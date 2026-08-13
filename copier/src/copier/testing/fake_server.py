@@ -56,6 +56,7 @@ class FakeCTraderServer:
         self.pending_orders: dict[int, list] = {}
         self.next_tokens: tuple[str, str] | None = None
         self.reject_next_order: bool = False  # Scriptable rejection
+        self.reject_error_code: str = "CH_TRADING_DISABLED"  # Scriptable reject errorCode
         self.requests, self.app_auths, self.account_auths, self.heartbeats = (
             [],
             [],
@@ -320,18 +321,17 @@ class FakeCTraderServer:
         proto.send_payload(res, msg.clientMsgId)
 
     def _handle_new_order_req(self, proto, msg):
-        """Handle new order request - sends response + broadcasts untagged events."""
+        """Handle new order request - broadcasts untagged execution events only.
+
+        The real cTrader server never sends a synchronous, clientMsgId-tagged
+        reply to a trade request; outcomes arrive exclusively as untagged
+        broadcast ProtoOAExecutionEvents. No tagged response is sent here.
+        """
         req = oa.ProtoOANewOrderReq()
         req.ParseFromString(msg.payload)
 
         # Record the trade request
         self.requests.append(req)
-
-        # Send minimal tagged response to resolve SDK.send() deferred
-        response = oa.ProtoOAExecutionEvent()
-        response.ctidTraderAccountId = req.ctidTraderAccountId
-        response.executionType = model.ProtoOAExecutionType.ORDER_ACCEPTED
-        proto.send_payload(response, msg.clientMsgId)
 
         # Check if we should reject this order
         if self.reject_next_order:
@@ -339,6 +339,7 @@ class FakeCTraderServer:
             reject_evt = oa.ProtoOAExecutionEvent()
             reject_evt.ctidTraderAccountId = req.ctidTraderAccountId
             reject_evt.executionType = model.ProtoOAExecutionType.ORDER_REJECTED
+            reject_evt.errorCode = self.reject_error_code
             reject_evt.order.orderId = next(self._order_ids)
             reject_evt.order.clientOrderId = req.clientOrderId
             reject_evt.order.orderType = req.orderType
@@ -417,18 +418,12 @@ class FakeCTraderServer:
                 self.broadcast(accept_evt)
 
     def _handle_close_position_req(self, proto, msg):
-        """Handle close position request - sends response + broadcasts untagged event."""
+        """Handle close position request - broadcasts untagged execution event only."""
         req = oa.ProtoOAClosePositionReq()
         req.ParseFromString(msg.payload)
 
         # Record the trade request
         self.requests.append(req)
-
-        # Send minimal tagged response
-        response = oa.ProtoOAExecutionEvent()
-        response.ctidTraderAccountId = req.ctidTraderAccountId
-        response.executionType = model.ProtoOAExecutionType.ORDER_ACCEPTED
-        proto.send_payload(response, msg.clientMsgId)
 
         if self.auto_fill:
             # Broadcast ORDER_FILLED event with closePositionDetail (untagged)
@@ -461,14 +456,17 @@ class FakeCTraderServer:
             self.broadcast(fill_evt)
 
     def _handle_amend_position_sltp_req(self, proto, msg):
-        """Handle amend position SL/TP request - broadcasts untagged event."""
+        """Handle amend position SL/TP request - broadcasts untagged event.
+
+        No synchronous tagged reply is sent (matches the real server); the
+        outcome arrives only as an untagged broadcast ProtoOAExecutionEvent.
+        """
         req = oa.ProtoOAAmendPositionSLTPReq()
         req.ParseFromString(msg.payload)
 
         # Record the trade request
         self.requests.append(req)
 
-        # Send tagged response to resolve SDK.send()
         response = oa.ProtoOAExecutionEvent()
         response.ctidTraderAccountId = req.ctidTraderAccountId
         response.executionType = model.ProtoOAExecutionType.ORDER_ACCEPTED
@@ -482,17 +480,20 @@ class FakeCTraderServer:
             response.position.stopLoss = req.stopLoss
         if req.HasField("takeProfit"):
             response.position.takeProfit = req.takeProfit
-        proto.send_payload(response, msg.clientMsgId)
+        self.broadcast(response)
 
     def _handle_amend_order_req(self, proto, msg):
-        """Handle amend order request - broadcasts untagged event."""
+        """Handle amend order request - broadcasts untagged event.
+
+        No synchronous tagged reply is sent (matches the real server); the
+        outcome arrives only as an untagged broadcast ProtoOAExecutionEvent.
+        """
         req = oa.ProtoOAAmendOrderReq()
         req.ParseFromString(msg.payload)
 
         # Record the trade request
         self.requests.append(req)
 
-        # Send tagged response to resolve SDK.send()
         response = oa.ProtoOAExecutionEvent()
         response.ctidTraderAccountId = req.ctidTraderAccountId
         response.executionType = model.ProtoOAExecutionType.ORDER_ACCEPTED
@@ -506,17 +507,20 @@ class FakeCTraderServer:
             response.order.limitPrice = req.limitPrice
         if req.HasField("stopPrice"):
             response.order.stopPrice = req.stopPrice
-        proto.send_payload(response, msg.clientMsgId)
+        self.broadcast(response)
 
     def _handle_cancel_order_req(self, proto, msg):
-        """Handle cancel order request - broadcasts untagged event."""
+        """Handle cancel order request - broadcasts untagged event.
+
+        No synchronous tagged reply is sent (matches the real server); the
+        outcome arrives only as an untagged broadcast ProtoOAExecutionEvent.
+        """
         req = oa.ProtoOACancelOrderReq()
         req.ParseFromString(msg.payload)
 
         # Record the trade request
         self.requests.append(req)
 
-        # Send tagged response to resolve SDK.send()
         response = oa.ProtoOAExecutionEvent()
         response.ctidTraderAccountId = req.ctidTraderAccountId
         response.executionType = model.ProtoOAExecutionType.ORDER_CANCELLED
@@ -526,7 +530,7 @@ class FakeCTraderServer:
         response.order.tradeData.symbolId = 1  # Default
         response.order.tradeData.volume = 100000  # Default
         response.order.tradeData.tradeSide = model.ProtoOATradeSide.BUY
-        proto.send_payload(response, msg.clientMsgId)
+        self.broadcast(response)
 
     def _handle_heartbeat(self, proto, msg):
         """Handle heartbeat event."""
