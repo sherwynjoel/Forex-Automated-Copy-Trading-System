@@ -51,6 +51,14 @@ def app_client(db):
     os.environ["ADMIN_BOOTSTRAP_PASSWORD"] = "hunter2!"
     os.environ["COPIER_CONTROL_URL"] = "http://copier.test"
     os.environ["COOKIE_SECURE"] = "false"  # Disable Secure flag in tests
+    os.environ["CTRADER_CLIENT_ID"] = "test-client-id"
+    os.environ["CTRADER_CLIENT_SECRET"] = "test-client-secret"
+    os.environ["CTRADER_REDIRECT_URI"] = "http://localhost:8000/api/oauth/callback"
+    os.environ["CTRADER_AUTH_URL"] = "https://openapi.ctrader.com/apps/auth"
+    os.environ["CTRADER_TOKEN_URL"] = "https://openapi.ctrader.com/apps/token"
+    # Generate a test Fernet key
+    from cryptography.fernet import Fernet
+    os.environ["FERNET_KEY"] = Fernet.generate_key().decode()
 
     # Import after setting env vars
     from api.main import create_app
@@ -59,9 +67,45 @@ def app_client(db):
     # Explicitly bootstrap admin since TestClient doesn't run lifespan
     ensure_admin(db, "hunter2!")
 
-    # Create injectable mock transport for httpx
-    mock_transport = httpx.MockTransport(lambda request: httpx.Response(200))
+    # Create injectable mock transport for httpx that handles both token URL and copier discover
+    def mock_callback(request: httpx.Request) -> httpx.Response:
+        """Mock transport that handles OAuth token exchange and copier discover."""
+        url = str(request.url)
 
-    # Create app with injectable transport
+        if "openapi.ctrader.com/apps/token" in url:
+            # Mock token exchange response
+            return httpx.Response(
+                200,
+                json={
+                    "accessToken": "at",
+                    "refreshToken": "rt",
+                    "expiresIn": 2592000,  # 30 days
+                }
+            )
+        elif "copier.test" in url and request.method == "POST":
+            # Mock copier discover endpoint
+            return httpx.Response(200, json={"status": "ok"})
+        else:
+            # Default response
+            return httpx.Response(200)
+
+    mock_transport = httpx.MockTransport(mock_callback)
+
+    # Create app with injectable transport (don't use lifespan context manager)
     app = create_app(http_transport=mock_transport)
-    return TestClient(app)
+
+    # Manually set up the http client since TestClient doesn't run async lifespan properly
+    if not hasattr(app.state, "http"):
+        app.state.http = httpx.AsyncClient(transport=mock_transport)
+
+    client = TestClient(app)
+
+    yield client
+
+    # Clean up
+    import asyncio
+    if hasattr(app.state, "http"):
+        try:
+            asyncio.run(app.state.http.aclose())
+        except:
+            pass
