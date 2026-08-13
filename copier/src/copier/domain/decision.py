@@ -94,5 +94,58 @@ def _position_sltp(e: m.MasterPositionSLTPAmended, mappings: m.MappingState,
     return out
 
 
-def _decide_pending(event, mappings, slaves) -> list[m.SlaveIntent]:
-    raise NotImplementedError  # implemented in Task 6
+def _decide_pending(event, mappings: m.MappingState,
+                    slaves: Sequence[m.SlaveConfig]) -> list[m.SlaveIntent]:
+    out: list[m.SlaveIntent] = []
+    enabled = _by_id(slaves)
+    match event:
+        case m.MasterPendingPlaced() as e:
+            for s in _enabled(slaves):
+                sym = s.symbols.get(e.symbol_name)
+                if sym is None:
+                    out.append(m.Alert(s.account_id,
+                               f"cannot copy order {e.order_id}: symbol {e.symbol_name!r} not available"))
+                    continue
+                vol = mirror_volume(e.volume, e.lot_size, s.multiplier,
+                                    sym.lot_size, sym.step_volume)
+                if vol == 0:
+                    out.append(m.Alert(s.account_id,
+                               f"cannot copy order {e.order_id}: mirrored volume rounds to 0"))
+                    continue
+                out.append(m.PlacePending(s.account_id, e.order_id, sym.symbol_id, e.side,
+                                          e.order_type, vol, e.price, e.stop_loss,
+                                          e.take_profit, e.expiry_ts_ms, f"copy:o{e.order_id}"))
+        case m.MasterPendingReplaced() as e:
+            covered: set[int] = set()
+            for entry in mappings.order_entries(e.order_id):
+                s = enabled.get(entry.slave_account_id)
+                if s is None:
+                    continue
+                covered.add(entry.slave_account_id)
+                sym = s.symbols.get(e.symbol_name)
+                if sym is None:
+                    out.append(m.Alert(s.account_id,
+                               f"cannot amend order copy of {e.order_id}: symbol missing"))
+                    continue
+                vol = mirror_volume(e.volume, e.lot_size, s.multiplier,
+                                    sym.lot_size, sym.step_volume)
+                out.append(m.AmendPending(s.account_id, entry.slave_order_id, e.order_type,
+                                          vol, e.price, e.stop_loss, e.take_profit))
+            for account_id in enabled.keys() - covered:
+                out.append(m.Alert(account_id,
+                           f"master replaced order {e.order_id} but slave has no mapped order"))
+        case m.MasterPendingCancelled() as e:
+            for entry in mappings.order_entries(e.order_id):
+                if entry.slave_account_id in enabled:
+                    out.append(m.CancelPending(entry.slave_account_id, entry.slave_order_id))
+        case m.MasterPendingFilled() as e:
+            covered = set()
+            for entry in mappings.order_entries(e.order_id):
+                if entry.slave_account_id not in enabled:
+                    continue
+                covered.add(entry.slave_account_id)
+                out.append(m.LinkPendingFill(entry.slave_account_id, e.order_id, e.position_id))
+            for account_id in enabled.keys() - covered:
+                out.append(m.Alert(account_id,
+                           f"master order {e.order_id} filled but slave has no mapped order"))
+    return out
