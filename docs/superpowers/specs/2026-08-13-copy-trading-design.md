@@ -7,8 +7,8 @@
 ## 1. Purpose
 
 Replicate every trade action from one **master** cTrader account to ~49 **slave**
-accounts at the same broker (FP Markets — see Open Questions), in real time, via
-the cTrader Open API. A web dashboard provides monitoring, control, account
+accounts at the same broker (FP Markets, confirmed by user; supports cTrader
+since 2023), in real time, via the cTrader Open API. A web dashboard provides monitoring, control, account
 onboarding, and a full audit log.
 
 ## 2. Requirements (user-confirmed)
@@ -211,9 +211,8 @@ per environment if faster fan-out is needed.
 1. **Register app at openapi.ctrader.com** (user): Spotware manually reviews —
    start immediately; yields clientId/clientSecret. Describe the app honestly
    as personal copy-trading across own accounts.
-2. **Broker identity** (user): confirm accounts are FP Markets (fpmarkets.com,
-   supports cTrader since 2023) vs an unknown "FPE Markets"; if the latter,
-   confirm it runs cTrader at all.
+2. ~~Broker identity~~ — **resolved 2026-08-13**: user confirmed the broker is
+   FP Markets (fpmarkets.com), which supports cTrader.
 3. Undocumented API details to verify on demo: manual-trade event delivery
    (§9), max accounts per connection, any per-app aggregate rate limit.
 
