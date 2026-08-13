@@ -5,6 +5,7 @@ import sys
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
+import httpx
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))  # makes the top-level `db` package importable
@@ -43,12 +44,13 @@ def db(database):
 
 @pytest.fixture
 def app_client(db):
-    """Provide a TestClient with test environment variables."""
+    """Provide a TestClient with test environment variables and injectable transport."""
     # Set up test environment variables
     os.environ["POSTGRES_DSN"] = db
     os.environ["SESSION_SECRET"] = "test-secret"
     os.environ["ADMIN_BOOTSTRAP_PASSWORD"] = "hunter2!"
     os.environ["COPIER_CONTROL_URL"] = "http://copier.test"
+    os.environ["COOKIE_SECURE"] = "false"  # Disable Secure flag in tests
 
     # Import after setting env vars
     from api.main import create_app
@@ -57,5 +59,9 @@ def app_client(db):
     # Explicitly bootstrap admin since TestClient doesn't run lifespan
     ensure_admin(db, "hunter2!")
 
-    app = create_app()
+    # Create injectable mock transport for httpx
+    mock_transport = httpx.MockTransport(lambda request: httpx.Response(200))
+
+    # Create app with injectable transport
+    app = create_app(http_transport=mock_transport)
     return TestClient(app)
