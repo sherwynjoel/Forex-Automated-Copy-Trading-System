@@ -16,17 +16,18 @@ Interfaces:
 import hashlib
 import logging
 from dataclasses import dataclass
-from typing import Callable, Mapping, Sequence
+from typing import Callable
 
 from twisted.internet import defer
 
 from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOAReconcileReq
+from ctrader_open_api.messages.OpenApiModelMessages_pb2 import ProtoOATradeSide
 from ctrader_open_api import Protobuf
 
 from copier.domain.models import Side
 from copier.ctrader.client import CTraderClient
 from copier.db.repo import Repo
-from copier.engine.dispatch import Dispatcher, build_request
+from copier.engine.dispatch import Dispatcher
 from copier.domain.models import ClosePosition
 
 log = logging.getLogger(__name__)
@@ -164,18 +165,26 @@ def compute_drift(
                     )
                     drift_items.append(item)
 
-    # 2. Check for missing slave copies (active mapping but slave position vanished)
+    # 2. Check for missing slave copies (active mapping, master position still open,
+    #    but slave position vanished). If the master position is also gone, the
+    #    slave closing in step is consistent with the master and is NOT drift.
     for m in mappings:
         if m.get('status') != 'active':
             continue
 
         account_id = m.get('slave_account_id')
         slave_pos_id = m.get('slave_position_id')
+        master_pos_id = m.get('master_position_id')
 
         if not account_id or not slave_pos_id:
             continue
 
         if account_id not in enabled_slave_ids:
+            continue
+
+        # Only flag as missing if the master position this mapping tracks is
+        # still open. If the master closed too, there is nothing to reconcile.
+        if master_pos_id not in master_pos_by_id:
             continue
 
         # Check if slave position still exists on broker
@@ -283,30 +292,129 @@ class Reconciler:
         self.dispatcher = dispatcher
         self.master_account_id = master_account_id
         self.current: list[DriftItem] = []
+        # Snapshot of the most recent slave positions per account, captured by
+        # run(). Used by close_orphan()/adopt() to determine the real live
+        # volume of a slave position without re-querying the broker.
+        self._slave_positions: dict[int, dict[int, PositionSnapshot]] = {}
 
-    def run(self) -> defer.Deferred:
+    def _fetch_snapshot(self, account_id: int):
+        """Send ProtoOAReconcileReq for one account and extract snapshots.
+
+        Returns a Deferred[(list[PositionSnapshot], list[OrderSnapshot])].
+        """
+        client = self.clients_by_account(account_id)
+        req = ProtoOAReconcileReq()
+        req.ctidTraderAccountId = account_id
+
+        def _extract(res):
+            reconcile_res = Protobuf.extract(res)
+            positions = [
+                PositionSnapshot(
+                    position_id=p.positionId,
+                    symbol_id=p.tradeData.symbolId,
+                    side=Side.BUY if p.tradeData.tradeSide == ProtoOATradeSide.BUY else Side.SELL,
+                    volume=p.tradeData.volume,
+                    price=p.price,
+                    label=p.tradeData.label,
+                )
+                for p in reconcile_res.position
+            ]
+            orders = [
+                OrderSnapshot(
+                    order_id=o.orderId,
+                    symbol_id=o.tradeData.symbolId,
+                    volume=o.tradeData.volume,
+                    label=o.tradeData.label,
+                )
+                for o in reconcile_res.order
+            ]
+            return positions, orders
+
+        d = client.send(req)
+        d.addCallback(_extract)
+        return d
+
+    @defer.inlineCallbacks
+    def run(self):
         """Run reconciliation: send ProtoOAReconcileReq per enabled account, compute drift, log events.
 
         This method:
-        1. Sends ProtoOAReconcileReq to master account for open positions/orders
+        1. Sends ProtoOAReconcileReq to the master account for open positions/orders
         2. Sends ProtoOAReconcileReq to each enabled slave account
         3. Computes drift using compute_drift()
         4. Logs one 'drift' event per DriftItem
         5. Stores results in self.current
 
-        Never issues orders itself; only reports drift.
+        Never issues orders itself, and never calls the dispatcher; drift is
+        reported, not auto-traded.
 
         Returns:
             Deferred[list[DriftItem]] - the computed drift items
         """
-        d = defer.Deferred()
+        accounts = self.repo.load_accounts()
+        enabled_slave_ids = {a.account_id for a in accounts if a.role == 'slave' and a.enabled}
 
-        # Placeholder: to be implemented with async reconcile request handling
-        # For now, just return empty drift
-        self.current = []
-        d.callback(self.current)
+        master_positions, master_orders = yield self._fetch_snapshot(self.master_account_id)
 
-        return d
+        slave_positions: dict[int, list[PositionSnapshot]] = {}
+        slave_orders: dict[int, list[OrderSnapshot]] = {}
+        for slave_id in enabled_slave_ids:
+            positions, orders = yield self._fetch_snapshot(slave_id)
+            slave_positions[slave_id] = positions
+            slave_orders[slave_id] = orders
+
+        # Cache live slave position snapshots for close_orphan()/adopt() volume lookups.
+        self._slave_positions = {
+            account_id: {p.position_id: p for p in positions}
+            for account_id, positions in slave_positions.items()
+        }
+
+        mappings = self.repo.mapping_rows()
+
+        items = compute_drift(
+            master_positions, master_orders, slave_positions, slave_orders,
+            mappings, enabled_slave_ids,
+        )
+
+        for item in items:
+            self.repo.log_event(
+                'drift',
+                'warning',
+                {
+                    'drift_kind': item.kind,
+                    'position_id': item.position_id,
+                    'order_id': item.order_id,
+                    'detail': item.detail,
+                },
+                account_id=item.account_id,
+            )
+
+        self.current = items
+        return items
+
+    def _find_current_item(self, item_id: str) -> DriftItem | None:
+        for drift_item in self.current:
+            if drift_item.id == item_id:
+                return drift_item
+        return None
+
+    def _lookup_slave_volume(self, account_id: int, position_id: int) -> int | None:
+        """Determine the real, live volume of a slave position.
+
+        Prefers the broker snapshot captured by the most recent run() (accurate
+        even for orphan positions that have no mapping row at all); falls back
+        to the mapping row's recorded slave_volume when no snapshot is available.
+        """
+        snapshot = self._slave_positions.get(account_id, {}).get(position_id)
+        if snapshot is not None:
+            return snapshot.volume
+
+        for m in self.repo.mapping_rows():
+            if (m.get('slave_account_id') == account_id and
+                m.get('slave_position_id') == position_id and
+                m.get('status') == 'active'):
+                return m.get('slave_volume')
+        return None
 
     def close_orphan(self, item_id: str) -> defer.Deferred:
         """Close an orphan slave position (user-initiated action).
@@ -324,12 +432,7 @@ class Reconciler:
         """
         d = defer.Deferred()
 
-        # Find the drift item
-        item = None
-        for drift_item in self.current:
-            if drift_item.id == item_id:
-                item = drift_item
-                break
+        item = self._find_current_item(item_id)
 
         if not item:
             d.errback(ValueError(f"Drift item {item_id} not found"))
@@ -343,19 +446,9 @@ class Reconciler:
             d.errback(ValueError(f"Item {item_id} missing account_id or position_id"))
             return d
 
-        # Get the mapping to find volume
-        mappings = self.repo.mapping_rows()
-        volume = None
-        for m in mappings:
-            if (m.get('slave_account_id') == item.account_id and
-                m.get('slave_position_id') == item.position_id and
-                m.get('status') == 'active'):
-                volume = m.get('slave_volume')
-                break
+        volume = self._lookup_slave_volume(item.account_id, item.position_id)
 
         if not volume:
-            # If no mapping, estimate from snapshot (would need to fetch current positions)
-            # For now, mark as unfound
             d.errback(ValueError(f"Could not determine volume for position {item.position_id}"))
             return d
 
@@ -390,12 +483,7 @@ class Reconciler:
         """
         d = defer.Deferred()
 
-        # Find the drift item
-        item = None
-        for drift_item in self.current:
-            if drift_item.id == item_id:
-                item = drift_item
-                break
+        item = self._find_current_item(item_id)
 
         if not item:
             d.errback(ValueError(f"Drift item {item_id} not found"))
@@ -409,9 +497,14 @@ class Reconciler:
             d.errback(ValueError(f"Item {item_id} missing account_id or position_id"))
             return d
 
-        # Get the current slave position to determine volume
-        # (Would need to fetch current positions from broker; placeholder for now)
-        slave_volume = 0  # Placeholder
+        # Look up the real, live slave position volume (from the snapshot
+        # captured during run(), falling back to a mapping row if present)
+        # so the adopted mapping records the actual position size rather
+        # than a fabricated 0.
+        slave_volume = self._lookup_slave_volume(item.account_id, item.position_id)
+        if not slave_volume:
+            d.errback(ValueError(f"Could not determine volume for position {item.position_id}"))
+            return d
 
         try:
             self.repo.adopt_position_mapping(

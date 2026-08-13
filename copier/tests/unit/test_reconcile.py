@@ -1,14 +1,21 @@
 """Tests for reconciliation and drift detection (reconcile.py)."""
 
 import pytest
+import pytest_twisted
 import psycopg
 from decimal import Decimal
 from unittest.mock import Mock, MagicMock, AsyncMock
 
-from copier.domain.models import Side
+from ctrader_open_api import Client, TcpProtocol
+from ctrader_open_api.messages.OpenApiModelMessages_pb2 import ProtoOATradeSide
+from twisted.internet import reactor
+
+from copier.ctrader.client import CTraderClient
+from copier.domain.models import ClosePosition, Side
 from copier.engine.reconcile import (
     PositionSnapshot, OrderSnapshot, DriftItem, compute_drift, Reconciler
 )
+from copier.testing.fake_server import FakeCTraderServer
 
 
 @pytest.fixture
@@ -323,6 +330,7 @@ class TestComputeDrift:
         """Test detection of multiple drift categories in one run."""
         master_pos = [
             PositionSnapshot(1, 1, Side.BUY, 100000, 1.1, ""),  # Unmapped
+            PositionSnapshot(3, 1, Side.BUY, 100000, 1.1, ""),  # Still open on master; slave copy vanished
         ]
 
         slave_pos = {
@@ -344,7 +352,7 @@ class TestComputeDrift:
             },
             {
                 'id': 2,
-                'master_position_id': 3,  # Mapping exists but no slave position
+                'master_position_id': 3,  # Master position 3 still open, but no slave position
                 'slave_account_id': 2001,
                 'slave_position_id': 5002,
                 'slave_volume': 100000,
@@ -361,86 +369,355 @@ class TestComputeDrift:
         assert 'orphan_slave_position' in kinds
         assert 'missing_slave_copy' in kinds
 
+    def test_missing_slave_copy_not_flagged_when_master_also_closed(self):
+        """No drift: mapping is active but BOTH master and slave positions are gone.
+
+        This is the copier having correctly closed the slave in step with the
+        master; it must NOT be reported as missing_slave_copy (which is only
+        for master-still-open-but-slave-vanished).
+        """
+        master_pos = []  # Master position 1 is also closed
+        master_orders = []
+
+        slave_pos = {2001: []}  # Slave position vanished too
+        slave_orders = {2001: []}
+
+        mappings = [
+            {
+                'id': 1,
+                'master_position_id': 1,
+                'slave_account_id': 2001,
+                'slave_position_id': 5000,
+                'slave_volume': 100000,
+                'status': 'active'
+            }
+        ]
+
+        drift_items = compute_drift(
+            master_pos, master_orders, slave_pos, slave_orders, mappings, {2001}
+        )
+
+        assert drift_items == []
+
+    def test_unfilled_slave_order_no_drift_when_slave_position_present(self):
+        """No drift: the linked order DID fill (matching slave position present).
+
+        Mirrors what Repo.activate_pending_fill() actually does in production:
+        once the slave order fills, slave_position_id/slave_volume are stamped
+        onto the SAME mapping row alongside slave_order_id/master_position_id.
+        """
+        master_pos = [
+            PositionSnapshot(123, 1, Side.BUY, 100000, 1.1, ""),  # still open on master too
+        ]
+        master_orders = []
+
+        slave_pos = {
+            2001: [
+                PositionSnapshot(5000, 1, Side.BUY, 100000, 1.1, "copy:o100"),
+            ]
+        }
+        slave_orders = {2001: []}
+
+        mappings = [
+            {
+                'id': 1,
+                'master_order_id': 100,
+                'slave_account_id': 2001,
+                'slave_order_id': 9000,
+                'slave_position_id': 5000,
+                'slave_volume': 100000,
+                'master_position_id': 123,
+                'status': 'active'
+            }
+        ]
+
+        drift_items = compute_drift(
+            master_pos, master_orders, slave_pos, slave_orders, mappings, {2001}
+        )
+
+        assert drift_items == []
+
+
+MASTER_ID = 1001
+SLAVE_ID = 2001            # enabled, per seed_accounts_and_mappings
+DISABLED_SLAVE_ID = 2002   # disabled, per seed_accounts_and_mappings
+
 
 class TestReconciler:
-    """Tests for Reconciler class with fake server."""
+    """Tests for Reconciler against a real FakeCTraderServer (real SDK wire, real Postgres).
+
+    These exercise run()'s actual ProtoOAReconcileReq round trip end-to-end,
+    the no-auto-trade safety invariant, and the close_orphan/adopt remedies.
+    """
 
     @pytest.fixture
     def dispatcher(self):
-        """Mock dispatcher."""
+        """Mock dispatcher -- used to assert run() never trades."""
         return Mock()
 
     @pytest.fixture
-    def clients_by_account(self):
-        """Mock client factory."""
-        return Mock()
+    def fake_server(self):
+        """A live FakeCTraderServer with scriptable open_positions/pending_orders."""
+        srv = FakeCTraderServer(auto_fill=True)
+        srv.accounts = {
+            MASTER_ID: "tok-master",
+            SLAVE_ID: "tok-slave",
+            DISABLED_SLAVE_ID: "tok-slave2",
+        }
+        port = srv.listen(reactor)
+        yield srv, port
+        srv.shutdown()
 
-    def test_reconciler_initialization(self, repo, dispatcher, clients_by_account):
-        """Test Reconciler can be initialized."""
+    @pytest.fixture
+    def make_client(self, fake_server):
+        """Factory for authorized CTraderClients; all are stopped at teardown
+        regardless of test outcome, so no heartbeat LoopingCall ever leaks."""
+        srv, port = fake_server
+        created = []
+
+        @pytest_twisted.inlineCallbacks
+        def _make(account_ids):
+            sdk = Client("127.0.0.1", port, TcpProtocol)
+            client = CTraderClient(sdk, "test-cid", "test-csecret")
+            client.start()
+            created.append(client)
+            yield client.ready
+            for account_id in account_ids:
+                yield client.authorize_account(account_id, srv.accounts[account_id])
+            return client
+
+        yield _make
+
+        for client in created:
+            client.stop()
+
+    def _drift_events(self, repo):
+        with psycopg.connect(repo.dsn, autocommit=True) as conn:
+            conn.row_factory = psycopg.rows.dict_row
+            return conn.execute("SELECT * FROM events WHERE category = 'drift'").fetchall()
+
+    def test_reconciler_initialization(self, repo, dispatcher):
+        """Reconciler starts with an empty current list and no snapshots."""
         reconciler = Reconciler(
-            clients_by_account=clients_by_account,
+            clients_by_account=Mock(),
             repo=repo,
             dispatcher=dispatcher,
-            master_account_id=1001
+            master_account_id=MASTER_ID,
         )
-        assert reconciler.master_account_id == 1001
+        assert reconciler.master_account_id == MASTER_ID
         assert reconciler.current == []
 
-    def test_reconciler_stores_drift_items(self, repo, dispatcher, clients_by_account):
-        """Test Reconciler stores computed drift items."""
+    @pytest_twisted.inlineCallbacks
+    def test_run_computes_drift_end_to_end_and_never_trades(self, repo, dispatcher, fake_server, make_client):
+        """run() fills self.current with one item per drift category (built via
+        scriptable open_positions + real mapping rows), logs exactly one 'drift'
+        event per item, and NEVER calls the dispatcher (binding no-auto-trade guard)."""
+        srv, port = fake_server
+
+        # Master: position 1 has no mapping at all (-> unmapped_master_position);
+        # position 2 is actively mapped to a slave position that never shows up
+        # on the slave broker (-> missing_slave_copy, since master is still open).
+        srv.open_positions = {
+            MASTER_ID: [
+                {"position_id": 1, "symbol_id": 1, "volume": 100_000,
+                 "trade_side": ProtoOATradeSide.BUY, "price": 1.10},
+                {"position_id": 2, "symbol_id": 1, "volume": 100_000,
+                 "trade_side": ProtoOATradeSide.BUY, "price": 1.15},
+            ],
+            SLAVE_ID: [
+                # Labeled copy:* but no mapping row references it -> orphan_slave_position.
+                {"position_id": 5000, "symbol_id": 1, "volume": 250_000,
+                 "trade_side": ProtoOATradeSide.BUY, "price": 1.10, "label": "copy:m999"},
+                # NOTE: position 5002 (mapped to master position 2) is intentionally absent.
+            ],
+        }
+
+        client = yield make_client([MASTER_ID, SLAVE_ID])
+
+        # Seed the missing_slave_copy mapping: master position 2 -> slave position
+        # 5002, which never materializes on the slave broker.
+        repo.create_position_mapping(master_position_id=2, slave_account_id=SLAVE_ID, client_order_id="cm2.2001")
+        repo.activate_position_mapping("cm2.2001", slave_position_id=5002, slave_volume=100_000)
+
+        # Seed the unfilled_slave_order mapping: order placed & linked to a master
+        # fill, but no corresponding slave position ever appeared.
+        repo.create_order_mapping(master_order_id=100, slave_account_id=SLAVE_ID, client_order_id="co100.2001")
+        repo.activate_order_mapping("co100.2001", slave_order_id=9000)
+        repo.link_pending_fill(master_order_id=100, slave_account_id=SLAVE_ID, master_position_id=55)
+
         reconciler = Reconciler(
-            clients_by_account=clients_by_account,
+            clients_by_account=lambda account_id: client,
             repo=repo,
             dispatcher=dispatcher,
-            master_account_id=1001
+            master_account_id=MASTER_ID,
         )
 
-        # Simulate setting drift items (normally done by run())
-        test_item = DriftItem(
+        items = yield reconciler.run()
+
+        assert items is reconciler.current
+        kinds = {item.kind for item in items}
+        assert kinds == {
+            'unmapped_master_position', 'missing_slave_copy',
+            'orphan_slave_position', 'unfilled_slave_order',
+        }
+
+        unmapped = next(i for i in items if i.kind == 'unmapped_master_position')
+        assert unmapped.position_id == 1
+
+        missing = next(i for i in items if i.kind == 'missing_slave_copy')
+        assert missing.account_id == SLAVE_ID and missing.position_id == 5002
+
+        orphan = next(i for i in items if i.kind == 'orphan_slave_position')
+        assert orphan.account_id == SLAVE_ID and orphan.position_id == 5000
+
+        unfilled = next(i for i in items if i.kind == 'unfilled_slave_order')
+        assert unfilled.account_id == SLAVE_ID and unfilled.order_id == 9000
+
+        # Exactly one 'drift' event logged per item.
+        rows = self._drift_events(repo)
+        assert len(rows) == len(items)
+        assert {r['severity'] for r in rows} == {'warning'}
+
+        # THE binding safety invariant: run() must never call the dispatcher.
+        dispatcher.dispatch.assert_not_called()
+
+    @pytest_twisted.inlineCallbacks
+    def test_run_ignores_disabled_slaves(self, repo, dispatcher, fake_server, make_client):
+        """A disabled slave's positions are never fetched/considered by run(),
+        even though it is scripted with a labeled (would-be-orphan) position."""
+        srv, port = fake_server
+        srv.open_positions = {
+            MASTER_ID: [],
+            DISABLED_SLAVE_ID: [
+                {"position_id": 6000, "symbol_id": 1, "volume": 100_000,
+                 "trade_side": ProtoOATradeSide.BUY, "price": 1.10, "label": "copy:m1"},
+            ],
+        }
+
+        client = yield make_client([MASTER_ID, SLAVE_ID, DISABLED_SLAVE_ID])
+        requested_accounts = []
+
+        def _clients_by_account(account_id):
+            requested_accounts.append(account_id)
+            return client
+
+        reconciler = Reconciler(
+            clients_by_account=_clients_by_account,
+            repo=repo,
+            dispatcher=dispatcher,
+            master_account_id=MASTER_ID,
+        )
+
+        items = yield reconciler.run()
+
+        assert MASTER_ID in requested_accounts
+        assert SLAVE_ID in requested_accounts        # enabled -> reconciled
+        assert DISABLED_SLAVE_ID not in requested_accounts  # disabled -> skipped entirely
+        assert items == []  # nothing open on master; disabled slave's position ignored
+        dispatcher.dispatch.assert_not_called()
+
+    @pytest_twisted.inlineCallbacks
+    def test_close_orphan_dispatches_single_full_volume_close(self, repo, dispatcher, fake_server, make_client):
+        """close_orphan() dispatches exactly ONE full-volume ClosePosition for the
+        orphan, and only when called explicitly (run() itself dispatches nothing)."""
+        srv, port = fake_server
+        srv.open_positions = {
+            MASTER_ID: [],
+            SLAVE_ID: [
+                {"position_id": 5000, "symbol_id": 1, "volume": 250_000,
+                 "trade_side": ProtoOATradeSide.BUY, "price": 1.10, "label": "copy:m999"},
+            ],
+        }
+
+        client = yield make_client([MASTER_ID, SLAVE_ID])
+
+        reconciler = Reconciler(
+            clients_by_account=lambda account_id: client,
+            repo=repo,
+            dispatcher=dispatcher,
+            master_account_id=MASTER_ID,
+        )
+
+        items = yield reconciler.run()
+        orphan = next(i for i in items if i.kind == 'orphan_slave_position')
+
+        # run() itself must not have dispatched anything.
+        dispatcher.dispatch.assert_not_called()
+
+        yield reconciler.close_orphan(orphan.id)
+
+        dispatcher.dispatch.assert_called_once()
+        (dispatched_intents,), _ = dispatcher.dispatch.call_args
+        assert len(dispatched_intents) == 1
+        intent = dispatched_intents[0]
+        assert isinstance(intent, ClosePosition)
+        assert intent.slave_account_id == SLAVE_ID
+        assert intent.position_id == 5000
+        assert intent.volume == 250_000  # full volume, matching the live snapshot
+
+    @pytest_twisted.inlineCallbacks
+    def test_adopt_persists_real_slave_volume(self, repo, dispatcher, fake_server, make_client):
+        """adopt() must persist the REAL live slave position volume, not a
+        hardcoded 0 (the mapping row is otherwise unusable for future reduces)."""
+        srv, port = fake_server
+        srv.open_positions = {
+            MASTER_ID: [],
+            SLAVE_ID: [
+                {"position_id": 5000, "symbol_id": 1, "volume": 175_000,
+                 "trade_side": ProtoOATradeSide.BUY, "price": 1.10, "label": "copy:m999"},
+            ],
+        }
+
+        client = yield make_client([MASTER_ID, SLAVE_ID])
+
+        reconciler = Reconciler(
+            clients_by_account=lambda account_id: client,
+            repo=repo,
+            dispatcher=dispatcher,
+            master_account_id=MASTER_ID,
+        )
+
+        items = yield reconciler.run()
+        orphan = next(i for i in items if i.kind == 'orphan_slave_position')
+
+        yield reconciler.adopt(orphan.id, master_position_id=999)
+
+        rows = repo.mapping_rows()
+        adopted = next(
+            r for r in rows
+            if r['slave_account_id'] == SLAVE_ID and r['slave_position_id'] == 5000
+        )
+        assert adopted['master_position_id'] == 999
+        assert adopted['slave_volume'] == 175_000  # real volume, not the old hardcoded 0
+        assert adopted['status'] == 'active'
+
+        dispatcher.dispatch.assert_not_called()  # adopt() never trades
+
+    def test_dismiss_logs_event_without_trading(self, repo, dispatcher):
+        """dismiss() is a log-only no-op: it logs an event and never dispatches."""
+        reconciler = Reconciler(
+            clients_by_account=Mock(),
+            repo=repo,
+            dispatcher=dispatcher,
+            master_account_id=MASTER_ID,
+        )
+        item = DriftItem(
             id="test_1",
             kind="unmapped_master_position",
             account_id=None,
             position_id=1,
             order_id=None,
-            detail="Test drift"
+            detail="Test drift",
         )
-        reconciler.current = [test_item]
+        reconciler.current = [item]
 
-        assert len(reconciler.current) == 1
-        assert reconciler.current[0].id == "test_1"
+        d = reconciler.dismiss("test_1")
+        results = []
+        d.addCallback(results.append)
+        assert results == [None]
 
-    def test_close_orphan_raises_not_implemented(self, repo, dispatcher, clients_by_account):
-        """Test close_orphan method exists and is callable."""
-        reconciler = Reconciler(
-            clients_by_account=clients_by_account,
-            repo=repo,
-            dispatcher=dispatcher,
-            master_account_id=1001
-        )
-
-        # Should be callable even if not implemented
-        assert callable(reconciler.close_orphan)
-
-    def test_adopt_raises_not_implemented(self, repo, dispatcher, clients_by_account):
-        """Test adopt method exists and is callable."""
-        reconciler = Reconciler(
-            clients_by_account=clients_by_account,
-            repo=repo,
-            dispatcher=dispatcher,
-            master_account_id=1001
-        )
-
-        # Should be callable even if not implemented
-        assert callable(reconciler.adopt)
-
-    def test_dismiss_raises_not_implemented(self, repo, dispatcher, clients_by_account):
-        """Test dismiss method exists and is callable."""
-        reconciler = Reconciler(
-            clients_by_account=clients_by_account,
-            repo=repo,
-            dispatcher=dispatcher,
-            master_account_id=1001
-        )
-
-        # Should be callable even if not implemented
-        assert callable(reconciler.dismiss)
+        rows = self._drift_events(repo)
+        info_rows = [r for r in rows if r['severity'] == 'info']
+        assert len(info_rows) == 1
+        assert info_rows[0]['payload']['action'] == 'dismissed'
+        dispatcher.dispatch.assert_not_called()
