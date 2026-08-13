@@ -26,9 +26,11 @@ export interface EventResponse {
   payload: Record<string, unknown>
 }
 
+export type DriftKind = 'orphan_slave_position' | 'missing_slave_copy' | 'unmapped_master_position' | 'unfilled_slave_order'
+
 export interface DriftItem {
   id: string
-  kind: string
+  kind: DriftKind
   account_id?: number | null
   position_id?: number | null
   order_id?: number | null
@@ -54,4 +56,45 @@ export interface AccountStateData {
 
 export interface StateSnapshot {
   [account_id: string]: AccountStateData
+}
+
+export interface PositionCopy {
+  slave_account_id: number
+  slave_position_id?: number | null
+  slave_order_id?: number | null
+  slave_volume: number
+  status: string
+  error?: string | null
+  fill_price?: number | null
+  volume_lots?: string
+}
+
+export interface MasterPosition {
+  position_id: number
+  symbol_id: number
+  symbol?: string
+  side: string
+  volume: number
+  price: number
+  label: string
+  pnl_quote?: number | null
+  volume_lots?: string
+  copies: PositionCopy[]
+}
+
+export interface PendingOrder {
+  order_id: number
+  symbol_id: number
+  symbol?: string
+  volume: number
+  label: string
+  volume_lots?: string
+  copies: PositionCopy[]
+}
+
+export interface ApiState {
+  accounts: Record<string, AccountStateData>
+  master_positions: MasterPosition[]
+  pending_orders: PendingOrder[]
+  drift: DriftItem[]
 }
