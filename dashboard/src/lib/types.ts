@@ -55,3 +55,44 @@ export interface AccountStateData {
 export interface StateSnapshot {
   [account_id: string]: AccountStateData
 }
+
+export interface PositionCopy {
+  slave_account_id: number
+  slave_position_id?: number | null
+  slave_order_id?: number | null
+  slave_volume: number
+  status: string
+  error?: string | null
+  fill_price?: number | null
+  volume_lots?: string
+}
+
+export interface MasterPosition {
+  position_id: number
+  symbol_id: number
+  symbol?: string
+  side: string
+  volume: number
+  price: number
+  label: string
+  pnl_quote?: number | null
+  volume_lots?: string
+  copies: PositionCopy[]
+}
+
+export interface PendingOrder {
+  order_id: number
+  symbol_id: number
+  symbol?: string
+  volume: number
+  label: string
+  volume_lots?: string
+  copies: PositionCopy[]
+}
+
+export interface ApiState {
+  accounts: Record<string, AccountStateData>
+  master_positions: MasterPosition[]
+  pending_orders: PendingOrder[]
+  drift: DriftItem[]
+}
