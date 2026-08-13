@@ -246,6 +246,7 @@ class FakeCTraderServer:
                 pos.tradeData.symbolId = pos_data["symbol_id"]
                 pos.tradeData.volume = pos_data["volume"]
                 pos.tradeData.tradeSide = pos_data["trade_side"]
+                pos.tradeData.label = pos_data.get("label", "")
                 pos.positionStatus = model.ProtoOAPositionStatus.POSITION_STATUS_OPEN
                 pos.swap = 0
                 pos.price = pos_data.get("price", 0)
@@ -257,6 +258,7 @@ class FakeCTraderServer:
                 order.tradeData.symbolId = ord_data["symbol_id"]
                 order.tradeData.volume = ord_data["volume"]
                 order.tradeData.tradeSide = ord_data["trade_side"]
+                order.tradeData.label = ord_data.get("label", "")
                 order.orderStatus = model.ProtoOAOrderStatus.ORDER_STATUS_ACCEPTED
                 order.orderType = ord_data["order_type"]
 
