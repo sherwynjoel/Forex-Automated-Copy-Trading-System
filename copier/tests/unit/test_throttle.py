@@ -44,3 +44,20 @@ def test_fifo_order():
     bucket.acquire().addCallback(lambda _: order.append("second"))
     clock.advance(2.5)
     assert order == ["first", "second"]
+
+
+def test_pacing_with_partial_advance():
+    # Verify pacing is enforced: partial time advance should release only partial backlog
+    clock = Clock()
+    bucket = TokenBucket(clock=clock)
+    outs = [fired(bucket.acquire()) for _ in range(89)]  # 40 burst + 49 queued
+
+    # Advance only 0.5s: should have ~40 + 0.5*40 = 60 tokens released
+    clock.advance(0.5)
+    fired_count = sum(1 for out in outs if out)
+    assert 55 <= fired_count <= 65, f"Expected ~60 fired at t=0.5, got {fired_count}"
+    assert not all(outs), "Not all should be fired yet"
+
+    # Advance the remaining 1.3s to complete: now all should be done
+    clock.advance(0.8)
+    assert all(outs), "All should be fired by t=1.3"
