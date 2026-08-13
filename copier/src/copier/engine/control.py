@@ -1,18 +1,27 @@
 """HTTP control endpoint for the copier service.
 
-The control endpoint is internal-only (bound to Docker-internal network only),
-providing operational commands for pause/resume/resync/state queries and drift remedies.
+The control endpoint is internal-only (bound to the Docker-internal network;
+host isolation comes from docker-compose NOT publishing the port, not from
+binding loopback -- see main.CONTROL_BIND_INTERFACE), providing operational
+commands for pause/resume/resync/state queries and drift remedies.
+
+Every route delegates to the real CopierApp -- no route ever fabricates a
+success response without having performed the underlying work; when a
+CopierApp method's Deferred errbacks, the route reports an HTTP 500 with the
+error, never a fake "ok".
 
 Routes:
 - GET /health: service status
-- GET /state: account snapshots and drift
-- POST /pause: pause copying (global or per-slave)
-- POST /resume: resume copying (global or per-slave)
+- GET /state: account snapshots, master positions (with slave copies),
+  pending orders, and drift
+- POST /pause: pause copying (global or per-slave), body {"account_id": int|null}
+- POST /resume: resume copying (global or per-slave), body {"account_id": int|null}
 - POST /resync: trigger reconciliation
 - POST /reload: reload accounts/settings
-- POST /dry-run: toggle dry-run mode
-- POST /discover: discover accounts from connection
-- POST /drift/close-orphan, /drift/adopt, /drift/dismiss: drift remedies
+- POST /dry-run: toggle dry-run mode, body {"enabled": bool}
+- POST /discover: discover accounts from a connection, body {"connection_id": int}
+- POST /drift/close-orphan, /drift/adopt, /drift/dismiss: drift remedies,
+  body {"id": str, "master_position_id": int?}
 """
 
 import json
@@ -24,204 +33,185 @@ from twisted.web import resource, server
 log = logging.getLogger(__name__)
 
 
-class HealthResource(resource.Resource):
-    """GET /health: Returns service status and master account info."""
+def _write_json(request, payload: dict, code: int | None = None) -> None:
+    if code is not None:
+        request.setResponseCode(code)
+    request.setHeader(b"Content-Type", b"application/json")
+    request.write(json.dumps(payload, default=str).encode())
+    request.finish()
+
+
+def _read_json_body(request) -> dict:
+    body = request.content.read()
+    return json.loads(body) if body else {}
+
+
+class _JsonResource(resource.Resource):
+    """Base class for control resources: JSON body in, JSON body out.
+
+    Subclasses implement `_handle(request, body) -> dict | Deferred[dict]`.
+    A Deferred result is awaited (NOT_DONE_YET) and its errback maps to an
+    HTTP 500 with the error message -- routes never fabricate success.
+    """
 
     isLeaf = True
 
     def __init__(self, app):
+        super().__init__()
         self.app = app
+
+    def _handle(self, request, body: dict):
+        raise NotImplementedError
+
+    def _render(self, request):
+        body = _read_json_body(request) if request.method in (b"POST", b"PUT") else {}
+        result = self._handle(request, body)
+        if hasattr(result, "addCallback"):  # Deferred
+            result.addCallback(lambda payload: _write_json(request, payload))
+            result.addErrback(self._on_error, request)
+            return server.NOT_DONE_YET
+        _write_json(request, result)
+        return server.NOT_DONE_YET
+
+    def _on_error(self, failure, request):
+        log.error("%s failed: %s", type(self).__name__, failure)
+        error_msg = str(failure.value) if hasattr(failure, "value") else str(failure)
+        _write_json(request, {"error": error_msg}, code=500)
 
     def render_GET(self, request):
-        """Handle GET /health."""
         try:
-            status = self.app.get_health()
-            request.setHeader(b"Content-Type", b"application/json")
-            return json.dumps(status).encode()
+            return self._render(request)
         except Exception as e:
-            log.exception("Health check failed: %s", e)
-            request.setResponseCode(500)
-            return json.dumps({"error": str(e)}).encode()
-
-
-class StateResource(resource.Resource):
-    """GET /state: Returns account snapshots and drift items."""
-
-    isLeaf = True
-
-    def __init__(self, app):
-        self.app = app
-
-    def render_GET(self, request):
-        """Handle GET /state."""
-        try:
-            state = self.app.get_state()
-            request.setHeader(b"Content-Type", b"application/json")
-            return json.dumps(state, default=str).encode()
-        except Exception as e:
-            log.exception("State query failed: %s", e)
-            request.setResponseCode(500)
-            return json.dumps({"error": str(e)}).encode()
-
-
-class PauseResource(resource.Resource):
-    """POST /pause: Pause copying globally or per-slave."""
-
-    isLeaf = True
-
-    def __init__(self, app):
-        self.app = app
+            log.exception("%s failed", type(self).__name__)
+            _write_json(request, {"error": str(e)}, code=500)
+            return server.NOT_DONE_YET
 
     def render_POST(self, request):
-        """Handle POST /pause with optional account_id."""
         try:
-            body = request.content.read()
-            data = json.loads(body) if body else {}
-            account_id = data.get("account_id")
-
-            self.app.pause(account_id=account_id)
-
-            request.setHeader(b"Content-Type", b"application/json")
-            return json.dumps({"status": "paused"}).encode()
+            return self._render(request)
         except Exception as e:
-            log.exception("Pause failed: %s", e)
-            request.setResponseCode(500)
-            return json.dumps({"error": str(e)}).encode()
+            log.exception("%s failed", type(self).__name__)
+            _write_json(request, {"error": str(e)}, code=500)
+            return server.NOT_DONE_YET
 
 
-class ResumeResource(resource.Resource):
-    """POST /resume: Resume copying globally or per-slave."""
+class HealthResource(_JsonResource):
+    """GET /health: service status and master account info."""
 
-    isLeaf = True
-
-    def __init__(self, app):
-        self.app = app
-
-    def render_POST(self, request):
-        """Handle POST /resume with optional account_id."""
-        try:
-            body = request.content.read()
-            data = json.loads(body) if body else {}
-            account_id = data.get("account_id")
-
-            self.app.resume(account_id=account_id)
-
-            request.setHeader(b"Content-Type", b"application/json")
-            return json.dumps({"status": "resumed"}).encode()
-        except Exception as e:
-            log.exception("Resume failed: %s", e)
-            request.setResponseCode(500)
-            return json.dumps({"error": str(e)}).encode()
+    def _handle(self, request, body):
+        return self.app.get_health()
 
 
-class ResyncResource(resource.Resource):
-    """POST /resync: Trigger reconciliation."""
+class StateResource(_JsonResource):
+    """GET /state: account snapshots, master positions, pending orders, drift."""
 
-    isLeaf = True
-
-    def __init__(self, app):
-        self.app = app
-
-    def render_POST(self, request):
-        """Handle POST /resync."""
-        try:
-            d = self.app.resync()
-            if d:
-                d.addCallback(lambda _: self._send_success(request))
-                d.addErrback(lambda f: self._send_error(request, f))
-                return server.NOT_DONE_YET
-            else:
-                return self._send_success(request)
-        except Exception as e:
-            log.exception("Resync failed: %s", e)
-            return self._send_error(request, e)
-
-    def _send_success(self, request):
-        request.setHeader(b"Content-Type", b"application/json")
-        request.write(json.dumps({"status": "resynced"}).encode())
-        request.finish()
-
-    def _send_error(self, request, error):
-        request.setResponseCode(500)
-        request.setHeader(b"Content-Type", b"application/json")
-        error_msg = str(error.value) if hasattr(error, 'value') else str(error)
-        request.write(json.dumps({"error": error_msg}).encode())
-        request.finish()
+    def _handle(self, request, body):
+        return self.app.get_state()
 
 
-class ReloadResource(resource.Resource):
-    """POST /reload: Reload accounts and settings."""
+class PauseResource(_JsonResource):
+    """POST /pause: pause copying globally or per-slave."""
 
-    isLeaf = True
-
-    def __init__(self, app):
-        self.app = app
-
-    def render_POST(self, request):
-        """Handle POST /reload."""
-        try:
-            request.setHeader(b"Content-Type", b"application/json")
-            return json.dumps({"status": "reloaded"}).encode()
-        except Exception as e:
-            log.exception("Reload failed: %s", e)
-            request.setResponseCode(500)
-            return json.dumps({"error": str(e)}).encode()
+    def _handle(self, request, body):
+        account_id = body.get("account_id")
+        d = self.app.pause(account_id=account_id)
+        d.addCallback(lambda _: {"status": "paused", "account_id": account_id})
+        return d
 
 
-class DryRunResource(resource.Resource):
-    """POST /dry-run: Toggle dry-run mode."""
+class ResumeResource(_JsonResource):
+    """POST /resume: resume copying globally or per-slave."""
 
-    isLeaf = True
-
-    def __init__(self, app):
-        self.app = app
-
-    def render_POST(self, request):
-        """Handle POST /dry-run with enabled flag."""
-        try:
-            body = request.content.read()
-            data = json.loads(body) if body else {}
-            enabled = data.get("enabled", False)
-
-            self.app.set_dry_run(enabled)
-
-            request.setHeader(b"Content-Type", b"application/json")
-            return json.dumps({"status": f"dry_run={'enabled' if enabled else 'disabled'}"}).encode()
-        except Exception as e:
-            log.exception("DryRun toggle failed: %s", e)
-            request.setResponseCode(500)
-            return json.dumps({"error": str(e)}).encode()
+    def _handle(self, request, body):
+        account_id = body.get("account_id")
+        d = self.app.resume(account_id=account_id)
+        d.addCallback(lambda _: {"status": "resumed", "account_id": account_id})
+        return d
 
 
-class DiscoverResource(resource.Resource):
-    """POST /discover: Discover accounts from connection."""
+class ResyncResource(_JsonResource):
+    """POST /resync: trigger reconciliation."""
 
-    isLeaf = True
+    def _handle(self, request, body):
+        d = self.app.resync()
+        d.addCallback(lambda items: {"status": "resynced", "drift_count": len(items or [])})
+        return d
 
-    def __init__(self, app):
-        self.app = app
 
-    def render_POST(self, request):
-        """Handle POST /discover with connection_id."""
-        try:
-            body = request.content.read()
-            data = json.loads(body) if body else {}
-            connection_id = data.get("connection_id")
+class ReloadResource(_JsonResource):
+    """POST /reload: reload accounts and settings."""
 
-            if connection_id is None:
-                raise ValueError("connection_id required")
+    def _handle(self, request, body):
+        d = self.app.reload()
+        d.addCallback(lambda _: {"status": "reloaded"})
+        return d
 
-            # TODO: Implement discovery
-            request.setHeader(b"Content-Type", b"application/json")
-            return json.dumps({"status": "discovered"}).encode()
-        except Exception as e:
-            log.exception("Discovery failed: %s", e)
-            request.setResponseCode(500)
-            return json.dumps({"error": str(e)}).encode()
+
+class DryRunResource(_JsonResource):
+    """POST /dry-run: toggle dry-run mode."""
+
+    def _handle(self, request, body):
+        enabled = bool(body.get("enabled", False))
+        self.app.set_dry_run(enabled)
+        return {"status": "ok", "dry_run": enabled}
+
+
+class DiscoverResource(_JsonResource):
+    """POST /discover: discover accounts reachable via a connection's token."""
+
+    def _handle(self, request, body):
+        connection_id = body.get("connection_id")
+        if connection_id is None:
+            raise ValueError("connection_id required")
+        d = self.app.discover(connection_id)
+        d.addCallback(lambda accounts: {
+            "status": "discovered",
+            "account_ids": [a.ctidTraderAccountId for a in accounts],
+        })
+        return d
+
+
+class DriftCloseOrphanResource(_JsonResource):
+    """POST /drift/close-orphan: close an orphan slave position."""
+
+    def _handle(self, request, body):
+        item_id = body.get("id")
+        if item_id is None:
+            raise ValueError("id required")
+        d = self.app.reconciler.close_orphan(item_id)
+        d.addCallback(lambda _: {"status": "closed", "id": item_id})
+        return d
+
+
+class DriftAdoptResource(_JsonResource):
+    """POST /drift/adopt: adopt an orphan slave position under a master position."""
+
+    def _handle(self, request, body):
+        item_id = body.get("id")
+        master_position_id = body.get("master_position_id")
+        if item_id is None:
+            raise ValueError("id required")
+        if master_position_id is None:
+            raise ValueError("master_position_id required")
+        d = self.app.reconciler.adopt(item_id, master_position_id)
+        d.addCallback(lambda _: {"status": "adopted", "id": item_id})
+        return d
+
+
+class DriftDismissResource(_JsonResource):
+    """POST /drift/dismiss: dismiss a drift item."""
+
+    def _handle(self, request, body):
+        item_id = body.get("id")
+        if item_id is None:
+            raise ValueError("id required")
+        d = self.app.reconciler.dismiss(item_id)
+        d.addCallback(lambda _: {"status": "dismissed", "id": item_id})
+        return d
 
 
 class DriftResource(resource.Resource):
-    """Base class for drift remedy endpoints."""
+    """Parent resource for /drift/{close-orphan,adopt,dismiss}."""
 
     def __init__(self, app):
         super().__init__()
@@ -231,95 +221,12 @@ class DriftResource(resource.Resource):
         self.putChild(b"dismiss", DriftDismissResource(app))
 
 
-class DriftCloseOrphanResource(resource.Resource):
-    """POST /drift/close-orphan: Close an orphan slave position."""
-
-    isLeaf = True
-
-    def __init__(self, app):
-        self.app = app
-
-    def render_POST(self, request):
-        """Handle POST /drift/close-orphan."""
-        try:
-            body = request.content.read()
-            data = json.loads(body) if body else {}
-            item_id = data.get("id")
-
-            if item_id is None:
-                raise ValueError("id required")
-
-            # TODO: Implement close-orphan
-            request.setHeader(b"Content-Type", b"application/json")
-            return json.dumps({"status": "closed"}).encode()
-        except Exception as e:
-            log.exception("Close orphan failed: %s", e)
-            request.setResponseCode(500)
-            return json.dumps({"error": str(e)}).encode()
-
-
-class DriftAdoptResource(resource.Resource):
-    """POST /drift/adopt: Adopt an orphan slave position."""
-
-    isLeaf = True
-
-    def __init__(self, app):
-        self.app = app
-
-    def render_POST(self, request):
-        """Handle POST /drift/adopt."""
-        try:
-            body = request.content.read()
-            data = json.loads(body) if body else {}
-            item_id = data.get("id")
-            master_position_id = data.get("master_position_id")
-
-            if item_id is None:
-                raise ValueError("id required")
-
-            # TODO: Implement adopt
-            request.setHeader(b"Content-Type", b"application/json")
-            return json.dumps({"status": "adopted"}).encode()
-        except Exception as e:
-            log.exception("Adopt failed: %s", e)
-            request.setResponseCode(500)
-            return json.dumps({"error": str(e)}).encode()
-
-
-class DriftDismissResource(resource.Resource):
-    """POST /drift/dismiss: Dismiss a drift item."""
-
-    isLeaf = True
-
-    def __init__(self, app):
-        self.app = app
-
-    def render_POST(self, request):
-        """Handle POST /drift/dismiss."""
-        try:
-            body = request.content.read()
-            data = json.loads(body) if body else {}
-            item_id = data.get("id")
-
-            if item_id is None:
-                raise ValueError("id required")
-
-            # TODO: Implement dismiss
-            request.setHeader(b"Content-Type", b"application/json")
-            return json.dumps({"status": "dismissed"}).encode()
-        except Exception as e:
-            log.exception("Dismiss failed: %s", e)
-            request.setResponseCode(500)
-            return json.dumps({"error": str(e)}).encode()
-
-
 class RootResource(resource.Resource):
     """Root resource that dispatches to sub-resources."""
 
     def __init__(self, app):
         super().__init__()
         self.app = app
-        # Register children as attributes
         self.putChild(b"health", HealthResource(app))
         self.putChild(b"state", StateResource(app))
         self.putChild(b"pause", PauseResource(app))
@@ -332,16 +239,11 @@ class RootResource(resource.Resource):
 
 
 def make_control_site(app: Any) -> server.Site:
-    """Create a Twisted web site for the control endpoint.
+    """Create the Twisted web Site for the control endpoint.
 
-    The site is bound to Docker-internal network only (never exposed to host).
-    This is enforced at the docker-compose level by NOT publishing the 8080 port.
-
-    Args:
-        app: CopierApp instance
-
-    Returns:
-        twisted.web.server.Site bound to the root resource
+    Binding to the Docker-internal network only is a caller concern (see
+    main.boot(), which binds main.CONTROL_BIND_INTERFACE); this function only
+    builds the resource tree.
     """
     root = RootResource(app)
     return server.Site(root)
