@@ -71,7 +71,7 @@ def app_client(db):
 
     # Create injectable mock transport for httpx that handles both token URL and copier discover
     def mock_callback(request: httpx.Request) -> httpx.Response:
-        """Mock transport that handles OAuth token exchange and copier discover."""
+        """Mock transport that handles OAuth token exchange and copier control endpoints."""
         url = str(request.url)
 
         if "openapi.ctrader.com/apps/token" in url:
@@ -84,9 +84,19 @@ def app_client(db):
                     "expiresIn": 2592000,  # 30 days
                 }
             )
-        elif "copier.test" in url and request.method == "POST":
-            # Mock copier discover endpoint
-            return httpx.Response(200, json={"status": "ok"})
+        elif "copier.test" in url:
+            # Mock copier endpoints (discover, reload, pause, resume, resync, state, drift, etc.)
+            if "/reload" in url or "/pause" in url or "/resume" in url or "/resync" in url:
+                return httpx.Response(200, json={"status": "ok"})
+            elif "/state" in url:
+                return httpx.Response(200, json={"status": "ok", "accounts": []})
+            elif "/drift/" in url:
+                return httpx.Response(200, json={"action": "completed"})
+            elif "/dry-run" in url:
+                return httpx.Response(200, json={"status": "ok"})
+            else:
+                # Default copier response
+                return httpx.Response(200, json={"status": "ok"})
         else:
             # Default response
             return httpx.Response(200)

@@ -13,6 +13,8 @@ from .auth import (
     create_auth_router,
 )
 from .oauth import create_oauth_router
+from .routes.accounts import create_accounts_router
+from .routes.settings_control import create_settings_control_router, create_state_router
 
 
 def create_app(http_transport: Optional[httpx.BaseTransport] = None) -> FastAPI:
@@ -58,6 +60,17 @@ def create_app(http_transport: Optional[httpx.BaseTransport] = None) -> FastAPI:
     # Include OAuth router
     oauth_router = create_oauth_router()
     app.include_router(oauth_router)
+
+    # Include accounts router
+    accounts_router = create_accounts_router()
+    app.include_router(accounts_router)
+
+    # Include settings and control routers
+    settings_control_router = create_settings_control_router()
+    app.include_router(settings_control_router)
+
+    state_router = create_state_router()
+    app.include_router(state_router)
 
     return app
 
