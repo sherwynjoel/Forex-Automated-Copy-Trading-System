@@ -1,0 +1,625 @@
+"""Tests for the control endpoint and boot sequence (control.py, main.py).
+
+Every test here drives the REAL CopierApp / control site produced by
+copier.main / copier.engine.control -- there is no hand-duplicated stub app.
+Clients are either a lightweight StubSdk-backed CTraderClient (synchronous,
+no real socket) or a real CTraderClient talking to FakeCTraderServer over a
+real TLS socket on the real reactor, matching the patterns already used by
+tests/unit/test_client.py, tests/unit/test_state.py and
+tests/unit/test_reconcile.py.
+"""
+
+import json
+from datetime import timedelta
+from io import BytesIO
+
+import psycopg
+import pytest
+import pytest_twisted
+from cryptography.fernet import Fernet
+from ctrader_open_api import Client, TcpProtocol
+from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOAAccountsTokenInvalidatedEvent
+from twisted.internet import defer, reactor as real_reactor, task
+from twisted.internet.task import Clock
+from twisted.web.client import Agent, readBody
+from twisted.web.test.requesthelper import DummyRequest
+
+import copier.main as main
+from copier.ctrader.client import CTraderClient
+from copier.ctrader.tokens import TokenStore
+from copier.db.repo import Repo
+from copier.engine.control import (
+    make_control_site, HealthResource, StateResource, PauseResource, ResumeResource,
+    DryRunResource, DriftCloseOrphanResource,
+)
+from copier.testing.fake_server import FakeCTraderServer
+from test_client import StubSdk
+
+# ---------- fixtures ----------
+
+
+def seed_db(db, fernet_key, expires_in_days=30):
+    """Seed test database with one connection and three accounts: 999 master, 100/101 slaves."""
+    fernet = Fernet(fernet_key.encode())
+    access_enc = fernet.encrypt(b"token_access").decode()
+    refresh_enc = fernet.encrypt(b"token_refresh").decode()
+
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute(
+            """
+            INSERT INTO ctid_connections (access_token_enc, refresh_token_enc, granted_at, expires_at)
+            VALUES (%s, %s, now(), now() + %s * interval '1 day')
+            """,
+            (access_enc, refresh_enc, expires_in_days),
+        )
+        conn.execute(
+            """
+            INSERT INTO accounts (ctid_trader_account_id, ctid_connection_id, trader_login, is_live, role, enabled, multiplier)
+            VALUES
+                (999, 1, 99900, false, 'master', true, 1.0),
+                (100, 1, 10000, false, 'slave', true, 1.0),
+                (101, 1, 10001, false, 'slave', true, 1.5)
+            """
+        )
+
+
+@pytest.fixture
+def fernet_key():
+    return Fernet.generate_key().decode()
+
+
+@pytest.fixture
+def db_seeded(db, fernet_key):
+    seed_db(db, fernet_key)
+    return db
+
+
+@pytest.fixture
+def repo(db_seeded):
+    return Repo(db_seeded)
+
+
+@pytest.fixture
+def token_store(db_seeded, fernet_key):
+    return TokenStore(db_seeded, fernet_key)
+
+
+def make_stub_client_factory():
+    """Client factory producing StubSdk-backed CTraderClients that are
+    app-authed (ready) synchronously the moment they're built -- lets
+    startup()/reload() run to completion without needing a real reactor."""
+    built = []
+
+    def factory(is_live):
+        sdk = StubSdk()
+        client = CTraderClient(sdk, "test-cid", "test-secret")
+        sdk.connect()  # synchronously fires app auth -> ready, via StubSdk's synchronous send()
+        built.append(client)
+        return client
+
+    factory.built = built
+    return factory
+
+
+class _FailingClient:
+    """Minimal stub CTraderClient whose send() always fails -- for exercising
+    the refresh-failure path without any real I/O."""
+
+    def __init__(self):
+        self.ready = defer.succeed(self)
+        self._accounts = {}
+
+    def start(self):
+        pass
+
+    def on_execution(self, cb):
+        pass
+
+    def on_tokens_invalidated(self, cb):
+        pass
+
+    def on_account_disconnect(self, cb):
+        pass
+
+    def on_spot(self, cb):
+        pass
+
+    def authorize_account(self, account_id, token):
+        self._accounts[account_id] = token
+        return defer.succeed(None)
+
+    def deauthorize_account(self, account_id):
+        self._accounts.pop(account_id, None)
+
+    def send(self, msg):
+        return defer.fail(RuntimeError("boom"))
+
+
+def _last_event(dsn):
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        row = conn.execute("SELECT category, severity, payload FROM events ORDER BY id DESC LIMIT 1").fetchone()
+    category, severity, payload = row
+    return category, severity, (payload if isinstance(payload, dict) else json.loads(payload))
+
+
+def _written_json(request):
+    return json.loads(b"".join(request.written))
+
+
+@pytest_twisted.inlineCallbacks
+def _wait_until(predicate, timeout=5.0, interval=0.02):
+    """Poll `predicate()` on the real reactor until true or timeout."""
+    waited = 0.0
+    while not predicate():
+        if waited >= timeout:
+            raise AssertionError(f"condition not met within {timeout}s")
+        d = defer.Deferred()
+        real_reactor.callLater(interval, d.callback, None)
+        yield d
+        waited += interval
+
+
+# ---------- Finding #1: main.py composition must not crash before reactor.run() ----------
+
+class _FakeReactor:
+    """Records callWhenRunning/listenTCP calls without ever invoking them --
+    proves boot() composes and wires the reactor without requiring a real
+    event loop or accidentally calling reactor.run()."""
+
+    def __init__(self):
+        self.callWhenRunning_calls = []
+        self.listenTCP_calls = []
+
+    def callWhenRunning(self, f):
+        self.callWhenRunning_calls.append(f)
+
+    def listenTCP(self, port, site, interface=""):
+        self.listenTCP_calls.append({"port": port, "site": site, "interface": interface})
+        return object()
+
+    def seconds(self):
+        import time
+        return time.time()
+
+
+def test_boot_composes_without_crashing_and_binds_all_interfaces(db, fernet_key):
+    """Regression test for the exact crash the prior implementation shipped:
+    _build_send_for_account(None) -> AttributeError before reactor.run(). Also
+    covers finding #5: the control port must NOT be bound to 127.0.0.1 only,
+    since inside Docker's bridge network other containers reach copier via
+    the bridge interface, not loopback."""
+    config = main.BootConfig(
+        postgres_dsn=db, fernet_key=fernet_key, client_id="cid", client_secret="secret",
+        demo_host="demo.example.invalid", live_host="live.example.invalid",
+        ctrader_port=5035, shards=1,
+    )
+    fake_reactor = _FakeReactor()
+
+    app = main.boot(config, fake_reactor)  # must not raise
+
+    assert app is not None
+    assert app.dispatcher is not None
+    assert app.reconciler.dispatcher is app.dispatcher
+    assert len(fake_reactor.listenTCP_calls) == 1
+    call = fake_reactor.listenTCP_calls[0]
+    assert call["port"] == main.CONTROL_PORT
+    assert call["interface"] == "0.0.0.0"
+    assert call["interface"] != "127.0.0.1"
+    # startup + token-refresh loop were scheduled, not run inline (no reactor loop here)
+    assert len(fake_reactor.callWhenRunning_calls) == 2
+
+
+def test_build_app_tolerates_zero_accounts_and_wires_dispatcher_before_app_exists(db, fernet_key):
+    """build_app() must not require an already-constructed CopierApp to build
+    send_for_account -- clients_by_account closes over repo/clients directly."""
+    repo = Repo(db)
+    token_store = TokenStore(db, fernet_key)
+    factory = make_stub_client_factory()
+
+    app = main.build_app(repo, token_store, factory, shards=1)
+
+    assert app.clients == {}
+    assert app.state_tracker is None
+    assert app.master_account_id is None
+    # dispatcher's send_for_account raises SendNotAttempted (not AttributeError!) for any account
+    with pytest.raises(main.SendNotAttempted):
+        app.dispatcher._send_for_account(999, object())
+
+
+@pytest_twisted.inlineCallbacks
+def test_startup_with_zero_accounts_does_not_crash(db, fernet_key):
+    repo = Repo(db)
+    token_store = TokenStore(db, fernet_key)
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+
+    yield app.startup()  # must complete without raising
+
+    assert app.state_tracker is None
+
+
+def test_build_app_wires_execution_and_invalidated_to_every_client_all_shards(db, fernet_key):
+    """Finding #6: on_execution/on_tokens_invalidated must be wired to EVERY
+    client (all shards, both environments) -- slave shards must deliver
+    execution events too, not just the master's client."""
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO ctid_connections (access_token_enc, refresh_token_enc, granted_at, expires_at)"
+            " VALUES ('a', 'b', now(), now() + interval '30 days')"
+        )
+        conn.execute(
+            "INSERT INTO accounts (ctid_trader_account_id, ctid_connection_id, trader_login, is_live, role, enabled, multiplier)"
+            " VALUES (10, 1, 1, false, 'slave', true, 1.0), (11, 1, 2, true, 'slave', true, 1.0)"
+        )
+
+    from unittest.mock import MagicMock
+    built = []
+
+    def factory(is_live):
+        m = MagicMock()
+        built.append(m)
+        return m
+
+    repo = Repo(db)
+    token_store = TokenStore(db, fernet_key)
+    main.build_app(repo, token_store, factory, shards=2)
+
+    # 2 environments (demo + live) x 2 shards = 4 clients, each wired exactly once
+    assert len(built) == 4
+    for client in built:
+        assert client.on_execution.call_count == 1
+        assert client.on_tokens_invalidated.call_count == 1
+
+
+# ---------- /health ----------
+
+def test_health_reports_settings(repo, token_store):
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+
+    status = app.get_health()
+
+    assert status == {"status": "ok", "master": 999, "copying_enabled": True, "dry_run": False}
+
+    request = DummyRequest([b"health"])
+    request.method = b"GET"
+    HealthResource(app).render_GET(request)
+    assert _written_json(request) == status
+
+
+@pytest_twisted.inlineCallbacks
+def test_health_reachable_over_real_network_socket(repo, token_store):
+    """Finding #5: prove /health actually answers over a real TCP socket when
+    bound to an unspecified/all-interfaces address (as main.boot() does),
+    not just via in-process resource calls."""
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    site = make_control_site(app)
+    port = real_reactor.listenTCP(0, site, interface="0.0.0.0")
+    try:
+        agent = Agent(real_reactor)
+        url = f"http://127.0.0.1:{port.getHost().port}/health".encode()
+        response = yield agent.request(b"GET", url)
+        body = yield readBody(response)
+        assert response.code == 200
+        assert json.loads(body)["status"] == "ok"
+    finally:
+        yield port.stopListening()
+
+
+# ---------- pause / resume ----------
+
+@pytest_twisted.inlineCallbacks
+def test_pause_global_flips_kill_switch_and_logs_control_event(repo, token_store):
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+
+    yield app.pause(account_id=None)
+
+    assert repo.get_settings().copying_enabled is False
+    category, severity, payload = _last_event(repo.dsn)
+    assert (category, payload["action"]) in (("control", "reload"), ("control", "pause_global"))
+    # both events must be present: the pause itself, and the reload it triggers
+    with psycopg.connect(repo.dsn, autocommit=True) as conn:
+        rows = conn.execute("SELECT payload->>'action' FROM events WHERE category = 'control'").fetchall()
+    actions = {r[0] for r in rows}
+    assert "pause_global" in actions
+    assert "reload" in actions
+
+
+@pytest_twisted.inlineCallbacks
+def test_pause_single_slave_sets_paused_status(repo, token_store):
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+
+    yield app.pause(account_id=100)
+
+    account_100 = next(a for a in repo.load_accounts() if a.account_id == 100)
+    assert account_100.status == "paused"
+    with psycopg.connect(repo.dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT payload FROM events WHERE category='control' AND payload->>'action'='pause_slave'"
+        ).fetchone()
+    payload = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+    assert payload["account_id"] == 100
+
+
+@pytest_twisted.inlineCallbacks
+def test_pause_single_slave_suppresses_it_and_resume_reenables_it(repo, token_store):
+    """Pause/resume must have REAL effect on copying (finding #3/#7), not just
+    flip a cosmetic status column: the paused slave must drop out of
+    slaves_provider()'s enabled set, and come back on resume."""
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+
+    before = {s.account_id: s.enabled for s in app.service._slaves_provider()}
+    assert before[100] is True and before[101] is True
+
+    yield app.pause(account_id=100)
+    after_pause = {s.account_id: s.enabled for s in app.service._slaves_provider()}
+    assert after_pause[100] is False
+    assert after_pause[101] is True  # untouched
+
+    yield app.resume(account_id=100)
+    after_resume = {s.account_id: s.enabled for s in app.service._slaves_provider()}
+    assert after_resume[100] is True
+
+
+@pytest_twisted.inlineCallbacks
+def test_control_site_post_pause_and_resume_over_dummy_request(repo, token_store):
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+
+    request = DummyRequest([b"pause"])
+    request.method = b"POST"
+    request.content = BytesIO(json.dumps({"account_id": None}).encode())
+    PauseResource(app).render_POST(request)
+    yield _wait_until(lambda: repo.get_settings().copying_enabled is False)
+    assert _written_json(request)["status"] == "paused"
+
+    request = DummyRequest([b"resume"])
+    request.method = b"POST"
+    request.content = BytesIO(json.dumps({"account_id": None}).encode())
+    ResumeResource(app).render_POST(request)
+    yield _wait_until(lambda: repo.get_settings().copying_enabled is True)
+    assert _written_json(request)["status"] == "resumed"
+
+
+# ---------- dry-run ----------
+
+def test_dry_run_toggle_persists(repo, token_store):
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+
+    app.set_dry_run(True)
+    assert repo.get_settings().dry_run is True
+
+    request = DummyRequest([b"dry-run"])
+    request.method = b"POST"
+    request.content = BytesIO(json.dumps({"enabled": False}).encode())
+    DryRunResource(app).render_POST(request)
+    assert repo.get_settings().dry_run is False
+    assert _written_json(request) == {"status": "ok", "dry_run": False}
+
+
+# ---------- /state ----------
+
+def test_get_state_includes_master_positions_with_copies_pending_orders_and_drift(repo, token_store):
+    from copier.domain.models import Side
+    from copier.engine.reconcile import PositionSnapshot, OrderSnapshot, DriftItem
+
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    assert app.state_tracker is not None  # master (999) exists
+
+    repo.create_position_mapping(master_position_id=42, slave_account_id=100, client_order_id="cm42.100")
+    repo.activate_position_mapping("cm42.100", slave_position_id=5001, slave_volume=100_000)
+
+    app.reconciler.master_positions = [
+        PositionSnapshot(position_id=42, symbol_id=1, side=Side.BUY, volume=100_000, price=1.1, label="copy:m42")
+    ]
+    app.reconciler.master_orders = [
+        OrderSnapshot(order_id=7, symbol_id=1, volume=50_000, label="pending")
+    ]
+    app.reconciler.current = [
+        DriftItem(id="abc123", kind="unmapped_master_position", account_id=None, position_id=99, order_id=None, detail="oops")
+    ]
+
+    state = app.get_state()
+
+    assert "accounts" in state
+    assert len(state["master_positions"]) == 1
+    mp = state["master_positions"][0]
+    assert mp["position_id"] == 42
+    assert len(mp["copies"]) == 1
+    assert mp["copies"][0]["slave_account_id"] == 100
+    assert mp["copies"][0]["slave_position_id"] == 5001
+    assert mp["copies"][0]["status"] == "active"
+
+    assert len(state["pending_orders"]) == 1
+    assert state["pending_orders"][0]["order_id"] == 7
+
+    assert state["drift"] == [
+        {"id": "abc123", "kind": "unmapped_master_position", "account_id": None,
+         "position_id": 99, "order_id": None, "detail": "oops"}
+    ]
+
+    request = DummyRequest([b"state"])
+    request.method = b"GET"
+    StateResource(app).render_GET(request)
+    assert _written_json(request)["master_positions"][0]["position_id"] == 42
+
+
+# ---------- drift routes never fake success ----------
+
+def test_drift_close_orphan_on_unknown_id_reports_error_not_fake_success(repo, token_store):
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+
+    request = DummyRequest([b"drift", b"close-orphan"])
+    request.method = b"POST"
+    request.content = BytesIO(json.dumps({"id": "does-not-exist"}).encode())
+    DriftCloseOrphanResource(app).render_POST(request)
+
+    assert request.responseCode == 500
+    body = _written_json(request)
+    assert "error" in body
+    assert body.get("status") != "closed"
+
+
+# ---------- token refresh ----------
+
+@pytest_twisted.inlineCallbacks
+def test_refresh_due_tokens_rotates_and_persists(db_seeded, fernet_key):
+    """Drives the real _refresh_token loop end to end against FakeCTraderServer
+    (not token_store.rotate() called directly): a due connection gets
+    ProtoOARefreshTokenReq'd, and the scripted ("a2", "r2") response is what
+    ends up persisted."""
+    with psycopg.connect(db_seeded, autocommit=True) as conn:
+        conn.execute("UPDATE ctid_connections SET expires_at = now() + interval '10 days' WHERE id = 1")
+
+    srv = FakeCTraderServer(auto_fill=True)
+    srv.accounts = {999: "token_access", 100: "token_access", 101: "token_access"}
+    srv.next_tokens = ("a2", "r2")
+    port = srv.listen(real_reactor)
+
+    repo = Repo(db_seeded)
+    token_store = TokenStore(db_seeded, fernet_key)
+    created = []
+
+    def factory(is_live):
+        client = CTraderClient(Client("127.0.0.1", port, TcpProtocol), "test-cid", "test-secret")
+        created.append(client)
+        return client
+
+    app = main.build_app(repo, token_store, factory, shards=1)
+    try:
+        yield app.startup()  # connects + authorizes, so a ready client exists
+
+        yield app.refresh_due_tokens()
+
+        new_pair = token_store.get(1)
+        assert new_pair.access_token == "a2"
+        assert new_pair.refresh_token == "r2"
+        assert new_pair.status == "active"
+    finally:
+        for c in created:
+            c.stop()
+        srv.shutdown()
+
+
+@pytest_twisted.inlineCallbacks
+def test_refresh_failure_marks_and_alerts(db_seeded, fernet_key):
+    with psycopg.connect(db_seeded, autocommit=True) as conn:
+        conn.execute("UPDATE ctid_connections SET expires_at = now() + interval '10 days' WHERE id = 1")
+
+    repo = Repo(db_seeded)
+    token_store = TokenStore(db_seeded, fernet_key)
+    app = main.build_app(repo, token_store, lambda is_live: _FailingClient(), shards=1)
+
+    yield app.refresh_due_tokens()
+
+    pair = token_store.get(1)
+    assert pair.status == "refresh_failed"
+
+    category, severity, payload = _last_event(db_seeded)
+    assert category == "auth"
+    assert severity == "error"
+    assert payload["action"] == "token_refresh_failed"
+    assert payload["connection_id"] == 1
+
+
+@pytest_twisted.inlineCallbacks
+def test_refresh_due_tokens_loop_body_survives_a_query_exception(db_seeded, fernet_key):
+    """Finding #2: the LoopingCall body must be exception-guarded -- a raise
+    inside must never kill the loop."""
+    repo = Repo(db_seeded)
+    token_store = TokenStore(db_seeded, fernet_key)
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+
+    def boom(_now):
+        raise RuntimeError("DB is down")
+
+    token_store.due_for_refresh = boom  # simulate a transient DB failure
+
+    d = app.refresh_due_tokens()
+    yield d  # must resolve (not errback) despite the exception inside
+
+    clock = Clock()
+    loop = task.LoopingCall(app.refresh_due_tokens)
+    loop.clock = clock
+    start_d = loop.start(main.TOKEN_REFRESH_INTERVAL_S, now=True)
+    errors = []
+    start_d.addErrback(errors.append)
+    clock.advance(main.TOKEN_REFRESH_INTERVAL_S * 3)
+    assert loop.running  # never stopped despite the guaranteed exception each tick
+    assert errors == []
+
+
+@pytest_twisted.inlineCallbacks
+def test_tokens_invalidated_event_triggers_refresh(db_seeded, fernet_key):
+    """Firing ProtoOAAccountsTokenInvalidatedEvent must trigger an immediate
+    refresh_due_tokens() call, not wait for the daily LoopingCall."""
+    with psycopg.connect(db_seeded, autocommit=True) as conn:
+        conn.execute("UPDATE ctid_connections SET expires_at = now() + interval '10 days' WHERE id = 1")
+
+    srv = FakeCTraderServer(auto_fill=True)
+    srv.accounts = {999: "token_access", 100: "token_access", 101: "token_access"}
+    srv.next_tokens = ("invalidated-a2", "invalidated-r2")
+    port = srv.listen(real_reactor)
+
+    repo = Repo(db_seeded)
+    token_store = TokenStore(db_seeded, fernet_key)
+    created = []
+
+    def factory(is_live):
+        client = CTraderClient(Client("127.0.0.1", port, TcpProtocol), "test-cid", "test-secret")
+        created.append(client)
+        return client
+
+    app = main.build_app(repo, token_store, factory, shards=1)
+    try:
+        yield app.startup()
+
+        assert token_store.get(1).refresh_token != "invalidated-r2"  # not refreshed yet
+
+        evt = ProtoOAAccountsTokenInvalidatedEvent()
+        evt.ctidTraderAccountIds.extend([999])
+        srv.broadcast(evt)  # real wire delivery -> on_tokens_invalidated -> refresh_due_tokens()
+
+        yield _wait_until(lambda: token_store.get(1).refresh_token == "invalidated-r2")
+    finally:
+        for c in created:
+            c.stop()
+        srv.shutdown()
+
+
+# ---------- discovery ----------
+
+@pytest_twisted.inlineCallbacks
+def test_discover_upserts_accounts_from_token(db, fernet_key):
+    fernet = Fernet(fernet_key.encode())
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO ctid_connections (access_token_enc, refresh_token_enc, granted_at, expires_at)"
+            " VALUES (%s, %s, now(), now() + interval '30 days')",
+            (fernet.encrypt(b"discover-token").decode(), fernet.encrypt(b"refresh").decode()),
+        )
+
+    srv = FakeCTraderServer(auto_fill=True)
+    srv.accounts = {5001: "discover-token"}
+    port = srv.listen(real_reactor)
+
+    repo = Repo(db)
+    token_store = TokenStore(db, fernet_key)
+    created = []
+
+    def factory(is_live):
+        client = CTraderClient(Client("127.0.0.1", port, TcpProtocol), "test-cid", "test-secret")
+        created.append(client)
+        return client
+
+    app = main.build_app(repo, token_store, factory, shards=1)  # zero accounts yet -> no clients built
+    assert app.clients == {}
+    try:
+        discovered = yield app.discover(connection_id=1)
+
+        assert [a.ctidTraderAccountId for a in discovered] == [5001]
+        accounts = repo.load_accounts()
+        account_5001 = next(a for a in accounts if a.account_id == 5001)
+        assert account_5001.connection_id == 1
+        assert account_5001.is_live is False
+    finally:
+        for c in created:
+            c.stop()
+        srv.shutdown()

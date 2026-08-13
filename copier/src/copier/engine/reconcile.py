@@ -296,6 +296,11 @@ class Reconciler:
         # run(). Used by close_orphan()/adopt() to determine the real live
         # volume of a slave position without re-querying the broker.
         self._slave_positions: dict[int, dict[int, PositionSnapshot]] = {}
+        # Most recent master open positions/orders, captured by run(). Exposed
+        # publicly so callers (e.g. CopierApp) can feed them into
+        # AccountStateTracker.set_positions() and answer /state truthfully.
+        self.master_positions: list[PositionSnapshot] = []
+        self.master_orders: list[OrderSnapshot] = []
 
     def _fetch_snapshot(self, account_id: int):
         """Send ProtoOAReconcileReq for one account and extract snapshots.
@@ -355,6 +360,8 @@ class Reconciler:
         enabled_slave_ids = {a.account_id for a in accounts if a.role == 'slave' and a.enabled}
 
         master_positions, master_orders = yield self._fetch_snapshot(self.master_account_id)
+        self.master_positions = master_positions
+        self.master_orders = master_orders
 
         slave_positions: dict[int, list[PositionSnapshot]] = {}
         slave_orders: dict[int, list[OrderSnapshot]] = {}
