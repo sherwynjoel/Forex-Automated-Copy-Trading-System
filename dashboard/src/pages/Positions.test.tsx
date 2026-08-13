@@ -30,7 +30,6 @@ const mockApiState: ApiState = {
           slave_position_id: 5001,
           slave_volume: 100000,
           status: 'active',
-          fill_price: 1.0955,
           volume_lots: '1.0',
         },
         {
@@ -58,17 +57,17 @@ const mockApiState: ApiState = {
   drift: [
     {
       id: 'drift-1',
-      kind: 'orphan',
+      kind: 'orphan_slave_position',
       account_id: 2003,
       position_id: 5003,
-      detail: 'Position 5003 on account 2003 has no master',
+      detail: 'Slave position 5003 on account 2003 has no mapped master (copy:m1001)',
     },
     {
       id: 'drift-2',
-      kind: 'orphan',
+      kind: 'orphan_slave_position',
       account_id: 2001,
       position_id: 5004,
-      detail: 'Position 5004 on account 2001 has no master',
+      detail: 'Slave position 5004 on account 2001 has no mapped master (copy:m1001)',
     },
   ],
 }
@@ -113,9 +112,9 @@ test('expanding a row shows per-slave copy status with slippage', async () => {
     // The table should show the slave account ID
     expect(screen.getByText('2001')).toBeInTheDocument()
     expect(screen.getByText('active')).toBeInTheDocument()
-    expect(screen.getByText('1.09550')).toBeInTheDocument()
-    // Slippage should be fill_price - entry_price = 1.0955 - 1.0950 = 0.0005 (5 points)
-    expect(screen.getByText('5.0')).toBeInTheDocument()
+    // When fill_price is not provided by backend, show "—" for both fill price and slippage
+    const dashElements = screen.getAllByText('—')
+    expect(dashElements.length).toBeGreaterThan(0)
   })
 })
 
@@ -151,7 +150,7 @@ test('drift item close-orphan confirms then POSTs', async () => {
   )
 
   await waitFor(() => {
-    expect(screen.getByText(/Position 5003/)).toBeInTheDocument()
+    expect(screen.getByText(/Slave position 5003/)).toBeInTheDocument()
   })
 
   const closeOrphanButtons = screen.getAllByRole('button', { name: /close orphan/i })
@@ -169,7 +168,6 @@ test('drift item close-orphan confirms then POSTs', async () => {
 
 test('adopt posts master_position_id', async () => {
   const apiSpy = vi.spyOn(apiModule, 'api').mockResolvedValue(mockApiState)
-  vi.stubGlobal('prompt', vi.fn().mockReturnValue('1001'))
 
   render(
     <MemoryRouter>
@@ -178,7 +176,7 @@ test('adopt posts master_position_id', async () => {
   )
 
   await waitFor(() => {
-    expect(screen.getByText(/Position 5003/)).toBeInTheDocument()
+    expect(screen.getByText(/Slave position 5003/)).toBeInTheDocument()
   })
 
   const adoptButtons = screen.getAllByRole('button', { name: /adopt/i })
@@ -197,6 +195,8 @@ test('adopt posts master_position_id', async () => {
         const parsed = JSON.parse(body)
         expect(parsed).toHaveProperty('id')
         expect(parsed).toHaveProperty('master_position_id')
+        // Should parse master_position_id from label (copy:m1001)
+        expect(parsed.master_position_id).toBe(1001)
       }
     }
   })

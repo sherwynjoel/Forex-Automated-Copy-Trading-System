@@ -41,8 +41,15 @@ export default function Positions() {
     }
   }
 
-  const handleAdopt = async (driftId: string, masterPositionId?: number | null) => {
-    let master_position_id = masterPositionId
+  const handleAdopt = async (driftId: string, driftDetail: string) => {
+    // Try to parse master position id from label (format: copy:m<id>)
+    let master_position_id: number | null = null
+    const match = driftDetail.match(/copy:m(\d+)/)
+    if (match) {
+      master_position_id = parseInt(match[1], 10)
+    }
+
+    // If not found in label, prompt user
     if (!master_position_id) {
       const input = prompt('Enter master position ID to adopt to:')
       if (!input) return
@@ -130,7 +137,7 @@ export default function Positions() {
                 <tr>
                   <th className="border p-3 text-left font-semibold">Symbol</th>
                   <th className="border p-3 text-left font-semibold">Side</th>
-                  <th className="border p-3 text-right font-semibold">Volume (lots)</th>
+                  <th className="border p-3 text-right font-semibold">Volume (units)</th>
                   <th className="border p-3 text-right font-semibold">Entry Price</th>
                   <th className="border p-3 text-right font-semibold">P&L</th>
                   <th className="border p-3 text-center font-semibold">Actions</th>
@@ -162,7 +169,7 @@ export default function Positions() {
               <thead className="bg-gray-100">
                 <tr>
                   <th className="border p-3 text-left font-semibold">Symbol</th>
-                  <th className="border p-3 text-right font-semibold">Volume (lots)</th>
+                  <th className="border p-3 text-right font-semibold">Volume (units)</th>
                   <th className="border p-3 text-center font-semibold">Actions</th>
                 </tr>
               </thead>
@@ -193,7 +200,7 @@ export default function Positions() {
                 key={drift.id}
                 drift={drift}
                 onCloseOrphan={() => handleCloseOrphan(drift.id)}
-                onAdopt={() => handleAdopt(drift.id, drift.position_id)}
+                onAdopt={() => handleAdopt(drift.id, drift.detail)}
                 onDismiss={() => handleDismiss(drift.id)}
               />
             ))}
@@ -221,7 +228,7 @@ function PositionRow({
         <td className="border p-3 text-right">{position.volume_lots || position.volume}</td>
         <td className="border p-3 text-right">{position.price.toFixed(5)}</td>
         <td className="border p-3 text-right">
-          {position.pnl_quote ? position.pnl_quote.toFixed(2) : '-'}
+          {position.pnl_quote != null ? position.pnl_quote.toFixed(2) : '-'}
         </td>
         <td className="border p-3 text-center">
           <button
@@ -324,15 +331,19 @@ function CopyRow({
   copy: PositionCopy
   entryPrice: number
 }) {
-  const fillPrice = copy.fill_price ?? entryPrice
-  const slippagePoints = (fillPrice - entryPrice) * 10000 // Convert to points
+  // Show "—" if fill_price is not available from backend
+  const hasFillPrice = copy.fill_price != null
+  const slippageDisplay = hasFillPrice
+    ? ((copy.fill_price! - entryPrice) * 10000).toFixed(1)
+    : '—'
+  const fillPriceDisplay = hasFillPrice ? copy.fill_price!.toFixed(5) : '—'
 
   return (
     <tr className="border-t hover:bg-gray-100">
       <td className="border p-2">{copy.slave_account_id}</td>
       <td className="border p-2">{copy.status}</td>
-      <td className="border p-2 text-right">{fillPrice.toFixed(5)}</td>
-      <td className="border p-2 text-right">{slippagePoints.toFixed(1)}</td>
+      <td className="border p-2 text-right">{fillPriceDisplay}</td>
+      <td className="border p-2 text-right">{slippageDisplay}</td>
       <td className="border p-2">{copy.error || '-'}</td>
     </tr>
   )
@@ -349,16 +360,20 @@ function DriftItemRow({
   onAdopt: () => void
   onDismiss: () => void
 }) {
+  const isOrphanSlave = drift.kind === 'orphan_slave_position'
+  const kindDisplay = drift.kind
+    .split('_')
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ')
+
   return (
     <div className="border rounded p-4 bg-white">
       <div className="mb-3">
-        <p className="font-semibold">
-          {drift.kind.charAt(0).toUpperCase() + drift.kind.slice(1)}
-        </p>
+        <p className="font-semibold">{kindDisplay}</p>
         <p className="text-sm text-gray-600">{drift.detail}</p>
       </div>
       <div className="flex gap-2">
-        {drift.kind === 'orphan' && (
+        {isOrphanSlave && (
           <button
             onClick={onCloseOrphan}
             className="px-3 py-2 bg-red-500 text-white rounded hover:bg-red-600 text-sm"
@@ -366,12 +381,14 @@ function DriftItemRow({
             Close Orphan
           </button>
         )}
-        <button
-          onClick={onAdopt}
-          className="px-3 py-2 bg-green-500 text-white rounded hover:bg-green-600 text-sm"
-        >
-          Adopt
-        </button>
+        {isOrphanSlave && (
+          <button
+            onClick={onAdopt}
+            className="px-3 py-2 bg-green-500 text-white rounded hover:bg-green-600 text-sm"
+          >
+            Adopt
+          </button>
+        )}
         <button
           onClick={onDismiss}
           className="px-3 py-2 bg-gray-500 text-white rounded hover:bg-gray-600 text-sm"

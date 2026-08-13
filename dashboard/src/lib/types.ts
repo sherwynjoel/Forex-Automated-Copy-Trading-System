@@ -26,9 +26,11 @@ export interface EventResponse {
   payload: Record<string, unknown>
 }
 
+export type DriftKind = 'orphan_slave_position' | 'missing_slave_copy' | 'unmapped_master_position' | 'unfilled_slave_order'
+
 export interface DriftItem {
   id: string
-  kind: string
+  kind: DriftKind
   account_id?: number | null
   position_id?: number | null
   order_id?: number | null
