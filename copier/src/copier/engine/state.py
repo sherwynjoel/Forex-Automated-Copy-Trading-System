@@ -238,6 +238,7 @@ class AccountStateTracker:
                     positions_list.append({
                         "position_id": pos.position_id,
                         "symbol_id": pos.symbol_id,
+                        "symbol": None,  # unknown symbol name
                         "side": pos.side.value,
                         "volume": pos.volume,
                         "entry_price": pos.price,

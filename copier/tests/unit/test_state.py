@@ -249,7 +249,12 @@ def test_equity_is_none_when_balance_unknown():
 
 
 def test_position_with_unmatched_symbol_is_surfaced_with_none_pnl():
-    """Unmatched symbol is logged and position is surfaced with pnl_quote=None."""
+    """Unmatched symbol is logged and position is surfaced with pnl_quote=None.
+
+    Verifies dict schema consistency: both matched and unmatched branches
+    must emit identical keys (position_id, symbol_id, symbol, side, volume,
+    entry_price, pnl_quote) so downstream consumers don't KeyError.
+    """
     sdk, clock = StubSdk(), Clock()
     client = CTraderClient(sdk, "cid", "csecret", clock=clock)
     client.start()
@@ -277,9 +282,19 @@ def test_position_with_unmatched_symbol_is_surfaced_with_none_pnl():
     # Position is still in the list
     assert len(account_state["positions"]) == 1
     pos = account_state["positions"][0]
+
+    # Verify all expected keys are present (schema consistency)
+    expected_keys = {"position_id", "symbol_id", "symbol", "side", "volume", "entry_price", "pnl_quote"}
+    assert set(pos.keys()) == expected_keys, f"Missing or extra keys: {set(pos.keys()) ^ expected_keys}"
+
+    # Verify values
     assert pos["position_id"] == 1
     assert pos["symbol_id"] == 999
+    assert pos["symbol"] is None  # Placeholder for unknown symbol
     assert pos["pnl_quote"] is None  # Unknown due to missing symbol
+    assert pos["side"] == "BUY"
+    assert pos["volume"] == 10_000_000
+    assert pos["entry_price"] == 1.1000
 
 
 def test_subscribes_only_open_position_symbols():
