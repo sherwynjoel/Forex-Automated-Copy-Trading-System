@@ -1,0 +1,46 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: copytrader
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-copytrader}
+      POSTGRES_DB: copytrader
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U copytrader"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  migrate:
+    build: { context: ., dockerfile: db/Dockerfile }
+    environment:
+      POSTGRES_DSN: postgresql://copytrader:${POSTGRES_PASSWORD:-copytrader}@postgres:5432/copytrader
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  copier:
+    build: { context: ., dockerfile: copier/Dockerfile }
+    env_file: .env
+    environment:
+      POSTGRES_DSN: postgresql://copytrader:${POSTGRES_PASSWORD:-copytrader}@postgres:5432/copytrader
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    # control port 8080 is intentionally NOT published — internal network only (spec §8)
+
+  api:
+    build: { context: ., dockerfile: api/Dockerfile }
+    env_file: .env
+    ports:
+      - "8000:8000"
+    environment:
+      POSTGRES_DSN: postgresql://copytrader:${POSTGRES_PASSWORD:-copytrader}@postgres:5432/copytrader
+      COPIER_CONTROL_URL: http://copier:8080
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+volumes:
+  pgdata: {}
