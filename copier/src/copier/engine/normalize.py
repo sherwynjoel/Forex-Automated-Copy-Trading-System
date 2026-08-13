@@ -20,19 +20,20 @@ def normalize(evt: ProtoOAExecutionEvent,
     unknown symbols).
     """
 
+    execution_type = evt.executionType
+
+    # Handle ORDER_REJECTED BEFORE symbol gate (rejections don't require mapped symbol)
+    if execution_type == ProtoOAExecutionType.ORDER_REJECTED:
+        reason = evt.errorCode if evt.errorCode else ProtoOAExecutionType.Name(execution_type)
+        return m.MasterRejected(reason=reason)
+
     # Get symbol info; return None if symbol is unknown
     symbol_id = evt.order.tradeData.symbolId
     symbol_info = symbols_by_id.get(symbol_id)
     if symbol_info is None:
         return None
 
-    execution_type = evt.executionType
     order_type = evt.order.orderType
-
-    # Handle ORDER_REJECTED
-    if execution_type == ProtoOAExecutionType.ORDER_REJECTED:
-        reason = evt.executionType.name if evt.errorCode == 0 else str(evt.errorCode)
-        return m.MasterRejected(reason=reason)
 
     # Handle protection orders (STOP_LOSS_TAKE_PROFIT)
     if order_type == ProtoOAOrderType.STOP_LOSS_TAKE_PROFIT:
@@ -100,8 +101,8 @@ def normalize(evt: ProtoOAExecutionEvent,
             else:
                 price = evt.order.stopPrice
 
-            stop_loss = evt.position.stopLoss if evt.position.HasField('stopLoss') else None
-            take_profit = evt.position.takeProfit if evt.position.HasField('takeProfit') else None
+            stop_loss = _extract_float_if_nonzero(evt.order.stopLoss)
+            take_profit = _extract_float_if_nonzero(evt.order.takeProfit)
             expiry_ts_ms = evt.order.expirationTimestamp if evt.order.HasField('expirationTimestamp') else None
 
             return m.MasterPendingPlaced(
@@ -131,8 +132,8 @@ def normalize(evt: ProtoOAExecutionEvent,
             else:
                 price = evt.order.stopPrice
 
-            stop_loss = evt.position.stopLoss if evt.position.HasField('stopLoss') else None
-            take_profit = evt.position.takeProfit if evt.position.HasField('takeProfit') else None
+            stop_loss = _extract_float_if_nonzero(evt.order.stopLoss)
+            take_profit = _extract_float_if_nonzero(evt.order.takeProfit)
 
             return m.MasterPendingReplaced(
                 order_id=evt.order.orderId,
@@ -169,3 +170,8 @@ def _proto_side_to_side(proto_side: int) -> m.Side:
         return m.Side.SELL
     else:
         raise ValueError(f"Unknown trade side: {proto_side}")
+
+
+def _extract_float_if_nonzero(value: float) -> float | None:
+    """Return float if nonzero (protobuf default is 0.0); else None."""
+    return value if value != 0.0 else None
