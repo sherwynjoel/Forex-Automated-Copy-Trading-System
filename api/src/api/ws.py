@@ -22,7 +22,13 @@ class EventBroadcaster:
         self.connections: Set[WebSocket] = set()
         self.listener_task = None
         self.listener_connection: AsyncConnection = None
+        self.query_connection: AsyncConnection = None
         self.dsn = None
+        # Set True once LISTEN events has actually been registered with Postgres.
+        # Lets callers (e.g. tests) know it's safe to INSERT without racing the
+        # listener's startup (asyncio.create_task only *schedules* the coroutine;
+        # it does not wait for LISTEN to be issued).
+        self.listening = False
 
     async def connect(self, ws: WebSocket):
         """Add a WebSocket connection."""
@@ -53,6 +59,14 @@ class EventBroadcaster:
             async with self.listener_connection.cursor() as cur:
                 await cur.execute("LISTEN events")
 
+            # A SEPARATE connection for fetching event rows. `notifies()` below
+            # holds the listener connection's internal lock for the lifetime of
+            # the generator (including while our loop body runs between yields),
+            # so issuing a query on that same connection from inside the loop
+            # would deadlock waiting for a lock the generator itself is holding.
+            self.query_connection = await AsyncConnection.connect(dsn, autocommit=True)
+
+            self.listening = True
             logger.info("Started listening on events channel")
 
             # Listen for notifications
@@ -61,8 +75,8 @@ class EventBroadcaster:
                     event_id = int(notify.payload)
                     logger.debug(f"Received event notification: {event_id}")
 
-                    # Fetch the event details
-                    async with self.listener_connection.cursor() as cur:
+                    # Fetch the event details on the separate query connection.
+                    async with self.query_connection.cursor() as cur:
                         await cur.execute(
                             """SELECT id, ts, account_id, category, severity, latency_ms, payload
                                FROM events WHERE id = %s""",
@@ -92,7 +106,11 @@ class EventBroadcaster:
         except Exception as e:
             logger.error(f"Unexpected error in listener: {e}")
         finally:
-            # Clean up the listener connection
+            # Clean up the listener and query connections
+            self.listening = False
+            if self.query_connection:
+                await self.query_connection.close()
+                self.query_connection = None
             if self.listener_connection:
                 await self.listener_connection.close()
                 self.listener_connection = None

@@ -1,7 +1,11 @@
 """Tests for events REST and WebSocket endpoints."""
+import asyncio
 import json
+import uuid
 import psycopg
 import pytest
+import httpx
+import websockets
 from datetime import datetime, timedelta
 from pathlib import Path
 from starlette.websockets import WebSocketDisconnect
@@ -292,6 +296,75 @@ class TestWebSocket:
                 pass
         except Exception as e:
             pytest.fail(f"WS connection should succeed with auth, got: {e}")
+
+class TestWebSocketLiveDelivery:
+    """Delivery tests against a REAL uvicorn server + REAL TCP `websockets` client.
+
+    These prove the full path: INSERT -> pg_notify('events', id) (migration 001 trigger)
+    -> EventBroadcaster.LISTEN -> broadcast -> WebSocket client, end to end. There is no
+    shared/cross-loop asyncio object here: the server (lifespan listener task + WS handler)
+    runs entirely in uvicorn's background-thread event loop, and the test's `websockets`
+    client runs entirely in the test's event loop. The only things connecting them are a
+    real TCP socket (for the WS) and Postgres itself (for the INSERT -> NOTIFY).
+    """
+
+    @pytest.mark.asyncio
+    async def test_ws_delivers_inserted_event(self, live_server, db):
+        """An events row inserted into the app's DB is delivered to a connected WS client."""
+        base_url, ws_url = live_server
+
+        # Log in over real HTTP against the live server to get a valid session cookie.
+        async with httpx.AsyncClient(base_url=base_url) as http:
+            resp = await http.post("/api/login", json={"password": "hunter2!"})
+            assert resp.status_code == 204, resp.text
+            session_cookie = resp.cookies.get("session")
+            assert session_cookie, "login did not set a session cookie"
+
+        # ws.py reads the cookie via ws.cookies["session"], populated from the Cookie header.
+        headers = {"Cookie": f"session={session_cookie}"}
+
+        async with websockets.connect(ws_url, additional_headers=headers, open_timeout=5) as ws:
+            # Confirm the connection actually stayed open (wasn't rejected/closed
+            # immediately) before we go on to assert delivery.
+            assert ws.close_code is None, (
+                f"WS connection closed immediately after handshake, code={ws.close_code} "
+                f"reason={ws.close_reason!r} -- auth was likely rejected"
+            )
+
+            # Separate psycopg connection, same DSN (`db`) the live app is configured with
+            # (POSTGRES_DSN was set to `db` by the live_server fixture). pg_notify only
+            # reaches listeners on the SAME database, so this must match exactly.
+            payload = {"message": "live delivery test", "nonce": str(uuid.uuid4())}
+            with psycopg.connect(db, autocommit=True) as conn:
+                row = conn.execute(
+                    """INSERT INTO events (account_id, category, severity, latency_ms, payload)
+                       VALUES (%s, %s, %s, %s, %s) RETURNING id""",
+                    (None, "control", "info", None, json.dumps(payload)),
+                ).fetchone()
+                event_id = row[0]
+
+            raw = await asyncio.wait_for(ws.recv(), timeout=5)
+            data = json.loads(raw)
+
+        assert data["id"] == event_id
+        assert data["category"] == "control"
+        assert data["severity"] == "info"
+        assert data["payload"] == payload
+
+    @pytest.mark.asyncio
+    async def test_ws_rejects_unauthenticated_live(self, live_server):
+        """Against the live server, a WS connect without a valid session cookie is rejected."""
+        _, ws_url = live_server
+
+        # No LISTEN registration or lifespan race here: ws.py rejects before ever
+        # calling ws.accept(), so uvicorn responds with an HTTP-level handshake
+        # rejection rather than a post-accept WS close frame carrying code 4401
+        # (confirmed against uvicorn's websockets_sansio_impl: a pre-accept
+        # "websocket.close" is turned into `conn.reject(HTTPStatus.FORBIDDEN, "")`).
+        with pytest.raises((websockets.exceptions.InvalidHandshake, websockets.exceptions.ConnectionClosed)):
+            async with websockets.connect(ws_url, open_timeout=5) as ws:
+                await ws.recv()
+
 
 class TestStaticServing:
     """Tests for static file serving."""

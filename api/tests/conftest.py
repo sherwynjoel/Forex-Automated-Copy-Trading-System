@@ -1,10 +1,13 @@
 import os
 import pathlib
 import sys
+import threading
+import time
 from contextlib import contextmanager
 
 import psycopg
 import pytest
+import uvicorn
 from fastapi.testclient import TestClient
 import httpx
 
@@ -160,6 +163,7 @@ def app_client_with_lifespan(db):
     broadcaster.connections.clear()
     broadcaster.listener_task = None
     broadcaster.listener_connection = None
+    broadcaster.query_connection = None
     broadcaster.dsn = None
 
     # Create injectable mock transport with configurable callback
@@ -174,6 +178,96 @@ def app_client_with_lifespan(db):
     # Use context manager so ASGI lifespan runs (required for broadcaster listener)
     with TestClient(app) as client:
         yield client
+
+
+def _set_live_test_env(db: str) -> None:
+    """Set the process env vars ApiConfig.from_env() needs, pointed at the test DB.
+
+    Mirrors app_client/app_client_with_lifespan. Shared here because live_server
+    also needs it, and os.environ is process-global (shared with the uvicorn
+    background thread since it's the same process, just a different thread).
+    """
+    from cryptography.fernet import Fernet
+
+    fernet_key = Fernet.generate_key().decode()
+    os.environ["POSTGRES_DSN"] = db
+    os.environ["SESSION_SECRET"] = "test-secret"
+    os.environ["ADMIN_BOOTSTRAP_PASSWORD"] = "hunter2!"
+    os.environ["COPIER_CONTROL_URL"] = "http://copier.test"
+    os.environ["COOKIE_SECURE"] = "false"
+    os.environ["CTRADER_CLIENT_ID"] = "test-client-id"
+    os.environ["CTRADER_CLIENT_SECRET"] = "test-client-secret"
+    os.environ["CTRADER_REDIRECT_URI"] = "http://localhost:8000/api/oauth/callback"
+    os.environ["CTRADER_AUTH_URL"] = "https://openapi.ctrader.com/apps/auth"
+    os.environ["CTRADER_TOKEN_URL"] = "https://openapi.ctrader.com/apps/token"
+    os.environ["FERNET_KEY"] = fernet_key
+
+
+@pytest.fixture
+def live_server(db):
+    """Run the real app under a real uvicorn.Server in a background thread.
+
+    This is a genuine TCP server on an ephemeral port with ASGI lifespan enabled,
+    so EventBroadcaster's LISTEN/NOTIFY task actually runs (unlike TestClient's
+    ASGI-transport shortcut). A `websockets` client connecting to it talks over a
+    real socket -- there is no shared/cross-loop asyncio object between the test
+    and the server; the only channel between them is the TCP connection itself
+    (for the WS) and Postgres (for the INSERT -> pg_notify).
+
+    Yields (base_url, ws_url) for the bound ephemeral port. The test DB DSN is
+    the same `db` string the app was configured with (POSTGRES_DSN), so tests
+    that want to insert rows the app's listener will see should connect with `db`.
+    """
+    _set_live_test_env(db)
+
+    from api.main import create_app
+    from api.auth import ensure_admin
+    from api.ws import broadcaster
+
+    # Bootstrap admin before the server starts serving requests.
+    ensure_admin(db, "hunter2!")
+
+    # broadcaster is a module-level singleton reused across tests/fixtures in this
+    # process -- reset it to a clean slate before this test's server starts.
+    broadcaster.connections.clear()
+    broadcaster.listener_task = None
+    broadcaster.listener_connection = None
+    broadcaster.query_connection = None
+    broadcaster.dsn = None
+    broadcaster.listening = False
+
+    mock_transport = MockTransportWrapper(default_mock_callback)
+    app = create_app(http_transport=mock_transport)
+
+    config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning", lifespan="on")
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+
+    try:
+        deadline = time.time() + 10
+        while not server.started:
+            if time.time() > deadline:
+                raise RuntimeError("uvicorn live_server did not start within 10s")
+            time.sleep(0.01)
+
+        # Wait for the EventBroadcaster to actually issue LISTEN events before
+        # handing control to the test -- otherwise an INSERT could fire pg_notify
+        # before any listener is registered on that channel, and the notification
+        # would simply be lost (not queued for a not-yet-listening connection).
+        deadline = time.time() + 10
+        while not broadcaster.listening:
+            if time.time() > deadline:
+                raise RuntimeError("EventBroadcaster did not start LISTENing within 10s")
+            time.sleep(0.01)
+
+        port = server.servers[0].sockets[0].getsockname()[1]
+        yield f"http://127.0.0.1:{port}", f"ws://127.0.0.1:{port}/api/ws"
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+        if thread.is_alive():
+            raise RuntimeError("uvicorn live_server thread did not shut down within 10s")
 
 
 class MockTransportWrapper:
