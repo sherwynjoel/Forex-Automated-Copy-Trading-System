@@ -128,6 +128,54 @@ def app_client(db):
             pass
 
 
+@pytest.fixture
+def app_client_with_lifespan(db):
+    """Provide a TestClient that runs ASGI lifespan for async features like WebSocket listeners."""
+    # Generate a test Fernet key first (before any config imports)
+    from cryptography.fernet import Fernet
+    fernet_key = Fernet.generate_key().decode()
+
+    # Set up test environment variables
+    os.environ["POSTGRES_DSN"] = db
+    os.environ["SESSION_SECRET"] = "test-secret"
+    os.environ["ADMIN_BOOTSTRAP_PASSWORD"] = "hunter2!"
+    os.environ["COPIER_CONTROL_URL"] = "http://copier.test"
+    os.environ["COOKIE_SECURE"] = "false"  # Disable Secure flag in tests
+    os.environ["CTRADER_CLIENT_ID"] = "test-client-id"
+    os.environ["CTRADER_CLIENT_SECRET"] = "test-client-secret"
+    os.environ["CTRADER_REDIRECT_URI"] = "http://localhost:8000/api/oauth/callback"
+    os.environ["CTRADER_AUTH_URL"] = "https://openapi.ctrader.com/apps/auth"
+    os.environ["CTRADER_TOKEN_URL"] = "https://openapi.ctrader.com/apps/token"
+    os.environ["FERNET_KEY"] = fernet_key
+
+    # Import after setting env vars
+    from api.main import create_app
+    from api.auth import ensure_admin
+    from api.ws import broadcaster
+
+    # Explicitly bootstrap admin BEFORE creating the app
+    ensure_admin(db, "hunter2!")
+
+    # Reset broadcaster for this test (clean slate)
+    broadcaster.connections.clear()
+    broadcaster.listener_task = None
+    broadcaster.listener_connection = None
+    broadcaster.dsn = None
+
+    # Create injectable mock transport with configurable callback
+    mock_transport = MockTransportWrapper(default_mock_callback)
+
+    # Create app with injectable transport
+    app = create_app(http_transport=mock_transport)
+
+    # Store the transport so tests can replace its callback
+    app.state.mock_transport = mock_transport
+
+    # Use context manager so ASGI lifespan runs (required for broadcaster listener)
+    with TestClient(app) as client:
+        yield client
+
+
 class MockTransportWrapper:
     """Wrapper that allows dynamic callback replacement."""
     def __init__(self, initial_callback):

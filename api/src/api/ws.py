@@ -1,23 +1,18 @@
 """WebSocket handlers and event broadcaster."""
 import asyncio
-import json
 import logging
-import os
 from typing import Set
 
 from psycopg import AsyncConnection
 import psycopg.errors
-from fastapi import APIRouter, WebSocketException, Cookie, Depends
+from fastapi import APIRouter
 from fastapi.websockets import WebSocket
-from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
+from itsdangerous import SignatureExpired, BadSignature
 
+from .auth import get_session_serializer
 from .config import ApiConfig
-from .db import get_cfg
 
 logger = logging.getLogger(__name__)
-# Enable debug logging if DEBUG env var is set
-if os.environ.get("DEBUG"):
-    logging.basicConfig(level=logging.DEBUG)
 
 
 class EventBroadcaster:
@@ -46,18 +41,6 @@ class EventBroadcaster:
             except Exception as e:
                 logger.warning(f"Failed to send to client: {e}")
                 self.disconnect(ws)
-
-    async def _ensure_listener_started(self):
-        """Ensure listener task is started if DSN is available."""
-        if not self.dsn or self.listener_task:
-            return
-
-        async with self._listener_lock:
-            # Double-check after acquiring lock
-            if self.listener_task:
-                return
-
-            self.listener_task = asyncio.create_task(self.start_listener(self.dsn))
 
     async def start_listener(self, dsn: str):
         """Start listening for Postgres events and broadcast them."""
@@ -149,7 +132,7 @@ def create_ws_router() -> APIRouter:
         session = cookies.get("session")
 
         if session:
-            serializer = URLSafeTimedSerializer(cfg.session_secret, salt="session")
+            serializer = get_session_serializer(cfg)
             try:
                 # max_age=12h = 43200 seconds
                 data = serializer.loads(session, max_age=43200)
@@ -159,6 +142,7 @@ def create_ws_router() -> APIRouter:
             except (SignatureExpired, BadSignature):
                 pass
 
+        # Reject before accepting the connection
         if not authenticated:
             await ws.close(code=4401, reason="Unauthorized")
             return

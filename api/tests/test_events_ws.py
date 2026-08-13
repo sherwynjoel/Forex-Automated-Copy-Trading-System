@@ -4,6 +4,7 @@ import psycopg
 import pytest
 from datetime import datetime, timedelta
 from pathlib import Path
+from starlette.websockets import WebSocketDisconnect
 
 
 def _seed_account(db, ctid_trader_account_id, ctid_connection_id, trader_login, is_live):
@@ -229,33 +230,18 @@ class TestEventsREST:
         assert "payload" in event
         assert event["payload"] == {"data": "test"}
 
-
-class TestWebSocket:
-    """Tests for WebSocket /api/ws endpoint."""
-
-    def test_ws_rejects_unauthenticated(self, app_client):
-        """WebSocket connection is rejected without authentication."""
-        with pytest.raises(Exception):  # TestClient raises on failed WS handshake
-            with app_client.websocket_connect("/api/ws"):
-                pass
-
-    def test_ws_accepts_authenticated(self, app_client):
-        """WebSocket connection is accepted with valid session cookie."""
+    def test_events_malformed_since_400(self, app_client):
+        """GET /api/events returns 400 for malformed since timestamp."""
         # Login first
         response = app_client.post("/api/login", json={"password": "hunter2!"})
         assert response.status_code == 204
 
-        # Should be able to connect to WS now
-        try:
-            with app_client.websocket_connect("/api/ws") as ws:
-                # Just check that connection succeeded
-                pass
-        except Exception as e:
-            pytest.fail(f"WS connection should succeed with auth, got: {e}")
+        response = app_client.get("/api/events?since=not-a-timestamp")
+        assert response.status_code == 400
+        assert "ISO 8601" in response.json()["detail"]
 
-    @pytest.mark.skip(reason="LISTEN/NOTIFY has timing issues with TestClient - will test manually in integration tests")
-    def test_ws_streams_inserted_event(self, app_client, db):
-        """WebSocket streams events inserted into the database."""
+    def test_events_limit_capped_to_1000(self, app_client, db):
+        """GET /api/events caps limit to 1000 maximum."""
         # Login first
         response = app_client.post("/api/login", json={"password": "hunter2!"})
         assert response.status_code == 204
@@ -263,9 +249,62 @@ class TestWebSocket:
         conn_id = _seed_connection(db)
         _seed_account(db, 12345, conn_id, 111111, True)
 
-        # Connect to WS
-        with app_client.websocket_connect("/api/ws") as ws:
-            # Insert an event
+        # Insert 10 events
+        for i in range(10):
+            _insert_event(db, account_id=12345, category="control", severity="info")
+
+        # Request with limit > 1000 should be capped to 1000
+        response = app_client.get("/api/events?limit=5000")
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 10  # Only 10 events exist, but limit was capped to 1000
+
+    def test_events_limit_min_1(self, app_client):
+        """GET /api/events returns 400 for limit < 1."""
+        # Login first
+        response = app_client.post("/api/login", json={"password": "hunter2!"})
+        assert response.status_code == 204
+
+        response = app_client.get("/api/events?limit=0")
+        assert response.status_code == 400
+
+
+class TestWebSocket:
+    """Tests for WebSocket /api/ws endpoint."""
+
+    def test_ws_rejects_unauthenticated(self, app_client):
+        """WebSocket connection is rejected without authentication with 4401 close code."""
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            with app_client.websocket_connect("/api/ws"):
+                pass
+        assert exc_info.value.code == 4401
+
+    def test_ws_accepts_authenticated(self, app_client_with_lifespan):
+        """WebSocket connection is accepted with valid session cookie."""
+        # Login first
+        response = app_client_with_lifespan.post("/api/login", json={"password": "hunter2!"})
+        assert response.status_code == 204
+
+        # Should be able to connect to WS now
+        try:
+            with app_client_with_lifespan.websocket_connect("/api/ws") as ws:
+                # Just check that connection succeeded
+                pass
+        except Exception as e:
+            pytest.fail(f"WS connection should succeed with auth, got: {e}")
+
+    def test_ws_streams_inserted_event(self, app_client_with_lifespan, db):
+        """WebSocket streams events inserted into the database via LISTEN/NOTIFY."""
+        # Login first
+        response = app_client_with_lifespan.post("/api/login", json={"password": "hunter2!"})
+        assert response.status_code == 204
+
+        conn_id = _seed_connection(db)
+        _seed_account(db, 12345, conn_id, 111111, True)
+
+        # Connect to WS (lifespan ensures broadcaster listener is running)
+        with app_client_with_lifespan.websocket_connect("/api/ws") as ws:
+            # Insert an event (fires pg_notify)
             event_id, ts = _insert_event(
                 db,
                 account_id=12345,
@@ -275,7 +314,7 @@ class TestWebSocket:
                 payload={"msg": "hello"}
             )
 
-            # Receive the event from WS
+            # Receive the event from WS (should arrive via LISTEN/NOTIFY)
             data = ws.receive_json()
             assert data["id"] == event_id
             assert data["category"] == "control"
@@ -284,18 +323,17 @@ class TestWebSocket:
             assert data["latency_ms"] == 50
             assert data["payload"] == {"msg": "hello"}
 
-    @pytest.mark.skip(reason="LISTEN/NOTIFY has timing issues with TestClient - will test manually in integration tests")
-    def test_ws_multiple_events(self, app_client, db):
-        """WebSocket receives multiple events in sequence."""
+    def test_ws_multiple_events(self, app_client_with_lifespan, db):
+        """WebSocket receives multiple events in sequence via LISTEN/NOTIFY."""
         # Login first
-        response = app_client.post("/api/login", json={"password": "hunter2!"})
+        response = app_client_with_lifespan.post("/api/login", json={"password": "hunter2!"})
         assert response.status_code == 204
 
         conn_id = _seed_connection(db)
         _seed_account(db, 12345, conn_id, 111111, True)
 
         # Connect to WS
-        with app_client.websocket_connect("/api/ws") as ws:
+        with app_client_with_lifespan.websocket_connect("/api/ws") as ws:
             # Insert first event
             event_id1, _ = _insert_event(
                 db,
@@ -326,7 +364,7 @@ class TestWebSocket:
 class TestStaticServing:
     """Tests for static file serving."""
 
-    def test_spa_fallback_serves_index_html(self, app_client, tmp_path, monkeypatch):
+    def test_spa_fallback_serves_index_html(self, tmp_path, monkeypatch):
         """SPA fallback serves index.html for non-/api paths when STATIC_DIR is set."""
         # Create a temporary static directory with index.html
         static_dir = tmp_path / "dist"
@@ -334,15 +372,14 @@ class TestStaticServing:
         index_html = static_dir / "index.html"
         index_html.write_text("<html><body>Test Dashboard</body></html>")
 
-        # Need to create a new app with STATIC_DIR set
-        import os
-        os.environ["STATIC_DIR"] = str(static_dir)
+        # Use monkeypatch to set STATIC_DIR (cleaner than direct environ manipulation)
+        monkeypatch.setenv("STATIC_DIR", str(static_dir))
 
         # Re-import to get fresh config
         from api.main import create_app
+        from fastapi.testclient import TestClient
 
         app = create_app()
-        from fastapi.testclient import TestClient
         client = TestClient(app)
 
         # GET / should return index.html
@@ -358,9 +395,6 @@ class TestStaticServing:
         # /api paths should not be affected
         response = client.get("/api/nonexistent")
         assert response.status_code == 404
-
-        # Clean up env var
-        del os.environ["STATIC_DIR"]
 
     def test_static_serving_absent_gracefully(self, app_client):
         """Static serving degrades gracefully when STATIC_DIR is not set or missing."""
