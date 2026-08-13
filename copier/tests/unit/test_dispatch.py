@@ -13,7 +13,7 @@ from copier.domain.models import (
     PlacePending, AmendPending, CancelPending, LinkPendingFill, Alert
 )
 from copier.engine.dispatch import (
-    RETRY_DELAYS, client_order_id_for, build_request, Dispatcher
+    RETRY_DELAYS, client_order_id_for, build_request, Dispatcher, SendNotAttempted
 )
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOANewOrderReq, ProtoOAClosePositionReq, ProtoOAAmendPositionSLTPReq,
@@ -405,7 +405,7 @@ class TestDispatcher:
         assert len(rows) == 0
 
     def test_dry_run_logs_and_sends_nothing(self, seed_accounts, repo):
-        """Dry run should log the would-be request without sending."""
+        """Dry run should log the exact would-be request without sending."""
         sent_messages = []
 
         def mock_send(account_id, msg):
@@ -433,14 +433,22 @@ class TestDispatcher:
         # Verify nothing was sent
         assert len(sent_messages) == 0
 
-        # Verify dry_run event was logged
+        # Verify dry_run event was logged with exact field details
         with psycopg.connect(seed_accounts, autocommit=True) as conn:
             rows = conn.execute(
                 "SELECT payload FROM events WHERE category = 'slave_action' AND payload @> '{\"dry_run\": true}'"
             ).fetchall()
         assert len(rows) > 0
-        assert rows[0][0]['dry_run'] is True
-        assert 'would_send' in rows[0][0]
+        payload = rows[0][0]
+        assert payload['dry_run'] is True
+        assert 'would_send' in payload
+
+        # Verify operators can see exact fields: SL, TP, label, volume, etc.
+        would_send = payload['would_send']
+        assert would_send['stopLoss'] == 1.05
+        assert would_send['takeProfit'] == 1.15
+        assert would_send['label'] == "copy:m42"
+        assert would_send['volume'] == 50000
 
         # Verify mapping was created (but stays pending)
         with psycopg.connect(seed_accounts, autocommit=True) as conn:
@@ -537,14 +545,14 @@ class TestDispatcher:
         assert row[1] == "co99.101"
 
     def test_transient_failure_retries_then_degraded(self, seed_accounts, repo):
-        """After 4 failures (3 retries), account should be marked degraded."""
+        """SendNotAttempted failures retry (1s/2s/4s), then degraded after 4th attempt."""
         attempt_count = [0]
         sent_messages = []
 
         def mock_send(account_id, msg):
             sent_messages.append((account_id, msg))
             attempt_count[0] += 1
-            return defer.fail(Exception("Transient error"))
+            return defer.fail(SendNotAttempted("Connection lost"))
 
         clock = Clock()
         from copier.engine.throttle import TokenBucket
@@ -587,13 +595,15 @@ class TestDispatcher:
             ).fetchone()
         assert row[0] == "degraded"
 
-        # Verify error event was logged
+        # Verify error event was logged with request summary
         with psycopg.connect(seed_accounts, autocommit=True) as conn:
             rows = conn.execute(
-                "SELECT severity FROM events WHERE account_id = %s AND severity = 'error'",
+                "SELECT payload FROM events WHERE account_id = %s AND severity = 'error'",
                 (101,)
             ).fetchall()
         assert len(rows) > 0
+        assert 'send_failed_degraded' in rows[0][0]['action']
+        assert 'request_summary' in rows[0][0]
 
     def test_one_slave_failure_does_not_block_others(self, seed_accounts, repo):
         """One slave's failure should not block other slaves in the same batch."""
@@ -638,3 +648,204 @@ class TestDispatcher:
 
         # Slave 102's message should be sent
         assert any(msg[0] == 102 for msg in sent_messages)
+
+    def test_exception_isolation_in_dispatch_loop(self, seed_accounts, repo):
+        """One intent's exception should not block remaining intents in batch."""
+        sent_messages = []
+
+        def mock_send(account_id, msg):
+            sent_messages.append((account_id, msg))
+            return defer.succeed(None)
+
+        clock = Clock()
+        bucket = Mock()
+        bucket.acquire.return_value = defer.succeed(None)
+        dispatcher = Dispatcher(mock_send, repo, bucket, clock=clock)
+
+        # Batch: intent #1 succeeds, #2 fails (duplicate mapping), #3 succeeds
+        intent1 = ClosePosition(slave_account_id=101, position_id=500, volume=10000)
+        # intent2 will fail: create mapping first, then duplicate it
+        repo.create_position_mapping(42, 102, "cm42.102")
+        intent2 = OpenMarket(
+            slave_account_id=102,
+            master_position_id=42,  # duplicate client_order_id will cause DB constraint
+            symbol_id=100,
+            side=Side.BUY,
+            volume=50000,
+            stop_loss=None,
+            take_profit=None,
+            label="copy:m42"
+        )
+        intent3 = ClosePosition(slave_account_id=101, position_id=501, volume=20000)
+
+        dispatcher.dispatch([intent1, intent2, intent3])
+
+        # Verify #1 and #3 were sent (slave 101), #2 failed but not blocking
+        close_messages = [msg for msg in sent_messages if msg[0] == 101]
+        assert len(close_messages) == 2
+
+        # Verify #2's failure was logged as degraded (intent processing failed)
+        with psycopg.connect(seed_accounts, autocommit=True) as conn:
+            row = conn.execute(
+                "SELECT status FROM accounts WHERE ctid_trader_account_id = %s",
+                (102,)
+            ).fetchone()
+        assert row[0] == "degraded"
+
+        # Verify error event for intent #2 processing failure
+        with psycopg.connect(seed_accounts, autocommit=True) as conn:
+            rows = conn.execute(
+                "SELECT payload FROM events WHERE account_id = %s AND severity = 'error'",
+                (102,)
+            ).fetchall()
+        assert len(rows) > 0
+        assert 'intent_processing_failed' in rows[0][0]['action']
+
+    def test_send_not_attempted_retries_then_succeeds(self, seed_accounts, repo):
+        """SendNotAttempted should trigger retries and eventually succeed."""
+        attempt_count = [0]
+        sent_messages = []
+
+        def mock_send(account_id, msg):
+            sent_messages.append((account_id, msg))
+            attempt_count[0] += 1
+            if attempt_count[0] < 3:
+                # First two attempts fail with SendNotAttempted (pre-wire)
+                return defer.fail(SendNotAttempted("Connection dropped before send"))
+            else:
+                # Third attempt succeeds
+                return defer.succeed(None)
+
+        clock = Clock()
+        from copier.engine.throttle import TokenBucket
+        bucket = TokenBucket(clock=clock)
+
+        dispatcher = Dispatcher(mock_send, repo, bucket, clock=clock)
+
+        intent = OpenMarket(
+            slave_account_id=101,
+            master_position_id=42,
+            symbol_id=100,
+            side=Side.BUY,
+            volume=50000,
+            stop_loss=None,
+            take_profit=None,
+            label="copy:m42"
+        )
+        dispatcher.dispatch([intent])
+
+        # First attempt made immediately
+        assert attempt_count[0] == 1
+
+        # Retry after 1s
+        clock.advance(1.0)
+        assert attempt_count[0] == 2
+
+        # Retry after 2s
+        clock.advance(2.0)
+        assert attempt_count[0] == 3
+
+        # Account should NOT be degraded (success after retry)
+        with psycopg.connect(seed_accounts, autocommit=True) as conn:
+            row = conn.execute(
+                "SELECT status FROM accounts WHERE ctid_trader_account_id = %s",
+                (101,)
+            ).fetchone()
+        assert row[0] != "degraded"
+
+    def test_send_not_attempted_4_times_then_degraded(self, seed_accounts, repo):
+        """SendNotAttempted ×4 should retry 3 times, then mark degraded."""
+        attempt_count = [0]
+        sent_messages = []
+
+        def mock_send(account_id, msg):
+            sent_messages.append((account_id, msg))
+            attempt_count[0] += 1
+            return defer.fail(SendNotAttempted("Connection dropped"))
+
+        clock = Clock()
+        from copier.engine.throttle import TokenBucket
+        bucket = TokenBucket(clock=clock)
+
+        dispatcher = Dispatcher(mock_send, repo, bucket, clock=clock)
+
+        intent = OpenMarket(
+            slave_account_id=101,
+            master_position_id=42,
+            symbol_id=100,
+            side=Side.BUY,
+            volume=50000,
+            stop_loss=None,
+            take_profit=None,
+            label="copy:m42"
+        )
+        dispatcher.dispatch([intent])
+
+        assert attempt_count[0] == 1
+        clock.advance(1.0)
+        assert attempt_count[0] == 2
+        clock.advance(2.0)
+        assert attempt_count[0] == 3
+        clock.advance(4.0)
+        assert attempt_count[0] == 4  # Exactly 4 attempts
+
+        # Account should be degraded after 4th SendNotAttempted
+        with psycopg.connect(seed_accounts, autocommit=True) as conn:
+            row = conn.execute(
+                "SELECT status FROM accounts WHERE ctid_trader_account_id = %s",
+                (101,)
+            ).fetchone()
+        assert row[0] == "degraded"
+
+    def test_generic_exception_no_retry_immediate_degraded(self, seed_accounts, repo):
+        """Generic Exception → NO retry, immediately mark degraded."""
+        attempt_count = [0]
+        sent_messages = []
+
+        def mock_send(account_id, msg):
+            sent_messages.append((account_id, msg))
+            attempt_count[0] += 1
+            # Return a generic Exception (not SendNotAttempted)
+            return defer.fail(RuntimeError("Ambiguous broker error"))
+
+        clock = Clock()
+        from copier.engine.throttle import TokenBucket
+        bucket = TokenBucket(clock=clock)
+
+        dispatcher = Dispatcher(mock_send, repo, bucket, clock=clock)
+
+        intent = OpenMarket(
+            slave_account_id=101,
+            master_position_id=42,
+            symbol_id=100,
+            side=Side.BUY,
+            volume=50000,
+            stop_loss=None,
+            take_profit=None,
+            label="copy:m42"
+        )
+        dispatcher.dispatch([intent])
+
+        # Exactly ONE attempt (no retry for ambiguous failures)
+        assert attempt_count[0] == 1
+
+        # Account should be degraded immediately
+        with psycopg.connect(seed_accounts, autocommit=True) as conn:
+            row = conn.execute(
+                "SELECT status FROM accounts WHERE ctid_trader_account_id = %s",
+                (101,)
+            ).fetchone()
+        assert row[0] == "degraded"
+
+        # Verify error event mentions ambiguous/no retry
+        with psycopg.connect(seed_accounts, autocommit=True) as conn:
+            rows = conn.execute(
+                "SELECT payload FROM events WHERE account_id = %s AND severity = 'error'",
+                (101,)
+            ).fetchall()
+        assert len(rows) > 0
+        assert 'send_failed_ambiguous_no_retry' in rows[0][0]['action']
+
+        # Advance time to verify no retries were scheduled
+        clock.advance(10.0)
+        assert attempt_count[0] == 1  # Still exactly 1, no retries scheduled
