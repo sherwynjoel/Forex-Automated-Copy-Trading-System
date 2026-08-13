@@ -10,7 +10,7 @@ const Accounts = () => <div className="text-gray-600">Accounts - Coming soon</di
 const Positions = () => <div className="text-gray-600">Positions - Coming soon</div>
 const Logs = () => <div className="text-gray-600">Logs - Coming soon</div>
 
-function ProtectedRoutes() {
+function ProtectedLayout() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null)
 
   useEffect(() => {
@@ -35,16 +35,7 @@ function ProtectedRoutes() {
     return <Navigate to="/login" replace />
   }
 
-  return (
-    <Layout>
-      <Routes>
-        <Route path="/" element={<Overview />} />
-        <Route path="/accounts" element={<Accounts />} />
-        <Route path="/positions" element={<Positions />} />
-        <Route path="/logs" element={<Logs />} />
-      </Routes>
-    </Layout>
-  )
+  return <Layout />
 }
 
 export default function App() {
@@ -52,7 +43,12 @@ export default function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/login" element={<Login />} />
-        <Route path="/*" element={<ProtectedRoutes />} />
+        <Route element={<ProtectedLayout />}>
+          <Route index element={<Overview />} />
+          <Route path="accounts" element={<Accounts />} />
+          <Route path="positions" element={<Positions />} />
+          <Route path="logs" element={<Logs />} />
+        </Route>
       </Routes>
     </BrowserRouter>
   )

@@ -1,76 +1,57 @@
 export interface Account {
-  id: string
-  broker: string
-  login: string
-  password: string
-  status: 'active' | 'paused' | 'error'
-  balance: number
-  equity: number
-  created_at: string
-  updated_at: string
+  ctid_trader_account_id: number
+  trader_login: number
+  is_live: boolean
+  role: string
+  enabled: boolean
+  multiplier: number
+  status: string
+  last_error?: string | null
+  connection_status: string
 }
 
 export interface Settings {
+  copying_enabled: boolean
   dry_run: boolean
-  max_lot_size: number
-  slippage_pct: number
+  shards: number
 }
 
-export interface EventRow {
-  id: string
-  timestamp: string
-  account_id: string | null
-  severity: 'info' | 'warning' | 'error'
+export interface EventResponse {
+  id: number
+  ts: string
+  account_id?: number | null
   category: string
-  message: string
+  severity: string
+  latency_ms?: number | null
+  payload: Record<string, unknown>
 }
 
 export interface DriftItem {
-  slave_account_id: string
-  slave_position_id?: string
-  master_position_id: string
-  status: 'orphan' | 'pending' | 'adopted' | 'dismissed'
-  details?: Record<string, unknown>
+  id: string
+  kind: string
+  account_id?: number | null
+  position_id?: number | null
+  order_id?: number | null
+  detail: string
 }
 
-export interface SlaveCopy {
-  slave_account_id: string
-  status: 'open' | 'closed' | 'error'
-  slave_position_id?: string
-  slave_volume: number
-  fill_price: number
-  error?: string
-}
-
-export interface MasterPosition {
-  position_id: string
-  symbol: string
-  side: 'long' | 'short'
+export interface PositionData {
+  position_id: number
+  symbol_id: number
+  symbol?: string
+  side: string
   volume: number
   entry_price: number
-  pnl_quote: number
-  copies: SlaveCopy[]
+  pnl_quote?: number | null
 }
 
-export interface PendingOrder {
-  order_id: string
-  symbol: string
-  side: 'buy' | 'sell'
-  volume: number
-  price: number
-  account_id: string
-  created_at: string
-}
-
-export interface AccountState {
-  balance: number
-  equity: number
-  positions: number
+export interface AccountStateData {
+  balance?: number | null
+  open_pnl: number
+  equity?: number | null
+  positions: PositionData[]
 }
 
 export interface StateSnapshot {
-  accounts: Record<string, AccountState>
-  master_positions: MasterPosition[]
-  pending_orders: PendingOrder[]
-  drift: DriftItem[]
+  [account_id: string]: AccountStateData
 }

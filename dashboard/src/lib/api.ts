@@ -14,6 +14,7 @@ function getCsrfToken(): string | null {
 
 /**
  * Make an API request with CSRF protection and automatic redirect on 401
+ * (except for /api/login where 401 is propagated to the caller)
  */
 export async function api<T>(
   path: string,
@@ -30,14 +31,20 @@ export async function api<T>(
     }
   }
 
+  // Add default Content-Type for requests with body
+  if (init?.body && !headers['Content-Type']) {
+    headers['Content-Type'] = 'application/json'
+  }
+
   const response = await fetch(path, {
     ...init,
     credentials: 'same-origin',
     headers,
   })
 
-  // Redirect to login on 401
-  if (response.status === 401) {
+  // Redirect to login on 401, but only for non-login endpoints
+  // (login endpoint 401 should propagate as inline error)
+  if (response.status === 401 && path !== '/api/login') {
     window.location.href = '/login'
     throw new Error('Unauthorized')
   }
