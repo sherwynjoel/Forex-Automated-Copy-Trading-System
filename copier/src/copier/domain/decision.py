@@ -129,15 +129,25 @@ def _decide_pending(event, mappings: m.MappingState,
                     continue
                 vol = mirror_volume(e.volume, e.lot_size, s.multiplier,
                                     sym.lot_size, sym.step_volume)
+                if vol == 0:
+                    out.append(m.Alert(s.account_id,
+                               f"cannot amend order {e.order_id}: mirrored volume rounds to 0"))
+                    continue
                 out.append(m.AmendPending(s.account_id, entry.slave_order_id, e.order_type,
                                           vol, e.price, e.stop_loss, e.take_profit))
             for account_id in enabled.keys() - covered:
                 out.append(m.Alert(account_id,
                            f"master replaced order {e.order_id} but slave has no mapped order"))
         case m.MasterPendingCancelled() as e:
+            covered = set()
             for entry in mappings.order_entries(e.order_id):
-                if entry.slave_account_id in enabled:
-                    out.append(m.CancelPending(entry.slave_account_id, entry.slave_order_id))
+                if entry.slave_account_id not in enabled:
+                    continue
+                covered.add(entry.slave_account_id)
+                out.append(m.CancelPending(entry.slave_account_id, entry.slave_order_id))
+            for account_id in enabled.keys() - covered:
+                out.append(m.Alert(account_id,
+                           f"master cancelled order {e.order_id} but slave has no mapped order"))
         case m.MasterPendingFilled() as e:
             covered = set()
             for entry in mappings.order_entries(e.order_id):

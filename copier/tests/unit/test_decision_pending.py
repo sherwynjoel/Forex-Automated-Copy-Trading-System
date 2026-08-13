@@ -77,3 +77,23 @@ def test_pending_fill_links_and_never_opens():
 
 def test_master_rejection_is_a_noop():
     assert decide(m.MasterRejected(reason="NOT_ENOUGH_MONEY"), MapState(), [slave(101)]) == []
+
+
+def test_pending_replace_zero_rounded_volume_alerts_never_sends_amend():
+    # multiplier 0.5 on 150k volume with 100k step = rounds to 0
+    st = MapState(orders={42: [m.OrderMappingEntry(101, 900)]})
+    ev = m.MasterPendingReplaced(order_id=42, symbol_name="EURUSD", lot_size=10_000_000,
+                                 order_type=m.PendingType.LIMIT, volume=150_000,
+                                 price=1.1100, stop_loss=None, take_profit=None)
+    out = decide(ev, st, [slave(101, mult="0.5")])
+    assert any(isinstance(i, m.Alert) and i.slave_account_id == 101 for i in out)
+    assert not any(isinstance(i, m.AmendPending) for i in out)
+
+
+def test_pending_cancel_with_no_mapping_alerts_enabled_slave():
+    st = MapState(orders={42: []})  # no mapping for order 42
+    out = decide(m.MasterPendingCancelled(order_id=42), st, [slave(101), slave(102)])
+    # both enabled slaves should get an alert
+    assert any(isinstance(i, m.Alert) and i.slave_account_id == 101 for i in out)
+    assert any(isinstance(i, m.Alert) and i.slave_account_id == 102 for i in out)
+    assert not any(isinstance(i, m.CancelPending) for i in out)
