@@ -214,6 +214,7 @@ class CopierService:
                     'account_id': account_id,
                     'execution_type': ProtoOAExecutionType.Name(evt.executionType),
                 },
+                account_id=account_id,
             )
             return
 
@@ -265,7 +266,7 @@ class CopierService:
         Updates:
         - clientOrderId starting "cm" → activate_position_mapping
         - closePositionDetail → reduce_position_mapping
-        - slave_order_id matching order mapping → activate_pending_fill (clientOrderId fallback)
+        - slave_order_id matching order mapping → activate_pending_fill
 
         Args:
             account_id: Slave account ID.
@@ -323,7 +324,7 @@ class CopierService:
                 )
             return
 
-        # Check for pending order fill: match by slave_order_id (primary), clientOrderId "co" (fallback)
+        # Check for pending order fill: match by slave_order_id
         try:
             self._repo.activate_pending_fill(account_id, slave_order_id, deal_position_id, filled_volume)
             fill_price = evt.deal.executionPrice if evt.deal.HasField('executionPrice') else None
@@ -342,30 +343,10 @@ class CopierService:
             )
             return
         except MappingNotFound:
-            # slave_order_id didn't match; this is expected if the order mapping doesn't exist
+            # slave_order_id didn't match; no order mapping found
             pass
 
-        # Fallback: try clientOrderId "co" if slave_order_id didn't match
-        if client_order_id and client_order_id.startswith("co"):
-            try:
-                self._repo.activate_pending_fill(account_id, slave_order_id, deal_position_id, filled_volume)
-                self._repo.log_event(
-                    'slave_action',
-                    'info',
-                    {
-                        'action': 'pending_fill_via_co',
-                        'client_order_id': client_order_id,
-                        'slave_order_id': slave_order_id,
-                        'slave_position_id': deal_position_id,
-                        'filled_volume': filled_volume,
-                    },
-                    account_id=account_id,
-                )
-                return
-            except MappingNotFound:
-                pass
-
-        # Fallthrough: fill matched nothing (neither position "cm", pending by order_id, nor "co")
+        # Fallthrough: fill matched nothing (neither position "cm" nor pending by order_id)
         self._repo.log_event(
             'slave_action',
             'warning',

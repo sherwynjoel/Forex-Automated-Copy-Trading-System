@@ -222,7 +222,7 @@ class TestSlaveEventHandling:
 
     def test_slave_pending_accept_then_fill_links_position(self, service, repo):
         """Slave ORDER_ACCEPTED 'co' order creates mapping; later fill links position."""
-        # Setup: pending order mapping
+        # Setup: pending order mapping for master order 42
         repo.create_order_mapping(master_order_id=42, slave_account_id=100, client_order_id="co42.100")
 
         # Step 1: ORDER_ACCEPTED activates order mapping
@@ -257,7 +257,17 @@ class TestSlaveEventHandling:
 
         # The order mapping should now be converted to a position mapping
         # (activate_pending_fill converts from order to position mapping)
-        # After the fill, verify events were logged
+        # Query the mapping row to verify the conversion
+        rows = repo.mapping_rows()
+        # Find the mapping by slave_order_id=9999 (the original order mapping)
+        order_mapping_rows = [r for r in rows if r['slave_order_id'] == 9999]
+        assert len(order_mapping_rows) >= 1, "Order mapping should exist after fill"
+
+        # The mapping should now have slave_position_id set to 77
+        mapping_row = order_mapping_rows[0]
+        assert mapping_row['slave_position_id'] == 77, f"Expected slave_position_id=77, got {mapping_row['slave_position_id']}"
+
+        # Verify events were logged
         with psycopg.connect(repo.dsn, autocommit=True) as conn:
             events = conn.execute(
                 "SELECT COUNT(*) FROM events WHERE category = 'slave_action' AND account_id = 100"
@@ -317,51 +327,59 @@ class TestPendingFillAlert:
 
         Negative case: slave order DID fill in time → NO alert
         Positive case: slave order not yet filled → alert after 30s
+
+        This test verifies that the check_pending_fills logic correctly distinguishes
+        between slaves that filled in time (have linked position) vs. those still waiting.
         """
         # Setup: master pending order with two slaves
         master_order_id = 42
+        master_position_id = 11
+
         repo.create_order_mapping(master_order_id=master_order_id, slave_account_id=100, client_order_id="co42.100")
         repo.activate_order_mapping("co42.100", 9999)  # slave order accepted for account 100
         repo.create_order_mapping(master_order_id=master_order_id, slave_account_id=101, client_order_id="co42.101")
         repo.activate_order_mapping("co42.101", 8888)  # slave order accepted for account 101
 
-        # Master pending order fills
+        # Master pending order fills (triggers check_pending_fills scheduling)
         evt = base_event(
             account_id=999,
             execution_type=ProtoOAExecutionType.ORDER_FILLED,
             order_type=ProtoOAOrderType.LIMIT,
             order_id=master_order_id,
-            position_id=11
+            position_id=master_position_id
         )
-        evt.deal.positionId = 11
+        evt.deal.positionId = master_position_id
         evt.deal.filledVolume = 10_000_000
 
         service.handle_execution(999, evt)
 
-        # Simulate slave 100 fills in time, but slave 101 doesn't
-        evt_slave100_fill = base_event(
-            account_id=100,
-            execution_type=ProtoOAExecutionType.ORDER_FILLED,
-            order_type=ProtoOAOrderType.LIMIT,
-            order_id=9999,
-            position_id=100  # slave position
-        )
-        evt_slave100_fill.deal.positionId = 100
-        evt_slave100_fill.deal.filledVolume = 10_000_000
-        service.handle_execution(100, evt_slave100_fill)
+        # Simulate slave 100 fills in time: link the pending fill to a position
+        # This requires both link_pending_fill (stamp master_position_id on order mapping)
+        # AND activate_pending_fill (convert order mapping to position mapping)
+        repo.link_pending_fill(master_order_id, 100, master_position_id)
+        repo.activate_pending_fill(100, 9999, 100, 10_000_000)  # slave 100 position 100
 
-        # Now slave 101 is still waiting...
-        # Advance time by 30 seconds
+        # Slave 101 order is NOT filled (no link_pending_fill, no activate_pending_fill)
+        # So when check_pending_fills runs, it will find no position_entries for 101
+
+        # Advance time by 30 seconds (triggers check_pending_fills callback)
         clock.advance(PENDING_FILL_ALERT_S)
 
-        # Check: warning events should be logged for slave 101 (still not filled)
+        # Verify POSITIVE case: warning logged for slave 101 (not filled)
         with psycopg.connect(repo.dsn, autocommit=True) as conn:
-            warnings = conn.execute(
+            warnings_101 = conn.execute(
                 "SELECT COUNT(*) FROM events WHERE category = 'slave_action' AND severity = 'warning' "
                 "AND account_id = 101"
             ).fetchone()
-        # Should have at least one warning alert for slave 101's unfilled order
-        assert warnings[0] >= 1
+        assert warnings_101[0] >= 1, "Should alert for slave 101 which didn't fill in time"
+
+        # Verify NEGATIVE case: NO warning for slave 100 (did fill in time)
+        with psycopg.connect(repo.dsn, autocommit=True) as conn:
+            warnings_100 = conn.execute(
+                "SELECT COUNT(*) FROM events WHERE category = 'slave_action' AND severity = 'warning' "
+                "AND account_id = 100 AND payload->>'action' = 'pending_fill_alert'"
+            ).fetchone()
+        assert warnings_100[0] == 0, "Should NOT alert for slave 100 which filled in time"
 
 
 class TestMasterEventLogging:
@@ -404,38 +422,45 @@ class TestDisabledAndIgnoredAccounts:
                        symbols={"EURUSD": EURUSD, "GBPUSD": GBPUSD}),
         ]
 
-        # Try to send fill event from disabled slave 101 with a guessed clientOrderId
+        # Test 1: disabled slave 101 with a guessed clientOrderId
         evt = base_event(account_id=101, execution_type=ProtoOAExecutionType.ORDER_FILLED)
         evt.order.clientOrderId = "cm11.101"  # Attempt to activate mapping
         evt.deal.positionId = 55
         evt.deal.filledVolume = 10_000_000
 
-        # Process the event
         service.handle_execution(101, evt)
 
-        # Verify: event WAS logged as ignored
+        # Verify: event WAS logged as ignored (drift category)
         with psycopg.connect(repo.dsn, autocommit=True) as conn:
-            events = conn.execute(
-                "SELECT COUNT(*) FROM events WHERE category = 'drift' AND account_id != 101"
+            drift_events = conn.execute(
+                "SELECT COUNT(*) FROM events WHERE category = 'drift' AND account_id = 101"
             ).fetchone()
-            # The ignore event logged has account_id=None (not set for drift category at the gate)
+        assert drift_events[0] >= 1, "Disabled slave event should be logged as drift"
 
         # Verify: NO mapping was created (mapping mutation was prevented)
         rows = repo.mapping_rows()
         cm11_mappings = [r for r in rows if r['client_order_id'] == "cm11.101"]
         assert len(cm11_mappings) == 0, "Disabled slave should not create mappings"
 
-        # Test with completely unknown account (not in slaves_provider)
-        evt2 = base_event(account_id=999, execution_type=ProtoOAExecutionType.ORDER_FILLED)
-        evt2.order.clientOrderId = "cm22.999"
-        evt2.deal.positionId = 77
-        evt2.deal.filledVolume = 5_000_000
+        # Test 2: completely unknown account (not 999 which is master, not 100/101 which are configured)
+        # Use account_id=777 which is neither master nor in slaves_provider
+        evt_unknown = base_event(account_id=777, execution_type=ProtoOAExecutionType.ORDER_FILLED)
+        evt_unknown.order.clientOrderId = "cm22.777"  # Attempt to activate mapping
+        evt_unknown.deal.positionId = 77
+        evt_unknown.deal.filledVolume = 5_000_000
 
-        service.handle_execution(999, evt2)
+        service.handle_execution(777, evt_unknown)
 
-        # Verify: still NO mapping for unknown account
+        # Verify: event WAS logged as ignored (drift category)
+        with psycopg.connect(repo.dsn, autocommit=True) as conn:
+            drift_events_777 = conn.execute(
+                "SELECT COUNT(*) FROM events WHERE category = 'drift' AND account_id = 777"
+            ).fetchone()
+        assert drift_events_777[0] >= 1, "Unknown account event should be logged as drift"
+
+        # Verify: NO mapping was created for unknown account
         rows = repo.mapping_rows()
-        cm22_mappings = [r for r in rows if r['client_order_id'] == "cm22.999"]
+        cm22_mappings = [r for r in rows if r['client_order_id'] == "cm22.777"]
         assert len(cm22_mappings) == 0, "Unknown account should not create mappings"
 
 
