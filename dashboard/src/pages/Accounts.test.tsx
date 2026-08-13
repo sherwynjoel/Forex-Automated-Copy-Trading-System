@@ -2,14 +2,17 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi, afterEach, beforeEach } from 'vitest'
+import { act } from 'react'
 import Accounts from './Accounts'
 
 let mockWindowOpen: ReturnType<typeof vi.fn>
 let mockConfirm: ReturnType<typeof vi.fn>
+let focusListeners: Set<(event: Event) => void> = new Set()
 
 beforeEach(() => {
   mockWindowOpen = vi.fn()
   mockConfirm = vi.fn()
+  focusListeners.clear()
 
   Object.defineProperty(window, 'open', {
     value: mockWindowOpen,
@@ -19,11 +22,21 @@ beforeEach(() => {
     value: mockConfirm,
     writable: true,
   })
+
+  // Capture focus event listeners
+  const originalAddEventListener = window.addEventListener
+  vi.spyOn(window, 'addEventListener').mockImplementation((event: string, handler: EventListenerOrEventListenerObject) => {
+    if (event === 'focus' && typeof handler === 'function') {
+      focusListeners.add(handler as (event: Event) => void)
+    }
+    return originalAddEventListener.call(window, event, handler)
+  })
 })
 
 afterEach(() => {
   vi.clearAllMocks()
   vi.restoreAllMocks()
+  focusListeners.clear()
 })
 
 const mockAccounts = [
@@ -95,6 +108,74 @@ test('connect button opens oauth popup', async () => {
 
   const connectButton = screen.getByRole('button', { name: /connect ctrader id/i })
   await userEvent.click(connectButton)
+
+  expect(mockWindowOpen).toHaveBeenCalledWith(
+    '/api/oauth/connect',
+    'ctrader-oauth',
+    'width=520,height=680'
+  )
+})
+
+test('window-focus refetch: refetches accounts after OAuth popup closes', async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify(mockAccounts), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      })
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify(mockAccounts), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      })
+    )
+  vi.stubGlobal('fetch', fetchMock)
+
+  render(
+    <MemoryRouter>
+      <Accounts />
+    </MemoryRouter>
+  )
+
+  await waitFor(() => {
+    expect(screen.getByText('12345')).toBeInTheDocument()
+  })
+
+  // Simulate window focus event
+  act(() => {
+    focusListeners.forEach((listener) => listener(new Event('focus')))
+  })
+
+  await waitFor(() => {
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    const lastCall = fetchMock.mock.calls[fetchMock.mock.calls.length - 1]
+    expect(lastCall[0]).toBe('/api/accounts')
+  })
+})
+
+test('re-grant access button opens oauth popup', async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValue(
+      new Response(JSON.stringify(mockAccounts), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      })
+    )
+  vi.stubGlobal('fetch', fetchMock)
+
+  render(
+    <MemoryRouter>
+      <Accounts />
+    </MemoryRouter>
+  )
+
+  await waitFor(() => {
+    expect(screen.getByText('12346')).toBeInTheDocument()
+  })
+
+  const reGrantButtons = screen.getAllByRole('button', { name: /re-grant access/i })
+  await userEvent.click(reGrantButtons[0])
 
   expect(mockWindowOpen).toHaveBeenCalledWith(
     '/api/oauth/connect',
@@ -226,6 +307,7 @@ test('multiplier edit PATCHes multiplier', async () => {
       '/api/accounts/2',
       expect.objectContaining({
         method: 'PATCH',
+        body: JSON.stringify({ multiplier: 3.5 }),
       })
     )
   })
@@ -307,4 +389,91 @@ test('multiplier validation: rejects values <= 0', async () => {
   await waitFor(() => {
     expect(screen.getByText(/multiplier must be greater than 0/i)).toBeInTheDocument()
   })
+})
+
+test('multiplier 400 error handling shows inline error', async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify(mockAccounts), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      })
+    )
+    .mockResolvedValueOnce(
+      new Response('Invalid multiplier', { status: 400 })
+    )
+  vi.stubGlobal('fetch', fetchMock)
+
+  render(
+    <MemoryRouter>
+      <Accounts />
+    </MemoryRouter>
+  )
+
+  await waitFor(() => {
+    expect(screen.getByText('12346')).toBeInTheDocument()
+  })
+
+  // Find multiplier input for slave account (account 2)
+  const multiplierInputs = screen.getAllByDisplayValue('2')
+  const multiplierInput = multiplierInputs[0]
+
+  await userEvent.clear(multiplierInput)
+  await userEvent.type(multiplierInput, '5.0')
+  await userEvent.tab() // Trigger blur
+
+  // Should show error message without crashing
+  await waitFor(() => {
+    expect(screen.getByText(/Failed to update multiplier/i)).toBeInTheDocument()
+  })
+})
+
+test('enabled toggle PATCHes enabled field (not role)', async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify(mockAccounts), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      })
+    )
+    .mockResolvedValueOnce(
+      new Response(null, { status: 204 })
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify(mockAccounts), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      })
+    )
+  vi.stubGlobal('fetch', fetchMock)
+
+  render(
+    <MemoryRouter>
+      <Accounts />
+    </MemoryRouter>
+  )
+
+  await waitFor(() => {
+    expect(screen.getByText('12345')).toBeInTheDocument()
+  })
+
+  // Find and click enabled checkbox for account 1
+  const checkboxes = screen.getAllByRole('checkbox')
+  await userEvent.click(checkboxes[0])
+
+  await waitFor(() => {
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/accounts/1',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({ enabled: false }),
+      })
+    )
+  })
+
+  // Verify role was NOT changed
+  const patchCalls = fetchMock.mock.calls.filter((call) => call[1]?.method === 'PATCH')
+  expect(patchCalls).toHaveLength(1)
+  expect(patchCalls[0][1].body).toContain('enabled')
+  expect(patchCalls[0][1].body).not.toContain('role')
 })
