@@ -141,7 +141,7 @@ def create_settings_control_router() -> APIRouter:
                 client = http_request.app.state.http
 
                 # Always call reload when settings change
-                reload_response = await _proxy_to_copier(
+                await _proxy_to_copier(
                     client,
                     f"{cfg.copier_control_url}/reload",
                     method="POST",
@@ -158,9 +158,10 @@ def create_settings_control_router() -> APIRouter:
                             method="POST",
                             json={},
                         )
+                        result["dry_run_applied"] = True
                     except HTTPException:
-                        # dry-run failed, but reload succeeded
-                        pass
+                        # dry-run failed; reflect this in response
+                        result["dry_run_applied"] = False
             except HTTPException:
                 result["copier_reloaded"] = False
 

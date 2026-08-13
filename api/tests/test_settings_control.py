@@ -53,6 +53,9 @@ def test_settings_dry_run_triggers_copier_calls(app_client, db):
     # Should indicate copier was contacted and successful
     assert "copier_reloaded" in data
     assert data["copier_reloaded"] is True
+    # Dry-run should also be applied
+    assert "dry_run_applied" in data
+    assert data["dry_run_applied"] is True
 
 
 def test_settings_copying_enabled_triggers_copier_reload(app_client, db):
@@ -144,6 +147,51 @@ def test_control_pause_with_account_id(app_client):
     assert response.status_code == 200
 
 
+def test_control_pause_forwards_payload(app_client):
+    """POST /api/control/pause should forward account_id in request body."""
+    response = app_client.post("/api/login", json={"password": "hunter2!"})
+    assert response.status_code == 204
+    csrf_token = response.cookies.get("csrf")
+
+    # Create a tracker to verify the payload is forwarded
+    received_requests = []
+
+    def tracking_callback(request: httpx.Request) -> httpx.Response:
+        """Track requests to copier."""
+        url = str(request.url)
+        if "copier.test" in url and "/pause" in url:
+            # Capture the request for assertion
+            received_requests.append({
+                "url": url,
+                "method": request.method,
+                "body": request.content,
+            })
+            return httpx.Response(200, json={"status": "ok"})
+        # Fall back to default
+        from conftest import default_mock_callback
+        return default_mock_callback(request)
+
+    # Replace mock transport
+    app_client.app.state.mock_transport = httpx.MockTransport(tracking_callback)
+    app_client.app.state.http = httpx.AsyncClient(
+        transport=app_client.app.state.mock_transport
+    )
+
+    # Send pause with account_id
+    response = app_client.post(
+        "/api/control/pause",
+        json={"account_id": 5678},
+        headers={"X-CSRF-Token": csrf_token}
+    )
+    assert response.status_code == 200
+
+    # Verify the copier received the correct payload
+    assert len(received_requests) == 1
+    request_info = received_requests[0]
+    assert request_info["method"] == "POST"
+    assert b"5678" in request_info["body"]  # account_id in request body
+
+
 def test_control_resume_proxies_to_copier(app_client):
     """POST /api/control/resume proxies to copier."""
     response = app_client.post("/api/login", json={"password": "hunter2!"})
@@ -172,55 +220,70 @@ def test_control_resync_proxies_to_copier(app_client):
     assert response.status_code == 200
 
 
-def test_control_502_when_copier_down(app_client):
-    """Control endpoints return 502 when copier is unreachable."""
-    # This test relies on the mock transport being configured to simulate copier down
-    # The test client should handle this via a specific mock configuration
+def test_control_502_when_copier_down(app_client, copier_error_response):
+    """Control endpoints return 502 when copier connection fails."""
     response = app_client.post("/api/login", json={"password": "hunter2!"})
     assert response.status_code == 204
     csrf_token = response.cookies.get("csrf")
 
-    # Verify that a non-200/3xx response from copier results in proper error handling
-    # (This will be validated through integration with the updated mock transport)
+    # Configure copier to raise connection error
+    copier_error_response.raise_connect_error()
+
+    # Should return 502 when copier is unreachable
     response = app_client.post(
         "/api/control/pause",
         json={"account_id": None},
         headers={"X-CSRF-Token": csrf_token}
     )
-    # Should succeed with mock transport returning 200
-    assert response.status_code == 200
+    assert response.status_code == 502
+    assert "unreachable" in response.json().get("detail", "").lower()
+
+    copier_error_response.reset()
 
 
-def test_control_pause_forwards_4xx_from_copier(app_client):
-    """Control pause should forward copier 4xx errors, not convert to 200."""
+def test_control_pause_forwards_4xx_from_copier(app_client, copier_error_response):
+    """Control pause should forward copier 4xx errors with detail, not convert to 200."""
     response = app_client.post("/api/login", json={"password": "hunter2!"})
     assert response.status_code == 204
     csrf_token = response.cookies.get("csrf")
 
-    # Test will verify via mock transport configuration that copier 4xx is forwarded
+    # Configure copier to return 404 with detail
+    copier_error_response.return_status_json(
+        404,
+        {"detail": "Account not found in copier"}
+    )
+
+    # Should forward the 404 with copier's detail
     response = app_client.post(
         "/api/control/pause",
         json={"account_id": 99999},  # Non-existent account
         headers={"X-CSRF-Token": csrf_token}
     )
-    # Should forward 4xx from copier, not silently convert to 200
-    # (will be validated by mock transport returning appropriate status)
+    assert response.status_code == 404
+    assert "Account not found" in response.json().get("detail", "")
+
+    copier_error_response.reset()
 
 
-def test_control_handles_malformed_copier_response(app_client):
-    """Control endpoints should handle non-JSON copier responses gracefully."""
+def test_control_handles_malformed_copier_response(app_client, copier_error_response):
+    """Control endpoints should return 502 for non-JSON copier responses (not 500)."""
     response = app_client.post("/api/login", json={"password": "hunter2!"})
     assert response.status_code == 204
     csrf_token = response.cookies.get("csrf")
 
-    # Test will verify via mock transport that non-JSON is handled as 502
+    # Configure copier to return 200 with non-JSON body
+    copier_error_response.return_non_json(200, b"Internal server error")
+
+    # Should return 502 on malformed response, not 500
     response = app_client.post(
         "/api/control/pause",
         json={"account_id": None},
         headers={"X-CSRF-Token": csrf_token}
     )
-    # Should return graceful response, not 500
-    assert response.status_code in (200, 502)
+    assert response.status_code == 502
+    assert "invalid response" in response.json().get("detail", "").lower()
+
+    copier_error_response.reset()
 
 
 def test_control_requires_auth(app_client):
