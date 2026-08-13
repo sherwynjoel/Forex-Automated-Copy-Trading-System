@@ -35,7 +35,7 @@ def database():
 def db(database):
     with psycopg.connect(database, autocommit=True) as conn:
         conn.execute(
-            "TRUNCATE events, mappings, symbol_cache, accounts, ctid_connections, admin "
+            "TRUNCATE events, mappings, symbol_cache, accounts, ctid_connections, oauth_states, admin "
             "RESTART IDENTITY CASCADE"
         )
         conn.execute("UPDATE settings SET copying_enabled = true, dry_run = false, shards = 1")
@@ -45,6 +45,10 @@ def db(database):
 @pytest.fixture
 def app_client(db):
     """Provide a TestClient with test environment variables and injectable transport."""
+    # Generate a test Fernet key first (before any config imports)
+    from cryptography.fernet import Fernet
+    fernet_key = Fernet.generate_key().decode()
+
     # Set up test environment variables
     os.environ["POSTGRES_DSN"] = db
     os.environ["SESSION_SECRET"] = "test-secret"
@@ -56,15 +60,13 @@ def app_client(db):
     os.environ["CTRADER_REDIRECT_URI"] = "http://localhost:8000/api/oauth/callback"
     os.environ["CTRADER_AUTH_URL"] = "https://openapi.ctrader.com/apps/auth"
     os.environ["CTRADER_TOKEN_URL"] = "https://openapi.ctrader.com/apps/token"
-    # Generate a test Fernet key
-    from cryptography.fernet import Fernet
-    os.environ["FERNET_KEY"] = Fernet.generate_key().decode()
+    os.environ["FERNET_KEY"] = fernet_key
 
     # Import after setting env vars
     from api.main import create_app
     from api.auth import ensure_admin
 
-    # Explicitly bootstrap admin since TestClient doesn't run lifespan
+    # Explicitly bootstrap admin BEFORE creating the app
     ensure_admin(db, "hunter2!")
 
     # Create injectable mock transport for httpx that handles both token URL and copier discover
@@ -99,6 +101,8 @@ def app_client(db):
         app.state.http = httpx.AsyncClient(transport=mock_transport)
 
     client = TestClient(app)
+    # Store original transport for test modifications
+    client._original_mock_transport = mock_transport
 
     yield client
 

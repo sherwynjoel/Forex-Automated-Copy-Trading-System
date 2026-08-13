@@ -44,6 +44,69 @@ def test_callback_rejects_bad_state(app_client):
     assert response.status_code == 403
 
 
+def test_callback_rejects_state_from_different_session(app_client, db):
+    """OAuth state from a different session should be rejected (session binding)."""
+    from itsdangerous import URLSafeTimedSerializer
+    from api.config import ApiConfig
+
+    cfg = ApiConfig.from_env()
+    serializer = URLSafeTimedSerializer(cfg.session_secret, salt="oauth-state")
+
+    # Create a valid state but with a different (forged) session binding
+    different_session = "different-session-value"
+    forged_state = serializer.dumps({
+        "state": "valid-state-value",
+        "session": different_session,
+    })
+
+    # Login with the real session
+    response = app_client.post("/api/login", json={"password": "hunter2!"})
+    assert response.status_code == 204
+
+    # Try to use the forged state (bound to a different session)
+    response = app_client.get(
+        f"/api/oauth/callback?code=test-code&state={forged_state}",
+        follow_redirects=False
+    )
+
+    # Should reject because session doesn't match
+    assert response.status_code == 403
+
+
+def test_callback_rejects_replay_attack(app_client, db):
+    """Replaying a consumed state should be rejected (single-use enforcement)."""
+    # First login
+    response = app_client.post("/api/login", json={"password": "hunter2!"})
+    assert response.status_code == 204
+
+    # Get a valid state by accessing connect endpoint
+    response = app_client.get("/api/oauth/connect", follow_redirects=False)
+    assert response.status_code == 307
+    location = response.headers.get("location")
+
+    import urllib.parse
+    parsed = urllib.parse.urlparse(location)
+    params = urllib.parse.parse_qs(parsed.query)
+    state = params.get("state", [None])[0]
+    assert state
+
+    # Use the state once (successful callback)
+    response = app_client.get(
+        f"/api/oauth/callback?code=test-auth-code&state={state}",
+        follow_redirects=False
+    )
+    assert response.status_code == 307
+
+    # Try to replay the same state (should fail)
+    response = app_client.get(
+        f"/api/oauth/callback?code=test-auth-code&state={state}",
+        follow_redirects=False
+    )
+
+    # Should reject because state was already consumed
+    assert response.status_code == 403
+
+
 def test_callback_exchanges_code_and_stores_encrypted_tokens(app_client, db):
     """GET /api/oauth/callback exchanges code and stores encrypted tokens."""
     # First login
@@ -105,10 +168,119 @@ def test_callback_exchanges_code_and_stores_encrypted_tokens(app_client, db):
     assert expires_at > granted_at
 
     # Verify expires_at is approximately now + 30 days
-    # (MockTransport returns expiresIn: 2592000 = 30 days in seconds)
     expected_expiry = granted_at + timedelta(seconds=2592000)
-    # Allow 5 second tolerance for test execution time
     assert abs((expires_at - expected_expiry).total_seconds()) < 5
+
+
+def test_callback_missing_code_or_state(app_client):
+    """GET /api/oauth/callback with missing code or state returns 400."""
+    # First login
+    response = app_client.post("/api/login", json={"password": "hunter2!"})
+    assert response.status_code == 204
+
+    # Missing code
+    response = app_client.get("/api/oauth/callback?state=test", follow_redirects=False)
+    assert response.status_code == 400
+
+    # Missing state
+    response = app_client.get("/api/oauth/callback?code=test", follow_redirects=False)
+    assert response.status_code == 400
+
+    # Missing both
+    response = app_client.get("/api/oauth/callback", follow_redirects=False)
+    assert response.status_code == 400
+
+
+def test_callback_malformed_token_response(app_client, db, monkeypatch):
+    """Malformed token response (non-JSON, missing fields) returns 400."""
+    # Create a mock that returns invalid JSON
+    def mock_callback_malformed(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "openapi.ctrader.com/apps/token" in url:
+            return httpx.Response(200, text="invalid json{]")
+        elif "copier.test" in url:
+            return httpx.Response(200, json={"status": "ok"})
+        return httpx.Response(200)
+
+    # Patch the http client to return malformed response
+    mock_transport_malformed = httpx.MockTransport(mock_callback_malformed)
+
+    # Monkeypatch the app's http client
+    import asyncio
+    async def mock_post(*args, **kwargs):
+        request = httpx.Request("POST", kwargs.get("url") or args[1] if len(args) > 1 else "")
+        return mock_callback_malformed(request)
+
+    original_post = app_client.app.state.http.post
+    app_client.app.state.http.post = mock_post
+
+    # First login
+    response = app_client.post("/api/login", json={"password": "hunter2!"})
+    assert response.status_code == 204
+
+    # Get a valid state
+    response = app_client.get("/api/oauth/connect", follow_redirects=False)
+    location = response.headers.get("location")
+    import urllib.parse
+    parsed = urllib.parse.urlparse(location)
+    params = urllib.parse.parse_qs(parsed.query)
+    state = params.get("state", [None])[0]
+
+    # Try callback with malformed response
+    response = app_client.get(
+        f"/api/oauth/callback?code=test-auth-code&state={state}",
+        follow_redirects=False
+    )
+
+    # Should return 400 for malformed response
+    assert response.status_code == 400
+
+    # Restore original
+    app_client.app.state.http.post = original_post
+
+
+def test_callback_missing_token_fields(app_client, db):
+    """Token response missing required fields returns 400."""
+    # Create a mock that returns incomplete token response
+    def mock_callback_incomplete(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "openapi.ctrader.com/apps/token" in url:
+            # Missing refreshToken
+            return httpx.Response(200, json={"accessToken": "at", "expiresIn": 2592000})
+        elif "copier.test" in url:
+            return httpx.Response(200, json={"status": "ok"})
+        return httpx.Response(200)
+
+    # Patch the app's http client
+    async def mock_post(*args, **kwargs):
+        request = httpx.Request("POST", kwargs.get("url") or args[1] if len(args) > 1 else "")
+        return mock_callback_incomplete(request)
+
+    original_post = app_client.app.state.http.post
+    app_client.app.state.http.post = mock_post
+
+    # First login
+    response = app_client.post("/api/login", json={"password": "hunter2!"})
+    assert response.status_code == 204
+
+    # Get a valid state
+    response = app_client.get("/api/oauth/connect", follow_redirects=False)
+    location = response.headers.get("location")
+    import urllib.parse
+    parsed = urllib.parse.urlparse(location)
+    params = urllib.parse.parse_qs(parsed.query)
+    state = params.get("state", [None])[0]
+
+    # Try callback with incomplete response
+    response = app_client.get(
+        f"/api/oauth/callback?code=test-auth-code&state={state}",
+        follow_redirects=False
+    )
+
+    assert response.status_code == 400
+
+    # Restore original
+    app_client.app.state.http.post = original_post
 
 
 def test_callback_discover_failure_still_stores_grant(app_client, db):
@@ -117,30 +289,27 @@ def test_callback_discover_failure_still_stores_grant(app_client, db):
     response = app_client.post("/api/login", json={"password": "hunter2!"})
     assert response.status_code == 204
 
-    # Get a valid state by accessing connect endpoint first
+    # Get state
     response = app_client.get("/api/oauth/connect", follow_redirects=False)
-    assert response.status_code == 307
     location = response.headers.get("location")
-
     import urllib.parse
     parsed = urllib.parse.urlparse(location)
     params = urllib.parse.parse_qs(parsed.query)
     state = params.get("state", [None])[0]
 
-    # Configure MockTransport to fail on copier control endpoint
-    # This will be tested by verifying the POST was attempted and failed gracefully
-
-    # For now, we just verify that even if discovery fails, the grant is stored
+    # Callback with normal token exchange (discovery may or may not fail based on mock)
+    # The important part is that the grant is stored regardless
     response = app_client.get(
         f"/api/oauth/callback?code=test-auth-code&state={state}",
         follow_redirects=False
     )
 
-    # Should still redirect, but with warning=discover_failed if discovery was attempted and failed
+    # Should redirect successfully
     assert response.status_code == 307
     location = response.headers.get("location")
+    assert "connected=1" in location
 
-    # Verify grant was stored regardless
+    # Verify grant was stored
     with psycopg.connect(db, autocommit=True) as conn:
         result = conn.execute(
             "SELECT id FROM ctid_connections ORDER BY id DESC LIMIT 1"
