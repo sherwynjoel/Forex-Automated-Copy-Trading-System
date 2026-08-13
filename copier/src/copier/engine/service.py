@@ -8,18 +8,13 @@ Orchestrates the complete flow:
 
 import logging
 import time
-from typing import Callable, Mapping, Sequence
+from typing import Callable, Mapping
 
 from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOAExecutionEvent
-from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
-    ProtoOAExecutionType, ProtoOAOrderType
-)
+from ctrader_open_api.messages.OpenApiModelMessages_pb2 import ProtoOAExecutionType
 
 from copier.db.repo import Repo, MappingNotFound
-from copier.domain.models import (
-    SymbolInfo, SlaveConfig, MasterEvent, MasterPendingFilled,
-    MasterPositionClosed
-)
+from copier.domain.models import SymbolInfo, SlaveConfig, MasterPendingFilled
 from copier.domain.decision import decide
 from copier.engine.normalize import normalize
 from copier.engine.dispatch import Dispatcher
@@ -74,16 +69,39 @@ class CopierService:
         - Slave account: update mappings only (never decide)
         - Unknown account: log and ignore
 
+        Exception boundary: any error during event processing (DB transient failures,
+        exception in normalize/decide/dispatch, etc.) is caught, logged, and the pump
+        continues to the next event. No single event can crash the event stream.
+
         Args:
             account_id: Source account ID.
             evt: ProtoOAExecutionEvent message.
         """
-        start_time = time.time_ns() // 1_000_000  # milliseconds
+        try:
+            start_time = time.time_ns() // 1_000_000  # milliseconds
 
-        if account_id == self._master_account_id:
-            self._handle_master_event(evt, start_time)
-        else:
-            self._handle_slave_event(account_id, evt)
+            if account_id == self._master_account_id:
+                self._handle_master_event(evt, start_time)
+            else:
+                self._handle_slave_event(account_id, evt)
+        except Exception as e:
+            # Catch all exceptions: DB transient failures, normalize/decide/dispatch errors, etc.
+            # Log and continue; do not re-raise, so the event pump stays alive.
+            error_msg = f"{type(e).__name__}: {str(e)}"
+            try:
+                self._repo.log_event(
+                    'connection',  # Category: infrastructure/DB failures
+                    'error',
+                    {
+                        'action': 'event_processing_failed',
+                        'account_id': account_id,
+                        'error': error_msg,
+                        'error_type': type(e).__name__,
+                    },
+                )
+            except Exception:
+                # Even the error log itself failed; give up
+                pass
 
     def _handle_master_event(self, evt: ProtoOAExecutionEvent, start_time: int) -> None:
         """Handle master account event: normalize -> decide -> dispatch.
@@ -160,15 +178,45 @@ class CopierService:
 
         self._clock.callLater(PENDING_FILL_ALERT_S, check_pending_fills)
 
+    def _is_known_enabled_slave(self, account_id: int) -> bool:
+        """Check if account is a known, enabled slave.
+
+        Args:
+            account_id: Account ID to check.
+
+        Returns:
+            True if account is in slaves_provider() and enabled; False otherwise.
+        """
+        slaves = self._slaves_provider()
+        for slave in slaves:
+            if slave.account_id == account_id and slave.enabled:
+                return True
+        return False
+
     def _handle_slave_event(self, account_id: int, evt: ProtoOAExecutionEvent) -> None:
         """Handle slave account event: update mappings, log, never decide.
 
         Loop-proof by construction: slave events never trigger decide/dispatch.
+        Gate: only known, enabled slaves are processed; unknown/disabled accounts
+        are logged and ignored (no mutations).
 
         Args:
             account_id: Slave account ID.
             evt: ProtoOAExecutionEvent.
         """
+        # Gate: only process known, enabled slaves
+        if not self._is_known_enabled_slave(account_id):
+            self._repo.log_event(
+                'drift',  # Unknown/disabled account
+                'info',
+                {
+                    'action': 'event_from_unknown_or_disabled_slave',
+                    'account_id': account_id,
+                    'execution_type': ProtoOAExecutionType.Name(evt.executionType),
+                },
+            )
+            return
+
         execution_type = evt.executionType
 
         # Handle ORDER_FILLED and ORDER_PARTIAL_FILL
@@ -188,21 +236,45 @@ class CopierService:
         elif execution_type == ProtoOAExecutionType.ORDER_REJECTED:
             self._handle_slave_order_rejected(account_id, evt)
 
+        # Log unclassified slave events
+        else:
+            self._repo.log_event(
+                'slave_action',
+                'info',
+                {
+                    'action': 'unclassified_slave_event',
+                    'execution_type': ProtoOAExecutionType.Name(execution_type),
+                },
+                account_id=account_id,
+            )
+
+    def _extract_client_order_id(self, evt: ProtoOAExecutionEvent) -> str | None:
+        """Extract clientOrderId from event if present.
+
+        Args:
+            evt: ProtoOAExecutionEvent.
+
+        Returns:
+            clientOrderId string or None if not present.
+        """
+        return evt.order.clientOrderId if evt.order.HasField('clientOrderId') else None
+
     def _handle_slave_fill(self, account_id: int, evt: ProtoOAExecutionEvent) -> None:
         """Handle slave ORDER_FILLED or ORDER_PARTIAL_FILL.
 
         Updates:
         - clientOrderId starting "cm" → activate_position_mapping
         - closePositionDetail → reduce_position_mapping
-        - clientOrderId starting "co" with slave_order_id → activate_pending_fill
+        - slave_order_id matching order mapping → activate_pending_fill (clientOrderId fallback)
 
         Args:
             account_id: Slave account ID.
             evt: ProtoOAExecutionEvent.
         """
-        client_order_id = evt.order.clientOrderId if evt.order.HasField('clientOrderId') else None
+        client_order_id = self._extract_client_order_id(evt)
         deal_position_id = evt.deal.positionId
         filled_volume = evt.deal.filledVolume
+        slave_order_id = evt.order.orderId
 
         # Check for close (has closePositionDetail)
         if evt.deal.HasField('closePositionDetail'):
@@ -251,20 +323,37 @@ class CopierService:
                 )
             return
 
-        # Check for pending order fill (clientOrderId starting "co")
+        # Check for pending order fill: match by slave_order_id (primary), clientOrderId "co" (fallback)
+        try:
+            self._repo.activate_pending_fill(account_id, slave_order_id, deal_position_id, filled_volume)
+            fill_price = evt.deal.executionPrice if evt.deal.HasField('executionPrice') else None
+            self._repo.log_event(
+                'slave_action',
+                'info',
+                {
+                    'action': 'pending_fill',
+                    'client_order_id': client_order_id,
+                    'slave_order_id': slave_order_id,
+                    'slave_position_id': deal_position_id,
+                    'filled_volume': filled_volume,
+                    'fill_price': fill_price,
+                },
+                account_id=account_id,
+            )
+            return
+        except MappingNotFound:
+            # slave_order_id didn't match; this is expected if the order mapping doesn't exist
+            pass
+
+        # Fallback: try clientOrderId "co" if slave_order_id didn't match
         if client_order_id and client_order_id.startswith("co"):
-            # This is a fill of a pending order placed by the slave
-            # We need to find the matching order mapping and convert to position
             try:
-                # Try to find and activate the pending fill
-                # We'll use the slave_order_id from the event
-                slave_order_id = evt.order.orderId
                 self._repo.activate_pending_fill(account_id, slave_order_id, deal_position_id, filled_volume)
                 self._repo.log_event(
                     'slave_action',
                     'info',
                     {
-                        'action': 'pending_fill',
+                        'action': 'pending_fill_via_co',
                         'client_order_id': client_order_id,
                         'slave_order_id': slave_order_id,
                         'slave_position_id': deal_position_id,
@@ -272,16 +361,23 @@ class CopierService:
                     },
                     account_id=account_id,
                 )
+                return
             except MappingNotFound:
-                self._repo.log_event(
-                    'slave_action',
-                    'warning',
-                    {
-                        'action': 'pending_fill_no_mapping',
-                        'client_order_id': client_order_id,
-                    },
-                    account_id=account_id,
-                )
+                pass
+
+        # Fallthrough: fill matched nothing (neither position "cm", pending by order_id, nor "co")
+        self._repo.log_event(
+            'slave_action',
+            'warning',
+            {
+                'action': 'unmatched_slave_fill',
+                'slave_order_id': slave_order_id,
+                'slave_position_id': deal_position_id,
+                'client_order_id': client_order_id,
+                'reason': 'No matching position or order mapping',
+            },
+            account_id=account_id,
+        )
 
     def _handle_slave_order_accepted(self, account_id: int, evt: ProtoOAExecutionEvent) -> None:
         """Handle slave ORDER_ACCEPTED with clientOrderId starting 'co'.
@@ -292,7 +388,7 @@ class CopierService:
             account_id: Slave account ID.
             evt: ProtoOAExecutionEvent.
         """
-        client_order_id = evt.order.clientOrderId if evt.order.HasField('clientOrderId') else None
+        client_order_id = self._extract_client_order_id(evt)
 
         if not client_order_id or not client_order_id.startswith("co"):
             return
@@ -344,8 +440,17 @@ class CopierService:
                 account_id=account_id,
             )
         except MappingNotFound:
-            # Order mapping doesn't exist or already closed - no-op
-            pass
+            # Order mapping doesn't exist or already closed - log as drift warning
+            self._repo.log_event(
+                'slave_action',
+                'warning',
+                {
+                    'action': 'order_cancel_no_mapping',
+                    'slave_order_id': slave_order_id,
+                    'reason': 'Order mapping not found or already closed',
+                },
+                account_id=account_id,
+            )
 
     def _handle_slave_order_rejected(self, account_id: int, evt: ProtoOAExecutionEvent) -> None:
         """Handle slave ORDER_REJECTED.
@@ -360,7 +465,7 @@ class CopierService:
             account_id: Slave account ID.
             evt: ProtoOAExecutionEvent.
         """
-        client_order_id = evt.order.clientOrderId if evt.order.HasField('clientOrderId') else None
+        client_order_id = self._extract_client_order_id(evt)
         error_code = evt.errorCode if evt.errorCode else "UNKNOWN"
         error_msg = f"Order rejected: {error_code}"
 

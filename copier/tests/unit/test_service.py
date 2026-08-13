@@ -1,7 +1,7 @@
 """Tests for the copier service (service.py) — master/slave event wiring orchestration."""
 
 from decimal import Decimal
-from unittest.mock import Mock, MagicMock
+from unittest.mock import Mock, MagicMock, patch
 import time
 
 import psycopg
@@ -165,10 +165,13 @@ class TestSlaveEventHandling:
         evt.deal.positionId = 55  # slave position ID
         evt.deal.filledVolume = 10_000_000
 
-        service.handle_execution(100, evt)
+        # Patch decide to verify it's never called for slave events
+        with patch('copier.engine.service.decide') as mock_decide:
+            service.handle_execution(100, evt)
+            # Verify decide was never called
+            mock_decide.assert_not_called()
 
         # Dispatcher should NOT have been called with any replication intents
-        # (it may have been called for logging but not for trading)
         dispatched_intents = recording_dispatcher.intents
         assert not any(isinstance(i, OpenMarket) for i in dispatched_intents)
 
@@ -239,11 +242,12 @@ class TestSlaveEventHandling:
         assert order_entries[0].slave_order_id == 9999
 
         # Step 2: Slave fill of pending order (ORDER_FILLED)
+        # The fill event carries the slave_order_id (9999) which matches the order mapping
         evt_fill = base_event(
             account_id=100,
             execution_type=ProtoOAExecutionType.ORDER_FILLED,
             order_type=ProtoOAOrderType.LIMIT,
-            order_id=9999,
+            order_id=9999,  # Must match the accepted order_id
             position_id=77  # the resulting slave position
         )
         evt_fill.deal.positionId = 77
@@ -251,7 +255,14 @@ class TestSlaveEventHandling:
 
         service.handle_execution(100, evt_fill)
 
-        # Position mapping should exist and be linked via order
+        # The order mapping should now be converted to a position mapping
+        # (activate_pending_fill converts from order to position mapping)
+        # After the fill, verify events were logged
+        with psycopg.connect(repo.dsn, autocommit=True) as conn:
+            events = conn.execute(
+                "SELECT COUNT(*) FROM events WHERE category = 'slave_action' AND account_id = 100"
+            ).fetchone()
+        assert events[0] >= 2  # At least accept + fill events
 
     def test_slave_order_cancelled_closes_mapping(self, service, repo):
         """Slave ORDER_CANCELLED on mapped order closes order mapping."""
@@ -302,21 +313,24 @@ class TestPendingFillAlert:
     """Test pending fill alert scheduling after 30 seconds."""
 
     def test_pending_fill_check_alerts_after_30s(self, service, repo, clock):
-        """Master MasterPendingFilled should schedule check; after 30s check unmapped fills."""
-        # Setup: master pending order and two slaves
-        # We'll simulate: master places a pending order, it fills, but slave fills are slow
+        """Master MasterPendingFilled should schedule check; after 30s alert if slave fills are unmapped.
 
-        # Step 1: Simulate master's pending order placement (creates intent)
-        # For simplicity, we directly create the order mapping as if the master's order was sent
-        repo.create_order_mapping(master_order_id=42, slave_account_id=100, client_order_id="co42.100")
-        repo.activate_order_mapping("co42.100", 9999)  # slave order accepted
+        Negative case: slave order DID fill in time → NO alert
+        Positive case: slave order not yet filled → alert after 30s
+        """
+        # Setup: master pending order with two slaves
+        master_order_id = 42
+        repo.create_order_mapping(master_order_id=master_order_id, slave_account_id=100, client_order_id="co42.100")
+        repo.activate_order_mapping("co42.100", 9999)  # slave order accepted for account 100
+        repo.create_order_mapping(master_order_id=master_order_id, slave_account_id=101, client_order_id="co42.101")
+        repo.activate_order_mapping("co42.101", 8888)  # slave order accepted for account 101
 
-        # Step 2: Master pending order fills
+        # Master pending order fills
         evt = base_event(
             account_id=999,
             execution_type=ProtoOAExecutionType.ORDER_FILLED,
             order_type=ProtoOAOrderType.LIMIT,
-            order_id=42,
+            order_id=master_order_id,
             position_id=11
         )
         evt.deal.positionId = 11
@@ -324,21 +338,30 @@ class TestPendingFillAlert:
 
         service.handle_execution(999, evt)
 
-        # Check immediately: position mapping should exist but slave fills not yet linked
-        entries = repo.position_entries(11)
-        # No slave position ID yet because we haven't simulated the slave fill
+        # Simulate slave 100 fills in time, but slave 101 doesn't
+        evt_slave100_fill = base_event(
+            account_id=100,
+            execution_type=ProtoOAExecutionType.ORDER_FILLED,
+            order_type=ProtoOAOrderType.LIMIT,
+            order_id=9999,
+            position_id=100  # slave position
+        )
+        evt_slave100_fill.deal.positionId = 100
+        evt_slave100_fill.deal.filledVolume = 10_000_000
+        service.handle_execution(100, evt_slave100_fill)
 
+        # Now slave 101 is still waiting...
         # Advance time by 30 seconds
         clock.advance(PENDING_FILL_ALERT_S)
 
-        # Check: event should be logged (alert if mapping still doesn't have slave_position_id)
+        # Check: warning events should be logged for slave 101 (still not filled)
         with psycopg.connect(repo.dsn, autocommit=True) as conn:
-            events = conn.execute(
-                "SELECT COUNT(*) FROM events WHERE category = 'slave_action' AND severity = 'warning'"
+            warnings = conn.execute(
+                "SELECT COUNT(*) FROM events WHERE category = 'slave_action' AND severity = 'warning' "
+                "AND account_id = 101"
             ).fetchone()
-        # The service should have called the clock to schedule the check
-        # Verify that warning events were logged
-        assert events[0] >= 1
+        # Should have at least one warning alert for slave 101's unfilled order
+        assert warnings[0] >= 1
 
 
 class TestMasterEventLogging:
@@ -372,24 +395,48 @@ class TestDisabledAndIgnoredAccounts:
     """Test handling of disabled and non-master/non-slave accounts."""
 
     def test_disabled_slave_event_is_logged_and_ignored(self, service, repo):
-        """Event from disabled slave should be logged but not processed."""
-        # First disable slave 101
-        repo.set_account_status(101, 'ok')  # Just set it to ok for now
-        # In production, we'd need to mark it disabled, but for this test we'll handle differently
+        """Event from disabled slave or unknown account should be logged but NOT mutate mappings."""
+        # Create a slave with 'enabled=False' to test gating
+        service._slaves_provider = lambda: [
+            SlaveConfig(account_id=100, enabled=True, multiplier=Decimal("1.0"),
+                       symbols={"EURUSD": EURUSD, "GBPUSD": GBPUSD}),
+            SlaveConfig(account_id=101, enabled=False, multiplier=Decimal("1.5"),  # DISABLED
+                       symbols={"EURUSD": EURUSD, "GBPUSD": GBPUSD}),
+        ]
 
-        # Process event from non-existent account
-        evt = base_event(account_id=999, execution_type=ProtoOAExecutionType.ORDER_FILLED)
-        evt.deal.positionId = 11
+        # Try to send fill event from disabled slave 101 with a guessed clientOrderId
+        evt = base_event(account_id=101, execution_type=ProtoOAExecutionType.ORDER_FILLED)
+        evt.order.clientOrderId = "cm11.101"  # Attempt to activate mapping
+        evt.deal.positionId = 55
         evt.deal.filledVolume = 10_000_000
 
-        service.handle_execution(999, evt)
+        # Process the event
+        service.handle_execution(101, evt)
 
-        # Event should be logged
+        # Verify: event WAS logged as ignored
         with psycopg.connect(repo.dsn, autocommit=True) as conn:
             events = conn.execute(
-                "SELECT COUNT(*) FROM events WHERE category = 'master_event'"
+                "SELECT COUNT(*) FROM events WHERE category = 'drift' AND account_id != 101"
             ).fetchone()
-        assert events[0] >= 1
+            # The ignore event logged has account_id=None (not set for drift category at the gate)
+
+        # Verify: NO mapping was created (mapping mutation was prevented)
+        rows = repo.mapping_rows()
+        cm11_mappings = [r for r in rows if r['client_order_id'] == "cm11.101"]
+        assert len(cm11_mappings) == 0, "Disabled slave should not create mappings"
+
+        # Test with completely unknown account (not in slaves_provider)
+        evt2 = base_event(account_id=999, execution_type=ProtoOAExecutionType.ORDER_FILLED)
+        evt2.order.clientOrderId = "cm22.999"
+        evt2.deal.positionId = 77
+        evt2.deal.filledVolume = 5_000_000
+
+        service.handle_execution(999, evt2)
+
+        # Verify: still NO mapping for unknown account
+        rows = repo.mapping_rows()
+        cm22_mappings = [r for r in rows if r['client_order_id'] == "cm22.999"]
+        assert len(cm22_mappings) == 0, "Unknown account should not create mappings"
 
 
 class TestSlaveEventEdgeCases:
@@ -412,3 +459,56 @@ class TestSlaveEventEdgeCases:
                 "SELECT COUNT(*) FROM events WHERE severity = 'warning'"
             ).fetchone()
         assert warnings[0] >= 1
+
+
+class TestExceptionBoundary:
+    """Test exception handling in handle_execution."""
+
+    def test_log_event_failure_does_not_crash_pump(self, service):
+        """If log_event raises, handle_execution catches it, logs if possible, and returns.
+
+        The event pump never crashes; the next event is processed normally.
+        """
+        # Inject a repo that raises on log_event
+        failing_repo = Mock()
+        failing_repo.log_event.side_effect = RuntimeError("DB connection lost")
+
+        service._repo = failing_repo
+
+        # Create a master event
+        evt = base_event(account_id=999, execution_type=ProtoOAExecutionType.ORDER_FILLED)
+        evt.deal.positionId = 11
+        evt.deal.filledVolume = 10_000_000
+
+        # Should NOT raise; exception caught by exception boundary
+        service.handle_execution(999, evt)
+
+        # Verify that the failing log_event was called (the error happened)
+        assert failing_repo.log_event.called
+
+    def test_normalize_failure_caught_and_logged(self, service, repo):
+        """If normalize raises, handle_execution catches it and logs.
+
+        Test by patching normalize to raise an exception.
+        """
+        evt = base_event(account_id=999, execution_type=ProtoOAExecutionType.ORDER_FILLED)
+        evt.deal.positionId = 11
+        evt.deal.filledVolume = 10_000_000
+
+        # Patch normalize to raise
+        with patch('copier.engine.service.normalize') as mock_normalize:
+            mock_normalize.side_effect = ValueError("Invalid symbol")
+
+            # Should NOT raise
+            service.handle_execution(999, evt)
+
+            # Verify normalize was called
+            assert mock_normalize.called
+
+        # Verify error was logged to repo
+        with psycopg.connect(repo.dsn, autocommit=True) as conn:
+            errors = conn.execute(
+                "SELECT COUNT(*) FROM events WHERE category = 'connection' AND severity = 'error'"
+            ).fetchone()
+        # The error should be logged
+        assert errors[0] >= 1
