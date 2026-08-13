@@ -129,3 +129,12 @@ def test_sequential_partial_closes_track_slave_volume():
     out2 = decide(ev2, st2, [slave(101)])
     # Should close 1.5M (50% of remaining 3M)
     assert out2 == [m.ClosePosition(slave_account_id=101, position_id=555, volume=1_500_000)]
+
+
+def test_sltp_amend_no_mapping_alerts():
+    """Enabled slave with no mapping entry for amended position -> Alert (spec-mandated safety)."""
+    # Position 11 has no mapping entries
+    st = MapState(positions={})
+    ev = m.MasterPositionSLTPAmended(position_id=11, stop_loss=1.05, take_profit=1.15)
+    out = decide(ev, st, [slave(101)])
+    assert out == [m.Alert(101, "SL/TP change on master position 11 but slave has no mapped copy")]
