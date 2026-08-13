@@ -1,0 +1,47 @@
+# Git
+.git
+.gitignore
+
+# Node
+node_modules
+npm-debug.log
+yarn-error.log
+
+# Python
+__pycache__
+*.pyc
+.pytest_cache
+.venv
+venv
+
+# Test coverage
+coverage/
+.nyc_output
+
+# Build artifacts
+dist/
+build/
+
+# IDEs
+.vscode
+.idea
+*.swp
+*.swo
+*~
+.DS_Store
+
+# CI/CD
+.github
+.gitlab-ci.yml
+
+# Documentation
+docs/
+README.md
+
+# Local env
+.env.local
+.env.*.local
+
+# Docker
+Dockerfile
+docker-compose.yml
