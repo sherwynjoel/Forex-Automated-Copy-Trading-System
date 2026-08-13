@@ -10,6 +10,11 @@ from psycopg.types.json import Jsonb
 from copier.domain.models import SymbolInfo, PositionMappingEntry, OrderMappingEntry
 
 
+class MappingNotFound(KeyError):
+    """Raised when a mapping update targets a non-existent row."""
+    pass
+
+
 @dataclass(frozen=True)
 class Settings:
     """Global settings row."""
@@ -94,12 +99,19 @@ class Repo:
             name: Setting name (copying_enabled, dry_run, shards)
             value: New value
         """
-        if name not in ("copying_enabled", "dry_run", "shards"):
+        # Map setting names to SQL column names
+        columns = {
+            "copying_enabled": "copying_enabled",
+            "dry_run": "dry_run",
+            "shards": "shards",
+        }
+        if name not in columns:
             raise ValueError(f"Unknown setting: {name}")
 
+        column = columns[name]
         with psycopg.connect(self.dsn, autocommit=True) as conn:
             conn.execute(
-                f"UPDATE settings SET {name} = %s WHERE id = true",
+                f"UPDATE settings SET {column} = %s WHERE id = true",
                 (value,),
             )
 
@@ -163,22 +175,26 @@ class Repo:
     # ---------- symbol cache ----------
 
     def save_symbol_cache(self, account_id: int, infos: dict[str, SymbolInfo]) -> None:
-        """Save symbol cache for account."""
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
-            # Delete existing cache
-            conn.execute(
-                "DELETE FROM symbol_cache WHERE account_id = %s",
-                (account_id,),
-            )
-            # Insert new cache
-            for name, info in infos.items():
+        """Save symbol cache for account.
+
+        Atomically deletes old cache and inserts new one to prevent partial updates.
+        """
+        with psycopg.connect(self.dsn) as conn:
+            with conn.transaction():
+                # Delete existing cache
                 conn.execute(
-                    """
-                    INSERT INTO symbol_cache (account_id, name, symbol_id, digits, lot_size, min_volume, step_volume)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (account_id, name, info.symbol_id, info.digits, info.lot_size, info.min_volume, info.step_volume),
+                    "DELETE FROM symbol_cache WHERE account_id = %s",
+                    (account_id,),
                 )
+                # Insert new cache
+                for name, info in infos.items():
+                    conn.execute(
+                        """
+                        INSERT INTO symbol_cache (account_id, name, symbol_id, digits, lot_size, min_volume, step_volume)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (account_id, name, info.symbol_id, info.digits, info.lot_size, info.min_volume, info.step_volume),
+                    )
 
     def load_symbol_cache(self, account_id: int) -> dict[str, SymbolInfo]:
         """Load symbol cache for account."""
@@ -228,9 +244,12 @@ class Repo:
         slave_position_id: int,
         slave_volume: int,
     ) -> None:
-        """Activate a position mapping."""
+        """Activate a position mapping.
+
+        Raises MappingNotFound if no pending mapping exists with this client_order_id.
+        """
         with psycopg.connect(self.dsn, autocommit=True) as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
                 UPDATE mappings
                 SET slave_position_id = %s, slave_volume = %s, status = 'active', updated_at = now()
@@ -238,6 +257,8 @@ class Repo:
                 """,
                 (slave_position_id, slave_volume, client_order_id),
             )
+            if cursor.rowcount == 0:
+                raise MappingNotFound(f"No mapping found with client_order_id={client_order_id}")
 
     def reduce_position_mapping(
         self,
@@ -248,48 +269,30 @@ class Repo:
         """Reduce a position mapping by the closed volume.
 
         Sets status to 'closed' when slave_volume reaches 0.
+        Atomic: uses single UPDATE with GREATEST to avoid TOCTOU race on concurrent reduces.
         """
         with psycopg.connect(self.dsn, autocommit=True) as conn:
-            # Get current slave_volume
+            # Atomic single-statement update: decrement slave_volume safely,
+            # set status='closed' when volume <= 0, update timestamp
             row = conn.execute(
                 """
-                SELECT id, slave_volume FROM mappings
+                UPDATE mappings
+                SET slave_volume = GREATEST(slave_volume - %s, 0),
+                    status = CASE WHEN slave_volume - %s <= 0 THEN 'closed' ELSE 'active' END,
+                    updated_at = now()
                 WHERE slave_account_id = %s AND slave_position_id = %s AND status = 'active'
+                RETURNING slave_volume, status
                 """,
-                (slave_account_id, slave_position_id),
+                (closed_volume, closed_volume, slave_account_id, slave_position_id),
             ).fetchone()
 
-            if not row:
-                return
-
-            mapping_id, current_volume = row
-            new_volume = current_volume - closed_volume
-
-            if new_volume <= 0:
-                # Close the mapping
-                conn.execute(
-                    """
-                    UPDATE mappings
-                    SET slave_volume = 0, status = 'closed', updated_at = now()
-                    WHERE id = %s
-                    """,
-                    (mapping_id,),
-                )
-            else:
-                # Update volume
-                conn.execute(
-                    """
-                    UPDATE mappings
-                    SET slave_volume = %s, updated_at = now()
-                    WHERE id = %s
-                    """,
-                    (new_volume, mapping_id),
-                )
-
     def fail_mapping(self, client_order_id: str, error: str) -> None:
-        """Mark a mapping as failed with an error message."""
+        """Mark a mapping as failed with an error message.
+
+        Raises MappingNotFound if no mapping exists with this client_order_id.
+        """
         with psycopg.connect(self.dsn, autocommit=True) as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
                 UPDATE mappings
                 SET status = 'failed', error = %s, updated_at = now()
@@ -297,6 +300,8 @@ class Repo:
                 """,
                 (error, client_order_id),
             )
+            if cursor.rowcount == 0:
+                raise MappingNotFound(f"No mapping found with client_order_id={client_order_id}")
 
     def create_order_mapping(
         self,
@@ -315,9 +320,12 @@ class Repo:
             )
 
     def activate_order_mapping(self, client_order_id: str, slave_order_id: int) -> None:
-        """Activate an order mapping."""
+        """Activate an order mapping.
+
+        Raises MappingNotFound if no pending mapping exists with this client_order_id.
+        """
         with psycopg.connect(self.dsn, autocommit=True) as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
                 UPDATE mappings
                 SET slave_order_id = %s, status = 'active', updated_at = now()
@@ -325,11 +333,16 @@ class Repo:
                 """,
                 (slave_order_id, client_order_id),
             )
+            if cursor.rowcount == 0:
+                raise MappingNotFound(f"No mapping found with client_order_id={client_order_id}")
 
     def close_order_mapping(self, slave_account_id: int, slave_order_id: int) -> None:
-        """Close an order mapping."""
+        """Close an order mapping.
+
+        Raises MappingNotFound if no active mapping exists with these identifiers.
+        """
         with psycopg.connect(self.dsn, autocommit=True) as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
                 UPDATE mappings
                 SET status = 'closed', updated_at = now()
@@ -337,6 +350,10 @@ class Repo:
                 """,
                 (slave_account_id, slave_order_id),
             )
+            if cursor.rowcount == 0:
+                raise MappingNotFound(
+                    f"No active order mapping found: slave_account_id={slave_account_id}, slave_order_id={slave_order_id}"
+                )
 
     def link_pending_fill(
         self,
@@ -344,16 +361,24 @@ class Repo:
         slave_account_id: int,
         master_position_id: int,
     ) -> None:
-        """Link pending fill by stamping master_position_id onto the order mapping row."""
+        """Link pending fill by stamping master_position_id onto the order mapping row.
+
+        Only updates active mappings; stale/failed rows are not touched.
+        Raises MappingNotFound if no active order mapping exists.
+        """
         with psycopg.connect(self.dsn, autocommit=True) as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
                 UPDATE mappings
                 SET master_position_id = %s, updated_at = now()
-                WHERE master_order_id = %s AND slave_account_id = %s
+                WHERE master_order_id = %s AND slave_account_id = %s AND status = 'active'
                 """,
                 (master_position_id, master_order_id, slave_account_id),
             )
+            if cursor.rowcount == 0:
+                raise MappingNotFound(
+                    f"No active order mapping found: master_order_id={master_order_id}, slave_account_id={slave_account_id}"
+                )
 
     def activate_pending_fill(
         self,
@@ -362,9 +387,12 @@ class Repo:
         slave_position_id: int,
         slave_volume: int,
     ) -> None:
-        """Activate the pending fill by converting to position mapping."""
+        """Activate the pending fill by converting to position mapping.
+
+        Raises MappingNotFound if no active order mapping exists.
+        """
         with psycopg.connect(self.dsn, autocommit=True) as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
                 UPDATE mappings
                 SET slave_position_id = %s, slave_volume = %s, status = 'active', updated_at = now()
@@ -372,6 +400,10 @@ class Repo:
                 """,
                 (slave_position_id, slave_volume, slave_account_id, slave_order_id),
             )
+            if cursor.rowcount == 0:
+                raise MappingNotFound(
+                    f"No active order mapping found: slave_account_id={slave_account_id}, slave_order_id={slave_order_id}"
+                )
 
     def adopt_position_mapping(
         self,
