@@ -130,6 +130,15 @@ def test_patch_invalid_multiplier_400(app_client, db):
     )
     assert response.status_code == 400
 
+    # Non-numeric multiplier should also return 400 (not 422)
+    response = app_client.patch(
+        "/api/accounts/12345",
+        json={"multiplier": "not-a-number"},
+        headers={"X-CSRF-Token": csrf_token}
+    )
+    assert response.status_code == 400
+    assert "multiplier" in response.json().get("detail", "").lower()
+
 
 def test_patch_invalid_role_400(app_client, db):
     """PATCH with invalid role returns 400."""

@@ -1,6 +1,6 @@
 """Accounts management endpoints."""
-from decimal import Decimal
-from typing import Optional, List
+from decimal import Decimal, InvalidOperation
+from typing import Optional, List, Any
 
 import httpx
 import psycopg
@@ -16,7 +16,7 @@ from ..db import get_conn
 class PatchAccountRequest(BaseModel):
     """Request body for PATCH /api/accounts/{id}."""
     role: Optional[str] = None
-    multiplier: Optional[Decimal] = None
+    multiplier: Optional[Any] = None  # Accept any type, validate manually
     enabled: Optional[bool] = None
 
 
@@ -86,9 +86,16 @@ def create_accounts_router() -> APIRouter:
             if request.role not in ("master", "slave", "ignored"):
                 raise HTTPException(status_code=400, detail="role must be one of: master, slave, ignored")
 
+        validated_multiplier = None
         if request.multiplier is not None:
-            if request.multiplier <= 0:
-                raise HTTPException(status_code=400, detail="multiplier must be greater than 0")
+            # Validate and convert multiplier
+            try:
+                multiplier_decimal = Decimal(str(request.multiplier))
+                if multiplier_decimal <= 0:
+                    raise HTTPException(status_code=400, detail="multiplier must be greater than 0")
+                validated_multiplier = multiplier_decimal
+            except (InvalidOperation, ValueError, TypeError):
+                raise HTTPException(status_code=400, detail="multiplier must be a valid positive number")
 
         # Check if account exists
         exists = conn.execute(
@@ -106,9 +113,9 @@ def create_accounts_router() -> APIRouter:
             updates.append("role = %s")
             params.append(request.role)
 
-        if request.multiplier is not None:
+        if validated_multiplier is not None:
             updates.append("multiplier = %s")
-            params.append(request.multiplier)
+            params.append(validated_multiplier)
 
         if request.enabled is not None:
             updates.append("enabled = %s")

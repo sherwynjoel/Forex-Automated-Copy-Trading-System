@@ -30,24 +30,47 @@ class ControlRequest(BaseModel):
     account_id: Optional[int] = None
 
 
-async def _reload_copier(cfg: ApiConfig) -> bool:
-    """Call copier POST /reload endpoint."""
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(f"{cfg.copier_control_url}/reload")
-            return response.status_code == 200
-    except Exception:
-        return False
+async def _proxy_to_copier(
+    client: httpx.AsyncClient,
+    url: str,
+    method: str = "POST",
+    json: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Proxy a request to copier, handling errors appropriately.
 
-
-async def _copier_dry_run(cfg: ApiConfig) -> bool:
-    """Call copier POST /dry-run endpoint."""
+    Returns the response JSON or raises HTTPException.
+    """
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(f"{cfg.copier_control_url}/dry-run")
-            return response.status_code == 200
-    except Exception:
-        return False
+        if method == "GET":
+            response = await client.get(url)
+        else:
+            response = await client.post(url, json=json or {})
+
+        # Forward non-2xx responses faithfully
+        if response.status_code >= 500:
+            raise HTTPException(status_code=502, detail="copier unreachable")
+
+        if response.status_code >= 400:
+            # Forward 4xx from copier
+            try:
+                detail = response.json().get("detail", response.text)
+            except Exception:
+                detail = response.text or "copier error"
+            raise HTTPException(status_code=response.status_code, detail=detail)
+
+        # Handle successful responses
+        try:
+            return response.json()
+        except Exception:
+            # Non-JSON response from copier
+            raise HTTPException(
+                status_code=502,
+                detail="copier returned invalid response"
+            )
+
+    except httpx.RequestError:
+        raise HTTPException(status_code=502, detail="copier unreachable")
 
 
 def create_settings_control_router() -> APIRouter:
@@ -75,26 +98,27 @@ def create_settings_control_router() -> APIRouter:
 
     @router.put("/settings", response_model=Dict[str, Any])
     async def update_settings(
-        request: SettingsUpdateRequest,
+        request_data: SettingsUpdateRequest,
+        http_request: Request,
         _: bool = Depends(require_admin),
         conn: psycopg.Connection = Depends(get_conn),
         cfg: ApiConfig = Depends(ApiConfig.from_env),
     ) -> Dict[str, Any]:
-        """Update settings and potentially trigger copier actions."""
+        """Update settings and trigger copier reload on any change."""
         updates = []
         params = []
 
-        if request.copying_enabled is not None:
+        if request_data.copying_enabled is not None:
             updates.append("copying_enabled = %s")
-            params.append(request.copying_enabled)
+            params.append(request_data.copying_enabled)
 
-        if request.dry_run is not None:
+        if request_data.dry_run is not None:
             updates.append("dry_run = %s")
-            params.append(request.dry_run)
+            params.append(request_data.dry_run)
 
-        if request.shards is not None:
+        if request_data.shards is not None:
             updates.append("shards = %s")
-            params.append(request.shards)
+            params.append(request_data.shards)
 
         if updates:
             update_sql = f"UPDATE settings SET {', '.join(updates)} WHERE id = TRUE"
@@ -111,11 +135,34 @@ def create_settings_control_router() -> APIRouter:
             "shards": row[2],
         }
 
-        # If dry_run changed, call copier reload and dry-run
-        if request.dry_run is not None:
-            reload_ok = await _reload_copier(cfg)
-            dry_run_ok = await _copier_dry_run(cfg)
-            result["copier_reloaded"] = reload_ok and dry_run_ok
+        # On ANY settings change, notify copier
+        if updates:
+            try:
+                client = http_request.app.state.http
+
+                # Always call reload when settings change
+                reload_response = await _proxy_to_copier(
+                    client,
+                    f"{cfg.copier_control_url}/reload",
+                    method="POST",
+                    json={},
+                )
+                result["copier_reloaded"] = True
+
+                # Also call dry-run if dry_run setting changed
+                if request_data.dry_run is not None:
+                    try:
+                        await _proxy_to_copier(
+                            client,
+                            f"{cfg.copier_control_url}/dry-run",
+                            method="POST",
+                            json={},
+                        )
+                    except HTTPException:
+                        # dry-run failed, but reload succeeded
+                        pass
+            except HTTPException:
+                result["copier_reloaded"] = False
 
         return result
 
@@ -127,24 +174,14 @@ def create_settings_control_router() -> APIRouter:
         cfg: ApiConfig = Depends(ApiConfig.from_env),
     ) -> Dict[str, Any]:
         """Proxy pause command to copier."""
-        try:
-            # Get the async client from app state
-            client = http_request.app.state.http
-            url = f"{cfg.copier_control_url}/pause"
-            response = await client.post(url, json={"account_id": request.account_id})
-
-            if response.status_code >= 500:
-                raise HTTPException(
-                    status_code=502,
-                    detail="copier unreachable"
-                )
-
-            return response.json()
-        except httpx.RequestError:
-            raise HTTPException(
-                status_code=502,
-                detail="copier unreachable"
-            )
+        client = http_request.app.state.http
+        url = f"{cfg.copier_control_url}/pause"
+        return await _proxy_to_copier(
+            client,
+            url,
+            method="POST",
+            json={"account_id": request.account_id},
+        )
 
     @router.post("/control/resume", response_model=Dict[str, Any])
     async def control_resume(
@@ -154,24 +191,14 @@ def create_settings_control_router() -> APIRouter:
         cfg: ApiConfig = Depends(ApiConfig.from_env),
     ) -> Dict[str, Any]:
         """Proxy resume command to copier."""
-        try:
-            # Get the async client from app state
-            client = http_request.app.state.http
-            url = f"{cfg.copier_control_url}/resume"
-            response = await client.post(url, json={"account_id": request.account_id})
-
-            if response.status_code >= 500:
-                raise HTTPException(
-                    status_code=502,
-                    detail="copier unreachable"
-                )
-
-            return response.json()
-        except httpx.RequestError:
-            raise HTTPException(
-                status_code=502,
-                detail="copier unreachable"
-            )
+        client = http_request.app.state.http
+        url = f"{cfg.copier_control_url}/resume"
+        return await _proxy_to_copier(
+            client,
+            url,
+            method="POST",
+            json={"account_id": request.account_id},
+        )
 
     @router.post("/control/resync", response_model=Dict[str, Any])
     async def control_resync(
@@ -180,24 +207,9 @@ def create_settings_control_router() -> APIRouter:
         cfg: ApiConfig = Depends(ApiConfig.from_env),
     ) -> Dict[str, Any]:
         """Proxy resync command to copier."""
-        try:
-            # Get the async client from app state
-            client = http_request.app.state.http
-            url = f"{cfg.copier_control_url}/resync"
-            response = await client.post(url, json={})
-
-            if response.status_code >= 500:
-                raise HTTPException(
-                    status_code=502,
-                    detail="copier unreachable"
-                )
-
-            return response.json()
-        except httpx.RequestError:
-            raise HTTPException(
-                status_code=502,
-                detail="copier unreachable"
-            )
+        client = http_request.app.state.http
+        url = f"{cfg.copier_control_url}/resync"
+        return await _proxy_to_copier(client, url, method="POST", json={})
 
     return router
 
@@ -213,24 +225,9 @@ def create_state_router() -> APIRouter:
         cfg: ApiConfig = Depends(ApiConfig.from_env),
     ) -> Dict[str, Any]:
         """Proxy GET state from copier."""
-        try:
-            # Get the async client from app state
-            client = http_request.app.state.http
-            url = f"{cfg.copier_control_url}/state"
-            response = await client.get(url)
-
-            if response.status_code >= 500:
-                raise HTTPException(
-                    status_code=502,
-                    detail="copier unreachable"
-                )
-
-            return response.json()
-        except httpx.RequestError:
-            raise HTTPException(
-                status_code=502,
-                detail="copier unreachable"
-            )
+        client = http_request.app.state.http
+        url = f"{cfg.copier_control_url}/state"
+        return await _proxy_to_copier(client, url, method="GET")
 
     @router.post("/drift/{action}", response_model=Dict[str, Any])
     async def drift_action(
@@ -247,23 +244,8 @@ def create_state_router() -> APIRouter:
                 detail=f"Invalid action: {action}. Must be one of: close-orphan, adopt, dismiss"
             )
 
-        try:
-            # Get the async client from app state
-            client = http_request.app.state.http
-            url = f"{cfg.copier_control_url}/drift/{action}"
-            response = await client.post(url, json={})
-
-            if response.status_code >= 500:
-                raise HTTPException(
-                    status_code=502,
-                    detail="copier unreachable"
-                )
-
-            return response.json()
-        except httpx.RequestError:
-            raise HTTPException(
-                status_code=502,
-                detail="copier unreachable"
-            )
+        client = http_request.app.state.http
+        url = f"{cfg.copier_control_url}/drift/{action}"
+        return await _proxy_to_copier(client, url, method="POST", json={})
 
     return router
