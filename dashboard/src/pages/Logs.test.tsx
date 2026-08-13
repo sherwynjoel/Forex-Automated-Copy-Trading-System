@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi, afterEach, beforeEach } from 'vitest'
 import Logs from './Logs'
+import * as apiModule from '../lib/api'
 
 // Mock WebSocket class that captures instance and allows emit
 class MockWebSocket {
@@ -28,11 +29,11 @@ class MockWebSocket {
 }
 
 beforeEach(() => {
-  vi.stubGlobal('WebSocket', MockWebSocket)
+  vi.spyOn(apiModule, 'eventsSocket').mockReturnValue(new MockWebSocket() as any)
 })
 
 afterEach(() => {
-  vi.unstubAllGlobals()
+  vi.restoreAllMocks()
   MockWebSocket.instance = null
 })
 

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { api } from '../lib/api'
+import { api, eventsSocket } from '../lib/api'
 import { EventResponse } from '../lib/types'
 
 export default function Logs() {
@@ -67,14 +67,13 @@ export default function Logs() {
     }
 
     const connectWebSocket = () => {
-      const ws = new WebSocket(
-        `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/ws`
-      )
+      const ws = eventsSocket()
 
       ws.onmessage = (event) => {
         try {
           const newEvent = JSON.parse(event.data) as EventResponse
-          // Only add if it matches current filters
+          // Only add if it matches current filters (account_id, severity, category).
+          // Note: 'since' filters history; live events are "now" so we don't filter by since.
           if (
             (!filters.account_id || newEvent.account_id?.toString() === filters.account_id) &&
             (filters.severity === 'all' || newEvent.severity === filters.severity) &&
