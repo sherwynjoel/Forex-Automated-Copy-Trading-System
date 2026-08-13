@@ -114,13 +114,25 @@ class CTraderClient:
                 return
         if isinstance(payload, ProtoOAExecutionEvent):
             for cb in self._exec_cbs:
-                cb(payload.ctidTraderAccountId, payload)
+                try:
+                    cb(payload.ctidTraderAccountId, payload)
+                except Exception:
+                    log.exception("execution callback raised")
         elif isinstance(payload, ProtoOASpotEvent):
             for cb in self._spot_cbs:
-                cb(payload)
+                try:
+                    cb(payload)
+                except Exception:
+                    log.exception("spot callback raised")
         elif isinstance(payload, ProtoOAAccountDisconnectEvent):
             for cb in self._disc_cbs:
-                cb(payload.ctidTraderAccountId)
+                try:
+                    cb(payload.ctidTraderAccountId)
+                except Exception:
+                    log.exception("account disconnect callback raised")
         elif isinstance(payload, ProtoOAAccountsTokenInvalidatedEvent):
             for cb in self._invalid_cbs:
-                cb(list(payload.ctidTraderAccountIds))
+                try:
+                    cb(list(payload.ctidTraderAccountIds))
+                except Exception:
+                    log.exception("tokens invalidated callback raised")

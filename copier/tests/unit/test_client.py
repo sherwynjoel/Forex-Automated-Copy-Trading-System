@@ -98,3 +98,73 @@ def test_ready_fires_after_first_app_auth():
     client.ready.addCallback(fired.append)
     sdk.connect()
     assert fired
+
+
+def test_execution_callback_error_does_not_break_remaining_callbacks():
+    sdk, _, client = make()
+    seen = []
+
+    def bad_cb(account_id, evt):
+        raise ValueError("intentional error")
+
+    def good_cb(account_id, evt):
+        seen.append((account_id, evt))
+
+    client.on_execution(bad_cb)
+    client.on_execution(good_cb)
+    sdk.connect()
+    evt = ProtoOAExecutionEvent()
+    evt.ctidTraderAccountId = 1001
+    sdk.deliver(evt)
+    # second callback should still run despite first raising
+    assert seen and seen[0][0] == 1001
+
+
+def test_stop_cancels_heartbeat():
+    sdk, clock, client = make()
+    sdk.connect()
+    # trigger heartbeat
+    clock.advance(HEARTBEAT_INTERVAL_S)
+    hb_count = len(of_type(sdk.sent, ProtoHeartbeatEvent))
+    assert hb_count == 1
+
+    client.stop()
+    # after stop, clock advancement should not produce more heartbeats
+    clock.advance(HEARTBEAT_INTERVAL_S * 3)
+    assert len(of_type(sdk.sent, ProtoHeartbeatEvent)) == 1
+
+
+def test_ready_does_not_fire_twice_on_reconnect():
+    sdk, _, client = make()
+    fire_count = [0]
+
+    def count_fires(result):
+        fire_count[0] += 1
+        return result
+
+    client.ready.addCallback(count_fires)
+    sdk.connect()
+    assert fire_count[0] == 1
+
+    # Reconnect
+    sdk.disconnect()
+    sdk.connect()
+    # ready should still have fired only once
+    assert fire_count[0] == 1
+
+
+def test_deauthorize_account_removes_from_reauth_registry():
+    sdk, _, client = make()
+    sdk.connect()
+    client.authorize_account(1001, "t1")
+    client.authorize_account(1002, "t2")
+    client.deauthorize_account(1001)
+
+    # Reconnect
+    sdk.disconnect()
+    sdk.connect()
+
+    # Only account 1002 should be re-authed
+    reauthed = of_type(sdk.sent, ProtoOAAccountAuthReq)
+    reauth_ids = {r.ctidTraderAccountId for r in reauthed[-1:]}
+    assert reauth_ids == {1002}
