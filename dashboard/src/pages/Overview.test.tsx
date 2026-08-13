@@ -306,24 +306,39 @@ test('shows dry-run badge when dry_run enabled', async () => {
   })
 })
 
-test('polls /api/state every 5 seconds', async () => {
-  const fetchMock = stubApi({
-    '/api/accounts': mockAccounts,
-    '/api/settings': mockSettings,
-    '/api/state': mockState,
-  })
+test(
+  'polls /api/state every 5 seconds',
+  async () => {
+    // Spy on setInterval to verify it's called with 5000ms
+    const setIntervalSpy = vi.spyOn(global, 'setInterval')
 
-  render(
-    <MemoryRouter>
-      <Overview />
-    </MemoryRouter>
-  )
+    const fetchMock = stubApi({
+      '/api/accounts': mockAccounts,
+      '/api/settings': mockSettings,
+      '/api/state': mockState,
+    })
 
-  await waitFor(() => {
-    expect(screen.getByText(/Master Account \(1001\)/)).toBeInTheDocument()
-  })
+    render(
+      <MemoryRouter>
+        <Overview />
+      </MemoryRouter>
+    )
 
-  // Verify that /api/state was called at least once during initial load
-  const stateCalls = fetchMock.mock.calls.filter((call) => call[0] === '/api/state')
-  expect(stateCalls.length).toBeGreaterThan(0)
-})
+    // Wait for initial render and data load
+    await waitFor(() => {
+      expect(screen.getByText(/Master Account \(1001\)/)).toBeInTheDocument()
+    })
+
+    // Verify that /api/state was called during initial load
+    const initialStateCalls = fetchMock.mock.calls.filter((call) => call[0] === '/api/state').length
+    expect(initialStateCalls).toBeGreaterThan(0)
+
+    // Verify that setInterval was called with 5000ms interval for polling
+    const pollingInterval = setIntervalSpy.mock.calls.find(
+      (call) => typeof call[1] === 'number' && call[1] === 5000
+    )
+    expect(pollingInterval).toBeDefined()
+
+    setIntervalSpy.mockRestore()
+  }
+)
