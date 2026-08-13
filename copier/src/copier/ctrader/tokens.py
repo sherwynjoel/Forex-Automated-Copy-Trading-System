@@ -7,6 +7,11 @@ from cryptography.fernet import Fernet
 REFRESH_THRESHOLD = timedelta(days=25)
 
 
+class UnknownConnection(KeyError):
+    """Raised when rotate() or mark() is called with a non-existent connection_id."""
+    pass
+
+
 @dataclass(frozen=True)
 class TokenPair:
     connection_id: int
@@ -49,11 +54,13 @@ class TokenStore:
                expires_at: datetime) -> None:
         # single transaction: rotated refresh token is never lost (spec §5)
         with psycopg.connect(self._dsn) as conn:
-            conn.execute(
+            cur = conn.execute(
                 "UPDATE ctid_connections SET access_token_enc=%s, refresh_token_enc=%s,"
                 " expires_at=%s, status='active' WHERE id=%s",
                 (self._enc(access_token), self._enc(refresh_token), expires_at, connection_id))
             conn.commit()
+            if cur.rowcount == 0:
+                raise UnknownConnection(connection_id)
 
     def due_for_refresh(self, now: datetime) -> list[int]:
         with psycopg.connect(self._dsn) as conn:
@@ -65,6 +72,8 @@ class TokenStore:
 
     def mark(self, connection_id: int, status: str) -> None:
         with psycopg.connect(self._dsn) as conn:
-            conn.execute("UPDATE ctid_connections SET status=%s WHERE id=%s",
-                         (status, connection_id))
+            cur = conn.execute("UPDATE ctid_connections SET status=%s WHERE id=%s",
+                               (status, connection_id))
             conn.commit()
+            if cur.rowcount == 0:
+                raise UnknownConnection(connection_id)
