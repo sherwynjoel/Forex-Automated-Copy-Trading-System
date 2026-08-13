@@ -72,7 +72,6 @@ class FakeCTraderServer:
 
     def _setup_handlers(self):
         """Setup message payload type handlers."""
-        # Populate handler dict with payload types
         self._handlers[oa.ProtoOAApplicationAuthReq().payloadType] = (
             self._handle_app_auth_req
         )
@@ -116,14 +115,7 @@ class FakeCTraderServer:
         self._handlers[ProtoHeartbeatEvent().payloadType] = self._handle_heartbeat
 
     def listen(self, reactor) -> int:
-        """Listen on a random port with TLS.
-
-        Args:
-            reactor: Twisted reactor
-
-        Returns:
-            int: The bound port number
-        """
+        """Listen on a random port with TLS."""
         factory = Factory.forProtocol(_Proto)
         factory.server = self
         self._listening = reactor.listenSSL(0, factory, make_self_signed_context())
@@ -142,23 +134,16 @@ class FakeCTraderServer:
         self.protocols.clear()
 
     def broadcast(self, event):
-        """Broadcast an event to all connected clients."""
+        """Broadcast an event to all connected clients (untagged, no clientMsgId)."""
         for p in self.protocols:
-            p.send_payload(event)
+            p.send_payload(event, client_msg_id="")
 
     def push_execution(self, evt):
         """Push an execution event to all clients."""
         self.broadcast(evt)
 
     def push_spot(self, ctid_trader_account_id: int, symbol_id: int, bid: int, ask: int):
-        """Push a spot event to all clients.
-
-        Args:
-            ctid_trader_account_id: Account ID (REQUIRED field)
-            symbol_id: Symbol ID
-            bid: Bid price
-            ask: Ask price
-        """
+        """Push a spot event to all clients."""
         spot = oa.ProtoOASpotEvent()
         spot.ctidTraderAccountId = ctid_trader_account_id
         spot.symbolId = symbol_id
@@ -167,12 +152,7 @@ class FakeCTraderServer:
         self.broadcast(spot)
 
     def handle(self, proto, msg):
-        """Handle an incoming message.
-
-        Args:
-            proto: The protocol instance
-            msg: The ProtoMessage
-        """
+        """Handle an incoming message."""
         handler = self._handlers.get(msg.payloadType)
         if handler:
             handler(proto, msg)
@@ -191,20 +171,18 @@ class FakeCTraderServer:
         req = oa.ProtoOAAccountAuthReq()
         req.ParseFromString(msg.payload)
 
-        # Validate token if accounts are set (empty dict = accept all)
+        # Validate token if accounts are set
         if self.accounts and req.ctidTraderAccountId not in self.accounts:
-            # Send error response
             error = oa.ProtoOAErrorRes()
             error.ctidTraderAccountId = req.ctidTraderAccountId
-            error.errorCode = 1  # GENERIC_ERROR or similar
+            error.errorCode = "CH_UNKNOWN_ACCOUNT"
             proto.send_payload(error, msg.clientMsgId)
             return
 
         if self.accounts and self.accounts[req.ctidTraderAccountId] != req.accessToken:
-            # Token mismatch
             error = oa.ProtoOAErrorRes()
             error.ctidTraderAccountId = req.ctidTraderAccountId
-            error.errorCode = 2  # INVALID_TOKEN or similar
+            error.errorCode = "CH_ACCESS_TOKEN_INVALID"
             proto.send_payload(error, msg.clientMsgId)
             return
 
@@ -237,7 +215,6 @@ class FakeCTraderServer:
         res = oa.ProtoOASymbolByIdRes()
         res.ctidTraderAccountId = req.ctidTraderAccountId
 
-        # Map symbol_id to symbol details
         sym_map = {s["symbol_id"]: s for s in self.symbols}
 
         for sym_id in req.symbolId:
@@ -246,7 +223,7 @@ class FakeCTraderServer:
                 full_sym = res.symbol.add()
                 full_sym.symbolId = sym["symbol_id"]
                 full_sym.digits = sym["digits"]
-                full_sym.pipPosition = 4  # Standard pip position for 5-digit forex
+                full_sym.pipPosition = 4
                 full_sym.lotSize = sym["lot_size"]
                 full_sym.minVolume = sym["min_volume"]
                 full_sym.stepVolume = sym["step_volume"]
@@ -261,7 +238,6 @@ class FakeCTraderServer:
         res = oa.ProtoOAReconcileRes()
         res.ctidTraderAccountId = req.ctidTraderAccountId
 
-        # Add open positions
         if req.ctidTraderAccountId in self.open_positions:
             for pos_data in self.open_positions[req.ctidTraderAccountId]:
                 pos = res.position.add()
@@ -273,7 +249,6 @@ class FakeCTraderServer:
                 pos.swap = 0
                 pos.price = pos_data.get("price", 0)
 
-        # Add pending orders
         if req.ctidTraderAccountId in self.pending_orders:
             for ord_data in self.pending_orders[req.ctidTraderAccountId]:
                 order = res.order.add()
@@ -292,7 +267,7 @@ class FakeCTraderServer:
         req.ParseFromString(msg.payload)
 
         res = oa.ProtoOAGetAccountListByAccessTokenRes()
-        res.accessToken = req.accessToken  # REQUIRED: echo back the token
+        res.accessToken = req.accessToken
         for account_id in self.accounts:
             acc = res.ctidTraderAccount.add()
             acc.ctidTraderAccountId = account_id
@@ -335,26 +310,24 @@ class FakeCTraderServer:
         res.ctidTraderAccountId = req.ctidTraderAccountId
         res.trader.ctidTraderAccountId = req.ctidTraderAccountId
 
-        # Set balance if available
         if req.ctidTraderAccountId in self.balances:
             res.trader.balance = self.balances[req.ctidTraderAccountId]
         else:
-            res.trader.balance = 100000  # Default balance
+            res.trader.balance = 100000
 
-        res.trader.depositAssetId = 1  # REQUIRED field
+        res.trader.depositAssetId = 1
 
         proto.send_payload(res, msg.clientMsgId)
 
     def _handle_new_order_req(self, proto, msg):
-        """Handle new order request."""
+        """Handle new order request - sends response + broadcasts untagged events."""
         req = oa.ProtoOANewOrderReq()
         req.ParseFromString(msg.payload)
 
         # Record the trade request
         self.requests.append(req)
 
-        # Send response to resolve the SDK's deferred (required for send() to return)
-        # Use ExecutionEvent as the response (many SDKs accept this as trade request response)
+        # Send minimal tagged response to resolve SDK.send() deferred
         response = oa.ProtoOAExecutionEvent()
         response.ctidTraderAccountId = req.ctidTraderAccountId
         response.executionType = model.ProtoOAExecutionType.ORDER_ACCEPTED
@@ -369,6 +342,7 @@ class FakeCTraderServer:
             reject_evt.order.orderId = next(self._order_ids)
             reject_evt.order.clientOrderId = req.clientOrderId
             reject_evt.order.orderType = req.orderType
+            reject_evt.order.orderStatus = model.ProtoOAOrderStatus.ORDER_STATUS_REJECTED
             reject_evt.order.tradeData.symbolId = req.symbolId
             reject_evt.order.tradeData.volume = req.volume
             reject_evt.order.tradeData.tradeSide = req.tradeSide
@@ -380,21 +354,21 @@ class FakeCTraderServer:
             if req.orderType == model.ProtoOAOrderType.MARKET:
                 order_id = next(self._order_ids)
 
-                # Send ORDER_ACCEPTED event
+                # Broadcast ORDER_ACCEPTED event (untagged)
                 accept_evt = oa.ProtoOAExecutionEvent()
                 accept_evt.ctidTraderAccountId = req.ctidTraderAccountId
                 accept_evt.executionType = model.ProtoOAExecutionType.ORDER_ACCEPTED
                 accept_evt.order.orderId = order_id
+                accept_evt.order.orderStatus = model.ProtoOAOrderStatus.ORDER_STATUS_ACCEPTED
+                accept_evt.order.orderType = req.orderType
                 accept_evt.order.tradeData.symbolId = req.symbolId
                 accept_evt.order.tradeData.volume = req.volume
                 accept_evt.order.tradeData.tradeSide = req.tradeSide
                 accept_evt.order.tradeData.label = req.label
-                accept_evt.order.orderType = req.orderType
                 accept_evt.order.clientOrderId = req.clientOrderId
-                accept_evt.order.orderStatus = model.ProtoOAOrderStatus.ORDER_STATUS_ACCEPTED
                 self.broadcast(accept_evt)
 
-                # Send ORDER_FILLED event
+                # Broadcast ORDER_FILLED event (untagged)
                 position_id = next(self._position_ids)
                 deal_id = next(self._deal_ids)
                 fill_evt = oa.ProtoOAExecutionEvent()
@@ -403,8 +377,8 @@ class FakeCTraderServer:
                 fill_evt.deal.dealId = deal_id
                 fill_evt.deal.orderId = order_id
                 fill_evt.deal.positionId = position_id
-                fill_evt.deal.filledVolume = req.volume
                 fill_evt.deal.volume = req.volume
+                fill_evt.deal.filledVolume = req.volume
                 fill_evt.deal.symbolId = req.symbolId
                 fill_evt.deal.tradeSide = req.tradeSide
                 fill_evt.deal.dealStatus = model.ProtoOADealStatus.FILLED
@@ -418,80 +392,88 @@ class FakeCTraderServer:
                 fill_evt.position.positionStatus = model.ProtoOAPositionStatus.POSITION_STATUS_OPEN
                 fill_evt.position.swap = 0
                 fill_evt.order.orderId = order_id
-                fill_evt.order.clientOrderId = req.clientOrderId
                 fill_evt.order.orderStatus = model.ProtoOAOrderStatus.ORDER_STATUS_FILLED
                 fill_evt.order.orderType = req.orderType
                 fill_evt.order.tradeData.symbolId = req.symbolId
                 fill_evt.order.tradeData.volume = req.volume
                 fill_evt.order.tradeData.tradeSide = req.tradeSide
                 fill_evt.order.tradeData.label = req.label
+                fill_evt.order.clientOrderId = req.clientOrderId
                 self.broadcast(fill_evt)
             else:
-                # For LIMIT/STOP orders: just accept
+                # For LIMIT/STOP orders: just accept (untagged)
                 order_id = next(self._order_ids)
                 accept_evt = oa.ProtoOAExecutionEvent()
                 accept_evt.ctidTraderAccountId = req.ctidTraderAccountId
                 accept_evt.executionType = model.ProtoOAExecutionType.ORDER_ACCEPTED
                 accept_evt.order.orderId = order_id
+                accept_evt.order.orderStatus = model.ProtoOAOrderStatus.ORDER_STATUS_ACCEPTED
+                accept_evt.order.orderType = req.orderType
                 accept_evt.order.tradeData.symbolId = req.symbolId
                 accept_evt.order.tradeData.volume = req.volume
                 accept_evt.order.tradeData.tradeSide = req.tradeSide
                 accept_evt.order.tradeData.label = req.label
-                accept_evt.order.orderType = req.orderType
                 accept_evt.order.clientOrderId = req.clientOrderId
-                accept_evt.order.orderStatus = model.ProtoOAOrderStatus.ORDER_STATUS_ACCEPTED
                 self.broadcast(accept_evt)
 
     def _handle_close_position_req(self, proto, msg):
-        """Handle close position request."""
+        """Handle close position request - sends response + broadcasts untagged event."""
         req = oa.ProtoOAClosePositionReq()
         req.ParseFromString(msg.payload)
 
         # Record the trade request
         self.requests.append(req)
 
-        # Send response to resolve the SDK's deferred
+        # Send minimal tagged response
         response = oa.ProtoOAExecutionEvent()
         response.ctidTraderAccountId = req.ctidTraderAccountId
         response.executionType = model.ProtoOAExecutionType.ORDER_ACCEPTED
         proto.send_payload(response, msg.clientMsgId)
 
         if self.auto_fill:
-            # Send ORDER_FILLED event with closePositionDetail
+            # Broadcast ORDER_FILLED event with closePositionDetail (untagged)
             deal_id = next(self._deal_ids)
             fill_evt = oa.ProtoOAExecutionEvent()
             fill_evt.ctidTraderAccountId = req.ctidTraderAccountId
             fill_evt.executionType = model.ProtoOAExecutionType.ORDER_FILLED
             fill_evt.deal.dealId = deal_id
+            fill_evt.deal.orderId = 0  # REQUIRED (no corresponding order for close)
             fill_evt.deal.positionId = req.positionId
-            fill_evt.deal.filledVolume = req.volume
             fill_evt.deal.volume = req.volume
+            fill_evt.deal.filledVolume = req.volume
+            fill_evt.deal.symbolId = 1  # Default, varies by position
+            fill_evt.deal.tradeSide = model.ProtoOATradeSide.BUY  # Default, varies
             fill_evt.deal.dealStatus = model.ProtoOADealStatus.FILLED
             fill_evt.deal.createTimestamp = int(time.time() * 1000)
             fill_evt.deal.executionTimestamp = int(time.time() * 1000)
-            fill_evt.deal.tradeSide = model.ProtoOATradeSide.BUY  # Default, will be overridden
-            fill_evt.deal.symbolId = 1  # Default, actual value may vary
             fill_evt.deal.closePositionDetail.closedVolume = req.volume
+            fill_evt.deal.closePositionDetail.entryPrice = 10000  # Plausible default
+            fill_evt.deal.closePositionDetail.grossProfit = 1000  # Plausible default
+            fill_evt.deal.closePositionDetail.swap = 0
+            fill_evt.deal.closePositionDetail.commission = 5  # Plausible default
+            fill_evt.deal.closePositionDetail.balance = 100000  # Plausible default
             fill_evt.position.positionId = req.positionId
-            fill_evt.position.tradeData.volume = 0  # Remaining volume is 0
+            fill_evt.position.tradeData.symbolId = 1  # Default
+            fill_evt.position.tradeData.volume = 0  # Closed
+            fill_evt.position.tradeData.tradeSide = model.ProtoOATradeSide.BUY  # Default
             fill_evt.position.positionStatus = model.ProtoOAPositionStatus.POSITION_STATUS_CLOSED
             fill_evt.position.swap = 0
             self.broadcast(fill_evt)
 
     def _handle_amend_position_sltp_req(self, proto, msg):
-        """Handle amend position SL/TP request."""
+        """Handle amend position SL/TP request - broadcasts untagged event."""
         req = oa.ProtoOAAmendPositionSLTPReq()
         req.ParseFromString(msg.payload)
 
         # Record the trade request
         self.requests.append(req)
 
-        # Send response to resolve the SDK's deferred
+        # Send tagged response to resolve SDK.send()
         response = oa.ProtoOAExecutionEvent()
         response.ctidTraderAccountId = req.ctidTraderAccountId
         response.executionType = model.ProtoOAExecutionType.ORDER_ACCEPTED
         response.position.positionId = req.positionId
-        response.position.tradeData.symbolId = 1  # Default, actual varies
+        response.position.tradeData.symbolId = 1  # Default
         response.position.tradeData.volume = 0
         response.position.tradeData.tradeSide = model.ProtoOATradeSide.BUY
         response.position.positionStatus = model.ProtoOAPositionStatus.POSITION_STATUS_OPEN
@@ -503,18 +485,23 @@ class FakeCTraderServer:
         proto.send_payload(response, msg.clientMsgId)
 
     def _handle_amend_order_req(self, proto, msg):
-        """Handle amend order request."""
+        """Handle amend order request - broadcasts untagged event."""
         req = oa.ProtoOAAmendOrderReq()
         req.ParseFromString(msg.payload)
 
         # Record the trade request
         self.requests.append(req)
 
-        # Send response to resolve the SDK's deferred
+        # Send tagged response to resolve SDK.send()
         response = oa.ProtoOAExecutionEvent()
         response.ctidTraderAccountId = req.ctidTraderAccountId
         response.executionType = model.ProtoOAExecutionType.ORDER_ACCEPTED
         response.order.orderId = req.orderId
+        response.order.orderStatus = model.ProtoOAOrderStatus.ORDER_STATUS_ACCEPTED
+        response.order.orderType = model.ProtoOAOrderType.LIMIT  # Default
+        response.order.tradeData.symbolId = 1  # Default
+        response.order.tradeData.volume = 100000  # Default
+        response.order.tradeData.tradeSide = model.ProtoOATradeSide.BUY
         if req.HasField("limitPrice"):
             response.order.limitPrice = req.limitPrice
         if req.HasField("stopPrice"):
@@ -522,19 +509,23 @@ class FakeCTraderServer:
         proto.send_payload(response, msg.clientMsgId)
 
     def _handle_cancel_order_req(self, proto, msg):
-        """Handle cancel order request."""
+        """Handle cancel order request - broadcasts untagged event."""
         req = oa.ProtoOACancelOrderReq()
         req.ParseFromString(msg.payload)
 
         # Record the trade request
         self.requests.append(req)
 
-        # Send response to resolve the SDK's deferred
+        # Send tagged response to resolve SDK.send()
         response = oa.ProtoOAExecutionEvent()
         response.ctidTraderAccountId = req.ctidTraderAccountId
         response.executionType = model.ProtoOAExecutionType.ORDER_CANCELLED
         response.order.orderId = req.orderId
         response.order.orderStatus = model.ProtoOAOrderStatus.ORDER_STATUS_CANCELLED
+        response.order.orderType = model.ProtoOAOrderType.LIMIT  # Default
+        response.order.tradeData.symbolId = 1  # Default
+        response.order.tradeData.volume = 100000  # Default
+        response.order.tradeData.tradeSide = model.ProtoOATradeSide.BUY
         proto.send_payload(response, msg.clientMsgId)
 
     def _handle_heartbeat(self, proto, msg):
