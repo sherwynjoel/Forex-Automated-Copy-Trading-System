@@ -12,6 +12,7 @@ from .auth import (
     CSRFMiddleware,
     create_auth_router,
 )
+from .oauth import create_oauth_router
 
 
 def create_app(http_transport: Optional[httpx.BaseTransport] = None) -> FastAPI:
@@ -53,6 +54,10 @@ def create_app(http_transport: Optional[httpx.BaseTransport] = None) -> FastAPI:
     # Include auth router
     auth_router = create_auth_router(rate_limiter)
     app.include_router(auth_router)
+
+    # Include OAuth router
+    oauth_router = create_oauth_router()
+    app.include_router(oauth_router)
 
     return app
 
