@@ -118,36 +118,24 @@ def create_oauth_router() -> APIRouter:
             logger.warning("OAuth state session mismatch - possible CSRF attempt")
             raise HTTPException(status_code=403, detail="State does not match session")
 
-        # Check state has not been consumed yet (single-use enforcement)
+        # Atomically consume state (single-use enforcement)
+        # UPDATE with WHERE consumed_at IS NULL and RETURNING ensures state was unconsumed
         state_hash = _create_state_hash(state)
         try:
-            state_row = conn.execute(
-                "SELECT consumed_at FROM oauth_states WHERE state_hash = %s",
-                (state_hash,),
+            result = conn.execute(
+                "UPDATE oauth_states SET consumed_at = %s WHERE state_hash = %s AND consumed_at IS NULL RETURNING state_hash",
+                (datetime.now(timezone.utc), state_hash),
             ).fetchone()
 
-            if not state_row:
-                logger.warning("OAuth state not found in database - possible forgery")
-                raise HTTPException(status_code=403, detail="Invalid state")
-
-            if state_row[0] is not None:
-                logger.warning("OAuth state replay attempt - state already consumed")
-                raise HTTPException(status_code=403, detail="State already used")
+            if not result:
+                # Either state_hash doesn't exist or it was already consumed (race-safe check)
+                logger.warning("OAuth state not found or already consumed - possible replay/forgery")
+                raise HTTPException(status_code=403, detail="Invalid or already-used state")
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"State validation database error: {e}")
+            logger.error(f"State consumption database error: {e}")
             raise HTTPException(status_code=500, detail="State validation failed")
-
-        # Mark state as consumed
-        try:
-            conn.execute(
-                "UPDATE oauth_states SET consumed_at = %s WHERE state_hash = %s",
-                (datetime.now(timezone.utc), state_hash),
-            )
-        except Exception as e:
-            logger.error(f"Failed to mark state consumed: {e}")
-            raise HTTPException(status_code=500, detail="Failed to process OAuth callback")
 
         # Exchange authorization code for tokens
         try:
@@ -193,8 +181,13 @@ def create_oauth_router() -> APIRouter:
             if not refresh_token or not isinstance(refresh_token, str):
                 logger.error("Missing or invalid refresh token in response")
                 raise HTTPException(status_code=400, detail="Invalid token response")
-            if not isinstance(expires_in, (int, float)) or expires_in <= 0:
-                logger.error(f"Missing or invalid expiresIn: {expires_in}")
+            # Validate expires_in: must be numeric, positive, and finite
+            if not isinstance(expires_in, (int, float)):
+                logger.error(f"Missing or invalid expiresIn type: {type(expires_in)}")
+                raise HTTPException(status_code=400, detail="Invalid token response")
+            import math
+            if not math.isfinite(expires_in) or expires_in <= 0:
+                logger.error(f"Invalid expiresIn value (not finite or <= 0): {expires_in}")
                 raise HTTPException(status_code=400, detail="Invalid token response")
 
         except httpx.RequestError as e:

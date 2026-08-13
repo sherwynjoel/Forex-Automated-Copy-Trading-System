@@ -191,8 +191,8 @@ def test_callback_missing_code_or_state(app_client):
     assert response.status_code == 400
 
 
-def test_callback_malformed_token_response(app_client, db, monkeypatch):
-    """Malformed token response (non-JSON, missing fields) returns 400."""
+def test_callback_malformed_token_response(app_client, db):
+    """Malformed token response (non-JSON) returns 400."""
     # Create a mock that returns invalid JSON
     def mock_callback_malformed(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
@@ -202,13 +202,9 @@ def test_callback_malformed_token_response(app_client, db, monkeypatch):
             return httpx.Response(200, json={"status": "ok"})
         return httpx.Response(200)
 
-    # Patch the http client to return malformed response
-    mock_transport_malformed = httpx.MockTransport(mock_callback_malformed)
-
-    # Monkeypatch the app's http client
-    import asyncio
-    async def mock_post(*args, **kwargs):
-        request = httpx.Request("POST", kwargs.get("url") or args[1] if len(args) > 1 else "")
+    # Patch the app's http client (URL is first positional arg)
+    async def mock_post(url, *args, **kwargs):
+        request = httpx.Request("POST", url)
         return mock_callback_malformed(request)
 
     original_post = app_client.app.state.http.post
@@ -240,20 +236,20 @@ def test_callback_malformed_token_response(app_client, db, monkeypatch):
 
 
 def test_callback_missing_token_fields(app_client, db):
-    """Token response missing required fields returns 400."""
-    # Create a mock that returns incomplete token response
+    """Token response missing required fields (refreshToken) returns 400."""
+    # Create a mock that returns incomplete token response (missing refreshToken)
     def mock_callback_incomplete(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
         if "openapi.ctrader.com/apps/token" in url:
-            # Missing refreshToken
+            # Missing refreshToken - this should trigger field validation, not JSON parse error
             return httpx.Response(200, json={"accessToken": "at", "expiresIn": 2592000})
         elif "copier.test" in url:
             return httpx.Response(200, json={"status": "ok"})
         return httpx.Response(200)
 
-    # Patch the app's http client
-    async def mock_post(*args, **kwargs):
-        request = httpx.Request("POST", kwargs.get("url") or args[1] if len(args) > 1 else "")
+    # Patch the app's http client (URL is first positional arg in post(url, data=..., timeout=...))
+    async def mock_post(url, *args, **kwargs):
+        request = httpx.Request("POST", url)
         return mock_callback_incomplete(request)
 
     original_post = app_client.app.state.http.post
@@ -271,12 +267,13 @@ def test_callback_missing_token_fields(app_client, db):
     params = urllib.parse.parse_qs(parsed.query)
     state = params.get("state", [None])[0]
 
-    # Try callback with incomplete response
+    # Try callback with incomplete response (missing refreshToken)
     response = app_client.get(
         f"/api/oauth/callback?code=test-auth-code&state={state}",
         follow_redirects=False
     )
 
+    # Should return 400 due to missing refreshToken field validation
     assert response.status_code == 400
 
     # Restore original
@@ -284,7 +281,25 @@ def test_callback_missing_token_fields(app_client, db):
 
 
 def test_callback_discover_failure_still_stores_grant(app_client, db):
-    """GET /api/oauth/callback stores grant even if discovery fails."""
+    """GET /api/oauth/callback stores grant even if discovery POST fails."""
+    # Create a mock that fails on discovery
+    def mock_callback_discover_fail(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "openapi.ctrader.com/apps/token" in url:
+            return httpx.Response(200, json={"accessToken": "at", "refreshToken": "rt", "expiresIn": 2592000})
+        elif "copier.test" in url:
+            # Make discovery fail with 500
+            return httpx.Response(500, json={"error": "discovery failed"})
+        return httpx.Response(200)
+
+    # Patch the app's http client to fail discovery
+    async def mock_post(url, *args, **kwargs):
+        request = httpx.Request("POST", url)
+        return mock_callback_discover_fail(request)
+
+    original_post = app_client.app.state.http.post
+    app_client.app.state.http.post = mock_post
+
     # First login
     response = app_client.post("/api/login", json={"password": "hunter2!"})
     assert response.status_code == 204
@@ -297,25 +312,69 @@ def test_callback_discover_failure_still_stores_grant(app_client, db):
     params = urllib.parse.parse_qs(parsed.query)
     state = params.get("state", [None])[0]
 
-    # Callback with normal token exchange (discovery may or may not fail based on mock)
-    # The important part is that the grant is stored regardless
+    # Callback (discovery will fail but grant should still be stored)
     response = app_client.get(
         f"/api/oauth/callback?code=test-auth-code&state={state}",
         follow_redirects=False
     )
 
-    # Should redirect successfully
+    # Should redirect with warning but still succeed
     assert response.status_code == 307
     location = response.headers.get("location")
     assert "connected=1" in location
+    assert "warning=discover_failed" in location
 
-    # Verify grant was stored
+    # Verify grant was stored DESPITE discovery failure
     with psycopg.connect(db, autocommit=True) as conn:
         result = conn.execute(
             "SELECT id FROM ctid_connections ORDER BY id DESC LIMIT 1"
         ).fetchone()
 
     assert result is not None, "Grant should be stored even if discovery fails"
+
+    # Restore original
+    app_client.app.state.http.post = original_post
+
+
+def test_callback_concurrency_replay_prevention(app_client, db):
+    """Concurrent callbacks with same state are atomically prevented (race-safe single-use)."""
+    import asyncio
+    import threading
+
+    # First login
+    response = app_client.post("/api/login", json={"password": "hunter2!"})
+    assert response.status_code == 204
+
+    # Get a valid state
+    response = app_client.get("/api/oauth/connect", follow_redirects=False)
+    assert response.status_code == 307
+    location = response.headers.get("location")
+
+    import urllib.parse
+    parsed = urllib.parse.urlparse(location)
+    params = urllib.parse.parse_qs(parsed.query)
+    state = params.get("state", [None])[0]
+    assert state
+
+    # Use the state once (first callback succeeds)
+    response = app_client.get(
+        f"/api/oauth/callback?code=test-auth-code&state={state}",
+        follow_redirects=False
+    )
+    assert response.status_code == 307, "First callback should succeed"
+
+    # Immediately try to replay the same state (second callback fails)
+    response = app_client.get(
+        f"/api/oauth/callback?code=test-auth-code&state={state}",
+        follow_redirects=False
+    )
+    assert response.status_code == 403, "Replay should be rejected (already consumed)"
+
+    # Verify only ONE grant was stored (not two from concurrent/race conditions)
+    with psycopg.connect(db, autocommit=True) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM ctid_connections").fetchone()[0]
+
+    assert count == 1, "Only one grant should exist (atomic consume prevents double-consumption)"
 
 
 def test_oauth_routes_require_admin(app_client):

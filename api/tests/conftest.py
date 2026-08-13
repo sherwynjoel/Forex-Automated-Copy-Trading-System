@@ -101,8 +101,6 @@ def app_client(db):
         app.state.http = httpx.AsyncClient(transport=mock_transport)
 
     client = TestClient(app)
-    # Store original transport for test modifications
-    client._original_mock_transport = mock_transport
 
     yield client
 
