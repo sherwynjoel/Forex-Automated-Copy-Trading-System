@@ -36,6 +36,7 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
 from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
     ProtoOAExecutionType,
     ProtoOAOrderType,
+    ProtoOAPositionStatus,
     ProtoOATradeSide,
 )
 from twisted.internet import defer, reactor
@@ -489,6 +490,88 @@ def test_reconcile_and_account_list_and_subscribe_spots_serialize(server):
 
     srv.push_spot(ACCOUNT_ID, 1, 10500, 10502)
     yield recorder.wait_until(has_spot)
+
+    yield sdk.stopService()
+
+
+@pytest_twisted.inlineCallbacks
+def test_open_positions_reflects_real_fill_then_partial_then_full_close(server):
+    """Regression test for task-30 review finding I1(b).
+
+    Before this fix, `open_positions` was populated ONLY by a test
+    hand-scripting it directly (see the test above) -- a REAL market fill
+    via _handle_new_order_req, or a REAL close via
+    _handle_close_position_req, never touched it. That made a
+    ProtoOAReconcileReq sent any time after a genuine fill report ZERO open
+    positions, which is unfaithful to a real broker (whose reconcile
+    response reflects positions opened earlier in the same session) and is
+    exactly what breaks task-30's compose e2e: CopierApp.resync() reconciles
+    the master AFTER a real fill and feeds the result into GET
+    /api/state's master_positions.
+
+    Drives a real MARKET fill, then a real PARTIAL close, then a real FULL
+    close, asserting what ProtoOAReconcileReq reports after each: full
+    volume open, reduced volume still open, then gone entirely.
+    """
+    srv, port = server
+    sdk, recorder = yield _connect_and_auth(port)
+
+    order_req = ProtoOANewOrderReq()
+    order_req.ctidTraderAccountId = ACCOUNT_ID
+    order_req.symbolId = 1
+    order_req.orderType = ProtoOAOrderType.MARKET
+    order_req.tradeSide = ProtoOATradeSide.BUY
+    order_req.volume = 1_000_000
+    order_req.label = "reconcile-fill-test"
+    _fire_and_forget(sdk, order_req, "open-1")
+
+    def n_fills(n):
+        return lambda messages: len(
+            [m for m in messages if getattr(m[2], "executionType", None) == ProtoOAExecutionType.ORDER_FILLED]
+        ) >= n
+
+    yield recorder.wait_until(n_fills(1))
+    filled = [m for m in recorder.messages if getattr(m[2], "executionType", None) == ProtoOAExecutionType.ORDER_FILLED]
+    position_id = filled[0][2].deal.positionId
+
+    def _reconcile():
+        req = ProtoOAReconcileReq()
+        req.ctidTraderAccountId = ACCOUNT_ID
+        return sdk.send(req)
+
+    # After the fill: position present, full volume, real symbol/side/label
+    # (not the close handler's own placeholder defaults).
+    res = Protobuf.extract((yield _reconcile()))
+    assert [p.positionId for p in res.position] == [position_id]
+    pos = res.position[0]
+    assert pos.tradeData.volume == 1_000_000
+    assert pos.tradeData.symbolId == 1
+    assert pos.tradeData.tradeSide == ProtoOATradeSide.BUY
+    assert pos.tradeData.label == "reconcile-fill-test"
+    assert pos.positionStatus == ProtoOAPositionStatus.POSITION_STATUS_OPEN
+
+    # Partial close (half): position stays OPEN with reduced volume.
+    close_half = ProtoOAClosePositionReq()
+    close_half.ctidTraderAccountId = ACCOUNT_ID
+    close_half.positionId = position_id
+    close_half.volume = 500_000
+    _fire_and_forget(sdk, close_half, "close-half-1")
+    yield recorder.wait_until(n_fills(2))
+
+    res = Protobuf.extract((yield _reconcile()))
+    assert [p.positionId for p in res.position] == [position_id]
+    assert res.position[0].tradeData.volume == 500_000
+
+    # Full close (remaining half): position is GONE from reconcile.
+    close_rest = ProtoOAClosePositionReq()
+    close_rest.ctidTraderAccountId = ACCOUNT_ID
+    close_rest.positionId = position_id
+    close_rest.volume = 500_000
+    _fire_and_forget(sdk, close_rest, "close-rest-1")
+    yield recorder.wait_until(n_fills(3))
+
+    res = Protobuf.extract((yield _reconcile()))
+    assert list(res.position) == []
 
     yield sdk.stopService()
 

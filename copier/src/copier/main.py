@@ -103,7 +103,11 @@ class CopierApp:
             return
 
         yield self._connect_and_authorize(accounts)
-        yield self._fetch_and_cache_symbols(accounts)
+        # force=True: a fresh process boot should always see the broker's
+        # CURRENT symbol set, never a stale DB cache from a previous
+        # process lifetime (see _fetch_and_cache_symbols' docstring for why
+        # reload(), unlike startup(), does not force this).
+        yield self._fetch_and_cache_symbols(accounts, force=True)
 
         try:
             yield self.resync()
@@ -148,8 +152,37 @@ class CopierApp:
             self.repo.set_account_status(account.account_id, 'degraded', f"authorization failed: {e}")
 
     @defer.inlineCallbacks
-    def _fetch_and_cache_symbols(self, accounts):
+    def _fetch_and_cache_symbols(self, accounts, force: bool = False):
+        """Fetch + cache each account's symbol map from the broker.
+
+        force=True (startup(), a once-per-process-lifetime event): fetches
+        every account unconditionally, exactly as before this parameter
+        existed.
+
+        force=False (reload(), the default -- see task-30 review finding
+        I2): SKIPS any account whose symbol_cache already has at least one
+        entry. reload() runs on the hot path of every PUT /api/settings and
+        every pause()/resume() (settings_control.py / main.py), so an
+        unconditional full re-fetch there would cost two heavyweight broker
+        round trips (ProtoOASymbolsListReq + ProtoOASymbolByIdReq) PER
+        ACCOUNT on every single operator action -- against a real broker
+        with a large symbol universe this risks the api's httpx proxy
+        timeout (a misleading 502 on a change that already applied) and
+        does needless broker traffic under cTrader's rate limits. A
+        brand-new account (the actual reason reload() needs this method at
+        all -- see the comment at its call site) has an empty cache and
+        still gets fetched the first time reload() ever sees it; every
+        later reload() is then free for that account.
+
+        On failure, logs an 'connection'/'error' EVENT (not just a log
+        line) so an operator sees a broken symbol fetch via /api/events
+        instead of only in container logs -- otherwise a fetch that starts
+        failing after this method stops running unconditionally could go
+        unnoticed indefinitely.
+        """
         for account in accounts:
+            if not force and self.repo.load_symbol_cache(account.account_id):
+                continue
             client = self._client_for_account(account)
             if client is None:
                 continue
@@ -161,6 +194,11 @@ class CopierApp:
                     self.master_symbols_by_id.update(symbols_by_id(symbol_map))
             except Exception as e:
                 log.error("failed to fetch symbol map for account %s: %s", account.account_id, e)
+                self.repo.log_event(
+                    'connection', 'error',
+                    {'action': 'symbol_fetch_failed', 'error': str(e)},
+                    account_id=account.account_id,
+                )
 
     def _client_for_account(self, account) -> CTraderClient | None:
         shard = account.account_id % self.shards
@@ -264,8 +302,49 @@ class CopierApp:
             else:
                 client.deauthorize_account(account.account_id)
 
+        # Mirrors startup()'s authorize -> fetch-symbols ordering: accounts
+        # added (via discover()/direct insert) and enabled AFTER the process
+        # already booted only ever go through reload(), never startup()
+        # again -- without this, their symbol_cache (needed by every slave's
+        # mirror_volume sizing) and, for a newly (re)designated master,
+        # master_symbols_by_id (needed by normalize()'s unknown-symbol gate)
+        # would stay empty for the lifetime of the process, silently
+        # dropping every master event / mis-sizing every slave copy with no
+        # error surfaced anywhere. Caught by the compose-level e2e test
+        # (e2e/test_full_stack.py), which seeds accounts and calls /reload
+        # against an already-running copier that started with zero accounts.
+        #
+        # Restricted to effectively-enabled accounts and left at
+        # force=False (cache-miss-only, see _fetch_and_cache_symbols):
+        # reload() runs on the hot path of every settings/pause/resume
+        # call, so (a) an account just deauthorized above has no live
+        # account-auth on this connection to fetch against -- skipping it
+        # avoids a guaranteed failure every reload, not just a logged one --
+        # and (b) an already-cached account costs zero broker round trips
+        # on every subsequent reload instead of two, every time (task-30
+        # review finding I2).
+        accounts_needing_symbols = [
+            a for a in accounts if a.enabled and a.status != 'paused'
+        ]
+        yield self._fetch_and_cache_symbols(accounts_needing_symbols)
+
         master_account = next((a for a in accounts if a.role == 'master'), None)
         new_master_id = master_account.account_id if master_account else None
+
+        # Refresh the IN-MEMORY master_symbols_by_id from whatever is
+        # currently cached in the DB for the master, unconditionally --
+        # decoupled from whether _fetch_and_cache_symbols actually hit the
+        # broker this cycle. Without this, a former SLAVE (already cached
+        # from being a slave) promoted to master would hit the cache-miss
+        # skip above and never populate master_symbols_by_id at all, since
+        # only a successful FETCH (not a cache hit) updates it in
+        # _fetch_and_cache_symbols. This is a plain local DB read, not a
+        # broker round trip, so doing it every reload is free.
+        if master_account is not None:
+            master_symbol_cache = self.repo.load_symbol_cache(master_account.account_id)
+            self.master_symbols_by_id.clear()
+            self.master_symbols_by_id.update(symbols_by_id(master_symbol_cache))
+
         if new_master_id != self.master_account_id:
             self.master_account_id = new_master_id
             self.service._master_account_id = new_master_id
