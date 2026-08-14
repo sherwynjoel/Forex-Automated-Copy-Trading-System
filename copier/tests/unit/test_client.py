@@ -4,7 +4,8 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
 from twisted.internet import defer
 from twisted.internet.task import Clock
 
-from copier.ctrader.client import HEARTBEAT_INTERVAL_S, CTraderClient
+from copier.ctrader.client import (
+    HEARTBEAT_INTERVAL_S, SEND_HANDOFF_TIMEOUT_S, CTraderClient)
 
 
 class StubProtocol:
@@ -216,7 +217,11 @@ def test_deauthorize_account_removes_from_reauth_registry():
 # and get misread by Dispatcher as an ambiguous failure -> degraded slave
 # account. send_no_reply() must resolve purely from the transport handoff
 # (whenConnected() + protocol.send()), never by waiting on an incoming
-# reply, and must never schedule a timeout of its own.
+# reply. It also bounds the wait for a *connection* itself (SEND_HANDOFF_
+# TIMEOUT_S, much shorter than the old 5s reply-timeout): whenConnected()
+# resolves with "the currently connected protocol, or the NEXT one to
+# connect", so without a bound it can stay pending through an entire
+# reconnect backoff (up to 60s) and then hand off a stale trade late.
 
 def test_send_no_reply_resolves_on_transport_handoff_without_awaiting_a_reply():
     sdk, clock, client = make()
@@ -232,12 +237,17 @@ def test_send_no_reply_resolves_on_transport_handoff_without_awaiting_a_reply():
     assert not isinstance(d.result, Exception)
     assert sdk.protocol.sent and sdk.protocol.sent[-1] == (msg, str(id(msg)))
 
-    # Unlike send() (which calls addTimeout, scheduling a delayed call),
-    # send_no_reply() must not have scheduled anything on the clock.
+    # The bounded-handoff timer is armed and (since the connection was
+    # already up) immediately cancelled again within this same call -- by
+    # the time send_no_reply() returns, nothing net-new is left scheduled
+    # on the clock (contrast the never-connected case below, where the
+    # timer is still pending afterwards).
     assert len(clock.getDelayedCalls()) == before
 
-    # Advancing well past the SDK's real ~5s response-timeout window must
-    # produce no late failure, because no timeout was ever armed.
+    # Advancing well past the SDK's real ~5s response-timeout window (the
+    # unwanted timeout send_no_reply exists to avoid) must produce no late
+    # failure -- the message already succeeded, and the local handoff timer
+    # was cancelled, not merely not-yet-fired.
     clock.advance(10.0)
     assert d.called
     assert not isinstance(d.result, Exception)
@@ -257,3 +267,50 @@ def test_send_no_reply_propagates_connection_level_failure():
     assert len(errors) == 1
     assert isinstance(errors[0].value, RuntimeError)
     assert not sdk.protocol.sent   # never reached the transport
+
+
+def test_send_no_reply_times_out_when_never_connected_without_enqueueing():
+    """Guards C1: an unbounded wait for a connection is itself a bug (it can
+    hold a trade request through a full ~60s reconnect backoff and then send
+    it stale). If no connection becomes available within
+    SEND_HANDOFF_TIMEOUT_S, send_no_reply must fail on its own -- and must
+    never have called protocol.send() at all, so the caller can always
+    safely treat this as SendNotAttempted-eligible (never reached a
+    transport, let alone the wire)."""
+    sdk, clock, client = make()
+    # Deliberately never connect and never fail_next_whenConnected(): the
+    # underlying whenConnected() Deferred stays genuinely pending, exactly
+    # like a client stuck mid-reconnect-backoff.
+
+    d = client.send_no_reply(ProtoOAExecutionEvent())
+    assert not d.called   # still bounded-waiting
+
+    clock.advance(SEND_HANDOFF_TIMEOUT_S)
+
+    assert d.called
+    errors = []
+    d.addErrback(errors.append)
+    assert len(errors) == 1
+    assert isinstance(errors[0].value, defer.TimeoutError)
+    assert sdk.protocol.sent == []   # never enqueued -- nothing to evict
+
+
+def test_send_no_reply_ignores_a_late_whenconnected_after_timeout():
+    """A whenConnected() Deferred that resolves AFTER send_no_reply already
+    reported a timeout to the caller must be ignored: no enqueue (the
+    caller has already moved on and may be retrying elsewhere) and no
+    crash. This is the reason send_no_reply deliberately never calls
+    .cancel() on whenConnected()'s own Deferred (see its docstring): the
+    vendored SDK's waiter list only forgets an entry when it fires it, so a
+    stray late firing is expected and must be handled, not prevented."""
+    sdk, clock, client = make()
+
+    d = client.send_no_reply(ProtoOAExecutionEvent())
+    clock.advance(SEND_HANDOFF_TIMEOUT_S)
+    assert d.called
+    d.addErrback(lambda _f: None)   # already asserted the failure shape above
+
+    # The connection "arrives" late -- must not raise (e.g. AlreadyCalledError)
+    # and must not enqueue the now-abandoned message.
+    sdk.connect()
+    assert sdk.protocol.sent == []

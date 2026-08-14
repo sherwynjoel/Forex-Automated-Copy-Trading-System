@@ -5,6 +5,7 @@ typed routing of pushed events. Reconnect scheduling itself is Twisted
 ClientService's retryPolicy (see make_sdk_client).
 """
 import logging
+from collections import deque
 from typing import Callable
 
 from ctrader_open_api import Client, Protobuf, TcpProtocol
@@ -15,14 +16,44 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOAExecutionEvent, ProtoOASpotEvent)
 from twisted.application.internet import backoffPolicy
 from twisted.internet import defer, task
+from twisted.python.failure import Failure
 
 log = logging.getLogger(__name__)
 
 HEARTBEAT_INTERVAL_S = 8.0   # server requires <= 10 s
 
+# Max time send_no_reply() will wait for a connected transport before
+# failing. Deliberately short: whenConnected() resolves with "the currently
+# connected protocol, OR THE NEXT ONE TO CONNECT", so during a reconnect it
+# can otherwise stay pending through the whole backoff (up to 60s, see
+# make_sdk_client) and then hand a now-stale trade request to the wire at a
+# since-moved price. A trade send must never wait out a reconnect backoff.
+SEND_HANDOFF_TIMEOUT_S = 2.0
+
+
+class _PerConnectionTcpProtocol(TcpProtocol):
+    """TcpProtocol keeps its outbound queue (`_send_queue`) as a **class**
+    attribute (`_send_queue = deque([])`, vendored, not ours to patch) that
+    is mutated via .append()/.popleft() but never reassigned -- so by
+    default every TCP connection in the process shares ONE process-global
+    queue. A message queued on one connection can then be silently drained
+    and written down a DIFFERENT, unrelated connection if the first
+    disconnects before its 1s drain tick fires (e.g. a slave trade request
+    flushed on the wrong shard/environment's socket). Shadowing
+    `_send_queue` as an instance attribute on connect gives each connection
+    its own private queue: a message can only ever be sent on the
+    connection it was handed off to, and is simply dropped (never resent
+    elsewhere) if that connection goes away first -- so this can never
+    double-send.
+    """
+
+    def connectionMade(self):
+        self._send_queue = deque()
+        super().connectionMade()
+
 
 def make_sdk_client(host: str, port: int) -> Client:
-    return Client(host, port, TcpProtocol,
+    return Client(host, port, _PerConnectionTcpProtocol,
                   retryPolicy=backoffPolicy(initialDelay=1.0, maxDelay=60.0, factor=2.0))
 
 
@@ -30,6 +61,7 @@ class CTraderClient:
     def __init__(self, sdk, client_id: str, client_secret: str, clock=None):
         if clock is None:
             from twisted.internet import reactor as clock  # pragma: no cover
+        self._clock = clock
         self._sdk = sdk
         self._client_id = client_id
         self._client_secret = client_secret
@@ -63,7 +95,7 @@ class CTraderClient:
     def send(self, msg) -> defer.Deferred:
         return self._sdk.send(msg)
 
-    def send_no_reply(self, msg) -> defer.Deferred:
+    def send_no_reply(self, msg, timeout_s: float = SEND_HANDOFF_TIMEOUT_S) -> defer.Deferred:
         """Fire-and-forget send for trade requests (new order, close position,
         amend SL/TP, amend order, cancel order): the real cTrader server
         never sends a synchronous, clientMsgId-tagged reply to these --
@@ -80,14 +112,65 @@ class CTraderClient:
         ~5s after being sent, which Dispatcher treats as an ambiguous
         failure and marks the account degraded.
 
-        The returned Deferred fires once the message has been handed to a
-        connected transport; a connection-level failure (e.g. not currently
-        connected) still propagates as a failure, exactly as it does for
-        send() -- both go through the same whenConnected() gate.
+        The wait for a connected transport is itself bounded to `timeout_s`
+        (see SEND_HANDOFF_TIMEOUT_S): whenConnected() resolves with "the
+        currently-connected protocol, or the NEXT one to connect", so
+        without a bound this could otherwise stay pending through an entire
+        reconnect backoff (up to 60s) and then hand off a now-stale trade at
+        a since-moved price -- a caller (Dispatcher) chaining this with no
+        timeout of its own would see total silence for that whole window: no
+        event row, no alert, no degraded status. If no connection becomes
+        available in time, this fails WITHOUT ever calling protocol.send()
+        -- the message is never queued, so the caller can always safely
+        treat this as "never reached the wire" and retry. A connection-level
+        failure (e.g. all reconnect attempts exhausted) fails the same way.
+
+        Deliberately does NOT call .cancel() on the Deferred returned by
+        whenConnected(): the vendored SDK's _awaitingConnected waiter list
+        removes an entry only when it fires it (see
+        twisted/application/internet.py _awaitingConnection/_unawait), not
+        when the caller cancels the Deferred it was handed -- cancelling it
+        directly would leave a phantom entry that the SDK later tries to
+        fire a second time, raising AlreadyCalledError deep inside
+        ClientService's state machine (which would also break firing of any
+        OTHER, legitimately-still-waiting whenConnected() callers, since
+        `_unawait` fires all waiters in a single unguarded loop). Instead,
+        this races whenConnected() against its own independent timer: if the
+        timer wins, this Deferred fails and protocol.send() is simply never
+        invoked; if whenConnected() later fires anyway (late), the result is
+        silently discarded rather than acted on.
         """
+        result: defer.Deferred = defer.Deferred()
+        settled = [False]
+
+        def _fail(failure: Failure) -> None:
+            if not settled[0]:
+                settled[0] = True
+                result.errback(failure)
+
+        def _on_connected(protocol) -> None:
+            if settled[0]:
+                # Already timed out and reported to the caller (see the
+                # cancellation note above) -- do not enqueue a message for
+                # an operation the caller has already been told failed.
+                return
+            settled[0] = True
+            result.callback(protocol.send(msg, clientMsgId=str(id(msg))))
+
+        def _on_timeout() -> None:
+            _fail(Failure(defer.TimeoutError(
+                f"send_no_reply: no connected transport within {timeout_s}s")))
+
+        timeout_call = self._clock.callLater(timeout_s, _on_timeout)
+
+        def _cancel_pending_timeout(_ignored=None) -> None:
+            if timeout_call.active():
+                timeout_call.cancel()
+
         d = self._sdk.whenConnected(failAfterFailures=1)
-        d.addCallback(lambda protocol: protocol.send(msg, clientMsgId=str(id(msg))))
-        return d
+        d.addCallbacks(_on_connected, _fail)
+        d.addBoth(_cancel_pending_timeout)
+        return result
 
     def on_execution(self, cb) -> None: self._exec_cbs.append(cb)
     def on_account_disconnect(self, cb) -> None: self._disc_cbs.append(cb)

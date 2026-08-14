@@ -290,6 +290,26 @@ def test_master_fill_fans_out_and_maps(db):
             if e["payload"].get("action") == "position_filled"
         ]
         assert {e["account_id"] for e in filled} == {SLAVE1_ID, SLAVE2_ID}
+
+        # Regression guard for the exact bug this task exists to catch:
+        # send_for_account used to call client.send() (not send_no_reply()),
+        # whose response Deferred timed out ~5s after every successful send
+        # (the real cTrader server never tags a reply to a trade request),
+        # which Dispatcher misread as an ambiguous failure and degraded the
+        # slave account -- on EVERY successful copy. Wait past that old
+        # window and prove neither slave was degraded and no send_failed_*
+        # event was logged.
+        yield task.deferLater(reactor, 5.5, lambda: None)
+
+        accounts_after = {a.account_id: a.status for a in repo.load_accounts()}
+        assert accounts_after[SLAVE1_ID] == 'ok'
+        assert accounts_after[SLAVE2_ID] == 'ok'
+
+        failed_sends = [
+            e for e in _events(db, "slave_action")
+            if str(e["payload"].get("action", "")).startswith("send_failed")
+        ]
+        assert failed_sends == []
     finally:
         _teardown(app, server)
 
@@ -299,10 +319,8 @@ def test_master_fill_fans_out_and_maps(db):
 def test_master_close_closes_slave_copies(db):
     """Master closes its position in full; both slave copies close too.
 
-    FakeCTraderServer's close handler only models FULL closes (it always
-    reports the position as CLOSED, regardless of requested volume -- see
-    testing/fake_server.py:_handle_close_position_req), so this exercises a
-    full close rather than a partial one.
+    See test_partial_close_closes_same_fraction for a close of less than
+    the full position (the proportional-volume path).
     """
     server, repo, app = _setup(db)
     try:
@@ -337,6 +355,80 @@ def test_master_close_closes_slave_copies(db):
         assert len(final_rows) == 2
         assert all(r["status"] == "closed" for r in final_rows)
         assert all(r["slave_volume"] == 0 for r in final_rows)
+    finally:
+        _teardown(app, server)
+
+
+@pytest.mark.timeout(45)
+@pytest_twisted.inlineCallbacks
+def test_partial_close_closes_same_fraction(db):
+    """Master closes HALF its position; each slave receives a
+    ProtoOAClosePositionReq for the SAME fraction of ITS OWN position
+    (scaled by its multiplier, not by the master's raw volume), and its
+    mapping stays 'active' with slave_volume reduced accordingly -- not
+    closed outright.
+
+    Exercises domain/sizing.py:partial_close_volume via
+    engine/normalize.py's MasterPositionClosed.remaining_volume, which
+    FakeCTraderServer now tracks per position (see
+    testing/fake_server.py:_handle_close_position_req).
+    """
+    server, repo, app = _setup(db)
+    try:
+        yield app.startup()
+        client = app.clients[False][0]
+
+        _fire_and_forget(client, _market_order(MASTER_ID, ProtoOATradeSide.BUY, ONE_LOT))
+        yield _wait_until(lambda: len(_active_rows(repo)) >= 2)
+
+        opened = repo.mapping_rows()
+        master_position_id = opened[0]["master_position_id"]
+        slave_position_id = {r["slave_account_id"]: r["slave_position_id"] for r in opened}
+
+        half_of_master = ONE_LOT // 2   # 5_000_000
+        expected_slave_close = {
+            SLAVE1_ID: 5_000_000,   # multiplier 1.0: half of slave's 10_000_000
+            SLAVE2_ID: 2_500_000,   # multiplier 0.5: half of slave's 5_000_000
+        }
+        expected_remaining = {
+            SLAVE1_ID: 5_000_000,
+            SLAVE2_ID: 2_500_000,
+        }
+
+        _fire_and_forget(client, _close_position(MASTER_ID, master_position_id, half_of_master))
+
+        yield _wait_until(
+            lambda: sum(
+                1 for r in server.requests
+                if isinstance(r, ProtoOAClosePositionReq) and r.ctidTraderAccountId in (SLAVE1_ID, SLAVE2_ID)
+            ) >= 2
+        )
+
+        close_reqs = [
+            r for r in server.requests
+            if isinstance(r, ProtoOAClosePositionReq) and r.ctidTraderAccountId in (SLAVE1_ID, SLAVE2_ID)
+        ]
+        assert len(close_reqs) == 2
+        by_account = {r.ctidTraderAccountId: r for r in close_reqs}
+        for slave_id in (SLAVE1_ID, SLAVE2_ID):
+            assert by_account[slave_id].positionId == slave_position_id[slave_id]
+            assert by_account[slave_id].volume == expected_slave_close[slave_id]
+
+        yield _wait_until(
+            lambda: all(
+                r["slave_volume"] == expected_remaining[r["slave_account_id"]]
+                for r in repo.mapping_rows()
+            )
+        )
+
+        final_rows = repo.mapping_rows()
+        assert len(final_rows) == 2
+        # Partial close: mapping stays active (not closed), volume reduced
+        # by the proportional amount -- not zeroed out.
+        assert all(r["status"] == "active" for r in final_rows)
+        by_slave = {r["slave_account_id"]: r for r in final_rows}
+        assert by_slave[SLAVE1_ID]["slave_volume"] == expected_remaining[SLAVE1_ID]
+        assert by_slave[SLAVE2_ID]["slave_volume"] == expected_remaining[SLAVE2_ID]
     finally:
         _teardown(app, server)
 

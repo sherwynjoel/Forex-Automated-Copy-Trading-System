@@ -67,6 +67,19 @@ class FakeCTraderServer:
         self._position_ids = itertools.count(5000)
         self._order_ids = itertools.count(9000)
         self._deal_ids = itertools.count(1000)
+        # position_id -> currently open volume, for ANY account (master or
+        # slave -- position_ids are drawn from one global counter above, so
+        # they never collide across accounts). Populated when a MARKET order
+        # fills; consulted by _handle_close_position_req so a close can
+        # correctly report whether it was full or partial (real cTrader:
+        # position.tradeData.volume is the REMAINING volume after the close,
+        # and positionStatus stays OPEN when some volume remains). Without
+        # this, every close looked full, and MasterPositionClosed's
+        # remaining_volume was always 0 (see engine/normalize.py), which
+        # collapses partial_close_volume() to a full close every time
+        # (domain/sizing.py:25) -- the fraction math this fake exists to let
+        # the e2e exercise was structurally unreachable.
+        self._position_volumes: dict[int, int] = {}
         self._listening = None
         self._handlers: dict[int, Any] = {}
         self._setup_handlers()
@@ -373,6 +386,7 @@ class FakeCTraderServer:
 
                 # Broadcast ORDER_FILLED event (untagged)
                 position_id = next(self._position_ids)
+                self._position_volumes[position_id] = req.volume
                 deal_id = next(self._deal_ids)
                 fill_evt = oa.ProtoOAExecutionEvent()
                 fill_evt.ctidTraderAccountId = req.ctidTraderAccountId
@@ -434,6 +448,19 @@ class FakeCTraderServer:
         self.requests.append(req)
 
         if self.auto_fill:
+            # Compute the position's REMAINING volume after this close, so a
+            # request for less than the whole position reports a genuine
+            # partial close (position stays OPEN) rather than always
+            # reporting the position as fully closed regardless of
+            # req.volume. Falls back to treating req.volume as the entire
+            # position when it was never seen opened here (e.g. a
+            # position_id fabricated directly by a test) -- preserves the
+            # previous always-full-close behaviour for that case.
+            current_volume = self._position_volumes.get(req.positionId, req.volume)
+            remaining_volume = max(current_volume - req.volume, 0)
+            self._position_volumes[req.positionId] = remaining_volume
+            is_full_close = remaining_volume == 0
+
             # Broadcast ORDER_FILLED event with closePositionDetail (untagged)
             deal_id = next(self._deal_ids)
             fill_evt = oa.ProtoOAExecutionEvent()
@@ -457,9 +484,17 @@ class FakeCTraderServer:
             fill_evt.deal.closePositionDetail.balance = 100000  # Plausible default
             fill_evt.position.positionId = req.positionId
             fill_evt.position.tradeData.symbolId = 1  # Default
-            fill_evt.position.tradeData.volume = 0  # Closed
+            # REMAINING volume (real cTrader semantics), not always 0: this
+            # is what normalize() reads as MasterPositionClosed.remaining_volume
+            # (engine/normalize.py), which domain/sizing.py:partial_close_volume
+            # uses to compute each slave's proportional close -- a hardcoded
+            # 0 here made every close look 100% regardless of req.volume.
+            fill_evt.position.tradeData.volume = remaining_volume
             fill_evt.position.tradeData.tradeSide = model.ProtoOATradeSide.BUY  # Default
-            fill_evt.position.positionStatus = model.ProtoOAPositionStatus.POSITION_STATUS_CLOSED
+            fill_evt.position.positionStatus = (
+                model.ProtoOAPositionStatus.POSITION_STATUS_CLOSED if is_full_close
+                else model.ProtoOAPositionStatus.POSITION_STATUS_OPEN
+            )
             fill_evt.position.swap = 0
             # normalize() keys its symbol lookup off order.tradeData.symbolId
             # for every execution event, closes included (see
