@@ -26,7 +26,15 @@ export interface EventResponse {
   payload: Record<string, unknown>
 }
 
-export type DriftKind = 'orphan_slave_position' | 'missing_slave_copy' | 'unmapped_master_position' | 'unfilled_slave_order'
+export type DriftKind =
+  | 'orphan_slave_position'
+  | 'missing_slave_copy'
+  | 'unmapped_master_position'
+  | 'unfilled_slave_order'
+  // N8: a copy that was dispatched but never activated -- invisible to every
+  // other drift category, because it has no slave_position_id and the master
+  // position still has other slaves' active mapping rows.
+  | 'stale_pending_copy'
 
 export interface DriftItem {
   id: string
@@ -40,7 +48,7 @@ export interface DriftItem {
 export interface PositionData {
   position_id: number
   symbol_id: number
-  symbol?: string
+  symbol?: string | null
   side: string
   volume: number
   entry_price: number
@@ -66,29 +74,29 @@ export interface PositionCopy {
   status: string
   error?: string | null
   fill_price?: number | null
-  volume_lots?: string
+  volume_lots?: string | null
 }
 
 export interface MasterPosition {
   position_id: number
   symbol_id: number
-  symbol?: string
+  symbol?: string | null
   side: string
   volume: number
   price: number
   label: string
   pnl_quote?: number | null
-  volume_lots?: string
+  volume_lots?: string | null
   copies: PositionCopy[]
 }
 
 export interface PendingOrder {
   order_id: number
   symbol_id: number
-  symbol?: string
+  symbol?: string | null
   volume: number
   label: string
-  volume_lots?: string
+  volume_lots?: string | null
   copies: PositionCopy[]
 }
 

@@ -552,3 +552,143 @@ test(
     setIntervalSpy.mockRestore()
   }
 )
+
+// ---------- N1: the dry-run toggle ----------
+
+test('dry-run toggle PUTs dry_run: true when enabling', async () => {
+  const fetchMock = stubApi({
+    '/api/accounts': mockAccounts,
+    '/api/settings': mockSettings, // dry_run: false
+    '/api/state': mockState,
+  })
+
+  render(
+    <MemoryRouter>
+      <Overview />
+    </MemoryRouter>
+  )
+
+  await waitFor(() => {
+    expect(screen.getByTestId('dry-run-toggle')).toBeInTheDocument()
+  })
+
+  const toggle = screen.getByTestId('dry-run-toggle')
+  expect(toggle).toHaveTextContent(/turn dry-run on/i)
+  await userEvent.click(toggle)
+
+  await waitFor(() => {
+    const putCall = fetchMock.mock.calls.find(
+      (call) => call[1]?.method === 'PUT' && call[0].includes('/api/settings')
+    )
+    expect(putCall).toBeDefined()
+    // The real value must be in the body -- this is the dashboard half of
+    // the seam where the api forwarded a hardcoded empty body and the copier
+    // read the absent "enabled" as false.
+    expect(JSON.parse(putCall![1]?.body as string)).toEqual({ dry_run: true })
+  })
+})
+
+test('enabling dry-run needs no confirmation (it is the safe direction)', async () => {
+  const fetchMock = stubApi({
+    '/api/accounts': mockAccounts,
+    '/api/settings': mockSettings,
+    '/api/state': mockState,
+  })
+  const confirmMock = vi.fn().mockReturnValue(false)
+  vi.stubGlobal('confirm', confirmMock)
+
+  render(
+    <MemoryRouter>
+      <Overview />
+    </MemoryRouter>
+  )
+
+  await waitFor(() => expect(screen.getByTestId('dry-run-toggle')).toBeInTheDocument())
+  await userEvent.click(screen.getByTestId('dry-run-toggle'))
+
+  expect(confirmMock).not.toHaveBeenCalled()
+  await waitFor(() => {
+    const putCall = fetchMock.mock.calls.find(
+      (call) => call[1]?.method === 'PUT' && call[0].includes('/api/settings')
+    )
+    expect(putCall).toBeDefined()
+  })
+})
+
+test('disabling dry-run confirms first, then PUTs dry_run: false', async () => {
+  const dryRunSettings: Settings = { copying_enabled: true, dry_run: true, shards: 4 }
+  const fetchMock = stubApi({
+    '/api/accounts': mockAccounts,
+    '/api/settings': dryRunSettings,
+    '/api/state': mockState,
+  })
+  const confirmMock = vi.fn().mockReturnValue(true)
+  vi.stubGlobal('confirm', confirmMock)
+
+  render(
+    <MemoryRouter>
+      <Overview />
+    </MemoryRouter>
+  )
+
+  await waitFor(() => expect(screen.getByTestId('dry-run-toggle')).toBeInTheDocument())
+  const toggle = screen.getByTestId('dry-run-toggle')
+  expect(toggle).toHaveTextContent(/turn dry-run off/i)
+  await userEvent.click(toggle)
+
+  expect(confirmMock).toHaveBeenCalled()
+  await waitFor(() => {
+    const putCall = fetchMock.mock.calls.find(
+      (call) => call[1]?.method === 'PUT' && call[0].includes('/api/settings')
+    )
+    expect(putCall).toBeDefined()
+    expect(JSON.parse(putCall![1]?.body as string)).toEqual({ dry_run: false })
+  })
+})
+
+test('disabling dry-run does not PUT if confirm is rejected', async () => {
+  const dryRunSettings: Settings = { copying_enabled: true, dry_run: true, shards: 4 }
+  const fetchMock = stubApi({
+    '/api/accounts': mockAccounts,
+    '/api/settings': dryRunSettings,
+    '/api/state': mockState,
+  })
+  vi.stubGlobal('confirm', vi.fn().mockReturnValue(false))
+
+  render(
+    <MemoryRouter>
+      <Overview />
+    </MemoryRouter>
+  )
+
+  await waitFor(() => expect(screen.getByTestId('dry-run-toggle')).toBeInTheDocument())
+  await userEvent.click(screen.getByTestId('dry-run-toggle'))
+
+  const putCall = fetchMock.mock.calls.find(
+    (call) => call[1]?.method === 'PUT' && call[0].includes('/api/settings')
+  )
+  expect(putCall).toBeUndefined()
+})
+
+test('the dry-run badge reflects the toggled state without a reload', async () => {
+  stubApi({
+    '/api/accounts': mockAccounts,
+    '/api/settings': mockSettings, // dry_run: false -> no badge initially
+    '/api/state': mockState,
+  })
+
+  render(
+    <MemoryRouter>
+      <Overview />
+    </MemoryRouter>
+  )
+
+  await waitFor(() => expect(screen.getByTestId('dry-run-toggle')).toBeInTheDocument())
+  expect(screen.queryByText(/^DRY RUN$/)).not.toBeInTheDocument()
+
+  await userEvent.click(screen.getByTestId('dry-run-toggle'))
+
+  await waitFor(() => {
+    expect(screen.getByText(/^DRY RUN$/)).toBeInTheDocument()
+  })
+})

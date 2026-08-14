@@ -13,7 +13,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-timeout>=2", "pytest-asyncio>=0.24"]
+# T9a: `websockets` is imported directly by tests/test_events_ws.py. It was
+# only ever present transitively (via uvicorn[standard]), so any change to
+# uvicorn's extras would have broken the api suite with an ImportError that
+# looked nothing like its cause. Declared explicitly here because this
+# project depends on it directly.
+dev = ["pytest>=8", "pytest-timeout>=2", "pytest-asyncio>=0.24", "websockets>=12"]
 
 [build-system]
 requires = ["hatchling"]

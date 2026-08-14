@@ -44,32 +44,134 @@ def test_callback_rejects_bad_state(app_client):
     assert response.status_code == 403
 
 
+def _state_from_connect(app_client) -> str:
+    """Drive GET /api/oauth/connect and return the `state` it minted."""
+    import urllib.parse
+
+    response = app_client.get("/api/oauth/connect", follow_redirects=False)
+    assert response.status_code == 307
+    params = urllib.parse.parse_qs(urllib.parse.urlparse(response.headers["location"]).query)
+    state = params.get("state", [None])[0]
+    assert state
+    return state
+
+
+def test_oauth_state_does_not_carry_the_session_cookie(app_client, db):
+    """N4: the state parameter must be an opaque nonce and nothing else.
+
+    RED before the fix: state was
+    `URLSafeTimedSerializer(...).dumps({"state": ..., "session": session})`
+    -- SIGNED, NOT ENCRYPTED -- so its payload was plain base64 JSON
+    containing the full, currently-valid admin session cookie. That value
+    travelled in a query string to openapi.ctrader.com (their request logs),
+    sat in browser history, and came back in the callback URL; anyone who
+    read it could decode it and replay the admin session for up to 12 h.
+    """
+    import base64
+
+    response = app_client.post("/api/login", json={"password": "hunter2!"})
+    assert response.status_code == 204
+    session_cookie = app_client.cookies.get("session")
+    assert session_cookie
+
+    state = _state_from_connect(app_client)
+
+    # Nothing recoverable from the state resembles the session, whether read
+    # raw or base64-decoded the way itsdangerous' payload used to be.
+    assert session_cookie not in state
+    decodable = [state] + state.split(".")
+    for chunk in decodable:
+        padded = chunk + "=" * (-len(chunk) % 4)
+        try:
+            decoded = base64.urlsafe_b64decode(padded).decode("utf-8", "replace")
+        except Exception:
+            continue
+        assert session_cookie not in decoded
+        assert "session" not in decoded.lower()
+
+
+def test_oauth_state_is_stored_only_as_a_digest(app_client, db):
+    """Neither the nonce nor the session is recoverable from the database."""
+    response = app_client.post("/api/login", json={"password": "hunter2!"})
+    assert response.status_code == 204
+    session_cookie = app_client.cookies.get("session")
+
+    state = _state_from_connect(app_client)
+
+    with psycopg.connect(db, autocommit=True) as conn:
+        rows = conn.execute("SELECT state_hash, session FROM oauth_states").fetchall()
+
+    assert len(rows) == 1
+    state_hash, stored_session = rows[0]
+    assert state_hash != state
+    assert stored_session != session_cookie
+    # Both are SHA-256 hex digests bound to the real values.
+    import hashlib
+    assert state_hash == hashlib.sha256(state.encode()).hexdigest()
+    assert stored_session == hashlib.sha256(session_cookie.encode()).hexdigest()
+
+
 def test_callback_rejects_state_from_different_session(app_client, db):
-    """OAuth state from a different session should be rejected (session binding)."""
+    """N4: a state minted under one admin session must not be usable under
+    another (session binding survives the switch to an opaque nonce).
+
+    Mints a real state in session A, then presents it while holding a
+    DIFFERENT but equally VALID admin session -- the shape a CSRF/session-
+    fixation attempt actually takes now that the state carries no session
+    payload of its own to forge. (Session B is minted directly rather than
+    by logging in twice: the session cookie is a signed
+    `{"authenticated": true}` with a second-granular timestamp, so two
+    logins in the same second produce a byte-identical cookie and would not
+    be a different session at all.)
+    """
     from itsdangerous import URLSafeTimedSerializer
     from api.config import ApiConfig
 
-    cfg = ApiConfig.from_env()
-    serializer = URLSafeTimedSerializer(cfg.session_secret, salt="oauth-state")
-
-    # Create a valid state but with a different (forged) session binding
-    different_session = "different-session-value"
-    forged_state = serializer.dumps({
-        "state": "valid-state-value",
-        "session": different_session,
-    })
-
-    # Login with the real session
+    # --- session A mints a state ---
     response = app_client.post("/api/login", json={"password": "hunter2!"})
     assert response.status_code == 204
+    session_a = app_client.cookies.get("session")
+    state = _state_from_connect(app_client)
 
-    # Try to use the forged state (bound to a different session)
+    # --- session B: a different, still-valid admin session ---
+    cfg = ApiConfig.from_env()
+    session_b = URLSafeTimedSerializer(cfg.session_secret, salt="session").dumps(
+        {"authenticated": True, "sid": "another-browser"}
+    )
+    assert session_b != session_a
+    app_client.cookies.set("session", session_b)
+
     response = app_client.get(
-        f"/api/oauth/callback?code=test-code&state={forged_state}",
+        f"/api/oauth/callback?code=test-code&state={state}",
         follow_redirects=False
     )
+    assert response.status_code == 403
 
-    # Should reject because session doesn't match
+    # ...and the mismatch must NOT have burned the legitimate state: the
+    # atomic consume includes the session predicate, so session A can still
+    # complete its own flow.
+    with psycopg.connect(db, autocommit=True) as conn:
+        consumed = conn.execute("SELECT consumed_at FROM oauth_states").fetchone()[0]
+    assert consumed is None
+
+
+def test_callback_rejects_an_expired_state(app_client, db):
+    """The TTL that used to ride along in the signed state is now enforced
+    against oauth_states.created_at."""
+    response = app_client.post("/api/login", json={"password": "hunter2!"})
+    assert response.status_code == 204
+    state = _state_from_connect(app_client)
+
+    from api.oauth import STATE_TTL_SECONDS
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE oauth_states SET created_at = now() - make_interval(secs => %s)",
+            (STATE_TTL_SECONDS + 60,),
+        )
+
+    response = app_client.get(
+        f"/api/oauth/callback?code=test-code&state={state}", follow_redirects=False,
+    )
     assert response.status_code == 403
 
 

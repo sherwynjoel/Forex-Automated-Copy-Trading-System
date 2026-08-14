@@ -30,6 +30,21 @@ class ControlRequest(BaseModel):
     account_id: Optional[int] = None
 
 
+class DriftActionRequest(BaseModel):
+    """Request body for POST /api/drift/{close-orphan,adopt,dismiss}.
+
+    Mirrors what the dashboard sends (dashboard/src/pages/Positions.tsx)
+    and what the copier's drift resources require
+    (copier/src/copier/engine/control.py): `id` is the DriftItem id for
+    every action; `master_position_id` is additionally required by `adopt`
+    and ignored by the other two. Validation of the action-specific
+    combination stays with the copier, which owns the drift state -- this
+    model exists so the body is PARSED AND FORWARDED at all.
+    """
+    id: str
+    master_position_id: Optional[int] = None
+
+
 async def _proxy_to_copier(
     client: httpx.AsyncClient,
     url: str,
@@ -149,14 +164,28 @@ def create_settings_control_router() -> APIRouter:
                 )
                 result["copier_reloaded"] = True
 
-                # Also call dry-run if dry_run setting changed
+                # Also call dry-run if dry_run setting changed.
+                #
+                # The body MUST carry the requested value: the copier's
+                # DryRunResource reads `body.get("enabled", False)` and
+                # writes that straight back to the settings row
+                # (copier/src/copier/engine/control.py ->
+                # CopierApp.set_dry_run). Posting `json={}` -- as this did
+                # -- therefore made every "turn dry-run ON" request
+                # immediately turn it back OFF in the database, while this
+                # endpoint reported `dry_run: true, dry_run_applied: true`
+                # from a row it had read BEFORE the proxy call. Dry-run
+                # could not be enabled through the API at all, the caller
+                # was told it had been, and Dispatcher (which re-reads
+                # settings per batch) went on sending real orders. That is
+                # the Stage-1 rollout gate, so it has to be the real value.
                 if request_data.dry_run is not None:
                     try:
                         await _proxy_to_copier(
                             client,
                             f"{cfg.copier_control_url}/dry-run",
                             method="POST",
-                            json={},
+                            json={"enabled": request_data.dry_run},
                         )
                         result["dry_run_applied"] = True
                     except HTTPException:
@@ -233,11 +262,24 @@ def create_state_router() -> APIRouter:
     @router.post("/drift/{action}", response_model=Dict[str, Any])
     async def drift_action(
         action: str,
+        request: DriftActionRequest,
         http_request: Request,
         _: bool = Depends(require_admin),
         cfg: ApiConfig = Depends(ApiConfig.from_env),
     ) -> Dict[str, Any]:
-        """Proxy drift action to copier."""
+        """Proxy a drift remedy (and its body) to the copier.
+
+        The body was previously dropped entirely (`json={}`), so all three
+        one-click remedies -- spec §7's drift remedies and an explicit
+        Stage-3 runbook step -- failed on every click: the copier's
+        resources raise `ValueError("id required")`, which becomes a 500 and
+        is mapped to a 502 here. The dashboard was sending `{id}` /
+        `{id, master_position_id}` the whole time.
+
+        `exclude_none` keeps `master_position_id` out of the close-orphan and
+        dismiss bodies rather than sending an explicit null the copier would
+        just ignore.
+        """
         # Validate action
         if action not in ("close-orphan", "adopt", "dismiss"):
             raise HTTPException(
@@ -247,6 +289,8 @@ def create_state_router() -> APIRouter:
 
         client = http_request.app.state.http
         url = f"{cfg.copier_control_url}/drift/{action}"
-        return await _proxy_to_copier(client, url, method="POST", json={})
+        return await _proxy_to_copier(
+            client, url, method="POST", json=request.model_dump(exclude_none=True),
+        )
 
     return router
