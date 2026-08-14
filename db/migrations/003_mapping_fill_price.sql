@@ -1,0 +1,16 @@
+-- T9c: record the price each slave copy actually filled at.
+--
+-- The dashboard's Positions screen renders a per-copy "Fill Price" and a
+-- "Slippage (pts)" derived from it (dashboard/src/pages/Positions.tsx),
+-- and spec §7 names both as Positions-screen content -- but the value was
+-- only ever written into an events row's JSON payload, never onto the
+-- mapping itself, so GET /state had nothing to report and both columns
+-- rendered "-" forever. It is already in hand at both activation call
+-- sites (engine/service.py reads evt.deal.executionPrice for the fill log
+-- line immediately after activating the mapping).
+--
+-- Nullable with no default: rows created before this migration, mappings
+-- still 'pending', and fills whose execution event genuinely carried no
+-- executionPrice all legitimately have no fill price, and the dashboard
+-- already treats null as "-" rather than fabricating a number.
+ALTER TABLE mappings ADD COLUMN fill_price DOUBLE PRECISION;

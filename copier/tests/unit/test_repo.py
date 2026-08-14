@@ -442,3 +442,136 @@ def test_link_pending_fill_raises_on_unknown_order(db):
 
     with pytest.raises(MappingNotFound):
         repo.link_pending_fill(999, 100, 88)
+
+
+# ---------- N2: master position increases ----------
+
+def test_create_position_mapping_is_idempotent_for_an_increase(db):
+    """N2 (repo half): the SECOND dispatch of the same (master position,
+    slave) -- a master position INCREASE, which reuses the deterministic
+    client_order_id `cm{pid}.{slave}` -- must not raise.
+
+    Before the ON CONFLICT clause this raised psycopg UniqueViolation on
+    `mappings.client_order_id TEXT UNIQUE`, which Dispatcher's per-intent
+    handler caught as `intent_processing_failed` and turned into a degraded
+    account -- and the increase itself was never sent.
+    """
+    repo = Repo(db)
+
+    repo.create_position_mapping(500, 100, "cm500.100")
+    repo.create_position_mapping(500, 100, "cm500.100")   # the increase
+
+    rows = [r for r in repo.mapping_rows() if r["client_order_id"] == "cm500.100"]
+    assert len(rows) == 1, "an increase must reuse the existing mapping row, not add one"
+    assert rows[0]["status"] == "pending"
+
+
+def test_activate_position_mapping_accumulates_volume_across_fills(db):
+    """N2 (repo half): the increase's fill ADDS to the mapping's volume.
+
+    cTrader merges a same-direction add into the existing position, so the
+    slave's second fill carries the SAME slave_position_id and a
+    deal.filledVolume of only the delta. The mapping row therefore has to
+    accumulate for its slave_volume to mean "this slave position's real
+    size" -- which is what partial_close_volume and reduce_position_mapping
+    both compute against.
+    """
+    repo = Repo(db)
+    repo.create_position_mapping(500, 100, "cm500.100")
+
+    repo.activate_position_mapping("cm500.100", 777, 10_000_000, fill_price=1.10500)
+    repo.create_position_mapping(500, 100, "cm500.100")            # increase dispatched
+    repo.activate_position_mapping("cm500.100", 777, 5_000_000, fill_price=1.10900)
+
+    (row,) = [r for r in repo.mapping_rows() if r["client_order_id"] == "cm500.100"]
+    assert row["slave_volume"] == 15_000_000
+    assert row["slave_position_id"] == 777
+    assert row["status"] == "active"
+    # The FIRST fill's price is the copy's entry price; a later increase must
+    # not silently redefine the slippage the Positions screen reports.
+    assert row["fill_price"] == pytest.approx(1.10500)
+
+
+def test_reduce_position_mapping_operates_on_the_aggregate(db):
+    """N2 (consequence): with one row per (master position, slave), a close
+    deducts from the aggregate exactly once.
+
+    The rejected alternative -- one row per fill -- would have produced two
+    active rows sharing a slave_position_id, and reduce_position_mapping
+    (which matches on `slave_account_id AND slave_position_id`) would have
+    deducted the full closed volume from BOTH.
+    """
+    repo = Repo(db)
+    repo.create_position_mapping(500, 100, "cm500.100")
+    repo.activate_position_mapping("cm500.100", 777, 10_000_000)
+    repo.create_position_mapping(500, 100, "cm500.100")
+    repo.activate_position_mapping("cm500.100", 777, 5_000_000)
+
+    repo.reduce_position_mapping(100, 777, 6_000_000)
+
+    (row,) = [r for r in repo.mapping_rows() if r["client_order_id"] == "cm500.100"]
+    assert row["slave_volume"] == 9_000_000
+    assert row["status"] == "active"
+
+
+def test_position_entries_reports_one_aggregated_entry_per_slave(db):
+    """The decision layer sees ONE entry per slave for an increased position,
+    carrying the aggregate volume -- so a later close emits one ClosePosition
+    per slave, sized against the slave's real position."""
+    repo = Repo(db)
+    repo.create_position_mapping(500, 100, "cm500.100")
+    repo.activate_position_mapping("cm500.100", 777, 10_000_000)
+    repo.create_position_mapping(500, 100, "cm500.100")
+    repo.activate_position_mapping("cm500.100", 777, 5_000_000)
+
+    entries = repo.position_entries(500)
+    assert len(entries) == 1
+    assert entries[0] == PositionMappingEntry(
+        slave_account_id=100, slave_position_id=777, slave_volume=15_000_000,
+    )
+
+
+# ---------- N6: degraded auto-clear ----------
+
+def test_clear_degraded_returns_account_to_ok_and_drops_last_error(db):
+    repo = Repo(db)
+    repo.set_account_status(100, 'degraded', "no connected transport for send")
+
+    assert repo.clear_degraded(100) is True
+
+    account = next(a for a in repo.load_accounts() if a.account_id == 100)
+    assert account.status == 'ok'
+    assert account.last_error is None
+
+
+def test_clear_degraded_never_resumes_a_paused_account(db):
+    """A slave an operator deliberately PAUSED must not be silently resumed
+    by a send that happens to succeed."""
+    repo = Repo(db)
+    repo.set_account_status(100, 'paused', None)
+
+    assert repo.clear_degraded(100) is False
+
+    account = next(a for a in repo.load_accounts() if a.account_id == 100)
+    assert account.status == 'paused'
+
+
+def test_clear_degraded_is_a_no_op_on_an_ok_account(db):
+    repo = Repo(db)
+    assert repo.clear_degraded(100) is False
+    account = next(a for a in repo.load_accounts() if a.account_id == 100)
+    assert account.status == 'ok'
+
+
+# ---------- T9c: fill price on the mapping row ----------
+
+def test_activate_pending_fill_stamps_fill_price(db):
+    repo = Repo(db)
+    repo.create_order_mapping(900, 100, "co900.100")
+    repo.activate_order_mapping("co900.100", 4242)
+
+    repo.activate_pending_fill(100, 4242, 888, 2_000_000, fill_price=1.23456)
+
+    (row,) = [r for r in repo.mapping_rows() if r["client_order_id"] == "co900.100"]
+    assert row["fill_price"] == pytest.approx(1.23456)
+    assert row["slave_position_id"] == 888

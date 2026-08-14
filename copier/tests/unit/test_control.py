@@ -21,6 +21,7 @@ from ctrader_open_api import Client, TcpProtocol
 from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOAAccountsTokenInvalidatedEvent
 from twisted.internet import defer, reactor as real_reactor, task
 from twisted.internet.task import Clock
+from twisted.python.failure import Failure
 from twisted.web.client import Agent, readBody
 from twisted.web.test.requesthelper import DummyRequest
 
@@ -245,8 +246,10 @@ def test_boot_composes_without_crashing_and_binds_all_interfaces(db, fernet_key)
     assert call["port"] == main.CONTROL_PORT
     assert call["interface"] == "0.0.0.0"
     assert call["interface"] != "127.0.0.1"
-    # startup + token-refresh loop were scheduled, not run inline (no reactor loop here)
-    assert len(fake_reactor.callWhenRunning_calls) == 2
+    # startup + token-refresh loop + balance-refresh loop (N9) were
+    # scheduled, not run inline (no reactor loop here).
+    assert len(fake_reactor.callWhenRunning_calls) == 3
+    assert app.balance_refresh_call.interval is None   # not started until the reactor runs
 
 
 def test_build_app_tolerates_zero_accounts_and_wires_dispatcher_before_app_exists(db, fernet_key):
@@ -712,3 +715,204 @@ def test_discover_upserts_accounts_from_token(db, fernet_key):
         for c in created:
             c.stop()
         srv.shutdown()
+
+
+# ---------- N9: balances are refreshed after boot ----------
+
+def _seed_symbol_cache(repo, account_ids, name="EURUSD", symbol_id=1, lot_size=10_000_000):
+    from copier.domain.models import SymbolInfo
+    info = SymbolInfo(symbol_id=symbol_id, name=name, digits=5, lot_size=lot_size,
+                      min_volume=100_000, step_volume=100_000)
+    for account_id in account_ids:
+        repo.save_symbol_cache(account_id, {name: info})
+    return info
+
+
+class _RecordingStateTracker:
+    """Stands in for AccountStateTracker, recording refresh_balances calls."""
+
+    def __init__(self):
+        self.refresh_calls = []
+
+    def refresh_balances(self, account_ids):
+        self.refresh_calls.append(list(account_ids))
+        return defer.succeed(None)
+
+    def snapshot(self):
+        return {}
+
+    def set_positions(self, account_id, positions):
+        pass
+
+    def ensure_spot_subscriptions(self):
+        return defer.succeed(None)
+
+
+def test_boot_schedules_a_periodic_balance_refresh(db, fernet_key):
+    """N9: refresh_balances was called ONLY from startup(), so Overview's
+    balance/equity went stale within hours of live trading (balance changes
+    on every realized close) while open P&L kept moving, which made the
+    stale numbers look plausible rather than obviously frozen.
+
+    Drives the real LoopingCall boot() wires, on a Clock: advancing past the
+    interval must produce refreshes, and they must keep coming.
+    """
+    seed_db(db, fernet_key)
+    config = main.BootConfig(
+        postgres_dsn=db, fernet_key=fernet_key, client_id="cid", client_secret="secret",
+        demo_host="demo.example.invalid", live_host="live.example.invalid",
+        ctrader_port=5035, shards=1,
+    )
+    fake_reactor = _FakeReactor()
+    app = main.boot(config, fake_reactor)
+
+    tracker = _RecordingStateTracker()
+    app.state_tracker = tracker
+
+    clock = Clock()
+    app.balance_refresh_call.clock = clock
+    app.balance_refresh_call.start(main.BALANCE_REFRESH_INTERVAL_S, now=False)
+    try:
+        assert tracker.refresh_calls == []          # nothing before the first tick
+
+        clock.advance(main.BALANCE_REFRESH_INTERVAL_S)
+        assert len(tracker.refresh_calls) == 1
+        # Every ENABLED account (master 999 + slaves 100/101), and nothing else.
+        assert sorted(tracker.refresh_calls[0]) == [100, 101, 999]
+
+        clock.advance(main.BALANCE_REFRESH_INTERVAL_S)
+        assert len(tracker.refresh_calls) == 2
+    finally:
+        app.balance_refresh_call.stop()
+
+
+def test_balance_refresh_survives_a_broker_failure_and_keeps_looping(db, fernet_key):
+    """A LoopingCall whose Deferred fails stops looping forever, so one
+    transient broker hiccup would otherwise end balance refreshing for the
+    life of the process."""
+    seed_db(db, fernet_key)
+    repo = Repo(db)
+    token_store = TokenStore(db, fernet_key)
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+
+    class _ExplodingTracker(_RecordingStateTracker):
+        def refresh_balances(self, account_ids):
+            self.refresh_calls.append(list(account_ids))
+            return defer.fail(RuntimeError("broker said no"))
+
+    tracker = _ExplodingTracker()
+    app.state_tracker = tracker
+
+    d = app.refresh_balances()
+    results = []
+    d.addBoth(results.append)
+
+    assert len(results) == 1
+    assert not isinstance(results[0], Failure), "refresh_balances must never errback"
+    assert len(tracker.refresh_calls) == 1
+
+    # And it can be called again afterwards.
+    app.refresh_balances()
+    assert len(tracker.refresh_calls) == 2
+
+
+def test_balance_refresh_skips_disabled_accounts(db, fernet_key):
+    seed_db(db, fernet_key)
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute("UPDATE accounts SET enabled = false WHERE ctid_trader_account_id = 101")
+
+    repo = Repo(db)
+    app = main.build_app(repo, TokenStore(db, fernet_key), make_stub_client_factory(), shards=1)
+    tracker = _RecordingStateTracker()
+    app.state_tracker = tracker
+
+    app.refresh_balances()
+
+    assert sorted(tracker.refresh_calls[0]) == [100, 999]
+
+
+# ---------- T9c: /state carries the fields the Positions screen renders ----------
+
+def test_get_state_enriches_copies_and_master_rows_for_the_positions_screen(repo, token_store):
+    """T9c: GET /state used to carry only ids/volume/status/error per copy
+    and no symbol/lots/P&L on master rows, so the dashboard's Positions
+    screen rendered a literal "-" for every Fill Price and Slippage,
+    `ID:<n>` instead of a symbol name, and raw protocol volume instead of
+    lots -- while spec §7 names fill price and slippage as Positions-screen
+    content and Stage 2's "verify multipliers produce expected volumes"
+    depends on the lots being readable.
+    """
+    from copier.domain.models import Side
+    from copier.engine.reconcile import PositionSnapshot, OrderSnapshot
+
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    symbol = _seed_symbol_cache(repo, [999, 100])
+    app.master_symbols_by_id[symbol.symbol_id] = symbol
+
+    repo.create_position_mapping(master_position_id=42, slave_account_id=100,
+                                 client_order_id="cm42.100")
+    repo.activate_position_mapping("cm42.100", slave_position_id=5001,
+                                   slave_volume=5_000_000, fill_price=1.10537)
+
+    app.reconciler.master_positions = [
+        PositionSnapshot(position_id=42, symbol_id=1, side=Side.BUY,
+                         volume=10_000_000, price=1.10500, label="copy:m42")
+    ]
+    app.reconciler.master_orders = [
+        OrderSnapshot(order_id=7, symbol_id=1, volume=2_500_000, label="copy:o7")
+    ]
+    # A live per-position P&L, exactly as the state tracker reports it.
+    app.state_tracker.set_positions(999, [
+        main.StatePositionSnapshot(position_id=42, symbol_id=1, side=Side.BUY,
+                                   volume=10_000_000, price=1.10500, label="copy:m42")
+    ])
+    app.state_tracker._spots[1] = (1.10600, 1.10620)
+
+    state = app.get_state()
+
+    master_position = state["master_positions"][0]
+    assert master_position["symbol"] == "EURUSD"          # not "ID:1"
+    assert master_position["volume_lots"] == "1.00"       # not 10000000
+    assert master_position["pnl_quote"] == pytest.approx(100.0)
+
+    copy = master_position["copies"][0]
+    assert copy["fill_price"] == pytest.approx(1.10537)   # not None -> not "-"
+    assert copy["volume_lots"] == "0.50"                  # the slave's own lots
+    assert copy["slave_position_id"] == 5001
+    assert copy["status"] == "active"
+
+    pending_order = state["pending_orders"][0]
+    assert pending_order["symbol"] == "EURUSD"
+    assert pending_order["volume_lots"] == "0.25"
+
+    # ...and it survives the real control route, which is what the api proxies.
+    request = DummyRequest([b"state"])
+    request.method = b"GET"
+    StateResource(app).render_GET(request)
+    rendered = _written_json(request)["master_positions"][0]
+    assert rendered["symbol"] == "EURUSD"
+    assert rendered["copies"][0]["fill_price"] == pytest.approx(1.10537)
+
+
+def test_get_state_reports_null_enrichment_rather_than_inventing_values(repo, token_store):
+    """A still-pending copy has no fill price and no volume; an unknown
+    symbol has no name. Those must come back as null, so the dashboard shows
+    "-" honestly, rather than as a fabricated number."""
+    from copier.domain.models import Side
+    from copier.engine.reconcile import PositionSnapshot
+
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    repo.create_position_mapping(master_position_id=42, slave_account_id=100,
+                                 client_order_id="cm42.100")
+    app.reconciler.master_positions = [
+        PositionSnapshot(position_id=42, symbol_id=1, side=Side.BUY,
+                         volume=10_000_000, price=1.105, label="copy:m42")
+    ]
+
+    master_position = app.get_state()["master_positions"][0]
+
+    assert master_position["symbol"] is None          # symbol map is empty
+    assert master_position["volume_lots"] is None
+    assert master_position["pnl_quote"] is None
+    assert master_position["copies"][0]["fill_price"] is None
+    assert master_position["copies"][0]["volume_lots"] is None

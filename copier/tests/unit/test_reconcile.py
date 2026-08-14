@@ -3,6 +3,7 @@
 import pytest
 import pytest_twisted
 import psycopg
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import Mock, MagicMock, AsyncMock
 
@@ -13,7 +14,8 @@ from twisted.internet import reactor
 from copier.ctrader.client import CTraderClient
 from copier.domain.models import ClosePosition, Side
 from copier.engine.reconcile import (
-    PositionSnapshot, OrderSnapshot, DriftItem, compute_drift, Reconciler
+    STALE_PENDING_AFTER_S, PositionSnapshot, OrderSnapshot, DriftItem,
+    compute_drift, Reconciler
 )
 from copier.testing.fake_server import FakeCTraderServer
 
@@ -721,3 +723,138 @@ class TestReconciler:
         assert len(info_rows) == 1
         assert info_rows[0]['payload']['action'] == 'dismissed'
         dispatcher.dispatch.assert_not_called()
+
+
+# ---------- N8: a copy that never activates ----------
+
+NOW = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _pending_mapping(created_at, *, account_id=101, client_order_id="cm500.101",
+                     master_position_id=500, status='pending'):
+    return {
+        'id': 1,
+        'master_position_id': master_position_id,
+        'master_order_id': None,
+        'slave_account_id': account_id,
+        'slave_position_id': None,
+        'slave_order_id': None,
+        'slave_volume': None,
+        'client_order_id': client_order_id,
+        'status': status,
+        'error': None,
+        'fill_price': None,
+        'created_at': created_at,
+        'updated_at': created_at,
+    }
+
+
+def _master_position(position_id=500):
+    return PositionSnapshot(position_id=position_id, symbol_id=1, side=Side.BUY,
+                            volume=10_000_000, price=1.1, label=f"copy:m{position_id}")
+
+
+class TestStalePendingDrift:
+    """N8: a mapping stuck in 'pending' is invisible to every other check."""
+
+    def test_stale_pending_copy_is_reported(self):
+        """RED before the fix: compute_drift returned []. The row has no
+        slave_position_id (so missing_slave_copy skips it), the master
+        position DOES have other active mapping rows (so
+        unmapped_master_position never fires), and no broker-side label
+        exists for an order that never reached the broker (so the orphan
+        checks see nothing). One slave silently carried no exposure at all
+        between the master's fill and its next action on that position.
+        """
+        stale = _pending_mapping(NOW - timedelta(seconds=STALE_PENDING_AFTER_S + 1))
+        # Another slave's copy DID activate -- which is exactly what keeps
+        # unmapped_master_position quiet about this master position.
+        healthy = {
+            **_pending_mapping(NOW, account_id=102, client_order_id="cm500.102"),
+            'status': 'active', 'slave_position_id': 777, 'slave_volume': 10_000_000,
+        }
+
+        items = compute_drift(
+            [_master_position()], [],
+            {101: [], 102: [PositionSnapshot(777, 1, Side.BUY, 10_000_000, 1.1, "copy:m500")]},
+            {101: [], 102: []},
+            [stale, healthy], {101, 102}, now=NOW,
+        )
+
+        stale_items = [i for i in items if i.kind == 'stale_pending_copy']
+        assert len(stale_items) == 1, items
+        assert stale_items[0].account_id == 101
+        assert stale_items[0].position_id == 500
+        assert "pending" in stale_items[0].detail
+        assert "cm500.101" in stale_items[0].detail
+
+    def test_a_freshly_pending_copy_is_not_drift(self):
+        """A copy dispatched moments ago is mid-flight, not drift."""
+        fresh = _pending_mapping(NOW - timedelta(seconds=STALE_PENDING_AFTER_S - 1))
+
+        items = compute_drift([_master_position()], [], {101: []}, {101: []},
+                              [fresh], {101}, now=NOW)
+
+        assert [i for i in items if i.kind == 'stale_pending_copy'] == []
+
+    def test_stale_pending_for_a_disabled_slave_is_ignored(self):
+        stale = _pending_mapping(NOW - timedelta(hours=1))
+
+        items = compute_drift([_master_position()], [], {}, {},
+                              [stale], set(), now=NOW)
+
+        assert [i for i in items if i.kind == 'stale_pending_copy'] == []
+
+    def test_dry_run_pending_mappings_are_not_drift(self):
+        """Dry-run creates mappings that STAY pending by design
+        (engine/dispatch.py:_handle_dry_run) -- reporting every one of them
+        would bury Stage 1's drift list in noise."""
+        stale = _pending_mapping(NOW - timedelta(hours=1))
+
+        assert [i for i in compute_drift([_master_position()], [], {101: []}, {101: []},
+                                         [stale], {101}, now=NOW, dry_run=True)
+                if i.kind == 'stale_pending_copy'] == []
+        # ... and the SAME rows are reported again once dry-run is off,
+        # because at that point they are genuine leftovers.
+        assert [i for i in compute_drift([_master_position()], [], {101: []}, {101: []},
+                                         [stale], {101}, now=NOW, dry_run=False)
+                if i.kind == 'stale_pending_copy'] != []
+
+    def test_active_and_closed_mappings_are_never_stale_pending(self):
+        old = NOW - timedelta(days=7)
+        rows = [
+            {**_pending_mapping(old, client_order_id="a"), 'status': 'active',
+             'slave_position_id': 777, 'slave_volume': 1},
+            {**_pending_mapping(old, client_order_id="b"), 'status': 'closed'},
+            {**_pending_mapping(old, client_order_id="c"), 'status': 'failed'},
+        ]
+
+        items = compute_drift(
+            [_master_position()], [],
+            {101: [PositionSnapshot(777, 1, Side.BUY, 1, 1.1, "copy:m500")]}, {101: []},
+            rows, {101}, now=NOW,
+        )
+
+        assert [i for i in items if i.kind == 'stale_pending_copy'] == []
+
+    def test_stale_pending_id_is_stable_across_runs(self):
+        stale = _pending_mapping(NOW - timedelta(hours=1))
+        first = compute_drift([_master_position()], [], {101: []}, {101: []},
+                              [stale], {101}, now=NOW)
+        second = compute_drift([_master_position()], [], {101: []}, {101: []},
+                               [stale], {101}, now=NOW + timedelta(minutes=5))
+        stale_ids = lambda items: [i.id for i in items if i.kind == 'stale_pending_copy']
+        assert stale_ids(first) == stale_ids(second) != []
+
+    def test_stale_pending_order_copy_names_the_master_order(self):
+        stale = {
+            **_pending_mapping(NOW - timedelta(hours=1), client_order_id="co900.101"),
+            'master_position_id': None, 'master_order_id': 900,
+        }
+
+        items = compute_drift([], [], {101: []}, {101: []}, [stale], {101}, now=NOW)
+
+        stale_items = [i for i in items if i.kind == 'stale_pending_copy']
+        assert len(stale_items) == 1
+        assert stale_items[0].order_id == 900
+        assert "order 900" in stale_items[0].detail

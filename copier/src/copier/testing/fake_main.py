@@ -78,7 +78,13 @@ def _push_market_fill(fake: FakeCTraderServer, account_id: int, symbol_id: int,
     itertools.count sequences with every wire-triggered handler, so ids
     never collide with a real request-triggered fill) so a later /close call
     against the returned position_id gets correct partial-close semantics
-    exactly like _handle_close_position_req's."""
+    exactly like _handle_close_position_req's.
+
+    Booking goes through FakeCTraderServer.register_market_fill, so a
+    SECOND /fill on the same account+symbol+side is a position INCREASE
+    (same position_id, delta volume) exactly as real cTrader aggregates it
+    -- which is what lets e2e/test_full_stack.py drive the master-increase
+    scenario at all."""
     order_id = next(fake._order_ids)
 
     accept_evt = oa.ProtoOAExecutionEvent()
@@ -93,8 +99,9 @@ def _push_market_fill(fake: FakeCTraderServer, account_id: int, symbol_id: int,
     accept_evt.order.tradeData.label = label
     fake.broadcast(accept_evt)
 
-    position_id = next(fake._position_ids)
-    fake._position_volumes[position_id] = volume
+    position_id, position_total = fake.register_market_fill(
+        account_id, symbol_id, side, volume, label,
+    )
     deal_id = next(fake._deal_ids)
 
     fill_evt = oa.ProtoOAExecutionEvent()
@@ -110,9 +117,12 @@ def _push_market_fill(fake: FakeCTraderServer, account_id: int, symbol_id: int,
     fill_evt.deal.dealStatus = model.ProtoOADealStatus.FILLED
     fill_evt.deal.createTimestamp = int(time.time() * 1000)
     fill_evt.deal.executionTimestamp = int(time.time() * 1000)
+    # Real cTrader always reports the price a deal filled at (T9c).
+    fill_evt.deal.executionPrice = fake.execution_price
     fill_evt.position.positionId = position_id
     fill_evt.position.tradeData.symbolId = symbol_id
-    fill_evt.position.tradeData.volume = volume
+    # TOTAL after this fill (deal.filledVolume above stays the delta).
+    fill_evt.position.tradeData.volume = position_total
     fill_evt.position.tradeData.tradeSide = side
     fill_evt.position.tradeData.label = label
     fill_evt.position.positionStatus = model.ProtoOAPositionStatus.POSITION_STATUS_OPEN
@@ -126,22 +136,20 @@ def _push_market_fill(fake: FakeCTraderServer, account_id: int, symbol_id: int,
     fill_evt.order.tradeData.label = label
     fake.broadcast(fill_evt)
 
-    # Record for _handle_reconcile_req, same as fake_server.py's own
-    # wire-triggered fill handler now does (see its comment) -- without
-    # this, a resync() run against the MASTER account after this fill would
-    # see it as having zero open positions, so the master position would
-    # never show up in CopierApp.get_state()'s master_positions (and every
-    # slave copy would misreport as missing_slave_copy drift once the
-    # master position itself is invisible to compute_drift).
-    fake.open_positions.setdefault(account_id, []).append({
-        "position_id": position_id,
-        "symbol_id": symbol_id,
-        "volume": volume,
-        "trade_side": side,
-        "label": label,
-    })
+    # NB: register_market_fill above already recorded this in
+    # fake.open_positions for _handle_reconcile_req -- without that, a
+    # resync() run against the MASTER account after this fill would see it
+    # as having zero open positions, so the master position would never show
+    # up in CopierApp.get_state()'s master_positions (and every slave copy
+    # would misreport as missing_slave_copy drift once the master position
+    # itself is invisible to compute_drift).
 
-    return {"order_id": order_id, "position_id": position_id, "deal_id": deal_id}
+    return {
+        "order_id": order_id,
+        "position_id": position_id,
+        "deal_id": deal_id,
+        "position_volume": position_total,
+    }
 
 
 def _push_close(fake: FakeCTraderServer, account_id: int, position_id: int, volume: int,
@@ -168,6 +176,7 @@ def _push_close(fake: FakeCTraderServer, account_id: int, position_id: int, volu
     fill_evt.deal.dealStatus = model.ProtoOADealStatus.FILLED
     fill_evt.deal.createTimestamp = int(time.time() * 1000)
     fill_evt.deal.executionTimestamp = int(time.time() * 1000)
+    fill_evt.deal.executionPrice = fake.execution_price
     fill_evt.deal.closePositionDetail.closedVolume = volume
     fill_evt.deal.closePositionDetail.entryPrice = 10000
     fill_evt.deal.closePositionDetail.grossProfit = 1000

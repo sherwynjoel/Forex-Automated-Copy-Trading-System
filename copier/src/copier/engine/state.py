@@ -19,6 +19,11 @@ from copier.domain.models import Side, SymbolInfo
 
 log = logging.getLogger(__name__)
 
+# cTrader Open API encodes ProtoOASpotEvent bid/ask as fixed 1/100_000 units
+# for EVERY symbol -- see on_spot(). Not derived from the symbol's `digits`,
+# which is display precision only.
+SPOT_PRICE_SCALE = 100_000.0
+
 
 def unrealized_pnl_quote(
     side: Side, entry_price: float, volume: int, bid: float, ask: float
@@ -196,21 +201,27 @@ class AccountStateTracker:
     def on_spot(self, evt: ProtoOASpotEvent) -> None:
         """Handle spot event from the client.
 
-        Updates bid/ask for the symbol. Spot values are in protocol format
-        and need to be scaled by the symbol's digits field (÷ 10**digits).
-        Falls back to ÷ 10**5 if symbol/digits is unavailable.
+        `ProtoOASpotEvent.bid`/`.ask` are FIXED 1/100_000 units for every
+        symbol, regardless of that symbol's `digits` (N5). `digits` is
+        display precision only -- it says how many decimals a platform shows
+        a price to, not how the wire encodes it. The official OpenApiPy
+        samples divide spot prices by 100000 unconditionally for the same
+        reason.
+
+        This used to divide by `10 ** digits`, which is right only for the
+        5-digit majors and wrong by a factor of 100 for every JPY pair
+        (digits=3): USDJPY at 110.50 arrives as 11_050_000 and was tracked
+        as 11_050.0, so Overview's open P&L and equity for any account
+        holding a JPY pair were off by 100x -- the exact numbers the rollout
+        stages tell the operator to watch. No trade path reads `_spots`, so
+        this was display-only, but it corrupted the display that gates the
+        rollout.
 
         Args:
-            evt: ProtoOASpotEvent with bid/ask in protocol format (scaled by 10**digits)
+            evt: ProtoOASpotEvent with bid/ask in 1/100_000 protocol units.
         """
-        # Determine scaling factor from symbol digits
-        digits = 5  # default/fallback
-        if evt.symbolId in self._symbols_by_id:
-            digits = self._symbols_by_id[evt.symbolId].digits
-
-        scale_factor = 10 ** digits
-        bid = evt.bid / scale_factor
-        ask = evt.ask / scale_factor
+        bid = evt.bid / SPOT_PRICE_SCALE
+        ask = evt.ask / SPOT_PRICE_SCALE
         self._spots[evt.symbolId] = (bid, ask)
 
     def snapshot(self) -> dict[int, dict[str, Any]]:

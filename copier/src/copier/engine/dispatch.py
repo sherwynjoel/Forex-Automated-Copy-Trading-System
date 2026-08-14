@@ -319,9 +319,36 @@ class Dispatcher:
         d.addErrback(lambda f: self._on_send_failure(f, account_id, req, attempt))
 
     def _on_send_success(self, account_id: int) -> None:
-        """Handle successful send."""
-        # For trade requests, outcomes arrive as execution events handled elsewhere
-        pass
+        """Handle successful send: clear a degraded account (N6).
+
+        `degraded` means exactly one thing in this system: a *send* to that
+        account failed (retry ladder exhausted, or an ambiguous failure that
+        must not be retried) -- it is a transport verdict, never a trading
+        one. A send that now succeeds is direct evidence that the verdict no
+        longer holds, which is precisely what README §5 already told
+        operators would happen ("it clears automatically on its next
+        successful send"). Nothing implemented it: the only writes of status
+        'ok' were the manual resume() path (main.py), so a connectivity blip
+        left half the fleet permanently marked degraded on the Overview
+        screen with no way back except a manual pause/resume per account.
+
+        repo.clear_degraded() is guarded (`WHERE status='degraded'`), so a
+        PAUSED account is never silently resumed and an already-'ok'
+        account is not rewritten -- it returns False and nothing is logged,
+        which is the case for essentially every send. Only a real recovery
+        writes a row and logs the transition, so an operator sees the
+        recovery in Logs rather than just watching the red marker vanish.
+
+        The trade request's own outcome (fill/rejection) is not this
+        method's business: it arrives later as an execution event.
+        """
+        if self._repo.clear_degraded(account_id):
+            self._repo.log_event(
+                'slave_action',
+                'info',
+                {'action': 'degraded_cleared', 'reason': 'successful send'},
+                account_id=account_id,
+            )
 
     def _on_send_failure(self, failure, account_id: int, req: message.Message, attempt: int) -> None:
         """Handle send failure: retry only on SendNotAttempted; other failures mark degraded immediately.

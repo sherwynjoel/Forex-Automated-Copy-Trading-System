@@ -151,6 +151,36 @@ class Repo:
                 (status, last_error, account_id),
             )
 
+    def clear_degraded(self, account_id: int) -> bool:
+        """Return a DEGRADED account to 'ok' and drop its stale last_error.
+
+        N6: README §5 promises a degraded slave "clears automatically on its
+        next successful send", but nothing in the code ever wrote status
+        'ok' outside the manual resume() path -- degraded was sticky until
+        an operator intervened. Dispatcher._on_send_success calls this.
+
+        The `status = 'degraded'` guard is what makes it safe to call on
+        every successful send: an account an operator deliberately PAUSED
+        must never be silently resumed by a send that happens to succeed,
+        and an already-'ok' account must not be rewritten (so this returns
+        False and the caller logs nothing on the overwhelmingly common
+        path). `last_error` is cleared alongside the status because it
+        describes the failure that has just been superseded; leaving it set
+        on an 'ok' account would keep showing a resolved error through
+        GET /api/accounts.
+
+        Returns True if this call actually cleared a degraded account.
+        """
+        with psycopg.connect(self.dsn, autocommit=True) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE accounts SET status = 'ok', last_error = NULL
+                WHERE ctid_trader_account_id = %s AND status = 'degraded'
+                """,
+                (account_id,),
+            )
+            return cursor.rowcount > 0
+
     def upsert_account(
         self,
         account_id: int,
@@ -228,12 +258,42 @@ class Repo:
         slave_account_id: int,
         client_order_id: str,
     ) -> None:
-        """Create a pending position mapping."""
+        """Create a pending position mapping, or leave the existing one alone.
+
+        N2 -- master POSITION INCREASES. cTrader merges a second
+        same-direction fill on the same symbol into the SAME position (new
+        volume, volume-weighted entry price) rather than opening a separate
+        one, so the master's "add to position" arrives as another
+        ORDER_FILLED carrying the ORIGINAL positionId. normalize() turns
+        that into a second MasterPositionOpened for an already-mapped
+        position and decide() correctly emits an OpenMarket for the DELTA
+        (see domain/decision.py and test_decision_positions.py's
+        test_increase_emits_delta_open_for_mapped_position). Dispatch then
+        derives the same deterministic client_order_id (`cm{master_position_
+        id}.{slave_account_id}`, engine/dispatch.py:client_order_id_for) as
+        the original open -- which used to hit `mappings.client_order_id
+        TEXT UNIQUE`, raise UniqueViolation, and get caught by Dispatcher's
+        per-intent handler as `intent_processing_failed`: the increase was
+        NEVER SENT to any slave, and every slave was marked degraded for a
+        routine trading action.
+
+        ON CONFLICT DO NOTHING makes the mapping row the ONE row per
+        (master_position_id, slave_account_id) it has to be, so the send
+        proceeds; the increase's own fill then accumulates into that row via
+        activate_position_mapping's additive volume (see its docstring).
+        The alternative shape -- a per-entry suffix in the client_order_id,
+        one row per fill -- was rejected precisely because of the merge
+        above: the slave's second fill reports the SAME slave_position_id,
+        so the extra rows would collide on (slave_account_id,
+        slave_position_id) and reduce_position_mapping would deduct each
+        close from every one of them.
+        """
         with psycopg.connect(self.dsn, autocommit=True) as conn:
             conn.execute(
                 """
                 INSERT INTO mappings (master_position_id, slave_account_id, client_order_id, status)
                 VALUES (%s, %s, %s, 'pending')
+                ON CONFLICT (client_order_id) DO NOTHING
                 """,
                 (master_position_id, slave_account_id, client_order_id),
             )
@@ -243,19 +303,53 @@ class Repo:
         client_order_id: str,
         slave_position_id: int,
         slave_volume: int,
+        fill_price: float | None = None,
     ) -> None:
-        """Activate a position mapping.
+        """Activate a position mapping, ACCUMULATING the filled volume.
 
-        Raises MappingNotFound if no pending mapping exists with this client_order_id.
+        `slave_volume = COALESCE(slave_volume, 0) + %s` rather than a plain
+        assignment (N2): a pending row starts with NULL volume, so a first
+        fill still lands at exactly the filled volume, while the second fill
+        for the same client_order_id -- the slave's copy of a master
+        POSITION INCREASE, which cTrader merges into the slave's existing
+        position (same slave_position_id, deal.filledVolume = the delta,
+        see create_position_mapping) -- adds to it. The mapping row then
+        carries the slave position's true aggregate size, which is what
+        every downstream consumer needs: partial_close_volume computes each
+        slave's proportional close against it (domain/sizing.py), and
+        reduce_position_mapping deducts from it.
+
+        The same accumulation is also the correct reading of a genuine
+        ORDER_PARTIAL_FILL followed by its ORDER_FILLED (engine/service.py
+        routes both here): each execution event's deal.filledVolume is that
+        deal's volume, not a running total, so the previous assignment
+        silently discarded everything but the last one.
+
+        The one thing accumulation cannot distinguish is a DUPLICATE
+        delivery of the same execution event, which would now double-count.
+        cTrader delivers execution events once per connection and the copier
+        holds a single connection per account, so this is not reachable
+        today; it is the deliberate trade for making increases work at all.
+
+        `fill_price` (T9c) is stamped only when supplied and only if not
+        already set: the FIRST fill's execution price is the copy's entry
+        price for the slippage the Positions screen shows against the
+        master's entry; a later increase's price would silently redefine it.
+
+        Raises MappingNotFound if no mapping exists with this client_order_id.
         """
         with psycopg.connect(self.dsn, autocommit=True) as conn:
             cursor = conn.execute(
                 """
                 UPDATE mappings
-                SET slave_position_id = %s, slave_volume = %s, status = 'active', updated_at = now()
+                SET slave_position_id = %s,
+                    slave_volume = COALESCE(slave_volume, 0) + %s,
+                    fill_price = COALESCE(fill_price, %s),
+                    status = 'active',
+                    updated_at = now()
                 WHERE client_order_id = %s
                 """,
-                (slave_position_id, slave_volume, client_order_id),
+                (slave_position_id, slave_volume, fill_price, client_order_id),
             )
             if cursor.rowcount == 0:
                 raise MappingNotFound(f"No mapping found with client_order_id={client_order_id}")
@@ -386,8 +480,13 @@ class Repo:
         slave_order_id: int,
         slave_position_id: int,
         slave_volume: int,
+        fill_price: float | None = None,
     ) -> None:
         """Activate the pending fill by converting to position mapping.
+
+        `fill_price` (T9c) is stamped when supplied so the Positions screen
+        can show a real fill price / slippage for a copy that came from a
+        mirrored pending order, exactly as for a mirrored market open.
 
         Raises MappingNotFound if no active order mapping exists.
         """
@@ -395,10 +494,12 @@ class Repo:
             cursor = conn.execute(
                 """
                 UPDATE mappings
-                SET slave_position_id = %s, slave_volume = %s, status = 'active', updated_at = now()
+                SET slave_position_id = %s, slave_volume = %s,
+                    fill_price = COALESCE(fill_price, %s),
+                    status = 'active', updated_at = now()
                 WHERE slave_account_id = %s AND slave_order_id = %s AND status = 'active'
                 """,
-                (slave_position_id, slave_volume, slave_account_id, slave_order_id),
+                (slave_position_id, slave_volume, fill_price, slave_account_id, slave_order_id),
             )
             if cursor.rowcount == 0:
                 raise MappingNotFound(
@@ -431,7 +532,7 @@ class Repo:
                 """
                 SELECT id, master_position_id, master_order_id, slave_account_id,
                        slave_position_id, slave_order_id, slave_volume, client_order_id,
-                       status, error, created_at, updated_at
+                       status, error, fill_price, created_at, updated_at
                 FROM mappings
                 """
             ).fetchall()
