@@ -357,7 +357,7 @@ any outbound calls to cTrader's OAuth token endpoint — no real network calls.
 cd dashboard && npm test
 ```
 
-Runs `tsc --noEmit` (typecheck) followed by `vitest run`. 7 test files, 48
+Runs `tsc --noEmit` (typecheck) followed by `vitest run`. 7 test files, 50
 tests, all component/page tests with mocked `fetch`/WebSocket — no backend
 required.
 

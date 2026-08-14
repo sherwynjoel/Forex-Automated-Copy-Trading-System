@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi, afterEach, beforeEach } from 'vitest'
 import Overview from './Overview'
-import type { Account, Settings, StateSnapshot } from '../lib/types'
+import type { Account, ApiState, Settings, StateSnapshot } from '../lib/types'
 
 // Helper to stub API routes
 function stubApi(routes: Record<string, unknown>) {
@@ -65,7 +65,9 @@ const mockSettings: Settings = {
   shards: 4,
 }
 
-const mockState: StateSnapshot = {
+// The per-account block of GET /api/state. Kept separate so tests can assert
+// against the same numbers the component is expected to render.
+const mockAccountState: StateSnapshot = {
   '1': {
     balance: 10000,
     equity: 12000,
@@ -106,6 +108,22 @@ const mockState: StateSnapshot = {
   },
 }
 
+// What GET /api/state ACTUALLY returns: a verbatim pass-through of the
+// copier's get_state(), i.e. an envelope whose per-account block sits under
+// `accounts`, alongside master_positions/pending_orders/drift.
+//
+// This mock used to be a bare StateSnapshot -- the account map on its own --
+// which is exactly the shape Overview wrongly assumed. The mock agreeing with
+// the bug is why the suite passed while the master card and every slave tile's
+// equity/balance rendered blank against the real API. Mocking the real
+// envelope is what makes this suite able to catch that class of bug at all.
+const mockState: ApiState = {
+  accounts: mockAccountState,
+  master_positions: [],
+  pending_orders: [],
+  drift: [],
+}
+
 afterEach(() => vi.unstubAllGlobals())
 
 test('renders master card with equity/balance/pnl', async () => {
@@ -130,6 +148,91 @@ test('renders master card with equity/balance/pnl', async () => {
   expect(screen.getByText('$12000.00')).toBeInTheDocument()
   expect(screen.getByText('$10000.00')).toBeInTheDocument()
   expect(screen.getByText('$2000.00')).toBeInTheDocument()
+})
+
+test('master card renders equity/balance/P&L read from the nested accounts block', async () => {
+  // Regression guard for the shape bug: /api/state returns
+  // {accounts, master_positions, pending_orders, drift}, and the per-account
+  // numbers live under `accounts`. Overview used to index the envelope
+  // directly, so every lookup was undefined -- the master card did not render
+  // at all and the slave tiles' stats were silently missing. The old mock was
+  // a bare account map, so the suite never noticed.
+  //
+  // This test asserts against an envelope that carries a NON-empty
+  // master_positions/drift too, so a future "just spread the response" fix
+  // that reintroduces the flat read cannot pass by accident.
+  const envelope: ApiState = {
+    accounts: mockAccountState,
+    master_positions: [
+      {
+        position_id: 9001,
+        symbol_id: 1,
+        symbol: 'EURUSD',
+        side: 'BUY',
+        volume: 10_000_000,
+        price: 1.105,
+        label: 'copy:m9001',
+        pnl_quote: 12.5,
+        volume_lots: '1.00',
+        copies: [],
+      },
+    ],
+    pending_orders: [],
+    drift: [],
+  }
+
+  stubApi({
+    '/api/accounts': mockAccounts,
+    '/api/settings': mockSettings,
+    '/api/state': envelope,
+  })
+
+  render(
+    <MemoryRouter>
+      <Overview />
+    </MemoryRouter>
+  )
+
+  // The master card only renders when the account's state block was found.
+  await waitFor(() => {
+    expect(screen.getByText(/Master Account \(1001\)/)).toBeInTheDocument()
+  })
+
+  // Account 1 is the master; its numbers come from envelope.accounts['1'].
+  expect(screen.getByText('$12000.00')).toBeInTheDocument() // equity
+  expect(screen.getByText('$10000.00')).toBeInTheDocument() // balance
+  expect(screen.getByText('$2000.00')).toBeInTheDocument() // open P&L
+
+  // ...and a slave tile's stats come from the same nested block, so a
+  // regression cannot hide behind the master card alone.
+  expect(screen.getByText('$5500.00')).toBeInTheDocument() // slave 2 equity
+  expect(screen.getByText('$5000.00')).toBeInTheDocument() // slave 2 balance
+})
+
+test('renders no account stats when the accounts block is empty, without crashing', async () => {
+  // The honest empty case: the copier returns `accounts: {}` before the state
+  // tracker has any data (e.g. no master configured). The screen must degrade
+  // to "no stats" rather than throwing on an undefined lookup.
+  stubApi({
+    '/api/accounts': mockAccounts,
+    '/api/settings': mockSettings,
+    '/api/state': { accounts: {}, master_positions: [], pending_orders: [], drift: [] },
+  })
+
+  render(
+    <MemoryRouter>
+      <Overview />
+    </MemoryRouter>
+  )
+
+  await waitFor(() => {
+    expect(screen.getByText('Copying Status')).toBeInTheDocument()
+  })
+
+  expect(screen.queryByText(/Master Account \(1001\)/)).not.toBeInTheDocument()
+  expect(screen.queryByText('$12000.00')).not.toBeInTheDocument()
+  // Slave tiles still render (they come from /api/accounts), just without stats.
+  expect(screen.getAllByTestId('slave-tile').length).toBeGreaterThanOrEqual(2)
 })
 
 test('renders slave tiles with status icons', async () => {
