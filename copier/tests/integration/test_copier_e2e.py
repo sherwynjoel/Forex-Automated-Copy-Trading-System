@@ -109,6 +109,58 @@ def _setup(dsn: str, auto_fill: bool = True):
     return server, repo, app
 
 
+def _setup_empty(dsn: str, auto_fill: bool = True):
+    """Like _setup(), but builds the CopierApp with ZERO accounts in the
+    database -- exactly how the real process boots when accounts are added
+    AFTER startup (discover(), the dashboard, or a direct insert), which is
+    the scenario task-30 review finding I1(a) exists to pin: build_app()
+    with no accounts builds no clients, and CopierApp.startup() with no
+    accounts returns before doing anything else (main.py:100-103). Returns
+    (server, repo, app, connection_id) -- connection_id is a ready-to-use
+    OAuth grant row the caller can attach accounts to later with
+    _insert_accounts(). Caller must yield app.startup() (with zero
+    accounts, a no-op) before inserting accounts and calling app.reload(),
+    and eventually call _teardown().
+    """
+    server = FakeCTraderServer(auto_fill=auto_fill)
+    port = server.listen(reactor)
+
+    token_store = TokenStore(dsn, FERNET_KEY)
+    expires_at = datetime.utcnow() + timedelta(days=60)
+    connection_id = token_store.save_grant(ACCESS_TOKEN, "e2e-refresh-token", expires_at)
+
+    server.accounts = {MASTER_ID: ACCESS_TOKEN, SLAVE1_ID: ACCESS_TOKEN, SLAVE2_ID: ACCESS_TOKEN}
+
+    repo = Repo(dsn)
+
+    def client_factory(is_live: bool) -> CTraderClient:
+        sdk = make_sdk_client("127.0.0.1", port)
+        return CTraderClient(sdk, "e2e-client-id", "e2e-client-secret")
+
+    app = build_app(repo, token_store, client_factory, shards=1)  # zero accounts at this point
+    return server, repo, app, connection_id
+
+
+def _insert_accounts(dsn: str, connection_id: int) -> None:
+    """Insert the same three accounts (100 master, 101 slave @1.0x, 102
+    slave @0.5x) _setup() seeds up front, but as a standalone step -- used
+    by tests that need them to arrive AFTER the app already exists (see
+    _setup_empty)."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            """
+            INSERT INTO accounts
+                (ctid_trader_account_id, ctid_connection_id, trader_login, is_live,
+                 role, enabled, multiplier)
+            VALUES
+                (%(master)s, %(conn)s, 90100, false, 'master', true, 1.0),
+                (%(slave1)s, %(conn)s, 90101, false, 'slave',  true, 1.0),
+                (%(slave2)s, %(conn)s, 90102, false, 'slave',  true, 0.5)
+            """,
+            {"master": MASTER_ID, "slave1": SLAVE1_ID, "slave2": SLAVE2_ID, "conn": connection_id},
+        )
+
+
 def _teardown(app, server) -> None:
     """Stop every client (kills the heartbeat LoopingCall) then the server."""
     for env_clients in app.clients.values():
@@ -805,5 +857,122 @@ def test_trade_dispatched_during_reconnect_reauth_window_retries_and_lands(db):
         # instead of exhausting into a permanent failure.
         accounts_after = {a.account_id: a.status for a in repo.load_accounts()}
         assert accounts_after[SLAVE1_ID] == 'ok'
+    finally:
+        _teardown(app, server)
+
+
+@pytest.mark.timeout(45)
+@pytest_twisted.inlineCallbacks
+def test_reload_fetches_symbols_for_accounts_added_after_boot(db):
+    """Regression test for task-30 review finding I1(a).
+
+    CopierApp.startup() with ZERO accounts (the real boot sequence when
+    accounts only arrive later -- via discover(), the dashboard, or a
+    direct insert, exactly like task-30's compose e2e) returns before ever
+    calling _fetch_and_cache_symbols (main.py:100-103). Accounts added
+    after that only ever traverse reload() -- which, before this fix,
+    never called _fetch_and_cache_symbols either. Consequence:
+    master_symbols_by_id stayed empty forever, so normalize()'s
+    unknown-symbol gate silently dropped EVERY master event
+    (engine/normalize.py:30-34), and every slave's symbol_cache stayed
+    empty, so mirror_volume had no lot_size/step_volume to size a copy
+    with. Proves both the direct symptom (symbol_cache / master_symbols_by_id
+    populated after reload()) and the actual consequence the brief cares
+    about: a real master fill dispatched AFTER reload() fans out to both
+    slaves at the correct volumes -- the exact thing that was silently
+    broken end-to-end before this fix, and the exact thing task-30's
+    compose-level e2e (e2e/test_full_stack.py) exercises against the real
+    stack. Confirmed RED against the pre-fix reload() (see
+    task-30-report.md's "Fix Round 1" section for the revert-and-rerun
+    evidence: this test fails with an empty master_symbols_by_id, an empty
+    symbol_cache, and zero mapping rows when the
+    `_fetch_and_cache_symbols` call is removed from reload()).
+    """
+    server, repo, app, connection_id = _setup_empty(db)
+    try:
+        yield app.startup()  # zero accounts: hits the early-return branch, exactly like a real boot
+        assert app.master_symbols_by_id == {}
+        assert repo.load_symbol_cache(SLAVE1_ID) == {}
+
+        _insert_accounts(db, connection_id)
+        yield app.reload()
+
+        # Direct symptom: the bug's own diagnosis.
+        assert app.master_symbols_by_id, (
+            "master_symbols_by_id still empty after reload() -- normalize() "
+            "would silently drop every master event"
+        )
+        slave1_symbols = repo.load_symbol_cache(SLAVE1_ID)
+        assert slave1_symbols, (
+            "slave 101's symbol_cache still empty after reload() -- mirror_volume "
+            "has no lot_size/step_volume to size a copy with"
+        )
+        assert slave1_symbols["EURUSD"].lot_size == 10_000_000
+        slave2_symbols = repo.load_symbol_cache(SLAVE2_ID)
+        assert slave2_symbols and slave2_symbols["EURUSD"].lot_size == 10_000_000
+
+        # The actual consequence: a real trade dispatched after reload()
+        # now fans out to both slaves at the correct volumes, exactly like
+        # test_master_fill_fans_out_and_maps proves for the ordinary
+        # (accounts-seeded-before-startup) path.
+        client = app.clients[False][0]
+        _fire_and_forget(client, _market_order(MASTER_ID, ProtoOATradeSide.BUY, ONE_LOT))
+        yield _wait_until(lambda: len(_active_rows(repo)) >= 2)
+
+        rows = repo.mapping_rows()
+        by_slave = {r["slave_account_id"]: r for r in rows}
+        assert by_slave[SLAVE1_ID]["slave_volume"] == ONE_LOT           # multiplier 1.0
+        assert by_slave[SLAVE2_ID]["slave_volume"] == ONE_LOT // 2      # multiplier 0.5
+    finally:
+        _teardown(app, server)
+
+
+@pytest.mark.timeout(45)
+@pytest_twisted.inlineCallbacks
+def test_reload_skips_symbol_fetch_for_already_cached_accounts(db):
+    """Regression test for task-30 review finding I2.
+
+    reload() sits on the hot path of every PUT /api/settings and every
+    pause()/resume() (settings_control.py / main.py:191,206) -- so once an
+    account's symbol_cache has been populated at least once, a SECOND
+    reload() with no new accounts must do ZERO broker symbol round trips
+    for it, not silently re-fetch the full map on every single operator
+    action. Proves this by monkeypatching fetch_symbol_map (imported into
+    copier.main) to count calls: the first reload() (fresh accounts, empty
+    cache) must fetch; a second reload() right after (same accounts,
+    now-populated cache, nothing changed) must fetch nothing at all.
+    """
+    import copier.main as main_module
+
+    server, repo, app = _setup(db)
+    try:
+        yield app.startup()
+
+        fetch_calls = []
+        real_fetch_symbol_map = main_module.fetch_symbol_map
+
+        def _counting_fetch_symbol_map(client, account_id):
+            fetch_calls.append(account_id)
+            return real_fetch_symbol_map(client, account_id)
+
+        main_module.fetch_symbol_map = _counting_fetch_symbol_map
+        try:
+            # First reload after startup: startup() already force-fetched
+            # everything, so this reload should ALSO fetch nothing (every
+            # account is already cached) -- confirms cache-miss-only, not
+            # just "skips a literal no-op second call".
+            yield app.reload()
+            assert fetch_calls == [], (
+                f"reload() re-fetched symbols for already-cached accounts: {fetch_calls}"
+            )
+
+            # A second reload() with still nothing new must also be a
+            # zero-fetch no-op.
+            yield app.reload()
+            assert fetch_calls == [], (
+                f"a second reload() with no new accounts fetched symbols: {fetch_calls}"
+            )
+        finally:
+            main_module.fetch_symbol_map = real_fetch_symbol_map
     finally:
         _teardown(app, server)

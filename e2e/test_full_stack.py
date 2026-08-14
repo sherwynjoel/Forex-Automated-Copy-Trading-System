@@ -58,6 +58,15 @@ API_BASE = "http://127.0.0.1:8000"
 COPIER_CONTROL_BASE = "http://127.0.0.1:8081"       # test-only publish (base compose never exposes 8080)
 FAKE_CTRADER_SCENARIO_BASE = "http://127.0.0.1:9000"
 
+# Must match docker-compose.test.yml's POSTGRES_DB=copytrader_e2e override
+# (applied there to postgres/migrate/copier/api alike). Deliberately NOT
+# "copytrader" -- see _connect_to_test_database's docstring (task-30 review
+# finding I4): the base docker-compose.yml also publishes 127.0.0.1:5433,
+# with database name "copytrader", so a distinct name here is what makes a
+# connection from this test to a developer's ordinary (non-test) stack fail
+# loudly instead of silently truncating their real data.
+POSTGRES_DB_NAME = "copytrader_e2e"
+
 MASTER_ID = 100
 SLAVE1_ID = 101   # multiplier 1.0
 SLAVE2_ID = 102   # multiplier 0.5
@@ -96,6 +105,47 @@ def _dotenv_get(env: dict[str, str], key: str) -> str:
     return value
 
 
+# ---------- DB isolation guard (task-30 review finding I4) ----------
+
+def _connect_to_test_database(dsn: str) -> psycopg.Connection:
+    """Connect to the isolated test-only database, or fail LOUDLY and
+    explain why rather than letting a bare connection error look like an
+    unrelated flake.
+
+    This test's very first act on the database is a destructive
+    `TRUNCATE ... CASCADE` (step 1 below). Port 127.0.0.1:5433 is published
+    by BOTH the base `docker-compose.yml` (a developer's ordinary dev
+    stack, database `copytrader`) and this project's test stack
+    (`docker-compose.yml` + `docker-compose.test.yml`, database
+    `copytrader_e2e` -- see POSTGRES_DB_NAME above) -- so probing "is
+    something listening on 5433" or even "is fake-ctrader up on 9000" is
+    NOT sufficient: a developer could have their dev stack running and
+    ALSO have layered docker-compose.test.yml on top of it from a stray
+    terminal, in which case fake-ctrader would legitimately answer while
+    postgres still only has the dev stack's `copytrader` database.
+    Naming the target database `copytrader_e2e` closes this for real:
+    Postgres only creates the `POSTGRES_DB`-named database on a FRESH data
+    volume, so a plain dev stack's `copytrader` database was never renamed
+    and `copytrader_e2e` simply does not exist there -- this connection
+    fails immediately, before any TRUNCATE is ever sent.
+    """
+    try:
+        return psycopg.connect(dsn, autocommit=True)
+    except psycopg.OperationalError as e:
+        pytest.fail(
+            f"could not connect to database '{POSTGRES_DB_NAME}' on 127.0.0.1:5433 ({e}).\n"
+            "This test ONLY EVER targets the isolated test-stack database "
+            "docker-compose.test.yml creates, by design (see task-30 review finding I4) -- "
+            "it never touches a plain dev stack's 'copytrader' database, even though both "
+            "publish the same port. If you see this, either:\n"
+            "  1. the test stack isn't up -- run: docker compose -f docker-compose.yml "
+            "-f docker-compose.test.yml up -d --build\n"
+            "  2. a plain dev stack (docker-compose.yml alone, database 'copytrader') is on "
+            "127.0.0.1:5433 instead -- stop it first, then bring up the test stack; this guard "
+            "is working as intended by refusing to touch it."
+        )
+
+
 # ---------- polling ----------
 
 def _poll_until(predicate: Callable[[], Any], timeout_s: float = DEADLINE_S,
@@ -128,12 +178,12 @@ def test_full_stack_flow():
     fernet_key = _dotenv_get(env, "FERNET_KEY")
     admin_password = _dotenv_get(env, "ADMIN_BOOTSTRAP_PASSWORD")
     postgres_password = _dotenv_get(env, "POSTGRES_PASSWORD")
-    postgres_dsn = f"postgresql://copytrader:{postgres_password}@127.0.0.1:5433/copytrader"
+    postgres_dsn = f"postgresql://copytrader:{postgres_password}@127.0.0.1:5433/{POSTGRES_DB_NAME}"
 
     fernet = Fernet(fernet_key.encode())
 
     # ---------- 1: seed ctid_connection (Fernet tokens) + accounts 100/101/102, all demo ----------
-    with psycopg.connect(postgres_dsn, autocommit=True) as conn:
+    with _connect_to_test_database(postgres_dsn) as conn:
         # Clean slate every run: this test owns the whole stack's DB state
         # for its duration (a fresh `docker compose ... up -d --build`
         # starts from an empty database via the one-shot `migrate`
@@ -245,6 +295,28 @@ def test_full_stack_flow():
         timeout=10.0,
     )
     assert fill_resp_2.status_code == 200, fill_resp_2.text
+
+    # POSITIVE check first (task-30 review finding I3): the negative check
+    # below ("no new fills for 5s") passes VACUOUSLY if the master event
+    # never reached the copier at all, if the fake failed to broadcast, or
+    # if the copier died after step 6 -- none of which have anything to do
+    # with the kill switch actually working. Dispatcher logs a
+    # `slave_action` event with `{"skipped": "kill_switch", ...}` per
+    # suppressed intent (engine/dispatch.py:_handle_kill_switch) -- polling
+    # for exactly those two events first proves the master fill genuinely
+    # arrived, was normalized and decided into two OpenMarket intents, and
+    # was suppressed FOR THE RIGHT REASON, before asserting the (necessary
+    # but not sufficient on its own) absence of new fills.
+    def _kill_switch_skip_events() -> list[dict]:
+        resp = client.get("/api/events", params={"category": "slave_action", "limit": 200})
+        assert resp.status_code == 200, resp.text
+        return [e for e in resp.json() if e["payload"].get("skipped") == "kill_switch"]
+
+    skip_events = _poll_until(
+        lambda: (lambda evs: evs if len(evs) >= 2 else None)(_kill_switch_skip_events()),
+        description="2 slave_action kill_switch skip events",
+    )
+    assert {e["account_id"] for e in skip_events} == {SLAVE1_ID, SLAVE2_ID}, skip_events
 
     negative_deadline = time.monotonic() + NEGATIVE_WAIT_S
     while time.monotonic() < negative_deadline:
