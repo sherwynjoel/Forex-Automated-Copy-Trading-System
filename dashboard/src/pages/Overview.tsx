@@ -83,8 +83,34 @@ export default function Overview() {
 
   const masterState = masterAccount ? state[String(masterAccount.ctid_trader_account_id)] : undefined
 
+  // Accounts (master or slave) whose cTrader-ID token refresh has failed. Once the
+  // token expires, copying for these accounts silently stops, so this must be
+  // impossible to miss on the dashboard - not just a row in the Logs table.
+  const refreshFailedAccounts = accounts.filter((a) => a.connection_status === 'refresh_failed')
+
   return (
     <div className="space-y-6">
+      {/* Token Refresh Failure Alert */}
+      {refreshFailedAccounts.length > 0 && (
+        <div
+          data-testid="refresh-failed-banner"
+          role="alert"
+          className="bg-red-600 text-white p-4 rounded-lg shadow-md border-2 border-red-800 flex items-start gap-3"
+        >
+          <span className="text-2xl leading-none" aria-hidden="true">⚠️</span>
+          <div>
+            <p className="font-bold">
+              Token refresh failed for account{refreshFailedAccounts.length > 1 ? 's' : ''}:{' '}
+              {refreshFailedAccounts.map((a) => a.trader_login).join(', ')}
+            </p>
+            <p className="text-sm mt-1 text-red-50">
+              Copying for these accounts will stop when the token expires. Reconnect via
+              Accounts &rarr; Connect cTrader ID.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Kill Switch and Status Bar */}
       <div className="bg-white p-6 rounded-lg shadow-md flex items-center justify-between">
         <div>
@@ -131,7 +157,8 @@ export default function Overview() {
             {slaveAccounts.map((slave) => {
               const slaveState = state[String(slave.ctid_trader_account_id)]
               const isPaused = !slave.enabled
-              const isDegraded = slave.connection_status === 'degraded'
+              const isDegraded = slave.status === 'degraded'
+              const isRefreshFailed = slave.connection_status === 'refresh_failed'
 
               // Status icon
               let statusIcon = '🟢'
@@ -148,7 +175,9 @@ export default function Overview() {
                 <div
                   key={slave.ctid_trader_account_id}
                   data-testid="slave-tile"
-                  className="bg-white p-6 rounded-lg shadow-md hover:shadow-lg transition-shadow"
+                  className={`bg-white p-6 rounded-lg shadow-md hover:shadow-lg transition-shadow ${
+                    isRefreshFailed ? 'border-2 border-orange-500' : ''
+                  }`}
                 >
                   {/* Header with status */}
                   <div className="flex items-center justify-between mb-4">
@@ -161,6 +190,16 @@ export default function Overview() {
                       <p className="text-xs text-gray-600 font-medium">{statusLabel}</p>
                     </div>
                   </div>
+
+                  {/* Refresh-failed marker - distinct from the degraded badge above */}
+                  {isRefreshFailed && (
+                    <div
+                      data-testid="slave-refresh-failed-marker"
+                      className="mb-4 px-3 py-2 bg-orange-100 border border-orange-400 text-orange-800 text-xs font-semibold rounded flex items-center gap-1"
+                    >
+                      <span aria-hidden="true">🔑</span> Token Refresh Failed - reconnect required
+                    </div>
+                  )}
 
                   {/* Stats */}
                   {slaveState && (
