@@ -264,6 +264,19 @@ class CopierApp:
             else:
                 client.deauthorize_account(account.account_id)
 
+        # Mirrors startup()'s authorize -> fetch-symbols ordering: accounts
+        # added (via discover()/direct insert) and enabled AFTER the process
+        # already booted only ever go through reload(), never startup()
+        # again -- without this, their symbol_cache (needed by every slave's
+        # mirror_volume sizing) and, for a newly (re)designated master,
+        # master_symbols_by_id (needed by normalize()'s unknown-symbol gate)
+        # would stay empty for the lifetime of the process, silently
+        # dropping every master event / mis-sizing every slave copy with no
+        # error surfaced anywhere. Caught by the compose-level e2e test
+        # (e2e/test_full_stack.py), which seeds accounts and calls /reload
+        # against an already-running copier that started with zero accounts.
+        yield self._fetch_and_cache_symbols(accounts)
+
         master_account = next((a for a in accounts if a.role == 'master'), None)
         new_master_id = master_account.account_id if master_account else None
         if new_master_id != self.master_account_id:

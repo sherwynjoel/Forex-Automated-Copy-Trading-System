@@ -142,11 +142,15 @@ class FakeCTraderServer:
         )
         self._handlers[ProtoHeartbeatEvent().payloadType] = self._handle_heartbeat
 
-    def listen(self, reactor) -> int:
-        """Listen on a random port with TLS."""
+    def listen(self, reactor, port: int = 0) -> int:
+        """Listen on `port` (default: a random free port, the in-process-test
+        default) with TLS. `port=0` is Twisted's convention for "pick any
+        free port"; fake_main.py (the compose-level e2e's standalone
+        process) passes the real cTrader port (5035) instead, since it has
+        no in-process caller to hand a random port back to."""
         factory = Factory.forProtocol(_Proto)
         factory.server = self
-        self._listening = reactor.listenSSL(0, factory, make_self_signed_context())
+        self._listening = reactor.listenSSL(port, factory, make_self_signed_context())
         return self._listening.getHost().port
 
     def shutdown(self):
@@ -449,6 +453,24 @@ class FakeCTraderServer:
                 fill_evt.order.tradeData.label = req.label
                 fill_evt.order.clientOrderId = req.clientOrderId
                 self.broadcast(fill_evt)
+
+                # Also record the position for _handle_reconcile_req (so a
+                # ProtoOAReconcileReq sent AFTER this fill -- e.g. the
+                # copier's resync()/state-tracker refresh -- reports it as
+                # open instead of empty, which previously made every fresh
+                # fill look like "unmapped_master_position"/"missing_
+                # slave_copy" drift, or a master position invisible to
+                # get_state(), the moment anything reconciled after a real
+                # fill rather than only after a hand-scripted
+                # open_positions dict). Kept in sync by
+                # _handle_close_position_req below.
+                self.open_positions.setdefault(req.ctidTraderAccountId, []).append({
+                    "position_id": position_id,
+                    "symbol_id": req.symbolId,
+                    "volume": req.volume,
+                    "trade_side": req.tradeSide,
+                    "label": req.label,
+                })
             else:
                 # For LIMIT/STOP orders: just accept (untagged)
                 order_id = next(self._order_ids)
@@ -545,6 +567,34 @@ class FakeCTraderServer:
             fill_evt.order.tradeData.volume = req.volume
             fill_evt.order.tradeData.tradeSide = model.ProtoOATradeSide.BUY  # Default, varies
             self.broadcast(fill_evt)
+
+            # Keep open_positions (see _handle_new_order_req) in sync: drop
+            # the position on a full close, shrink its recorded volume on a
+            # partial one -- otherwise a ProtoOAReconcileReq sent after this
+            # close would keep reporting the position at its ORIGINAL
+            # volume (or reporting it at all, once fully closed) forever.
+            # Preserves the tracked entry's real symbol_id/trade_side/label
+            # (set when it was opened) rather than this handler's own
+            # symbol/side defaults above, which only stand in for fields
+            # ProtoOAClosePositionReq never carries (a close references a
+            # position_id, not a symbol or side).
+            existing = next(
+                (p for p in self.open_positions.get(req.ctidTraderAccountId, [])
+                 if p["position_id"] == req.positionId),
+                None,
+            )
+            remaining = [
+                p for p in self.open_positions.get(req.ctidTraderAccountId, [])
+                if p["position_id"] != req.positionId
+            ]
+            if not is_full_close:
+                updated = dict(existing) if existing is not None else {
+                    "position_id": req.positionId, "symbol_id": 1,
+                    "trade_side": model.ProtoOATradeSide.BUY, "label": "",
+                }
+                updated["volume"] = remaining_volume
+                remaining.append(updated)
+            self.open_positions[req.ctidTraderAccountId] = remaining
 
     def _handle_amend_position_sltp_req(self, proto, msg):
         """Handle amend position SL/TP request - broadcasts untagged event.

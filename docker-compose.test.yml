@@ -1,0 +1,41 @@
+services:
+  # Fake cTrader Open API server for the compose-level end-to-end test: a
+  # real TLS/protobuf server (FakeCTraderServer) on the real cTrader port
+  # (5035) plus a tiny HTTP scenario-control API on 9000 that
+  # e2e/test_full_stack.py drives to push master-side fills/closes/pending
+  # placements. Reuses the copier image/build context since fake_main.py
+  # lives inside copier/src/copier/testing/ and is installed as part of the
+  # copier package.
+  fake-ctrader:
+    build: { context: ., dockerfile: copier/Dockerfile }
+    command: python -m copier.testing.fake_main
+    ports:
+      - "127.0.0.1:9000:9000"
+
+  copier:
+    environment:
+      # Points the copier's demo-environment client at fake-ctrader instead
+      # of the real demo.ctraderapi.com. CTRADER_PORT is left at .env's
+      # default (5035), which fake-ctrader also listens on.
+      CTRADER_DEMO_HOST: fake-ctrader
+    depends_on:
+      fake-ctrader:
+        condition: service_started
+    # Test-only: the base docker-compose.yml deliberately never publishes
+    # this port (spec §8 -- control endpoint is Docker-internal only in
+    # production). e2e/test_full_stack.py needs to reach it directly
+    # (POST /reload) since the api's /api/settings proxy only forwards
+    # settings-shaped commands, not an unconditional reload after seeding
+    # accounts straight into Postgres.
+    ports:
+      - "127.0.0.1:8081:8080"
+
+  api:
+    environment:
+      # The e2e test drives the API over plain http://127.0.0.1:8000 (no
+      # TLS termination in this local/test topology); with the default
+      # cookie_secure=true, the session/csrf cookies set by POST /api/login
+      # would carry the Secure attribute and never be sent back over http.
+      # Same override the api test suite's own conftest.py already uses for
+      # the same reason (see api/tests/conftest.py).
+      COOKIE_SECURE: "false"
