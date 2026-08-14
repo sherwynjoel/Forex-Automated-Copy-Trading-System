@@ -425,6 +425,70 @@ test('slave tile shows Degraded status from account.status, not connection_statu
   expect(screen.getByText('Degraded')).toBeInTheDocument()
 })
 
+test('degraded slave tile shows the last_error reason', async () => {
+  const accounts: Account[] = [
+    { ...mockAccounts[0], connection_status: 'active' },
+    {
+      ...mockAccounts[1],
+      status: 'degraded',
+      connection_status: 'active',
+      last_error: 'Send failed: insufficient margin on EURUSD',
+    },
+    { ...mockAccounts[2], connection_status: 'active' },
+  ]
+
+  stubApi({
+    '/api/accounts': accounts,
+    '/api/settings': mockSettings,
+    '/api/state': mockState,
+  })
+
+  render(
+    <MemoryRouter>
+      <Overview />
+    </MemoryRouter>
+  )
+
+  await waitFor(() => {
+    expect(screen.getByTestId('slave-last-error')).toBeInTheDocument()
+  })
+
+  const errorEl = screen.getByTestId('slave-last-error')
+  expect(errorEl).toHaveTextContent('Send failed: insufficient margin on EURUSD')
+  expect(errorEl).toHaveAttribute('title', 'Send failed: insufficient margin on EURUSD')
+})
+
+test('non-degraded slave tile never shows a last_error message', async () => {
+  const accounts: Account[] = [
+    { ...mockAccounts[0], connection_status: 'active' },
+    {
+      ...mockAccounts[1],
+      status: 'ok',
+      connection_status: 'active',
+      last_error: 'Send failed: insufficient margin on EURUSD',
+    },
+    { ...mockAccounts[2], connection_status: 'active' },
+  ]
+
+  stubApi({
+    '/api/accounts': accounts,
+    '/api/settings': mockSettings,
+    '/api/state': mockState,
+  })
+
+  render(
+    <MemoryRouter>
+      <Overview />
+    </MemoryRouter>
+  )
+
+  await waitFor(() => {
+    expect(screen.getByText(/1002/)).toBeInTheDocument()
+  })
+
+  expect(screen.queryByTestId('slave-last-error')).not.toBeInTheDocument()
+})
+
 test('slave tile shows a refresh-failed marker distinct from degraded styling', async () => {
   const accounts: Account[] = [
     { ...mockAccounts[0], connection_status: 'active' },

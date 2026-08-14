@@ -191,6 +191,17 @@ export default function Overview() {
                     </div>
                   </div>
 
+                  {/* Reason for degraded status - the send-failure message from the backend */}
+                  {isDegraded && slave.last_error && (
+                    <p
+                      data-testid="slave-last-error"
+                      title={slave.last_error}
+                      className="mb-4 text-xs text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1 truncate"
+                    >
+                      {slave.last_error}
+                    </p>
+                  )}
+
                   {/* Refresh-failed marker - distinct from the degraded badge above */}
                   {isRefreshFailed && (
                     <div
