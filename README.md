@@ -179,8 +179,9 @@ slave, confirm a few real trades copy correctly, then scale up.
   pre-wire "never reached the broker" failure case) or hits a non-retryable,
   ambiguous send failure (the request's fate on the broker is unknown, so it
   isn't retried). Treat it as a connectivity issue: check the copier's
-  connection health (`docker compose logs copier`) and the specific message
-  in `last_error` on the Accounts screen. A degraded slave is not disabled —
+  connection health (`docker compose logs copier`) and the specific send-failure
+  message shown on the degraded slave's card on the Overview screen (hover for
+  the full text). A degraded slave is not disabled —
   it keeps receiving every future master event (each action is
   independent) — and it clears automatically on its next successful send,
   or you can pause/resume it manually to force one.
