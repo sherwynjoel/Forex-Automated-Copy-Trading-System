@@ -41,6 +41,17 @@ services:
       # of the real demo.ctraderapi.com. CTRADER_PORT is left at .env's
       # default (5035), which fake-ctrader also listens on.
       CTRADER_DEMO_HOST: fake-ctrader
+      # TEST-ONLY (T1): fake-ctrader presents a self-signed certificate
+      # generated fresh in its own process every boot
+      # (copier/src/copier/testing/tls.py), which no CA can vouch for and
+      # whose CN is "localhost", not "fake-ctrader". The copier's default
+      # TLS path verifies the chain against the platform trust store AND
+      # checks the hostname (copier/src/copier/ctrader/client.py:
+      # client_tls_options), so it would -- correctly -- refuse this
+      # connection. This variable is the ONLY thing that relaxes that, it
+      # appears nowhere in docker-compose.yml, and the copier logs a
+      # WARNING every time it honours it.
+      CTRADER_TLS_INSECURE: "1"
       POSTGRES_DSN: postgresql://copytrader:${POSTGRES_PASSWORD:-copytrader}@postgres:5432/copytrader_e2e
     depends_on:
       fake-ctrader:

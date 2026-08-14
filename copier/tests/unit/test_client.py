@@ -1,14 +1,18 @@
-from ctrader_open_api.messages.OpenApiCommonMessages_pb2 import ProtoHeartbeatEvent
+from ctrader_open_api.messages.OpenApiCommonMessages_pb2 import (
+    ProtoErrorRes, ProtoHeartbeatEvent, ProtoMessage)
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
-    ProtoOAAccountAuthReq, ProtoOAApplicationAuthReq, ProtoOAExecutionEvent)
+    ProtoOAAccountAuthReq, ProtoOAAccountAuthRes, ProtoOAApplicationAuthReq,
+    ProtoOAErrorRes, ProtoOAExecutionEvent)
 from ctrader_open_api.messages.OpenApiModelMessages_pb2 import ProtoOAExecutionType
-from twisted.internet import defer
+from twisted.internet import defer, ssl
 from twisted.internet.task import Clock
 from twisted.python.failure import Failure
 
 from copier.ctrader.client import (
-    HEARTBEAT_INTERVAL_S, SEND_HANDOFF_TIMEOUT_S, CTraderClient,
-    _PerConnectionTcpProtocol)
+    HEARTBEAT_INTERVAL_S, SEND_HANDOFF_TIMEOUT_S, TLS_CA_FILE_ENV,
+    TLS_INSECURE_ENV, CTraderClient, _PerConnectionTcpProtocol,
+    client_tls_options, make_sdk_client)
+from copier.testing.tls import make_self_signed_context
 
 
 class _StubTransport:
@@ -465,3 +469,238 @@ def test_per_connection_tcp_protocol_isolates_send_queues():
 
     assert list(p1._send_queue)          # queued on p1's own connection
     assert list(p2._send_queue) == []    # never visible on p2's -- the actual regression this guards
+
+
+# ---------- T1: TLS verification ----------
+
+def test_default_tls_options_verify_chain_and_hostname(monkeypatch):
+    """The DEFAULT path (nothing set in the environment) must produce a
+    hostname-verifying, platform-trust-anchored client TLS creator.
+
+    The vendored SDK built `clientFromString(reactor, f"ssl:{host}:{port}")`,
+    whose parser only enables verification when a `hostname=`/`caCertsDir=`
+    parameter is present -- neither ever was -- yielding
+    `CertificateOptions(trustRoot=None)`: VERIFY_NONE, no hostname check,
+    for every real-money cTrader connection.
+    """
+    monkeypatch.delenv(TLS_INSECURE_ENV, raising=False)
+    monkeypatch.delenv(TLS_CA_FILE_ENV, raising=False)
+
+    options = client_tls_options("demo.ctraderapi.com")
+
+    # ClientTLSOptions is the type optionsForClientTLS() returns; a bare
+    # CertificateOptions (what the old path produced) verifies nothing.
+    assert type(options).__name__ == "ClientTLSOptions"
+    assert not isinstance(options, ssl.CertificateOptions)
+    # It carries the hostname it will check the peer certificate against.
+    assert options._hostnameBytes == b"demo.ctraderapi.com"
+
+
+def test_insecure_knob_is_inert_unless_explicitly_set(monkeypatch):
+    """An unset OR empty/false-y value must not weaken the default path."""
+    monkeypatch.delenv(TLS_CA_FILE_ENV, raising=False)
+    for value in ("", "0", "false", "no"):
+        monkeypatch.setenv(TLS_INSECURE_ENV, value)
+        assert type(client_tls_options("demo.ctraderapi.com")).__name__ == "ClientTLSOptions", value
+
+
+def test_insecure_knob_when_set_disables_verification(monkeypatch):
+    """Set explicitly (only by tests/integration/conftest.py and
+    docker-compose.test.yml's fake-ctrader-facing copier), it reproduces the
+    old verify-nothing behaviour so a self-signed fake can be reached."""
+    monkeypatch.setenv(TLS_INSECURE_ENV, "1")
+    options = client_tls_options("127.0.0.1")
+    assert isinstance(options, ssl.CertificateOptions)
+
+
+def test_custom_ca_knob_still_checks_hostname(monkeypatch, tmp_path):
+    monkeypatch.delenv(TLS_INSECURE_ENV, raising=False)
+    ca_pem = tmp_path / "ca.pem"
+    ca_pem.write_bytes(
+        ssl.Certificate(make_self_signed_context().certificate).dumpPEM()
+    )
+    monkeypatch.setenv(TLS_CA_FILE_ENV, str(ca_pem))
+
+    options = client_tls_options("demo.ctraderapi.com")
+
+    assert type(options).__name__ == "ClientTLSOptions"
+    assert options._hostnameBytes == b"demo.ctraderapi.com"
+
+
+def test_make_sdk_client_connects_over_a_tls_wrapped_endpoint(monkeypatch):
+    """The endpoint handed to ClientService must be our TLS wrapper, not the
+    SDK's `ssl:host:port` string endpoint."""
+    monkeypatch.delenv(TLS_INSECURE_ENV, raising=False)
+    monkeypatch.delenv(TLS_CA_FILE_ENV, raising=False)
+    from twisted.internet import reactor as real_reactor
+
+    client = make_sdk_client("demo.ctraderapi.com", 5035, reactor_=real_reactor)
+
+    endpoint = client._machine._endpoint
+    assert type(endpoint).__name__ == "_WrapperEndpoint"
+    # Still a working SDK Client in every other respect.
+    assert client.numberOfMessagesToSendPerSecond == 5
+    assert client.isConnected is False
+    assert client._responseDeferreds == {}
+
+
+# ---------- T2: post-reconnect bulk re-auth ----------
+
+class _DeferredSdk(StubSdk):
+    """StubSdk whose send() returns a Deferred the test fires by hand, so
+    "how many auth requests are in flight at once" is observable."""
+
+    def __init__(self):
+        super().__init__()
+        self.pending: list[defer.Deferred] = []
+
+    def send(self, msg, **kwargs):
+        self.sent.append(msg)
+        d = defer.Deferred()
+        self.pending.append(d)
+        return d
+
+
+def test_bulk_reauth_is_serialized_and_reaches_every_account():
+    """T2: on a reconnect, every registered account must be re-authed, one
+    at a time -- including accounts far past the SDK's 5 msg/s drain window.
+
+    RED before the fix: `_on_app_authed` fired `_send_account_auth` for ALL
+    accounts in a single reactor turn. The vendored SDK arms each request's
+    5 s response timeout AT SEND TIME while TcpProtocol drains only 5
+    messages per second, so everything at queue index >= ~25 timed out
+    before it was ever written, was dropped by the SDK's `isCanceled` check
+    instead of sent, and was never retried -- permanently un-authed for that
+    connection's life. This test sees all 30 ProtoOAAccountAuthReqs handed
+    to send() at once (in-flight count 30) rather than one at a time.
+    """
+    sdk = _DeferredSdk()
+    client = CTraderClient(sdk, "cid", "csecret", clock=Clock())
+    client.start()
+
+    # First connect: app auth is the one pending request; answer it, then
+    # register 30 accounts (each authorize_account sends immediately, so
+    # answer each in turn).
+    sdk.connect()
+    sdk.pending.pop(0).callback(None)                 # ProtoOAApplicationAuthReq
+    account_ids = list(range(1000, 1030))             # 30 > the ~25 ceiling
+    for account_id in account_ids:
+        client.authorize_account(account_id, f"tok-{account_id}")
+        sdk.pending.pop(0).callback(None)
+    assert sdk.pending == []
+
+    sent_before = len(sdk.sent)
+
+    # --- the reconnect ---
+    sdk.disconnect()
+    sdk.connect()
+    app_auth = sdk.pending.pop(0)
+    assert isinstance(sdk.sent[-1], ProtoOAApplicationAuthReq)
+    app_auth.callback(None)
+
+    reauthed_in_order = []
+    while sdk.pending:
+        assert len(sdk.pending) == 1, (
+            f"{len(sdk.pending)} account-auth requests in flight at once; the re-auth "
+            "loop must await each response before sending the next"
+        )
+        req = sdk.sent[-1]
+        assert isinstance(req, ProtoOAAccountAuthReq)
+        reauthed_in_order.append(req.ctidTraderAccountId)
+        sdk.pending.pop(0).callback(None)
+
+    assert reauthed_in_order == account_ids, (
+        "every registered account must be re-authed on a reconnect, including "
+        "those beyond the SDK's 5 msg/s send-timeout window"
+    )
+    assert len(sdk.sent) == sent_before + 1 + len(account_ids)
+
+
+def test_bulk_reauth_continues_past_one_failing_account():
+    """One account whose auth errbacks must not abandon the accounts queued
+    behind it."""
+    sdk = _DeferredSdk()
+    client = CTraderClient(sdk, "cid", "csecret", clock=Clock())
+    client.start()
+    sdk.connect()
+    sdk.pending.pop(0).callback(None)
+    for account_id in (1001, 1002, 1003):
+        client.authorize_account(account_id, "tok")
+        sdk.pending.pop(0).callback(None)
+
+    sdk.disconnect()
+    sdk.connect()
+    sdk.pending.pop(0).callback(None)                  # app auth
+
+    seen = []
+    while sdk.pending:
+        seen.append(sdk.sent[-1].ctidTraderAccountId)
+        d = sdk.pending.pop(0)
+        if seen[-1] == 1002:
+            d.errback(Failure(RuntimeError("auth blew up")))
+        else:
+            d.callback(None)
+
+    assert seen == [1001, 1002, 1003]
+
+
+# ---------- T3: auth response fail-closed ----------
+
+def _auth_envelope(payload) -> ProtoMessage:
+    """The raw ProtoMessage envelope the SDK's send() resolves with."""
+    return ProtoMessage(payloadType=payload.payloadType,
+                        payload=payload.SerializeToString(), clientMsgId="x")
+
+
+def test_account_auth_success_marks_authed():
+    sdk, _, client = make()
+    sdk.connect()
+    client.authorize_account(1001, "tok")
+    client._on_account_auth_response(
+        _auth_envelope(ProtoOAAccountAuthRes(ctidTraderAccountId=1001)), 1001,
+    )
+    assert client.is_account_authed(1001)
+
+
+def test_common_protocol_error_res_is_a_rejection():
+    """T3: ProtoErrorRes (common protocol, payloadType 50) is a rejection
+    just as much as ProtoOAErrorRes (2142).
+
+    RED before the fix: only ProtoOAErrorRes was treated as failure, so a
+    common-protocol error left the account marked authed -- and every
+    subsequent trade for it went to the wire on a connection the server does
+    not consider authorized, where it is rejected UNTAGGED, i.e. silently:
+    no response Deferred to fail, no retry, no degraded status.
+    """
+    sdk, _, client = make()
+    sdk.connect()
+    client.authorize_account(1001, "tok")
+
+    error = ProtoErrorRes(errorCode="CH_ACCESS_TOKEN_INVALID")
+    assert error.payloadType == 50
+    client._on_account_auth_response(_auth_envelope(error), 1001)
+
+    assert not client.is_account_authed(1001)
+
+
+def test_oa_error_res_is_a_rejection():
+    sdk, _, client = make()
+    sdk.connect()
+    client.authorize_account(1001, "tok")
+    client._on_account_auth_response(
+        _auth_envelope(ProtoOAErrorRes(errorCode="CH_UNKNOWN_ACCOUNT")), 1001,
+    )
+    assert not client.is_account_authed(1001)
+
+
+def test_undecodable_auth_response_fails_closed():
+    """T3: a response Protobuf.extract cannot decode is not evidence of
+    success. RED before the fix: `except Exception: payload = None` fell
+    through to `_authed_accounts.add(account_id)`."""
+    sdk, _, client = make()
+    sdk.connect()
+    client.authorize_account(1001, "tok")
+
+    client._on_account_auth_response(object(), 1001)   # not a ProtoMessage at all
+
+    assert not client.is_account_authed(1001)
