@@ -48,6 +48,7 @@ from twisted.internet import defer, reactor, task
 from copier.ctrader.client import CTraderClient, make_sdk_client
 from copier.ctrader.tokens import TokenStore
 from copier.db.repo import Repo
+from copier.domain.models import OpenMarket, Side
 from copier.main import build_app
 from copier.testing.fake_server import FakeCTraderServer
 
@@ -709,5 +710,100 @@ def test_reconnect_reauths_and_resyncs(db):
         ]
         assert len(matching_drift_events) == 1
         assert matching_drift_events[0]["account_id"] == SLAVE1_ID
+    finally:
+        _teardown(app, server)
+
+
+@pytest.mark.timeout(45)
+@pytest_twisted.inlineCallbacks
+def test_trade_dispatched_during_reconnect_reauth_window_retries_and_lands(db):
+    """NEW-1 regression: send_no_reply's instant=True write (Fix Round 2)
+    can reach the wire in the same reactor turn a connection is confirmed
+    -- before THAT connection's own account-auth round trip for the target
+    account has completed. Before instant=True, the single FIFO drain queue
+    incidentally serialized every trade send behind the account-auth
+    request queued moments earlier on the same reconnect; instant=True
+    removed that accidental protection.
+
+    FakeCTraderServer.enforce_auth=True makes this reachable in CI: it
+    rejects a trade request for an account not yet account-authed on the
+    connection it arrived on, faithful to real cTrader (which the
+    unenforced fake -- the default everywhere else -- would otherwise
+    silently accept regardless of auth state, hiding the race entirely).
+
+    Dispatches a SlaveIntent directly via app.dispatcher.dispatch(),
+    deterministically inside the window: waits for CTraderClient to have
+    actually detected the disconnect (is_account_authed() false --
+    _on_disconnected clears it) before dispatching, so the send is
+    guaranteed to land on a genuinely not-yet-re-authed connection rather
+    than a stale, already-dying one whose broadcast responses would go
+    nowhere once the server finishes tearing it down (a test-harness race
+    to avoid, distinct from the production race under test). From that
+    point, CTraderClient._authed_accounts stays empty until the automatic
+    reconnect + re-auth (real reactor time) completes.
+
+    Without main.py's is_account_authed() gate (Fix Round 3),
+    send_for_account would let send_no_reply through regardless,
+    FakeCTraderServer would reject it, and -- since send_no_reply's own
+    Deferred still reports success once the write is handed to a connected
+    transport -- Dispatcher would never see a failure to retry: the mapping
+    would stay 'pending' forever, no event, no alert, no degraded status.
+    With the gate, the premature attempt raises SendNotAttempted (nothing
+    reached the wire), Dispatcher retries at 1s/2s/4s, and the retry lands
+    once real reconnect+re-auth (typically ~1-2s, well inside the ~7s retry
+    budget) actually completes.
+    """
+    server, repo, app = _setup(db)
+    server.enforce_auth = True
+    try:
+        yield app.startup()
+        client = app.clients[False][0]
+
+        server.drop_all_connections()
+
+        # Wait for the disconnect to actually register client-side (see
+        # the docstring) before firing, so the send is deterministically
+        # inside the not-yet-re-authed window rather than racing detection
+        # of the disconnect itself.
+        yield _wait_until(lambda: not client.is_account_authed(SLAVE1_ID), timeout=10.0)
+
+        intent = OpenMarket(
+            slave_account_id=SLAVE1_ID,
+            master_position_id=999001,
+            symbol_id=SYMBOL_ID,
+            side=Side.BUY,
+            volume=ONE_LOT,
+            stop_loss=None,
+            take_profit=None,
+            label="copy:m999001",
+        )
+        app.dispatcher.dispatch([intent])
+
+        yield _wait_until(
+            lambda: any(
+                r["status"] == "active"
+                for r in repo.mapping_rows()
+                if r["master_position_id"] == 999001
+            ),
+            timeout=20.0,
+        )
+
+        rows = [r for r in repo.mapping_rows() if r["master_position_id"] == 999001]
+        assert len(rows) == 1
+        assert rows[0]["status"] == "active"
+        assert rows[0]["slave_position_id"] is not None
+
+        landed = [
+            r for r in server.requests
+            if isinstance(r, ProtoOANewOrderReq) and r.ctidTraderAccountId == SLAVE1_ID
+            and r.label == "copy:m999001"
+        ]
+        assert len(landed) >= 1
+        assert landed[-1].volume == ONE_LOT
+
+        # Never degraded: the retry ladder carried it past the window
+        # instead of exhausting into a permanent failure.
+        accounts_after = {a.account_id: a.status for a in repo.load_accounts()}
+        assert accounts_after[SLAVE1_ID] == 'ok'
     finally:
         _teardown(app, server)

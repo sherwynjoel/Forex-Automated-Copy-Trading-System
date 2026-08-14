@@ -485,12 +485,34 @@ def _build_send_for_account(
         reclassified as such here: left as a bare failure it would otherwise
         hit Dispatcher's ambiguous-failure branch and degrade the account on
         the very first transient blip instead of retrying at 1s/2s/4s.
+
+        Also gates on client.is_account_authed(account_id), not just
+        _accounts registry membership (NEW-1): send_no_reply's instant=True
+        write reaches the wire in the same reactor turn a connection is
+        confirmed, with no FIFO queue serializing it behind that
+        connection's own (still in-flight) account-auth request the way
+        there incidentally was before instant=True. _accounts membership
+        only proves authorize_account() was ever called, not that auth has
+        completed on the CURRENT connection -- so on every reconnect there
+        is a window where _accounts already contains the account but the
+        wire does not yet know it. Without this gate a trade sent in that
+        window reaches the server on an unauthorized connection and is
+        rejected -- silently, since there is no tagged response Deferred
+        for it to fail. Gating here instead means that window raises
+        SendNotAttempted -- provably nothing reached the wire -- so the
+        retry ladder (1s/2s/4s) carries the send past re-auth instead of
+        racing it.
         """
         client = clients_by_account(account_id)  # may raise SendNotAttempted
         if not client.ready.called:
             raise SendNotAttempted(f"client for account {account_id} not app-authed yet")
         if account_id not in getattr(client, '_accounts', {account_id: None}):
             raise SendNotAttempted(f"account {account_id} not yet account-authed on its client")
+        is_authed = getattr(client, 'is_account_authed', None)
+        if is_authed is not None and not is_authed(account_id):
+            raise SendNotAttempted(
+                f"account {account_id} auth not yet confirmed on the current connection"
+            )
 
         def _reclassify_as_not_attempted(failure):
             raise SendNotAttempted(

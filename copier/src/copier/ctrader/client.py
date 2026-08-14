@@ -13,7 +13,8 @@ from ctrader_open_api.messages.OpenApiCommonMessages_pb2 import ProtoHeartbeatEv
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOAAccountAuthReq, ProtoOAAccountDisconnectEvent,
     ProtoOAAccountsTokenInvalidatedEvent, ProtoOAApplicationAuthReq,
-    ProtoOAExecutionEvent, ProtoOASpotEvent)
+    ProtoOAErrorRes, ProtoOAExecutionEvent, ProtoOAOrderErrorEvent,
+    ProtoOASpotEvent)
 from twisted.application.internet import backoffPolicy
 from twisted.internet import defer, task
 from twisted.python.failure import Failure
@@ -66,6 +67,12 @@ class CTraderClient:
         self._client_id = client_id
         self._client_secret = client_secret
         self._accounts: dict[int, str] = {}          # account_id -> access token
+        # account_id -> confirmed account-authed on the CURRENT connection
+        # (cleared on every disconnect, repopulated by re-auth). Distinct
+        # from _accounts, which is just a registry of "authorize_account()
+        # was ever called" -- not proof of auth on this connection. See
+        # is_account_authed() / NEW-1.
+        self._authed_accounts: set[int] = set()
         self._exec_cbs: list[Callable] = []
         self._disc_cbs: list[Callable] = []
         self._invalid_cbs: list[Callable] = []
@@ -91,6 +98,25 @@ class CTraderClient:
 
     def deauthorize_account(self, account_id: int) -> None:
         self._accounts.pop(account_id, None)
+        self._authed_accounts.discard(account_id)
+
+    def is_account_authed(self, account_id: int) -> bool:
+        """True once a (non-error) response to this account's
+        ProtoOAAccountAuthReq has been received on the CURRENT connection.
+
+        NEW-1: send_no_reply's instant=True write reaches the wire in the
+        same reactor turn whenConnected() confirms a connection -- there is
+        no longer a FIFO drain queue serializing it behind this connection's
+        (still-queued) account-auth request the way there incidentally was
+        before instant=True. Gating a trade send on this (see
+        main.py:send_for_account) instead of on _accounts registry
+        membership means a send attempted before re-auth completes raises
+        SendNotAttempted -- provably nothing reached the wire -- so the
+        dispatcher's normal retry ladder (1s/2s/4s) applies and the retry
+        lands once auth actually completes, rather than racing the wire
+        ahead of it and being silently rejected server-side.
+        """
+        return account_id in self._authed_accounts
 
     def send(self, msg) -> defer.Deferred:
         return self._sdk.send(msg)
@@ -238,13 +264,39 @@ class CTraderClient:
         req.ctidTraderAccountId = account_id
         req.accessToken = self._accounts[account_id]
         d = self._sdk.send(req)
+        d.addCallback(self._on_account_auth_response, account_id)
         d.addErrback(lambda f: log.error("account auth %s failed: %s", account_id, f))
         return d
+
+    def _on_account_auth_response(self, response, account_id: int):
+        """Mark `account_id` authed on the current connection unless the
+        response is an explicit rejection (ProtoOAErrorRes).
+
+        `response` is send()'s raw ProtoMessage envelope; unwrap it to
+        check for an explicit error. Any other outcome -- including a
+        genuine ProtoOAAccountAuthRes, or a shape Protobuf.extract can't
+        recognize at all -- is treated as authed: this method only needs to
+        rule out the one case the real server actually uses to signal
+        rejection (see testing/fake_server.py:_handle_account_auth_req),
+        and failing open on an unrecognized response avoids requiring every
+        test double's send() to fabricate a realistic ProtoOAAccountAuthRes
+        just to exercise unrelated code paths.
+        """
+        try:
+            payload = Protobuf.extract(response)
+        except Exception:
+            payload = None
+        if isinstance(payload, ProtoOAErrorRes):
+            log.error("account auth %s rejected: %s", account_id, payload.errorCode)
+            return response
+        self._authed_accounts.add(account_id)
+        return response
 
     def _on_disconnected(self, _sdk, reason) -> None:
         log.warning("disconnected: %s", reason)
         if self._hb.running:
             self._hb.stop()
+        self._authed_accounts.clear()
 
     def _heartbeat(self) -> None:
         d = self._sdk.send(ProtoHeartbeatEvent())
@@ -283,3 +335,14 @@ class CTraderClient:
                     cb(list(payload.ctidTraderAccountIds))
                 except Exception:
                     log.exception("tokens invalidated callback raised")
+        elif isinstance(payload, (ProtoOAErrorRes, ProtoOAOrderErrorEvent)):
+            # An untagged rejection of something send_no_reply already
+            # wrote to the wire (no clientMsgId round trip exists for
+            # these): there is no registered response Deferred to fail and
+            # no typed callback list for it, so without this it was
+            # silently dropped -- exactly the observability gap NEW-1's
+            # gate exists to keep out of reach in the common case, but this
+            # still logs any rejection that reaches the wire regardless of
+            # cause (e.g. a rejected trade for reasons other than auth).
+            log.error("server rejected a request: %s (account %s)",
+                      payload.errorCode, getattr(payload, 'ctidTraderAccountId', None))

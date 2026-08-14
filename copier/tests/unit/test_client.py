@@ -4,6 +4,7 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
 from ctrader_open_api.messages.OpenApiModelMessages_pb2 import ProtoOAExecutionType
 from twisted.internet import defer
 from twisted.internet.task import Clock
+from twisted.python.failure import Failure
 
 from copier.ctrader.client import (
     HEARTBEAT_INTERVAL_S, SEND_HANDOFF_TIMEOUT_S, CTraderClient,
@@ -275,7 +276,11 @@ def test_send_no_reply_resolves_on_transport_handoff_without_awaiting_a_reply():
     # Resolved synchronously off the transport handoff alone -- no reply
     # message was ever delivered (sdk.deliver was never called).
     assert d.called
-    assert not isinstance(d.result, Exception)
+    # NEW-2: Failure derives from BaseException, not Exception, so
+    # `isinstance(d.result, Exception)` is always False whether the
+    # Deferred succeeded or failed -- vacuous. Checking against Failure
+    # directly is the discriminating assertion.
+    assert not isinstance(d.result, Failure)
     assert sdk.protocol.sent and sdk.protocol.sent[-1] == (msg, str(id(msg)))
 
     # The bounded-handoff timer is armed and (since the connection was
@@ -291,7 +296,11 @@ def test_send_no_reply_resolves_on_transport_handoff_without_awaiting_a_reply():
     # was cancelled, not merely not-yet-fired.
     clock.advance(10.0)
     assert d.called
-    assert not isinstance(d.result, Exception)
+    # NEW-2: Failure derives from BaseException, not Exception, so
+    # `isinstance(d.result, Exception)` is always False whether the
+    # Deferred succeeded or failed -- vacuous. Checking against Failure
+    # directly is the discriminating assertion.
+    assert not isinstance(d.result, Failure)
 
 
 def test_send_no_reply_propagates_connection_level_failure():
@@ -391,7 +400,11 @@ def test_send_no_reply_writes_synchronously_to_the_transport_not_the_drain_queue
     d = client.send_no_reply(msg)
 
     assert d.called
-    assert not isinstance(d.result, Exception)
+    # NEW-2: Failure derives from BaseException, not Exception, so
+    # `isinstance(d.result, Exception)` is always False whether the
+    # Deferred succeeded or failed -- vacuous. Checking against Failure
+    # directly is the discriminating assertion.
+    assert not isinstance(d.result, Failure)
     # Written straight to the transport, in this same synchronous turn...
     assert len(real_protocol.transport.written) == 1
     # ...and never touched the drain queue -- nothing sat there for a dying

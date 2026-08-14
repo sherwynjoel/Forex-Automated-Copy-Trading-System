@@ -20,6 +20,10 @@ class _Proto(Int32StringReceiver):
 
     def connectionMade(self):
         self.factory.server.protocols.append(self)
+        # Accounts confirmed account-authed on THIS connection specifically
+        # (see FakeCTraderServer.enforce_auth) -- distinct per connection,
+        # naturally, since each _Proto instance is its own object.
+        self.authed_accounts: set[int] = set()
 
     def stringReceived(self, data):
         msg = ProtoMessage()
@@ -57,6 +61,16 @@ class FakeCTraderServer:
         self.next_tokens: tuple[str, str] | None = None
         self.reject_next_order: bool = False  # Scriptable rejection
         self.reject_error_code: str = "CH_TRADING_DISABLED"  # Scriptable reject errorCode
+        # Opt-in (off by default -- most tests don't care about auth
+        # sequencing): when True, every trade handler rejects a request for
+        # an account that has not completed ProtoOAAccountAuthReq on the
+        # SAME connection the request arrived on, faithful to real
+        # cTrader. Exists to let CI catch the NEW-1 race (send_no_reply's
+        # instant=True write can otherwise reach the wire before this
+        # connection's own account-auth round trip completes, e.g. right
+        # after a reconnect) -- with this off, the fake accepts trades
+        # regardless of auth state and that race is invisible to tests.
+        self.enforce_auth: bool = False
         self.requests, self.app_auths, self.account_auths, self.heartbeats = (
             [],
             [],
@@ -201,10 +215,25 @@ class FakeCTraderServer:
             return
 
         self.account_auths.append(req.ctidTraderAccountId)
+        proto.authed_accounts.add(req.ctidTraderAccountId)
 
         res = oa.ProtoOAAccountAuthRes()
         res.ctidTraderAccountId = req.ctidTraderAccountId
         proto.send_payload(res, msg.clientMsgId)
+
+    def _reject_if_not_authed(self, proto, account_id: int) -> bool:
+        """When enforce_auth is on, reject (broadcast an untagged
+        ProtoOAOrderErrorEvent, matching how a trade request's outcome
+        normally arrives -- see send_no_reply) and return True if
+        `account_id` has not completed account-auth on THIS connection.
+        Off by default; see enforce_auth's docstring in __init__."""
+        if not self.enforce_auth or account_id in proto.authed_accounts:
+            return False
+        err = oa.ProtoOAOrderErrorEvent()
+        err.ctidTraderAccountId = account_id
+        err.errorCode = "ACCOUNT_NOT_AUTHORIZED"
+        self.broadcast(err)
+        return True
 
     def _handle_symbols_list_req(self, proto, msg):
         """Handle symbols list request."""
@@ -348,6 +377,9 @@ class FakeCTraderServer:
         # Record the trade request
         self.requests.append(req)
 
+        if self._reject_if_not_authed(proto, req.ctidTraderAccountId):
+            return
+
         # Check if we should reject this order
         if self.reject_next_order:
             self.reject_next_order = False
@@ -447,6 +479,9 @@ class FakeCTraderServer:
         # Record the trade request
         self.requests.append(req)
 
+        if self._reject_if_not_authed(proto, req.ctidTraderAccountId):
+            return
+
         if self.auto_fill:
             # Compute the position's REMAINING volume after this close, so a
             # request for less than the whole position reports a genuine
@@ -523,6 +558,9 @@ class FakeCTraderServer:
         # Record the trade request
         self.requests.append(req)
 
+        if self._reject_if_not_authed(proto, req.ctidTraderAccountId):
+            return
+
         response = oa.ProtoOAExecutionEvent()
         response.ctidTraderAccountId = req.ctidTraderAccountId
         response.executionType = model.ProtoOAExecutionType.ORDER_ACCEPTED
@@ -564,6 +602,9 @@ class FakeCTraderServer:
         # Record the trade request
         self.requests.append(req)
 
+        if self._reject_if_not_authed(proto, req.ctidTraderAccountId):
+            return
+
         response = oa.ProtoOAExecutionEvent()
         response.ctidTraderAccountId = req.ctidTraderAccountId
         # Real cTrader reports a successful amend as ORDER_REPLACED (the type
@@ -596,6 +637,9 @@ class FakeCTraderServer:
 
         # Record the trade request
         self.requests.append(req)
+
+        if self._reject_if_not_authed(proto, req.ctidTraderAccountId):
+            return
 
         response = oa.ProtoOAExecutionEvent()
         response.ctidTraderAccountId = req.ctidTraderAccountId
