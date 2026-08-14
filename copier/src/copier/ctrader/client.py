@@ -5,6 +5,7 @@ typed routing of pushed events. Reconnect scheduling itself is Twisted
 ClientService's retryPolicy (see make_sdk_client).
 """
 import logging
+from collections import deque
 from typing import Callable
 
 from ctrader_open_api import Client, Protobuf, TcpProtocol
@@ -12,17 +13,48 @@ from ctrader_open_api.messages.OpenApiCommonMessages_pb2 import ProtoHeartbeatEv
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOAAccountAuthReq, ProtoOAAccountDisconnectEvent,
     ProtoOAAccountsTokenInvalidatedEvent, ProtoOAApplicationAuthReq,
-    ProtoOAExecutionEvent, ProtoOASpotEvent)
+    ProtoOAErrorRes, ProtoOAExecutionEvent, ProtoOAOrderErrorEvent,
+    ProtoOASpotEvent)
 from twisted.application.internet import backoffPolicy
 from twisted.internet import defer, task
+from twisted.python.failure import Failure
 
 log = logging.getLogger(__name__)
 
 HEARTBEAT_INTERVAL_S = 8.0   # server requires <= 10 s
 
+# Max time send_no_reply() will wait for a connected transport before
+# failing. Deliberately short: whenConnected() resolves with "the currently
+# connected protocol, OR THE NEXT ONE TO CONNECT", so during a reconnect it
+# can otherwise stay pending through the whole backoff (up to 60s, see
+# make_sdk_client) and then hand a now-stale trade request to the wire at a
+# since-moved price. A trade send must never wait out a reconnect backoff.
+SEND_HANDOFF_TIMEOUT_S = 2.0
+
+
+class _PerConnectionTcpProtocol(TcpProtocol):
+    """TcpProtocol keeps its outbound queue (`_send_queue`) as a **class**
+    attribute (`_send_queue = deque([])`, vendored, not ours to patch) that
+    is mutated via .append()/.popleft() but never reassigned -- so by
+    default every TCP connection in the process shares ONE process-global
+    queue. A message queued on one connection can then be silently drained
+    and written down a DIFFERENT, unrelated connection if the first
+    disconnects before its 1s drain tick fires (e.g. a slave trade request
+    flushed on the wrong shard/environment's socket). Shadowing
+    `_send_queue` as an instance attribute on connect gives each connection
+    its own private queue: a message can only ever be sent on the
+    connection it was handed off to, and is simply dropped (never resent
+    elsewhere) if that connection goes away first -- so this can never
+    double-send.
+    """
+
+    def connectionMade(self):
+        self._send_queue = deque()
+        super().connectionMade()
+
 
 def make_sdk_client(host: str, port: int) -> Client:
-    return Client(host, port, TcpProtocol,
+    return Client(host, port, _PerConnectionTcpProtocol,
                   retryPolicy=backoffPolicy(initialDelay=1.0, maxDelay=60.0, factor=2.0))
 
 
@@ -30,10 +62,17 @@ class CTraderClient:
     def __init__(self, sdk, client_id: str, client_secret: str, clock=None):
         if clock is None:
             from twisted.internet import reactor as clock  # pragma: no cover
+        self._clock = clock
         self._sdk = sdk
         self._client_id = client_id
         self._client_secret = client_secret
         self._accounts: dict[int, str] = {}          # account_id -> access token
+        # account_id -> confirmed account-authed on the CURRENT connection
+        # (cleared on every disconnect, repopulated by re-auth). Distinct
+        # from _accounts, which is just a registry of "authorize_account()
+        # was ever called" -- not proof of auth on this connection. See
+        # is_account_authed() / NEW-1.
+        self._authed_accounts: set[int] = set()
         self._exec_cbs: list[Callable] = []
         self._disc_cbs: list[Callable] = []
         self._invalid_cbs: list[Callable] = []
@@ -59,9 +98,143 @@ class CTraderClient:
 
     def deauthorize_account(self, account_id: int) -> None:
         self._accounts.pop(account_id, None)
+        self._authed_accounts.discard(account_id)
+
+    def is_account_authed(self, account_id: int) -> bool:
+        """True once a (non-error) response to this account's
+        ProtoOAAccountAuthReq has been received on the CURRENT connection.
+
+        NEW-1: send_no_reply's instant=True write reaches the wire in the
+        same reactor turn whenConnected() confirms a connection -- there is
+        no longer a FIFO drain queue serializing it behind this connection's
+        (still-queued) account-auth request the way there incidentally was
+        before instant=True. Gating a trade send on this (see
+        main.py:send_for_account) instead of on _accounts registry
+        membership means a send attempted before re-auth completes raises
+        SendNotAttempted -- provably nothing reached the wire -- so the
+        dispatcher's normal retry ladder (1s/2s/4s) applies and the retry
+        lands once auth actually completes, rather than racing the wire
+        ahead of it and being silently rejected server-side.
+        """
+        return account_id in self._authed_accounts
 
     def send(self, msg) -> defer.Deferred:
         return self._sdk.send(msg)
+
+    def send_no_reply(self, msg, timeout_s: float = SEND_HANDOFF_TIMEOUT_S) -> defer.Deferred:
+        """Fire-and-forget send for trade requests (new order, close position,
+        amend SL/TP, amend order, cancel order): the real cTrader server
+        never sends a synchronous, clientMsgId-tagged reply to these --
+        outcomes arrive later as untagged ProtoOAExecutionEvent broadcasts,
+        routed through on_execution() (see testing/fake_server.py, which
+        models this precisely).
+
+        Unlike send(), this does NOT register a response Deferred/timeout
+        that is guaranteed to never be satisfied by a reply: send() would
+        eventually time out (its default responseTimeoutInSeconds) on every
+        single trade request regardless of whether it actually succeeded,
+        which is exactly what happened before this method existed -- every
+        live-dispatched trade intent's underlying Deferred spuriously failed
+        ~5s after being sent, which Dispatcher treats as an ambiguous
+        failure and marks the account degraded.
+
+        The wait for a connected transport is itself bounded to `timeout_s`
+        (see SEND_HANDOFF_TIMEOUT_S): whenConnected() resolves with "the
+        currently-connected protocol, or the NEXT one to connect", so
+        without a bound this could otherwise stay pending through an entire
+        reconnect backoff (up to 60s) and then hand off a now-stale trade at
+        a since-moved price -- a caller (Dispatcher) chaining this with no
+        timeout of its own would see total silence for that whole window: no
+        event row, no alert, no degraded status. If no connection becomes
+        available in time, this fails WITHOUT ever calling protocol.send()
+        -- the message is never queued, so the caller can always safely
+        treat this as "never reached the wire" and retry. A connection-level
+        failure (e.g. all reconnect attempts exhausted) fails the same way.
+        The timer is armed only *after* whenConnected() has been called (and
+        returned a Deferred) rather than before: whenConnected() raises
+        synchronously (automat's NoTransition) if called before the client
+        has ever started, so arming it first would leak a DelayedCall on
+        that path.
+
+        Deliberately does NOT call .cancel() on the Deferred returned by
+        whenConnected(): the vendored SDK's _awaitingConnected waiter list
+        removes an entry only when it fires it (see
+        twisted/application/internet.py _awaitingConnection/_unawait), not
+        when the caller cancels the Deferred it was handed -- cancelling it
+        directly would leave a phantom entry that the SDK later tries to
+        fire a second time, raising AlreadyCalledError deep inside
+        ClientService's state machine (which would also break firing of any
+        OTHER, legitimately-still-waiting whenConnected() callers, since
+        `_unawait` fires all waiters in a single unguarded loop). Instead,
+        this races whenConnected() against its own independent timer: if the
+        timer wins, this Deferred fails and protocol.send() is simply never
+        invoked; if whenConnected() later fires anyway (late), the result is
+        silently discarded rather than acted on.
+
+        Sends with instant=True: TcpProtocol.send()'s default (instant=False)
+        only *enqueues* onto _send_queue, drained by a <=1s-cadence
+        LoopingCall -- if the connection dies inside that window (now that
+        each connection has its own private queue, see
+        _PerConnectionTcpProtocol, so the message can no longer be flushed
+        by a *different* connection either) the message is silently
+        dropped, yet this method had already reported success: no retry, no
+        event, no degraded status, and reconcile can't catch it either
+        (it only inspects 'active' mappings; a never-activated 'pending' one
+        is invisible to every drift check). instant=True calls
+        protocol.sendString() -- and therefore self.transport.write() --
+        synchronously, in the SAME reactor turn whenConnected() confirms the
+        protocol is connected, so there is no queue, no drain window, and
+        nothing to die inside. This can only make the previously-silent
+        "dropped but reported success" case into, at worst, "handed to a
+        TCP transport that itself then fails" -- an ordinary connection-
+        level failure, which is exactly what whenConnected()/_fail already
+        handle correctly (ambiguous outcome -> SendNotAttempted -> retry,
+        never a silent no-op). Only this method's call is changed to
+        instant=True; send() (app/account auth, heartbeat, and every other
+        request type) is untouched and still queues.
+        """
+        result: defer.Deferred = defer.Deferred()
+        settled = [False]
+
+        def _fail(failure: Failure) -> None:
+            if not settled[0]:
+                settled[0] = True
+                result.errback(failure)
+
+        def _on_connected(protocol) -> None:
+            if settled[0]:
+                # Already timed out and reported to the caller (see the
+                # cancellation note above) -- do not send a message for an
+                # operation the caller has already been told failed.
+                return
+            try:
+                sent = protocol.send(msg, instant=True, clientMsgId=str(id(msg)))
+            except BaseException:
+                # A synchronous raise here (unreachable for the protobufs
+                # Dispatcher builds today, but this is the live trade-send
+                # path) must not strand `result` forever: settled[0] is
+                # still False, so _fail is free to errback it, exactly as
+                # any other failure mode does.
+                _fail(Failure())
+                return
+            settled[0] = True
+            result.callback(sent)
+
+        def _on_timeout() -> None:
+            _fail(Failure(defer.TimeoutError(
+                f"send_no_reply: no connected transport within {timeout_s}s")))
+
+        d = self._sdk.whenConnected(failAfterFailures=1)
+
+        timeout_call = self._clock.callLater(timeout_s, _on_timeout)
+
+        def _cancel_pending_timeout(_ignored=None) -> None:
+            if timeout_call.active():
+                timeout_call.cancel()
+
+        d.addCallbacks(_on_connected, _fail)
+        d.addBoth(_cancel_pending_timeout)
+        return result
 
     def on_execution(self, cb) -> None: self._exec_cbs.append(cb)
     def on_account_disconnect(self, cb) -> None: self._disc_cbs.append(cb)
@@ -91,13 +264,39 @@ class CTraderClient:
         req.ctidTraderAccountId = account_id
         req.accessToken = self._accounts[account_id]
         d = self._sdk.send(req)
+        d.addCallback(self._on_account_auth_response, account_id)
         d.addErrback(lambda f: log.error("account auth %s failed: %s", account_id, f))
         return d
+
+    def _on_account_auth_response(self, response, account_id: int):
+        """Mark `account_id` authed on the current connection unless the
+        response is an explicit rejection (ProtoOAErrorRes).
+
+        `response` is send()'s raw ProtoMessage envelope; unwrap it to
+        check for an explicit error. Any other outcome -- including a
+        genuine ProtoOAAccountAuthRes, or a shape Protobuf.extract can't
+        recognize at all -- is treated as authed: this method only needs to
+        rule out the one case the real server actually uses to signal
+        rejection (see testing/fake_server.py:_handle_account_auth_req),
+        and failing open on an unrecognized response avoids requiring every
+        test double's send() to fabricate a realistic ProtoOAAccountAuthRes
+        just to exercise unrelated code paths.
+        """
+        try:
+            payload = Protobuf.extract(response)
+        except Exception:
+            payload = None
+        if isinstance(payload, ProtoOAErrorRes):
+            log.error("account auth %s rejected: %s", account_id, payload.errorCode)
+            return response
+        self._authed_accounts.add(account_id)
+        return response
 
     def _on_disconnected(self, _sdk, reason) -> None:
         log.warning("disconnected: %s", reason)
         if self._hb.running:
             self._hb.stop()
+        self._authed_accounts.clear()
 
     def _heartbeat(self) -> None:
         d = self._sdk.send(ProtoHeartbeatEvent())
@@ -136,3 +335,14 @@ class CTraderClient:
                     cb(list(payload.ctidTraderAccountIds))
                 except Exception:
                     log.exception("tokens invalidated callback raised")
+        elif isinstance(payload, (ProtoOAErrorRes, ProtoOAOrderErrorEvent)):
+            # An untagged rejection of something send_no_reply already
+            # wrote to the wire (no clientMsgId round trip exists for
+            # these): there is no registered response Deferred to fail and
+            # no typed callback list for it, so without this it was
+            # silently dropped -- exactly the observability gap NEW-1's
+            # gate exists to keep out of reach in the common case, but this
+            # still logs any rejection that reaches the wire regardless of
+            # cause (e.g. a rejected trade for reasons other than auth).
+            log.error("server rejected a request: %s (account %s)",
+                      payload.errorCode, getattr(payload, 'ctidTraderAccountId', None))

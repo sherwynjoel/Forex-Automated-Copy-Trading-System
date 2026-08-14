@@ -135,6 +135,46 @@ class _FailingClient:
         return defer.fail(RuntimeError("boom"))
 
 
+class _ConnFailingClient:
+    """Minimal stub CTraderClient that is ready/account-authed but whose
+    send_no_reply() always fails with a bare connection-level error --
+    e.g. what CTraderClient.send_no_reply() now produces itself when no
+    connected transport is available within its bounded wait (see
+    ctrader/client.py:SEND_HANDOFF_TIMEOUT_S), or when whenConnected()
+    fails outright. For exercising send_for_account's reclassification of
+    that failure into SendNotAttempted (finding I1) without any real I/O."""
+
+    def __init__(self, account_id):
+        self.ready = defer.succeed(self)
+        self._accounts = {account_id: "tok"}
+
+    def send_no_reply(self, msg):
+        return defer.fail(RuntimeError("no connected transport (mid-backoff)"))
+
+
+class _UnauthedClient:
+    """Stub CTraderClient that is ready and _accounts-registered but NOT
+    yet account-authed on its CURRENT connection -- exactly the NEW-1
+    window (right after a reconnect, before that connection's own
+    ProtoOAAccountAuthReq round trip completes). send_no_reply raises if
+    ever called, so a test using this proves the gate short-circuits
+    BEFORE anything reaches the transport, not merely that the eventual
+    send fails."""
+
+    def __init__(self, account_id):
+        self.ready = defer.succeed(self)
+        self._accounts = {account_id: "tok"}
+
+    def is_account_authed(self, account_id):
+        return False
+
+    def send_no_reply(self, msg):
+        raise AssertionError(
+            "send_no_reply must never be called for an account not yet "
+            "authed on the current connection"
+        )
+
+
 def _last_event(dsn):
     with psycopg.connect(dsn, autocommit=True) as conn:
         row = conn.execute("SELECT category, severity, payload FROM events ORDER BY id DESC LIMIT 1").fetchone()
@@ -224,6 +264,55 @@ def test_build_app_tolerates_zero_accounts_and_wires_dispatcher_before_app_exist
     # dispatcher's send_for_account raises SendNotAttempted (not AttributeError!) for any account
     with pytest.raises(main.SendNotAttempted):
         app.dispatcher._send_for_account(999, object())
+
+
+def test_send_for_account_reclassifies_connection_failure_as_send_not_attempted(repo):
+    """Finding I1: a connection-level failure out of client.send_no_reply()
+    (e.g. no transport within its bounded wait, or whenConnected() failing
+    outright) must be reclassified as SendNotAttempted by send_for_account.
+    protocol.send() is only ever invoked inside send_no_reply()'s success
+    callback, so ANY failure it produces means the message never reached a
+    transport, let alone the wire -- exactly SendNotAttempted's contract.
+    Left as a bare failure, it would instead hit Dispatcher's
+    ambiguous-failure branch and degrade the account on the very first
+    transient blip rather than retrying at 1s/2s/4s
+    (engine/dispatch.py:_on_send_failure)."""
+    account_id = 100  # slave seeded by db_seeded/seed_db, is_live=False, shard 0
+
+    clients = {False: {0: _ConnFailingClient(account_id)}}
+    clients_by_account = main._build_clients_by_account(repo, clients, shards=1)
+    send_for_account = main._build_send_for_account(clients_by_account)
+
+    d = send_for_account(account_id, object())
+
+    failures = []
+    d.addErrback(failures.append)
+    assert len(failures) == 1
+    assert isinstance(failures[0].value, main.SendNotAttempted)
+    assert "no connected transport" in str(failures[0].value)
+
+
+def test_send_for_account_blocks_account_not_yet_authed_on_current_connection(repo):
+    """NEW-1 guard: send_no_reply's instant=True write reaches the wire in
+    the same reactor turn a connection is confirmed, with no FIFO queue
+    left to serialize it behind that connection's own (still in-flight)
+    account-auth request the way there incidentally was before instant=True
+    -- so _accounts registry membership alone (proves authorize_account()
+    was ever called, not that auth completed on THIS connection) is not
+    enough to gate on. send_for_account must also check
+    is_account_authed(), and must raise SendNotAttempted -- safe to retry
+    -- without ever calling send_no_reply at all: _UnauthedClient's
+    send_no_reply raises AssertionError if invoked, so this proves nothing
+    reached the transport, not merely that the eventual send failed."""
+    account_id = 100  # slave seeded by db_seeded/seed_db, is_live=False, shard 0
+
+    clients = {False: {0: _UnauthedClient(account_id)}}
+    clients_by_account = main._build_clients_by_account(repo, clients, shards=1)
+    send_for_account = main._build_send_for_account(clients_by_account)
+
+    with pytest.raises(main.SendNotAttempted) as exc_info:
+        send_for_account(account_id, object())
+    assert "not yet confirmed" in str(exc_info.value)
 
 
 @pytest_twisted.inlineCallbacks

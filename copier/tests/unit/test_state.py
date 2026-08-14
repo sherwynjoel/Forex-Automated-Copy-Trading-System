@@ -2,8 +2,9 @@
 
 import pytest
 import pytest_twisted
+from ctrader_open_api.messages.OpenApiCommonMessages_pb2 import ProtoMessage
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
-    ProtoOASpotEvent, ProtoOASubscribeSpotsReq, ProtoOATraderReq,
+    ProtoOASpotEvent, ProtoOASubscribeSpotsReq, ProtoOATraderReq, ProtoOATraderRes,
 )
 from ctrader_open_api.messages.OpenApiModelMessages_pb2 import ProtoOATradeSide
 from dataclasses import dataclass
@@ -329,6 +330,60 @@ def test_subscribes_only_open_position_symbols():
     assert len(reqs) == 1
     # The request should only have symbol_id 1
     assert list(reqs[0].symbolId) == [1]
+
+
+class _RawEnvelopeClient:
+    """Client stub whose send() resolves exactly the way the real
+    CTraderClient.send() does: with the raw ProtoMessage envelope
+    (payloadType + serialized payload bytes), NOT the unwrapped typed
+    response. This is the shape refresh_balances() must Protobuf.extract()
+    before .trader is reachable."""
+
+    def __init__(self, raw_response):
+        self._raw_response = raw_response
+        self.sent = []
+
+    def on_spot(self, cb):
+        pass
+
+    def send(self, req):
+        self.sent.append(req)
+        return defer.succeed(self._raw_response)
+
+
+def test_refresh_balances_unwraps_raw_envelope_before_reading_trader():
+    """Guards the regression where refresh_balances() read .trader straight
+    off the raw ProtoMessage envelope CTraderClient.send() resolves with
+    (which has no .trader field -- hasattr is False, so it silently marked
+    every account's balance unknown) instead of first unwrapping it via
+    Protobuf.extract into a typed ProtoOATraderRes."""
+    typed = ProtoOATraderRes()
+    typed.ctidTraderAccountId = 1001
+    typed.trader.ctidTraderAccountId = 1001
+    typed.trader.balance = 123456
+    typed.trader.moneyDigits = 2
+    typed.trader.depositAssetId = 1
+
+    raw_envelope = ProtoMessage(
+        payloadType=typed.payloadType, payload=typed.SerializeToString(),
+    )
+    assert not hasattr(raw_envelope, "trader")  # sanity: this is the raw envelope shape
+
+    class MockRepo:
+        pass
+
+    symbols = {1: SymbolInfo(symbol_id=1, name="EURUSD", digits=5,
+                            lot_size=10_000_000, min_volume=100_000, step_volume=100_000)}
+    client = _RawEnvelopeClient(raw_envelope)
+    tracker = AccountStateTracker(client, MockRepo(), 1001, symbols)
+
+    d = tracker.refresh_balances([1001])
+    results = []
+    d.addCallback(results.append)
+    assert results  # the stub resolves synchronously
+
+    assert tracker._balance_known[1001] is True
+    assert tracker._balances[1001] == pytest.approx(1234.56)
 
 
 def test_fallback_spot_scaling_when_symbol_digits_unavailable():

@@ -20,6 +20,10 @@ class _Proto(Int32StringReceiver):
 
     def connectionMade(self):
         self.factory.server.protocols.append(self)
+        # Accounts confirmed account-authed on THIS connection specifically
+        # (see FakeCTraderServer.enforce_auth) -- distinct per connection,
+        # naturally, since each _Proto instance is its own object.
+        self.authed_accounts: set[int] = set()
 
     def stringReceived(self, data):
         msg = ProtoMessage()
@@ -57,6 +61,16 @@ class FakeCTraderServer:
         self.next_tokens: tuple[str, str] | None = None
         self.reject_next_order: bool = False  # Scriptable rejection
         self.reject_error_code: str = "CH_TRADING_DISABLED"  # Scriptable reject errorCode
+        # Opt-in (off by default -- most tests don't care about auth
+        # sequencing): when True, every trade handler rejects a request for
+        # an account that has not completed ProtoOAAccountAuthReq on the
+        # SAME connection the request arrived on, faithful to real
+        # cTrader. Exists to let CI catch the NEW-1 race (send_no_reply's
+        # instant=True write can otherwise reach the wire before this
+        # connection's own account-auth round trip completes, e.g. right
+        # after a reconnect) -- with this off, the fake accepts trades
+        # regardless of auth state and that race is invisible to tests.
+        self.enforce_auth: bool = False
         self.requests, self.app_auths, self.account_auths, self.heartbeats = (
             [],
             [],
@@ -67,6 +81,19 @@ class FakeCTraderServer:
         self._position_ids = itertools.count(5000)
         self._order_ids = itertools.count(9000)
         self._deal_ids = itertools.count(1000)
+        # position_id -> currently open volume, for ANY account (master or
+        # slave -- position_ids are drawn from one global counter above, so
+        # they never collide across accounts). Populated when a MARKET order
+        # fills; consulted by _handle_close_position_req so a close can
+        # correctly report whether it was full or partial (real cTrader:
+        # position.tradeData.volume is the REMAINING volume after the close,
+        # and positionStatus stays OPEN when some volume remains). Without
+        # this, every close looked full, and MasterPositionClosed's
+        # remaining_volume was always 0 (see engine/normalize.py), which
+        # collapses partial_close_volume() to a full close every time
+        # (domain/sizing.py:25) -- the fraction math this fake exists to let
+        # the e2e exercise was structurally unreachable.
+        self._position_volumes: dict[int, int] = {}
         self._listening = None
         self._handlers: dict[int, Any] = {}
         self._setup_handlers()
@@ -188,10 +215,25 @@ class FakeCTraderServer:
             return
 
         self.account_auths.append(req.ctidTraderAccountId)
+        proto.authed_accounts.add(req.ctidTraderAccountId)
 
         res = oa.ProtoOAAccountAuthRes()
         res.ctidTraderAccountId = req.ctidTraderAccountId
         proto.send_payload(res, msg.clientMsgId)
+
+    def _reject_if_not_authed(self, proto, account_id: int) -> bool:
+        """When enforce_auth is on, reject (broadcast an untagged
+        ProtoOAOrderErrorEvent, matching how a trade request's outcome
+        normally arrives -- see send_no_reply) and return True if
+        `account_id` has not completed account-auth on THIS connection.
+        Off by default; see enforce_auth's docstring in __init__."""
+        if not self.enforce_auth or account_id in proto.authed_accounts:
+            return False
+        err = oa.ProtoOAOrderErrorEvent()
+        err.ctidTraderAccountId = account_id
+        err.errorCode = "ACCOUNT_NOT_AUTHORIZED"
+        self.broadcast(err)
+        return True
 
     def _handle_symbols_list_req(self, proto, msg):
         """Handle symbols list request."""
@@ -335,6 +377,9 @@ class FakeCTraderServer:
         # Record the trade request
         self.requests.append(req)
 
+        if self._reject_if_not_authed(proto, req.ctidTraderAccountId):
+            return
+
         # Check if we should reject this order
         if self.reject_next_order:
             self.reject_next_order = False
@@ -373,6 +418,7 @@ class FakeCTraderServer:
 
                 # Broadcast ORDER_FILLED event (untagged)
                 position_id = next(self._position_ids)
+                self._position_volumes[position_id] = req.volume
                 deal_id = next(self._deal_ids)
                 fill_evt = oa.ProtoOAExecutionEvent()
                 fill_evt.ctidTraderAccountId = req.ctidTraderAccountId
@@ -417,6 +463,12 @@ class FakeCTraderServer:
                 accept_evt.order.tradeData.tradeSide = req.tradeSide
                 accept_evt.order.tradeData.label = req.label
                 accept_evt.order.clientOrderId = req.clientOrderId
+                # Echo the requested price back (required for MasterPendingPlaced.price
+                # to reflect reality when this account is a copier-monitored master).
+                if req.orderType == model.ProtoOAOrderType.LIMIT and req.HasField("limitPrice"):
+                    accept_evt.order.limitPrice = req.limitPrice
+                elif req.orderType == model.ProtoOAOrderType.STOP and req.HasField("stopPrice"):
+                    accept_evt.order.stopPrice = req.stopPrice
                 self.broadcast(accept_evt)
 
     def _handle_close_position_req(self, proto, msg):
@@ -427,7 +479,23 @@ class FakeCTraderServer:
         # Record the trade request
         self.requests.append(req)
 
+        if self._reject_if_not_authed(proto, req.ctidTraderAccountId):
+            return
+
         if self.auto_fill:
+            # Compute the position's REMAINING volume after this close, so a
+            # request for less than the whole position reports a genuine
+            # partial close (position stays OPEN) rather than always
+            # reporting the position as fully closed regardless of
+            # req.volume. Falls back to treating req.volume as the entire
+            # position when it was never seen opened here (e.g. a
+            # position_id fabricated directly by a test) -- preserves the
+            # previous always-full-close behaviour for that case.
+            current_volume = self._position_volumes.get(req.positionId, req.volume)
+            remaining_volume = max(current_volume - req.volume, 0)
+            self._position_volumes[req.positionId] = remaining_volume
+            is_full_close = remaining_volume == 0
+
             # Broadcast ORDER_FILLED event with closePositionDetail (untagged)
             deal_id = next(self._deal_ids)
             fill_evt = oa.ProtoOAExecutionEvent()
@@ -451,10 +519,31 @@ class FakeCTraderServer:
             fill_evt.deal.closePositionDetail.balance = 100000  # Plausible default
             fill_evt.position.positionId = req.positionId
             fill_evt.position.tradeData.symbolId = 1  # Default
-            fill_evt.position.tradeData.volume = 0  # Closed
+            # REMAINING volume (real cTrader semantics), not always 0: this
+            # is what normalize() reads as MasterPositionClosed.remaining_volume
+            # (engine/normalize.py), which domain/sizing.py:partial_close_volume
+            # uses to compute each slave's proportional close -- a hardcoded
+            # 0 here made every close look 100% regardless of req.volume.
+            fill_evt.position.tradeData.volume = remaining_volume
             fill_evt.position.tradeData.tradeSide = model.ProtoOATradeSide.BUY  # Default
-            fill_evt.position.positionStatus = model.ProtoOAPositionStatus.POSITION_STATUS_CLOSED
+            fill_evt.position.positionStatus = (
+                model.ProtoOAPositionStatus.POSITION_STATUS_CLOSED if is_full_close
+                else model.ProtoOAPositionStatus.POSITION_STATUS_OPEN
+            )
             fill_evt.position.swap = 0
+            # normalize() keys its symbol lookup off order.tradeData.symbolId
+            # for every execution event, closes included (see
+            # tests/unit/test_normalize.py's base_event + closePositionDetail);
+            # without this a close from the master account is silently
+            # dropped (unknown symbol -> None) instead of replicating.
+            # orderId=0 mirrors the deal.orderId convention above: no real
+            # order backs a close.
+            fill_evt.order.orderId = 0
+            fill_evt.order.orderStatus = model.ProtoOAOrderStatus.ORDER_STATUS_FILLED
+            fill_evt.order.orderType = model.ProtoOAOrderType.MARKET
+            fill_evt.order.tradeData.symbolId = 1  # Default, varies by position
+            fill_evt.order.tradeData.volume = req.volume
+            fill_evt.order.tradeData.tradeSide = model.ProtoOATradeSide.BUY  # Default, varies
             self.broadcast(fill_evt)
 
     def _handle_amend_position_sltp_req(self, proto, msg):
@@ -469,6 +558,9 @@ class FakeCTraderServer:
         # Record the trade request
         self.requests.append(req)
 
+        if self._reject_if_not_authed(proto, req.ctidTraderAccountId):
+            return
+
         response = oa.ProtoOAExecutionEvent()
         response.ctidTraderAccountId = req.ctidTraderAccountId
         response.executionType = model.ProtoOAExecutionType.ORDER_ACCEPTED
@@ -482,6 +574,20 @@ class FakeCTraderServer:
             response.position.stopLoss = req.stopLoss
         if req.HasField("takeProfit"):
             response.position.takeProfit = req.takeProfit
+        # Real cTrader tags SL/TP amendments with an order of type
+        # STOP_LOSS_TAKE_PROFIT carrying the position's symbol; without this
+        # the copier's normalize() has no symbol to key off of and silently
+        # drops the event (evt.order.tradeData.symbolId defaults to 0). The
+        # other order.* fields below are REQUIRED by the protobuf schema once
+        # the submessage is touched at all; there is no real order backing an
+        # SL/TP-only amendment so orderId is 0, matching the close-position
+        # convention elsewhere in this file.
+        response.order.orderId = 0
+        response.order.orderStatus = model.ProtoOAOrderStatus.ORDER_STATUS_ACCEPTED
+        response.order.orderType = model.ProtoOAOrderType.STOP_LOSS_TAKE_PROFIT
+        response.order.tradeData.symbolId = 1  # Default
+        response.order.tradeData.volume = 0
+        response.order.tradeData.tradeSide = model.ProtoOATradeSide.BUY
         self.broadcast(response)
 
     def _handle_amend_order_req(self, proto, msg):
@@ -496,14 +602,23 @@ class FakeCTraderServer:
         # Record the trade request
         self.requests.append(req)
 
+        if self._reject_if_not_authed(proto, req.ctidTraderAccountId):
+            return
+
         response = oa.ProtoOAExecutionEvent()
         response.ctidTraderAccountId = req.ctidTraderAccountId
-        response.executionType = model.ProtoOAExecutionType.ORDER_ACCEPTED
+        # Real cTrader reports a successful amend as ORDER_REPLACED (the type
+        # normalize() keys a MasterPendingReplaced off of), not ORDER_ACCEPTED
+        # (which is reserved for the order's initial placement).
+        response.executionType = model.ProtoOAExecutionType.ORDER_REPLACED
         response.order.orderId = req.orderId
         response.order.orderStatus = model.ProtoOAOrderStatus.ORDER_STATUS_ACCEPTED
         response.order.orderType = model.ProtoOAOrderType.LIMIT  # Default
         response.order.tradeData.symbolId = 1  # Default
-        response.order.tradeData.volume = 100000  # Default
+        # Echo the requested volume back rather than a fixed default, so
+        # replicated-volume math (mirror_volume) exercises the caller's
+        # actual amend, not an arbitrary constant.
+        response.order.tradeData.volume = req.volume
         response.order.tradeData.tradeSide = model.ProtoOATradeSide.BUY
         if req.HasField("limitPrice"):
             response.order.limitPrice = req.limitPrice
@@ -522,6 +637,9 @@ class FakeCTraderServer:
 
         # Record the trade request
         self.requests.append(req)
+
+        if self._reject_if_not_authed(proto, req.ctidTraderAccountId):
+            return
 
         response = oa.ProtoOAExecutionEvent()
         response.ctidTraderAccountId = req.ctidTraderAccountId
