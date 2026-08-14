@@ -10,11 +10,12 @@ onboarding, and a full audit log.
 The system watches a single master trading account and mirrors its market
 opens/closes (including partial closes), SL/TP changes, and pending order
 lifecycle to a configurable list of slave accounts, each with its own
-lot-size multiplier. It runs as three Docker Compose services: a Python/Twisted
+lot-size multiplier. It runs as four Docker Compose services: a Python/Twisted
 **copier** that owns the cTrader connections and does the actual trade
 replication, a **FastAPI** backend that serves the dashboard and proxies
-control commands to the copier, and **Postgres** as the single source of
-truth for accounts, mappings, and the audit log.
+control commands to the copier, **Postgres** as the single source of truth
+for accounts, mappings, and the audit log, and a one-shot **migrate** job
+that applies the schema on startup before `copier`/`api` start.
 
 ```mermaid
 flowchart LR
@@ -172,22 +173,37 @@ slave, confirm a few real trades copy correctly, then scale up.
 - **Per-slave pause** — pauses one slave account without affecting the
   master subscription or other slaves (`POST /api/control/pause` /
   `/resume` with an `account_id`).
-- **Degraded slaves** — a slave is marked `degraded` when an action to it
-  exhausts its retries (3 attempts, 1s/2s/4s backoff) or hits a
-  non-retryable send failure. A degraded slave is not disabled: it keeps
-  receiving every future master event (each action is independent), but
-  every failure raises an alert in Logs. Investigate the `last_error` shown
-  on the Accounts screen, fix the underlying issue (often a broker-side
-  rejection — margin, min volume), and it will recover on the next
-  successful action, or you can pause/resume it manually.
+- **Degraded slaves** — `degraded` is purely a transport/send problem, never
+  a trading one. A slave is marked `degraded` only when a *send* to it
+  exhausts its retry ladder (3 attempts, 1s/2s/4s backoff, for the
+  pre-wire "never reached the broker" failure case) or hits a non-retryable,
+  ambiguous send failure (the request's fate on the broker is unknown, so it
+  isn't retried). Treat it as a connectivity issue: check the copier's
+  connection health (`docker compose logs copier`) and the specific message
+  in `last_error` on the Accounts screen. A degraded slave is not disabled —
+  it keeps receiving every future master event (each action is
+  independent) — and it clears automatically on its next successful send,
+  or you can pause/resume it manually to force one.
+- **Order rejected on a copy** — a separate, non-degrading path: the broker
+  itself declines an individual copy order that *was* successfully sent —
+  most commonly margin or below-minimum volume. The slave account stays
+  `ok`; only that one mapping is marked `failed`, with the broker's reason
+  visible as its `error` in the per-slave copy row on the Positions screen,
+  plus a matching error-severity event in Logs. There is no account-level or
+  Overview indicator for this case, so check Positions/Logs to catch it —
+  the fix is usually funding or position-sizing on that slave account, not a
+  copier restart.
 - **Token refresh & re-grant** — the copier proactively refreshes each
   connected cTrader ID's OAuth token before it expires (access tokens last
   about 30 days, refresh tokens rotate on every refresh). If a token is
   invalidated out of band, cTrader sends a
   `ProtoOAAccountsTokenInvalidatedEvent`; the copier reacts by attempting an
-  immediate refresh. If that refresh fails, the dashboard shows a prominent
-  alert and you must reconnect that cTrader ID from **Accounts → Connect
-  cTrader ID** (a normal re-grant, same OAuth flow as the first connection).
+  immediate refresh. If that refresh fails, the connection is marked
+  `refresh_failed`: the Overview screen shows a prominent warning banner for
+  it, and the underlying failure is also written as an error-severity event
+  in Logs. Clear it by reconnecting that cTrader ID from **Accounts →
+  Connect cTrader ID** (a normal re-grant, same OAuth flow as the first
+  connection).
 - **New accounts under an already-granted cTID** — a grant only covers the
   accounts that existed under that cTrader ID at grant time. If you open a
   new account under a cTID you've already connected, it won't show up until
