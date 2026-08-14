@@ -23,21 +23,17 @@ of the repo-root .env (git-ignored, so this test has no other way to know
 them) -- the exact values docker-compose.yml's `env_file: .env` handed to
 the copier/api containers this test talks to.
 
-TLS note (why this test needs no CA/cert wiring of its own): the copier
-connects to fake-ctrader the same way it connects to demo.ctraderapi.com --
-via ctrader_open_api.Client, which builds a bare Twisted `ssl:host:port`
-endpoint string (see copier/src/copier/ctrader/client.py:make_sdk_client).
-Twisted's parser for that form (twisted.internet.endpoints._parseClientSSL /
-_parseClientSSLOptions) only enables certificate verification when a
-`hostname` or `caCertsDir` parameter is present in the string -- neither
-ever is here -- so `CertificateOptions(trustRoot=None, ...)` is built with
-`verify=False`: NO certificate validation happens for ANY cTrader
-connection, real or fake, today. That is exactly why the existing in-process
-integration suite (copier/tests/integration/test_copier_e2e.py) already
-connects straight to FakeCTraderServer's self-signed cert with zero special
-trust setup, and it is why this compose-level test needs none either --
-docker-compose.test.yml only points CTRADER_DEMO_HOST at fake-ctrader; no
-CA file, no verify knob, nothing added to the TLS path.
+TLS note (T1): the copier now VERIFIES cTrader's certificate chain against
+the platform trust store and checks the hostname on every connection
+(copier/src/copier/ctrader/client.py:client_tls_options) -- which no
+self-signed certificate minted in-process by fake-ctrader can satisfy. So
+docker-compose.test.yml sets `CTRADER_TLS_INSECURE=1` on the copier service,
+and ONLY there: it appears nowhere in docker-compose.yml, and the copier
+logs a WARNING every time it honours it. Nothing in this test touches the
+TLS path; the knob in the overlay is the whole of it. (The default path's
+refusal of exactly this certificate is proved by
+copier/tests/integration/test_client_integration.py:
+test_default_tls_path_rejects_the_self_signed_fake_server.)
 """
 
 import time
@@ -73,6 +69,11 @@ SLAVE2_ID = 102   # multiplier 0.5
 
 SLAVE1_EXPECTED_VOLUME = 10_000_000   # 1.00 lot * lotSize 10_000_000 * multiplier 1.0
 SLAVE2_EXPECTED_VOLUME = 5_000_000    # 1.00 lot * lotSize 10_000_000 * multiplier 0.5
+
+# After the master adds +0.50 lot to the SAME position (step 6b, N2): the
+# mapping row aggregates, so 1.50 lots at each slave's multiplier.
+SLAVE1_VOLUME_AFTER_INCREASE = 15_000_000
+SLAVE2_VOLUME_AFTER_INCREASE = 7_500_000
 
 DEADLINE_S = 60.0
 POLL_INTERVAL_S = 0.5
@@ -282,6 +283,61 @@ def test_full_stack_flow():
     assert by_slave[SLAVE1_ID]["slave_volume"] == SLAVE1_EXPECTED_VOLUME, mapping_rows
     assert by_slave[SLAVE2_ID]["slave_volume"] == SLAVE2_EXPECTED_VOLUME, mapping_rows
 
+    # ---------- 6b: master position INCREASE (+0.50 lot) fans out (N2) ----------
+    # cTrader merges a same-direction add on the same symbol into the SAME
+    # position, so this second /fill on account 100/EURUSD/BUY reports the
+    # ORIGINAL position_id with a delta volume (fake_main mirrors that; see
+    # FakeCTraderServer.register_market_fill). Before N2's fix the copier's
+    # second OpenMarket reused the deterministic client_order_id
+    # `cm{pid}.{slave}`, hit the mappings UNIQUE constraint, and was caught
+    # as `intent_processing_failed` -- so the increase reached NO slave and
+    # BOTH were marked degraded, for a routine scale-in.
+    increase_resp = httpx.post(
+        f"{FAKE_CTRADER_SCENARIO_BASE}/fill",
+        json={"account_id": MASTER_ID, "symbol": "EURUSD", "side": "BUY", "volume_lots": "0.50"},
+        timeout=10.0,
+    )
+    assert increase_resp.status_code == 200, increase_resp.text
+    assert increase_resp.json()["position_id"] == master_position_id, (
+        "the fake must report an add to the same position, not a new one"
+    )
+
+    def _mappings_reflect_the_increase():
+        rows = _mapping_rows()
+        if len(rows) != 2:
+            return None
+        by_slave = {r["slave_account_id"]: r for r in rows}
+        if (by_slave[SLAVE1_ID]["slave_volume"] == SLAVE1_VOLUME_AFTER_INCREASE
+                and by_slave[SLAVE2_ID]["slave_volume"] == SLAVE2_VOLUME_AFTER_INCREASE):
+            return rows
+        return None
+
+    increased_rows = _poll_until(
+        _mappings_reflect_the_increase,
+        description="both mappings aggregated to include the +0.50 lot increase",
+    )
+    by_slave = {r["slave_account_id"]: r for r in increased_rows}
+    assert all(r["status"] == "active" for r in increased_rows), increased_rows
+    # One row per (master position, slave) -- an increase aggregates, it does
+    # not add rows -- and each still points at that slave's single position.
+    assert len(increased_rows) == 2
+    # T9c: the fill price is stamped onto the mapping, which is what the
+    # Positions screen's Fill Price / Slippage columns render.
+    assert all(r["fill_price"] is not None for r in increased_rows), increased_rows
+
+    # Four slave fills total now (two opens + two increases), and neither
+    # slave was degraded by the increase.
+    increase_fills = _poll_until(
+        lambda: (lambda evs: evs if len(evs) >= 4 else None)(_slave_fill_events()),
+        description="4 slave_action position_filled events (2 opens + 2 increases)",
+    )
+    assert len(increase_fills) == 4, increase_fills
+    accounts_resp = client.get("/api/accounts")
+    assert accounts_resp.status_code == 200, accounts_resp.text
+    statuses = {a["ctid_trader_account_id"]: a["status"] for a in accounts_resp.json()}
+    assert statuses[SLAVE1_ID] == "ok", statuses
+    assert statuses[SLAVE2_ID] == "ok", statuses
+
     # ---------- 7: kill switch -- disable copying, fill again, assert NO new fills within 5s ----------
     settings_resp = client.put("/api/settings", json={"copying_enabled": False})
     assert settings_resp.status_code == 200, settings_resp.text
@@ -354,3 +410,102 @@ def test_full_stack_flow():
     copies = master_position["copies"]
     assert len(copies) == 2, master_position
     assert {c["slave_account_id"] for c in copies} == {SLAVE1_ID, SLAVE2_ID}, master_position
+
+    # T9c: /state carries the fields the Positions screen renders, not just ids.
+    assert master_position["symbol"] == "EURUSD", master_position
+    assert master_position["volume_lots"] == "1.50", master_position
+    for copy in copies:
+        assert copy["fill_price"] is not None, copy
+        assert copy["volume_lots"] is not None, copy
+    by_slave_copy = {c["slave_account_id"]: c for c in copies}
+    assert by_slave_copy[SLAVE1_ID]["volume_lots"] == "1.50", copies
+    assert by_slave_copy[SLAVE2_ID]["volume_lots"] == "0.75", copies
+
+    # ---------- 9: drift remedy -- the proxy must forward the request body (N3) ----------
+    # The kill-switched SELL in step 7 opened a master position with no
+    # copies at all, which the resync above reports as
+    # `unmapped_master_position` drift. Dismissing it exercises the remedy
+    # path end to end: before N3's fix the api proxied a hardcoded `json={}`
+    # to the copier, whose drift resources raise ValueError("id required")
+    # -> 500 -> 502 here, so every dashboard remedy click failed.
+    state = client.get("/api/state").json()
+    drift_items = state.get("drift", [])
+    assert drift_items, "expected the un-copied (kill-switched) master position to surface as drift"
+    dismissable = next(i for i in drift_items if i["kind"] == "unmapped_master_position")
+
+    dismiss_resp = client.post("/api/drift/dismiss", json={"id": dismissable["id"]})
+    assert dismiss_resp.status_code == 200, dismiss_resp.text
+    assert dismiss_resp.json().get("status") == "dismissed", dismiss_resp.text
+    assert dismiss_resp.json().get("id") == dismissable["id"], dismiss_resp.text
+
+    # The copier really acted on the id it was handed, not on an empty body.
+    def _dismissal_event():
+        resp = client.get("/api/events", params={"category": "drift", "limit": 200})
+        assert resp.status_code == 200, resp.text
+        matches = [
+            e for e in resp.json()
+            if e["payload"].get("action") == "dismissed"
+            and e["payload"].get("position_id") == dismissable["position_id"]
+        ]
+        return matches[0] if matches else None
+
+    dismissal = _poll_until(_dismissal_event, description="a drift dismissal event for that item")
+    assert dismissal["payload"]["drift_kind"] == "unmapped_master_position", dismissal
+
+    # ---------- 10: dry-run really turns ON through the API (N1) ----------
+    # Re-enable copying first (step 7 left the kill switch on, and the kill
+    # switch is checked before dry-run in Dispatcher.dispatch), then turn
+    # dry-run on and prove a master fill produces "would_send" log entries
+    # and NO actual copy.
+    resume_resp = client.put("/api/settings", json={"copying_enabled": True})
+    assert resume_resp.status_code == 200, resume_resp.text
+    assert resume_resp.json()["copying_enabled"] is True, resume_resp.text
+
+    dry_run_resp = client.put("/api/settings", json={"dry_run": True})
+    assert dry_run_resp.status_code == 200, dry_run_resp.text
+    assert dry_run_resp.json()["dry_run"] is True, dry_run_resp.text
+    assert dry_run_resp.json().get("dry_run_applied") is True, dry_run_resp.text
+
+    # The real check: the copier's OWN view of the setting, read back through
+    # the api AFTER the proxy call. Before N1's fix the api forwarded an empty
+    # body, the copier read the absent "enabled" as False and rewrote the row
+    # to false -- while still answering `dry_run: true, dry_run_applied: true`
+    # from a row it had read BEFORE the proxy call.
+    settings_readback = _poll_until(
+        lambda: (lambda s: s if s.get("dry_run") is True else None)(
+            client.get("/api/settings").json()
+        ),
+        description="dry_run to still be true after the copier applied it",
+    )
+    assert settings_readback["dry_run"] is True, settings_readback
+
+    def _would_send_events() -> list[dict]:
+        resp = client.get("/api/events", params={"category": "slave_action", "limit": 300})
+        assert resp.status_code == 200, resp.text
+        return [e for e in resp.json() if e["payload"].get("dry_run") is True]
+
+    fills_before_dry_run = len(_slave_fill_events())
+
+    dry_fill_resp = httpx.post(
+        f"{FAKE_CTRADER_SCENARIO_BASE}/fill",
+        json={"account_id": MASTER_ID, "symbol": "EURUSD", "side": "BUY", "volume_lots": "0.10"},
+        timeout=10.0,
+    )
+    assert dry_fill_resp.status_code == 200, dry_fill_resp.text
+
+    would_send = _poll_until(
+        lambda: (lambda evs: evs if len(evs) >= 2 else None)(_would_send_events()),
+        description="2 slave_action dry_run would_send events",
+    )
+    assert {e["account_id"] for e in would_send} == {SLAVE1_ID, SLAVE2_ID}, would_send
+    assert all(e["payload"].get("would_send") for e in would_send), would_send
+
+    # ...and nothing reached the wire: no new fill was reported for either slave.
+    negative_deadline = time.monotonic() + NEGATIVE_WAIT_S
+    while time.monotonic() < negative_deadline:
+        time.sleep(POLL_INTERVAL_S)
+        current = len(_slave_fill_events())
+        assert current == fills_before_dry_run, (
+            f"dry-run did not suppress sending: {current - fills_before_dry_run} new "
+            f"slave_action position_filled event(s) appeared with dry_run=true"
+        )

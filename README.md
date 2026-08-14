@@ -183,8 +183,11 @@ slave, confirm a few real trades copy correctly, then scale up.
   message shown on the degraded slave's card on the Overview screen (hover for
   the full text). A degraded slave is not disabled —
   it keeps receiving every future master event (each action is
-  independent) — and it clears automatically on its next successful send,
-  or you can pause/resume it manually to force one.
+  independent) — and it clears automatically on its next successful send
+  (status back to `ok`, the stale error message dropped, and a
+  `degraded_cleared` entry written to Logs), or you can pause/resume it
+  manually to force one. A slave you deliberately *paused* is never resumed
+  this way — only `degraded` clears.
 - **Order rejected on a copy** — a separate, non-degrading path: the broker
   itself declines an individual copy order that *was* successfully sent —
   most commonly margin or below-minimum volume. The slave account stays
@@ -330,7 +333,7 @@ Two consequences worth knowing before you lose half an hour to them:
 cd copier && .venv/bin/pytest tests --timeout=60
 ```
 
-214 tests (unit + integration), takes roughly two minutes — most of that is
+278 tests (unit + integration), takes roughly six minutes — most of that is
 the integration suite, which spins up a real, self-signed-TLS, in-process
 fake cTrader server (`copier/src/copier/testing/fake_server.py`) speaking
 the same protobuf messages as the real API (auth, heartbeats, order
@@ -344,7 +347,7 @@ against it. Nothing here talks to the real cTrader network.
 cd api && .venv/bin/pytest tests
 ```
 
-75 tests. Uses the same Postgres instance (a fresh `copytrader_test`
+82 tests. Uses the same Postgres instance (a fresh `copytrader_test`
 database, dropped and recreated per session) and a mocked HTTP transport for
 any outbound calls to cTrader's OAuth token endpoint — no real network calls.
 
@@ -354,7 +357,7 @@ any outbound calls to cTrader's OAuth token endpoint — no real network calls.
 cd dashboard && npm test
 ```
 
-Runs `tsc --noEmit` (typecheck) followed by `vitest run`. 7 test files, 36
+Runs `tsc --noEmit` (typecheck) followed by `vitest run`. 7 test files, 48
 tests, all component/page tests with mocked `fetch`/WebSocket — no backend
 required.
 
