@@ -209,6 +209,20 @@ slave, confirm a few real trades copy correctly, then scale up.
   accounts that existed under that cTrader ID at grant time. If you open a
   new account under a cTID you've already connected, it won't show up until
   you re-grant (Connect cTrader ID again for that same cTID).
+- **Connection sizing (`SHARDS`)** — every account authorized on one
+  connection is re-authenticated one at a time after each reconnect, and the
+  cTrader SDK drains its outbound queue at 5 messages/second, so a
+  reconnect costs roughly `accounts / 5` seconds before the last account on
+  that connection is trading again. Keep no more than **~20–25 accounts per
+  connection** until you have observed the real per-connection account limit
+  on demo (Stage 1): set `SHARDS` in `.env` to
+  `ceil(accounts / 20)` — e.g. `SHARDS=3` for ~50 accounts. `SHARDS` is read
+  from the environment at boot only; changing it needs a copier restart. (The
+  `shards` value shown in the settings API is **not** wired to the copier —
+  it is display-only.)
+- **New instruments** — the copier fetches each account's symbol map once, at
+  startup. Instruments the broker adds later are not copyable until you
+  restart the copier (`docker compose restart copier`).
 - **Backups** — all durable state lives in the `postgres` Docker volume
   (`pgdata`). Back that volume up (or the underlying Postgres data via
   `pg_dump`) on whatever schedule matches your risk tolerance; there is no
@@ -218,6 +232,33 @@ slave, confirm a few real trades copy correctly, then scale up.
   over WebSocket. For container/process-level logs (startup, connection
   errors, stack traces), use `docker compose logs`, e.g. `docker compose
   logs -f copier` or `docker compose logs -f api`.
+
+### Deploying to a VPS
+
+Everything the stack publishes is bound to **loopback only** — `api` on
+`127.0.0.1:8000` and `postgres` on `127.0.0.1:5433` — and the copier's
+control port is never published at all. That is deliberate: the dashboard's
+only authentication is a single admin password over a session cookie, so it
+must never be reachable directly from the internet. When you move to a VPS:
+
+- **Put a TLS reverse proxy in front of it** (Caddy, nginx + certbot,
+  Traefik) terminating HTTPS on 443 and proxying to `127.0.0.1:8000`. The
+  simplest alternative, if you are the only operator, is no public exposure
+  at all: leave the port on loopback and reach it through an SSH tunnel
+  (`ssh -L 8000:127.0.0.1:8000 you@vps`).
+- **Keep `COOKIE_SECURE=true`** (the default). It is only ever set to `false`
+  for local plain-HTTP testing; over a TLS proxy the real value must stay
+  `true`, or the session and CSRF cookies travel without the `Secure`
+  attribute.
+- **Update the OAuth redirect URI in both places** — `CTRADER_REDIRECT_URI`
+  in `.env` *and* the redirect URI registered for your app at
+  https://openapi.ctrader.com — to the VPS's public HTTPS URL
+  (`https://your-host/api/oauth/callback`). They must match exactly or the
+  cTrader consent flow will refuse the callback.
+- **Rotate the secrets** you used locally before going live:
+  `ADMIN_BOOTSTRAP_PASSWORD`, `SESSION_SECRET`, and `POSTGRES_PASSWORD`.
+- Do **not** widen the published ports to `0.0.0.0` to "make it reachable" —
+  proxy to loopback instead.
 
 ## 6. Development
 
@@ -253,6 +294,34 @@ suites default to):
 ```bash
 docker compose up -d postgres
 ```
+
+**Which stack these two suites are valid against: the plain dev stack only.**
+They connect as an admin to the `copytrader` database on `127.0.0.1:5433`
+(`TEST_POSTGRES_ADMIN_DSN`) purely to `DROP`/`CREATE` their own scratch
+database, `copytrader_test` (`TEST_POSTGRES_DSN`), which they then migrate
+and truncate per test. Both variables can be overridden if your Postgres is
+elsewhere:
+
+```bash
+TEST_POSTGRES_ADMIN_DSN=postgresql://copytrader:copytrader@localhost:5433/copytrader \
+TEST_POSTGRES_DSN=postgresql://copytrader:copytrader@localhost:5433/copytrader_test \
+  .venv/bin/pytest tests
+```
+
+Two consequences worth knowing before you lose half an hour to them:
+
+- **The two suites share `copytrader_test`, so never run them concurrently.**
+  Each drops and recreates that database at session start; running both at
+  once has one suite delete the other's database mid-run.
+- **The `pgdata` volume is shared with the e2e overlay — after an e2e run,
+  a plain `docker compose up -d postgres` serves a cluster with no
+  `copytrader` database, and BOTH suites fail on connect until you
+  `docker compose down -v`.** The overlay sets `POSTGRES_DB=copytrader_e2e`
+  (see below), and Postgres only creates the `POSTGRES_DB`-named database on
+  a *fresh* data volume — so once the volume was initialized by the overlay,
+  it permanently contains `copytrader_e2e` and not `copytrader`, no matter
+  which compose files you bring it up with afterwards. `down -v` (which
+  deletes the volume), then `up -d postgres`, restores it.
 
 **copier** (Python 3.12+; create the venv once with `python3 -m venv .venv
 && .venv/bin/pip install -e ".[dev]"` from inside `copier/`):
@@ -304,6 +373,39 @@ disconnects, and reconnection — see `test_client_integration.py`,
 `test_fake_server.py`, and `test_symbols.py`. To add a new integration
 scenario, extend `FakeCTraderServer`'s handlers rather than mocking the SDK
 directly, so the test still exercises the real wire protocol.
+
+### Compose-level end-to-end test
+
+`e2e/test_full_stack.py` drives the **whole stack** — postgres, migrate,
+copier, api, plus a `fake-ctrader` service running the same
+`FakeCTraderServer` over TLS on the real cTrader port — exactly as an
+operator would: it seeds one OAuth grant and three accounts, tells the
+copier to pick them up, logs in to the dashboard API, pushes master fills
+through the fake broker's scenario-control API on port 9000, and asserts the
+fan-out, the position-increase path, the drift remedies, dry-run, and the
+kill switch end to end.
+
+```bash
+cp <main-checkout>/.env .env          # the test reads FERNET_KEY/ADMIN_BOOTSTRAP_PASSWORD from it
+docker compose -f docker-compose.yml -f docker-compose.test.yml up -d --build
+cd api && .venv/bin/pytest ../e2e/test_full_stack.py -v
+cd .. && docker compose -f docker-compose.yml -f docker-compose.test.yml down -v
+```
+
+Notes:
+
+- The overlay isolates the test's data in a **different database name**
+  (`copytrader_e2e`), so pointing this test at an ordinary dev stack fails
+  loudly on connect instead of `TRUNCATE`-ing your real accounts. It also
+  publishes the copier's control port on `127.0.0.1:8081` (the base compose
+  never does) because the test needs `POST /reload` directly.
+- The overlay is also the only place `CTRADER_TLS_INSECURE=1` is set. The
+  copier verifies cTrader's certificate chain and hostname by default
+  (`copier/src/copier/ctrader/client.py`), which no self-signed fake can
+  satisfy; the copier logs a WARNING whenever that variable is honoured.
+- **`down -v`, not `down`** — see the shared-`pgdata` trap above. Skipping
+  `-v` leaves the volume initialized for `copytrader_e2e`, and the copier and
+  api unit suites will then fail until you remove it.
 
 For a true end-to-end check against Spotware's infrastructure, there's no
 substitute for the demo-account rollout stages in section 4 above — that's
