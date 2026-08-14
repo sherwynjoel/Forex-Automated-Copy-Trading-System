@@ -306,6 +306,216 @@ test('shows dry-run badge when dry_run enabled', async () => {
   })
 })
 
+test('does not show refresh-failed banner when all connections are active', async () => {
+  const accounts: Account[] = [
+    { ...mockAccounts[0], connection_status: 'active' },
+    { ...mockAccounts[1], connection_status: 'active' },
+    { ...mockAccounts[2], connection_status: 'active' },
+  ]
+
+  stubApi({
+    '/api/accounts': accounts,
+    '/api/settings': mockSettings,
+    '/api/state': mockState,
+  })
+
+  render(
+    <MemoryRouter>
+      <Overview />
+    </MemoryRouter>
+  )
+
+  await waitFor(() => {
+    expect(screen.getByText(/Master Account \(1001\)/)).toBeInTheDocument()
+  })
+
+  expect(screen.queryByTestId('refresh-failed-banner')).not.toBeInTheDocument()
+})
+
+test('shows prominent refresh-failed banner naming the affected account', async () => {
+  const accounts: Account[] = [
+    { ...mockAccounts[0], connection_status: 'active' },
+    { ...mockAccounts[1], connection_status: 'refresh_failed' },
+    { ...mockAccounts[2], connection_status: 'active' },
+  ]
+
+  stubApi({
+    '/api/accounts': accounts,
+    '/api/settings': mockSettings,
+    '/api/state': mockState,
+  })
+
+  render(
+    <MemoryRouter>
+      <Overview />
+    </MemoryRouter>
+  )
+
+  await waitFor(() => {
+    expect(screen.getByTestId('refresh-failed-banner')).toBeInTheDocument()
+  })
+
+  const banner = screen.getByTestId('refresh-failed-banner')
+  // Names the affected account by its trader login
+  expect(banner).toHaveTextContent('1002')
+  // Explains the operator-facing consequence and remediation
+  expect(banner).toHaveTextContent(/token refresh failed/i)
+  expect(banner).toHaveTextContent(/copying .* will stop/i)
+  expect(banner).toHaveTextContent(/reconnect/i)
+  expect(banner).toHaveTextContent(/connect ctrader id/i)
+})
+
+test('shows refresh-failed banner above the master card when the master itself has a failed refresh', async () => {
+  const accounts: Account[] = [
+    { ...mockAccounts[0], connection_status: 'refresh_failed' },
+    { ...mockAccounts[1], connection_status: 'active' },
+    { ...mockAccounts[2], connection_status: 'active' },
+  ]
+
+  stubApi({
+    '/api/accounts': accounts,
+    '/api/settings': mockSettings,
+    '/api/state': mockState,
+  })
+
+  render(
+    <MemoryRouter>
+      <Overview />
+    </MemoryRouter>
+  )
+
+  await waitFor(() => {
+    expect(screen.getByTestId('refresh-failed-banner')).toBeInTheDocument()
+  })
+
+  const banner = screen.getByTestId('refresh-failed-banner')
+  expect(banner).toHaveTextContent('1001')
+
+  // Banner must precede the master card in document order
+  const masterHeading = screen.getByText(/Master Account \(1001\)/)
+  // eslint-disable-next-line no-bitwise
+  expect(banner.compareDocumentPosition(masterHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+})
+
+test('slave tile shows Degraded status from account.status, not connection_status', async () => {
+  const accounts: Account[] = [
+    { ...mockAccounts[0], connection_status: 'active' },
+    { ...mockAccounts[1], status: 'degraded', connection_status: 'active' },
+    { ...mockAccounts[2], connection_status: 'active' },
+  ]
+
+  stubApi({
+    '/api/accounts': accounts,
+    '/api/settings': mockSettings,
+    '/api/state': mockState,
+  })
+
+  render(
+    <MemoryRouter>
+      <Overview />
+    </MemoryRouter>
+  )
+
+  await waitFor(() => {
+    expect(screen.getByText(/1002/)).toBeInTheDocument()
+  })
+
+  // account.status === 'degraded' must drive the degraded badge, even though
+  // connection_status is 'active' (connection_status never holds 'degraded').
+  expect(screen.getByText('Degraded')).toBeInTheDocument()
+})
+
+test('degraded slave tile shows the last_error reason', async () => {
+  const accounts: Account[] = [
+    { ...mockAccounts[0], connection_status: 'active' },
+    {
+      ...mockAccounts[1],
+      status: 'degraded',
+      connection_status: 'active',
+      last_error: 'Send failed: insufficient margin on EURUSD',
+    },
+    { ...mockAccounts[2], connection_status: 'active' },
+  ]
+
+  stubApi({
+    '/api/accounts': accounts,
+    '/api/settings': mockSettings,
+    '/api/state': mockState,
+  })
+
+  render(
+    <MemoryRouter>
+      <Overview />
+    </MemoryRouter>
+  )
+
+  await waitFor(() => {
+    expect(screen.getByTestId('slave-last-error')).toBeInTheDocument()
+  })
+
+  const errorEl = screen.getByTestId('slave-last-error')
+  expect(errorEl).toHaveTextContent('Send failed: insufficient margin on EURUSD')
+  expect(errorEl).toHaveAttribute('title', 'Send failed: insufficient margin on EURUSD')
+})
+
+test('non-degraded slave tile never shows a last_error message', async () => {
+  const accounts: Account[] = [
+    { ...mockAccounts[0], connection_status: 'active' },
+    {
+      ...mockAccounts[1],
+      status: 'ok',
+      connection_status: 'active',
+      last_error: 'Send failed: insufficient margin on EURUSD',
+    },
+    { ...mockAccounts[2], connection_status: 'active' },
+  ]
+
+  stubApi({
+    '/api/accounts': accounts,
+    '/api/settings': mockSettings,
+    '/api/state': mockState,
+  })
+
+  render(
+    <MemoryRouter>
+      <Overview />
+    </MemoryRouter>
+  )
+
+  await waitFor(() => {
+    expect(screen.getByText(/1002/)).toBeInTheDocument()
+  })
+
+  expect(screen.queryByTestId('slave-last-error')).not.toBeInTheDocument()
+})
+
+test('slave tile shows a refresh-failed marker distinct from degraded styling', async () => {
+  const accounts: Account[] = [
+    { ...mockAccounts[0], connection_status: 'active' },
+    { ...mockAccounts[1], connection_status: 'refresh_failed' },
+    { ...mockAccounts[2], connection_status: 'active' },
+  ]
+
+  stubApi({
+    '/api/accounts': accounts,
+    '/api/settings': mockSettings,
+    '/api/state': mockState,
+  })
+
+  render(
+    <MemoryRouter>
+      <Overview />
+    </MemoryRouter>
+  )
+
+  await waitFor(() => {
+    expect(screen.getByTestId('slave-refresh-failed-marker')).toBeInTheDocument()
+  })
+
+  // Distinct from the degraded marker - degraded label must not appear
+  expect(screen.queryByText('Degraded')).not.toBeInTheDocument()
+})
+
 test(
   'polls /api/state every 5 seconds',
   async () => {
