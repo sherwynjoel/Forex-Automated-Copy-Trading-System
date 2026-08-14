@@ -124,6 +124,11 @@ class CTraderClient:
         -- the message is never queued, so the caller can always safely
         treat this as "never reached the wire" and retry. A connection-level
         failure (e.g. all reconnect attempts exhausted) fails the same way.
+        The timer is armed only *after* whenConnected() has been called (and
+        returned a Deferred) rather than before: whenConnected() raises
+        synchronously (automat's NoTransition) if called before the client
+        has ever started, so arming it first would leak a DelayedCall on
+        that path.
 
         Deliberately does NOT call .cancel() on the Deferred returned by
         whenConnected(): the vendored SDK's _awaitingConnected waiter list
@@ -139,6 +144,28 @@ class CTraderClient:
         timer wins, this Deferred fails and protocol.send() is simply never
         invoked; if whenConnected() later fires anyway (late), the result is
         silently discarded rather than acted on.
+
+        Sends with instant=True: TcpProtocol.send()'s default (instant=False)
+        only *enqueues* onto _send_queue, drained by a <=1s-cadence
+        LoopingCall -- if the connection dies inside that window (now that
+        each connection has its own private queue, see
+        _PerConnectionTcpProtocol, so the message can no longer be flushed
+        by a *different* connection either) the message is silently
+        dropped, yet this method had already reported success: no retry, no
+        event, no degraded status, and reconcile can't catch it either
+        (it only inspects 'active' mappings; a never-activated 'pending' one
+        is invisible to every drift check). instant=True calls
+        protocol.sendString() -- and therefore self.transport.write() --
+        synchronously, in the SAME reactor turn whenConnected() confirms the
+        protocol is connected, so there is no queue, no drain window, and
+        nothing to die inside. This can only make the previously-silent
+        "dropped but reported success" case into, at worst, "handed to a
+        TCP transport that itself then fails" -- an ordinary connection-
+        level failure, which is exactly what whenConnected()/_fail already
+        handle correctly (ambiguous outcome -> SendNotAttempted -> retry,
+        never a silent no-op). Only this method's call is changed to
+        instant=True; send() (app/account auth, heartbeat, and every other
+        request type) is untouched and still queues.
         """
         result: defer.Deferred = defer.Deferred()
         settled = [False]
@@ -151,15 +178,27 @@ class CTraderClient:
         def _on_connected(protocol) -> None:
             if settled[0]:
                 # Already timed out and reported to the caller (see the
-                # cancellation note above) -- do not enqueue a message for
-                # an operation the caller has already been told failed.
+                # cancellation note above) -- do not send a message for an
+                # operation the caller has already been told failed.
+                return
+            try:
+                sent = protocol.send(msg, instant=True, clientMsgId=str(id(msg)))
+            except BaseException:
+                # A synchronous raise here (unreachable for the protobufs
+                # Dispatcher builds today, but this is the live trade-send
+                # path) must not strand `result` forever: settled[0] is
+                # still False, so _fail is free to errback it, exactly as
+                # any other failure mode does.
+                _fail(Failure())
                 return
             settled[0] = True
-            result.callback(protocol.send(msg, clientMsgId=str(id(msg))))
+            result.callback(sent)
 
         def _on_timeout() -> None:
             _fail(Failure(defer.TimeoutError(
                 f"send_no_reply: no connected transport within {timeout_s}s")))
+
+        d = self._sdk.whenConnected(failAfterFailures=1)
 
         timeout_call = self._clock.callLater(timeout_s, _on_timeout)
 
@@ -167,7 +206,6 @@ class CTraderClient:
             if timeout_call.active():
                 timeout_call.cancel()
 
-        d = self._sdk.whenConnected(failAfterFailures=1)
         d.addCallbacks(_on_connected, _fail)
         d.addBoth(_cancel_pending_timeout)
         return result
