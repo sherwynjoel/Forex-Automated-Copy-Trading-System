@@ -7,11 +7,29 @@ from twisted.internet.task import Clock
 from copier.ctrader.client import HEARTBEAT_INTERVAL_S, CTraderClient
 
 
+class StubProtocol:
+    """Stand-in for the vendored SDK's TcpProtocol: the object whenConnected()
+    resolves with, whose .send() (unlike Client.send()) hands a message to
+    the transport and returns None -- no response Deferred, no timeout."""
+
+    def __init__(self):
+        self.sent = []  # list of (msg, clientMsgId)
+
+    def send(self, msg, clientMsgId=None, **kwargs):
+        self.sent.append((msg, clientMsgId))
+        return None
+
+
 class StubSdk:
     def __init__(self):
         self.sent = []
         self.running = False
         self._connected_cb = self._disconnected_cb = self._message_cb = None
+        # whenConnected() support (used by CTraderClient.send_no_reply):
+        self.protocol = StubProtocol()
+        self._connected = False
+        self._when_connected_waiters = []
+        self._connect_failure = None
 
     def setConnectedCallback(self, cb): self._connected_cb = cb
     def setDisconnectedCallback(self, cb): self._disconnected_cb = cb
@@ -23,10 +41,29 @@ class StubSdk:
         self.sent.append(msg)
         return defer.succeed(None)
 
+    def whenConnected(self, failAfterFailures=None):
+        """Mirrors ClientService.whenConnected(): fires with the connected
+        protocol, or errbacks on a connection-level failure."""
+        d = defer.Deferred()
+        if self._connect_failure is not None:
+            d.errback(self._connect_failure)
+        elif self._connected:
+            d.callback(self.protocol)
+        else:
+            self._when_connected_waiters.append(d)
+        return d
+
     # test helpers
-    def connect(self): self._connected_cb(self)
-    def disconnect(self): self._disconnected_cb(self, "lost")
+    def connect(self):
+        self._connected = True
+        self._connected_cb(self)
+        waiters, self._when_connected_waiters = self._when_connected_waiters, []
+        for d in waiters:
+            d.callback(self.protocol)
+
+    def disconnect(self): self._connected = False; self._disconnected_cb(self, "lost")
     def deliver(self, payload): self._message_cb(self, payload)
+    def fail_next_whenConnected(self, failure): self._connect_failure = failure
 
 
 def make():
@@ -168,3 +205,55 @@ def test_deauthorize_account_removes_from_reauth_registry():
     reauthed = of_type(sdk.sent, ProtoOAAccountAuthReq)
     reauth_ids = {r.ctidTraderAccountId for r in reauthed[-1:]}
     assert reauth_ids == {1002}
+
+
+# ---- send_no_reply: guards the every-trade-degrades regression ----
+#
+# The real cTrader server never sends a synchronous, clientMsgId-tagged
+# reply to a trade request (new order, close, amend, cancel); send()
+# registers a response Deferred with a ~5s timeout that such a reply would
+# never satisfy, so every successful trade send used to time out ~5s later
+# and get misread by Dispatcher as an ambiguous failure -> degraded slave
+# account. send_no_reply() must resolve purely from the transport handoff
+# (whenConnected() + protocol.send()), never by waiting on an incoming
+# reply, and must never schedule a timeout of its own.
+
+def test_send_no_reply_resolves_on_transport_handoff_without_awaiting_a_reply():
+    sdk, clock, client = make()
+    sdk.connect()
+
+    before = len(clock.getDelayedCalls())
+    msg = ProtoOAExecutionEvent()
+    d = client.send_no_reply(msg)
+
+    # Resolved synchronously off the transport handoff alone -- no reply
+    # message was ever delivered (sdk.deliver was never called).
+    assert d.called
+    assert not isinstance(d.result, Exception)
+    assert sdk.protocol.sent and sdk.protocol.sent[-1] == (msg, str(id(msg)))
+
+    # Unlike send() (which calls addTimeout, scheduling a delayed call),
+    # send_no_reply() must not have scheduled anything on the clock.
+    assert len(clock.getDelayedCalls()) == before
+
+    # Advancing well past the SDK's real ~5s response-timeout window must
+    # produce no late failure, because no timeout was ever armed.
+    clock.advance(10.0)
+    assert d.called
+    assert not isinstance(d.result, Exception)
+
+
+def test_send_no_reply_propagates_connection_level_failure():
+    """A connection-level failure (never connected / all attempts failed)
+    still fails send_no_reply's Deferred, exactly as it does for send() --
+    both are gated by the same whenConnected() call."""
+    sdk, _, client = make()
+    sdk.fail_next_whenConnected(RuntimeError("connection refused"))
+
+    d = client.send_no_reply(ProtoOAExecutionEvent())
+
+    errors = []
+    d.addErrback(lambda failure: errors.append(failure))
+    assert len(errors) == 1
+    assert isinstance(errors[0].value, RuntimeError)
+    assert not sdk.protocol.sent   # never reached the transport

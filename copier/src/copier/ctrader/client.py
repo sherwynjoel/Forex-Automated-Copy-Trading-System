@@ -63,6 +63,32 @@ class CTraderClient:
     def send(self, msg) -> defer.Deferred:
         return self._sdk.send(msg)
 
+    def send_no_reply(self, msg) -> defer.Deferred:
+        """Fire-and-forget send for trade requests (new order, close position,
+        amend SL/TP, amend order, cancel order): the real cTrader server
+        never sends a synchronous, clientMsgId-tagged reply to these --
+        outcomes arrive later as untagged ProtoOAExecutionEvent broadcasts,
+        routed through on_execution() (see testing/fake_server.py, which
+        models this precisely).
+
+        Unlike send(), this does NOT register a response Deferred/timeout
+        that is guaranteed to never be satisfied by a reply: send() would
+        eventually time out (its default responseTimeoutInSeconds) on every
+        single trade request regardless of whether it actually succeeded,
+        which is exactly what happened before this method existed -- every
+        live-dispatched trade intent's underlying Deferred spuriously failed
+        ~5s after being sent, which Dispatcher treats as an ambiguous
+        failure and marks the account degraded.
+
+        The returned Deferred fires once the message has been handed to a
+        connected transport; a connection-level failure (e.g. not currently
+        connected) still propagates as a failure, exactly as it does for
+        send() -- both go through the same whenConnected() gate.
+        """
+        d = self._sdk.whenConnected(failAfterFailures=1)
+        d.addCallback(lambda protocol: protocol.send(msg, clientMsgId=str(id(msg))))
+        return d
+
     def on_execution(self, cb) -> None: self._exec_cbs.append(cb)
     def on_account_disconnect(self, cb) -> None: self._disc_cbs.append(cb)
     def on_tokens_invalidated(self, cb) -> None: self._invalid_cbs.append(cb)

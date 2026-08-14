@@ -8,6 +8,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
+from ctrader_open_api import Protobuf
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOASpotEvent, ProtoOASubscribeSpotsReq, ProtoOATraderReq,
 )
@@ -109,6 +110,10 @@ class AccountStateTracker:
             req = ProtoOATraderReq()
             req.ctidTraderAccountId = account_id
             d = self._client.send(req)
+            # CTraderClient.send() resolves with the raw ProtoMessage envelope
+            # (payloadType/payload bytes); it must be unwrapped into a typed
+            # ProtoOATraderRes before .trader is accessible.
+            d.addCallback(Protobuf.extract)
             d.addCallback(self._process_trader_response, account_id)
             d.addErrback(self._handle_trader_error, account_id)
             deferreds.append(d)

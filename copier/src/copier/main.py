@@ -461,20 +461,27 @@ def _build_send_for_account(
     clients_by_account: Callable[[int], CTraderClient],
 ) -> Callable:
     def send_for_account(account_id: int, message):
-        """Send a message to an account's client.
+        """Send a trade request (Dispatcher's sole caller) to an account's client.
 
         Raises SendNotAttempted for pre-wire failures (unknown account, no
         client for that account's environment/shard, app-level auth not yet
         ready, or the account never having been account-auth'd on this
         client) -- all safe to retry. Any other exception is ambiguous and
         must NOT be retried by the caller.
+
+        Uses send_no_reply(), not send(): every message Dispatcher builds
+        (new order, close, amend SL/TP, amend order, cancel) is a trade
+        request the real cTrader server never tags a synchronous reply to
+        (outcomes arrive later as untagged execution-event broadcasts), so
+        waiting on send()'s response Deferred would time out on every single
+        successful send and get misread as an ambiguous failure.
         """
         client = clients_by_account(account_id)  # may raise SendNotAttempted
         if not client.ready.called:
             raise SendNotAttempted(f"client for account {account_id} not app-authed yet")
         if account_id not in getattr(client, '_accounts', {account_id: None}):
             raise SendNotAttempted(f"account {account_id} not yet account-authed on its client")
-        return client.send(message)
+        return client.send_no_reply(message)
 
     return send_for_account
 

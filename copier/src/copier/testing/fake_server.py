@@ -417,6 +417,12 @@ class FakeCTraderServer:
                 accept_evt.order.tradeData.tradeSide = req.tradeSide
                 accept_evt.order.tradeData.label = req.label
                 accept_evt.order.clientOrderId = req.clientOrderId
+                # Echo the requested price back (required for MasterPendingPlaced.price
+                # to reflect reality when this account is a copier-monitored master).
+                if req.orderType == model.ProtoOAOrderType.LIMIT and req.HasField("limitPrice"):
+                    accept_evt.order.limitPrice = req.limitPrice
+                elif req.orderType == model.ProtoOAOrderType.STOP and req.HasField("stopPrice"):
+                    accept_evt.order.stopPrice = req.stopPrice
                 self.broadcast(accept_evt)
 
     def _handle_close_position_req(self, proto, msg):
@@ -455,6 +461,19 @@ class FakeCTraderServer:
             fill_evt.position.tradeData.tradeSide = model.ProtoOATradeSide.BUY  # Default
             fill_evt.position.positionStatus = model.ProtoOAPositionStatus.POSITION_STATUS_CLOSED
             fill_evt.position.swap = 0
+            # normalize() keys its symbol lookup off order.tradeData.symbolId
+            # for every execution event, closes included (see
+            # tests/unit/test_normalize.py's base_event + closePositionDetail);
+            # without this a close from the master account is silently
+            # dropped (unknown symbol -> None) instead of replicating.
+            # orderId=0 mirrors the deal.orderId convention above: no real
+            # order backs a close.
+            fill_evt.order.orderId = 0
+            fill_evt.order.orderStatus = model.ProtoOAOrderStatus.ORDER_STATUS_FILLED
+            fill_evt.order.orderType = model.ProtoOAOrderType.MARKET
+            fill_evt.order.tradeData.symbolId = 1  # Default, varies by position
+            fill_evt.order.tradeData.volume = req.volume
+            fill_evt.order.tradeData.tradeSide = model.ProtoOATradeSide.BUY  # Default, varies
             self.broadcast(fill_evt)
 
     def _handle_amend_position_sltp_req(self, proto, msg):
@@ -482,6 +501,20 @@ class FakeCTraderServer:
             response.position.stopLoss = req.stopLoss
         if req.HasField("takeProfit"):
             response.position.takeProfit = req.takeProfit
+        # Real cTrader tags SL/TP amendments with an order of type
+        # STOP_LOSS_TAKE_PROFIT carrying the position's symbol; without this
+        # the copier's normalize() has no symbol to key off of and silently
+        # drops the event (evt.order.tradeData.symbolId defaults to 0). The
+        # other order.* fields below are REQUIRED by the protobuf schema once
+        # the submessage is touched at all; there is no real order backing an
+        # SL/TP-only amendment so orderId is 0, matching the close-position
+        # convention elsewhere in this file.
+        response.order.orderId = 0
+        response.order.orderStatus = model.ProtoOAOrderStatus.ORDER_STATUS_ACCEPTED
+        response.order.orderType = model.ProtoOAOrderType.STOP_LOSS_TAKE_PROFIT
+        response.order.tradeData.symbolId = 1  # Default
+        response.order.tradeData.volume = 0
+        response.order.tradeData.tradeSide = model.ProtoOATradeSide.BUY
         self.broadcast(response)
 
     def _handle_amend_order_req(self, proto, msg):
@@ -498,12 +531,18 @@ class FakeCTraderServer:
 
         response = oa.ProtoOAExecutionEvent()
         response.ctidTraderAccountId = req.ctidTraderAccountId
-        response.executionType = model.ProtoOAExecutionType.ORDER_ACCEPTED
+        # Real cTrader reports a successful amend as ORDER_REPLACED (the type
+        # normalize() keys a MasterPendingReplaced off of), not ORDER_ACCEPTED
+        # (which is reserved for the order's initial placement).
+        response.executionType = model.ProtoOAExecutionType.ORDER_REPLACED
         response.order.orderId = req.orderId
         response.order.orderStatus = model.ProtoOAOrderStatus.ORDER_STATUS_ACCEPTED
         response.order.orderType = model.ProtoOAOrderType.LIMIT  # Default
         response.order.tradeData.symbolId = 1  # Default
-        response.order.tradeData.volume = 100000  # Default
+        # Echo the requested volume back rather than a fixed default, so
+        # replicated-volume math (mirror_volume) exercises the caller's
+        # actual amend, not an arbitrary constant.
+        response.order.tradeData.volume = req.volume
         response.order.tradeData.tradeSide = model.ProtoOATradeSide.BUY
         if req.HasField("limitPrice"):
             response.order.limitPrice = req.limitPrice
