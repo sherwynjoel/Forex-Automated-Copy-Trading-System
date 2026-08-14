@@ -35,7 +35,14 @@ services:
     build: { context: ., dockerfile: api/Dockerfile }
     env_file: .env
     ports:
-      - "8000:8000"
+      # LOOPBACK ONLY, like postgres above (N7). A bare "8000:8000" binds
+      # 0.0.0.0, so on the README's own Stage-4 "move to a VPS" path this
+      # published the admin dashboard -- single-password login, session
+      # cookies that need COOKIE_SECURE=false to work over plain HTTP -- on
+      # the public internet in cleartext. On a VPS, front this with a TLS
+      # reverse proxy or reach it over an SSH tunnel; see the README's
+      # "Deploying to a VPS" section.
+      - "127.0.0.1:8000:8000"
     environment:
       POSTGRES_DSN: postgresql://copytrader:${POSTGRES_PASSWORD:-copytrader}@postgres:5432/copytrader
       COPIER_CONTROL_URL: http://copier:8080

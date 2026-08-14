@@ -293,11 +293,19 @@ class CopierService:
             )
             return
 
+        # T9c: the execution price is what the Positions screen's per-copy
+        # "Fill Price"/"Slippage" columns are built from. It was already
+        # being read here for the event log; it is now also handed to the
+        # mapping row so GET /state can report it (see repo.mappings.fill_price
+        # / db/migrations/003_mapping_fill_price.sql).
+        fill_price = evt.deal.executionPrice if evt.deal.HasField('executionPrice') else None
+
         # Check for position fill (clientOrderId starting "cm")
         if client_order_id and client_order_id.startswith("cm"):
             try:
-                self._repo.activate_position_mapping(client_order_id, deal_position_id, filled_volume)
-                fill_price = evt.deal.executionPrice if evt.deal.HasField('executionPrice') else None
+                self._repo.activate_position_mapping(
+                    client_order_id, deal_position_id, filled_volume, fill_price=fill_price,
+                )
                 self._repo.log_event(
                     'slave_action',
                     'info',
@@ -326,8 +334,10 @@ class CopierService:
 
         # Check for pending order fill: match by slave_order_id
         try:
-            self._repo.activate_pending_fill(account_id, slave_order_id, deal_position_id, filled_volume)
-            fill_price = evt.deal.executionPrice if evt.deal.HasField('executionPrice') else None
+            self._repo.activate_pending_fill(
+                account_id, slave_order_id, deal_position_id, filled_volume,
+                fill_price=fill_price,
+            )
             self._repo.log_event(
                 'slave_action',
                 'info',

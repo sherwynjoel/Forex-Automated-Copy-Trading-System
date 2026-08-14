@@ -1,5 +1,6 @@
 """Tests for the intent dispatcher (dispatch.py)."""
 
+from dataclasses import dataclass
 from unittest.mock import Mock, MagicMock
 from decimal import Decimal
 
@@ -650,7 +651,19 @@ class TestDispatcher:
         assert any(msg[0] == 102 for msg in sent_messages)
 
     def test_exception_isolation_in_dispatch_loop(self, seed_accounts, repo):
-        """One intent's exception should not block remaining intents in batch."""
+        """One intent's exception should not block remaining intents in batch.
+
+        The failing intent used to be a duplicate `client_order_id` (a
+        second OpenMarket for an already-mapped master position), which
+        raised UniqueViolation out of `_create_mapping`. That is exactly the
+        case N2 fixed -- a duplicate coid is a legitimate position INCREASE
+        and no longer raises anything -- so this test now provokes the same
+        isolation behaviour with a genuinely unprocessable intent:
+        `build_request` raises `ValueError: Unknown intent type` for a shape
+        it does not recognize, from inside the same try block. The property
+        under test (one bad intent degrades only its own account and never
+        stops the batch) is unchanged.
+        """
         sent_messages = []
 
         def mock_send(account_id, msg):
@@ -662,20 +675,13 @@ class TestDispatcher:
         bucket.acquire.return_value = defer.succeed(None)
         dispatcher = Dispatcher(mock_send, repo, bucket, clock=clock)
 
-        # Batch: intent #1 succeeds, #2 fails (duplicate mapping), #3 succeeds
+        @dataclass(frozen=True)
+        class _UnprocessableIntent:
+            slave_account_id: int
+
+        # Batch: intent #1 succeeds, #2 raises inside processing, #3 succeeds
         intent1 = ClosePosition(slave_account_id=101, position_id=500, volume=10000)
-        # intent2 will fail: create mapping first, then duplicate it
-        repo.create_position_mapping(42, 102, "cm42.102")
-        intent2 = OpenMarket(
-            slave_account_id=102,
-            master_position_id=42,  # duplicate client_order_id will cause DB constraint
-            symbol_id=100,
-            side=Side.BUY,
-            volume=50000,
-            stop_loss=None,
-            take_profit=None,
-            label="copy:m42"
-        )
+        intent2 = _UnprocessableIntent(slave_account_id=102)
         intent3 = ClosePosition(slave_account_id=101, position_id=501, volume=20000)
 
         dispatcher.dispatch([intent1, intent2, intent3])
@@ -849,3 +855,153 @@ class TestDispatcher:
         # Advance time to verify no retries were scheduled
         clock.advance(10.0)
         assert attempt_count[0] == 1  # Still exactly 1, no retries scheduled
+
+
+class TestPositionIncreaseSeam:
+    """N2: a master POSITION INCREASE must actually reach the slave."""
+
+    def _open_market(self, master_position_id: int, volume: int) -> OpenMarket:
+        return OpenMarket(
+            slave_account_id=101,
+            master_position_id=master_position_id,
+            symbol_id=100,
+            side=Side.BUY,
+            volume=volume,
+            stop_loss=None,
+            take_profit=None,
+            label=f"copy:m{master_position_id}",
+        )
+
+    def test_increase_is_sent_and_does_not_degrade_the_slave(self, seed_accounts, repo):
+        """The second OpenMarket for an already-mapped master position -- the
+        delta the pure decision layer emits for an increase (see
+        test_decision_positions.py:test_increase_emits_delta_open_for_mapped_position)
+        -- must put a SECOND ProtoOANewOrderReq on the wire.
+
+        RED before the fix: `_create_mapping` re-inserted the same
+        deterministic `cm42.101`, hit `mappings.client_order_id TEXT UNIQUE`,
+        and Dispatcher's per-intent exception handler swallowed the
+        UniqueViolation into an `intent_processing_failed` event plus a
+        degraded account -- with `_handle_live_send` abandoned BEFORE
+        `_send_with_retries`, so the increase reached no slave at all. With
+        50 slaves that is 50 degraded accounts and zero copies for a routine
+        scale-in.
+        """
+        sent_messages = []
+
+        def mock_send(account_id, msg):
+            sent_messages.append((account_id, msg))
+            return defer.succeed(None)
+
+        bucket = Mock()
+        bucket.acquire.return_value = defer.succeed(None)
+        dispatcher = Dispatcher(mock_send, repo, bucket, clock=Clock())
+
+        dispatcher.dispatch([self._open_market(42, 10_000_000)])
+        # The first copy fills, exactly as a slave execution event would report it.
+        repo.activate_position_mapping("cm42.101", 777, 10_000_000, fill_price=1.1050)
+
+        dispatcher.dispatch([self._open_market(42, 5_000_000)])   # the increase
+
+        assert len(sent_messages) == 2, (
+            "the increase never reached the wire: "
+            f"{[type(m).__name__ for _a, m in sent_messages]}"
+        )
+        assert [msg.volume for _a, msg in sent_messages] == [10_000_000, 5_000_000]
+        assert all(msg.clientOrderId == "cm42.101" for _a, msg in sent_messages)
+
+        # No degradation, and no intent_processing_failed event.
+        account = next(a for a in repo.load_accounts() if a.account_id == 101)
+        assert account.status == 'ok'
+        with psycopg.connect(seed_accounts, autocommit=True) as conn:
+            failures = conn.execute(
+                "SELECT payload FROM events WHERE category = 'slave_action' AND severity = 'error'"
+            ).fetchall()
+        assert failures == [], failures
+
+    def test_increase_lands_as_one_mapping_row_carrying_both_entries(self, seed_accounts, repo):
+        """The mapping reflects BOTH fills: one row per (master position,
+        slave), volume aggregated, pointing at the slave's single merged
+        position (cTrader aggregates same-direction adds)."""
+        bucket = Mock()
+        bucket.acquire.return_value = defer.succeed(None)
+        dispatcher = Dispatcher(lambda a, m: defer.succeed(None), repo, bucket, clock=Clock())
+
+        dispatcher.dispatch([self._open_market(42, 10_000_000)])
+        repo.activate_position_mapping("cm42.101", 777, 10_000_000)
+        dispatcher.dispatch([self._open_market(42, 5_000_000)])
+        repo.activate_position_mapping("cm42.101", 777, 5_000_000)
+
+        rows = [r for r in repo.mapping_rows() if r["master_position_id"] == 42]
+        assert len(rows) == 1
+        assert rows[0]["slave_volume"] == 15_000_000
+        assert rows[0]["status"] == "active"
+
+
+class TestDegradedAutoClear:
+    """N6: README §5's promise that a degraded slave clears on its next
+    successful send."""
+
+    def test_successful_send_clears_a_degraded_account(self, seed_accounts, repo):
+        """RED before the fix: `_on_send_success` was `pass`, so the only
+        write of status 'ok' anywhere was the manual resume() path -- a slave
+        degraded by one connectivity blip stayed degraded on the Overview
+        screen until an operator pause/resumed it by hand."""
+        repo.set_account_status(101, 'degraded', "no connected transport for send")
+
+        bucket = Mock()
+        bucket.acquire.return_value = defer.succeed(None)
+        dispatcher = Dispatcher(lambda a, m: defer.succeed(None), repo, bucket, clock=Clock())
+
+        dispatcher.dispatch([OpenMarket(
+            slave_account_id=101, master_position_id=77, symbol_id=100, side=Side.BUY,
+            volume=10_000, stop_loss=None, take_profit=None, label="copy:m77",
+        )])
+
+        account = next(a for a in repo.load_accounts() if a.account_id == 101)
+        assert account.status == 'ok'
+        assert account.last_error is None
+
+        with psycopg.connect(seed_accounts, autocommit=True) as conn:
+            payloads = [
+                r[0] for r in conn.execute(
+                    "SELECT payload FROM events WHERE category = 'slave_action'"
+                ).fetchall()
+            ]
+        assert any(p.get('action') == 'degraded_cleared' for p in payloads), payloads
+
+    def test_successful_send_does_not_resume_a_paused_account(self, seed_accounts, repo):
+        repo.set_account_status(101, 'paused', None)
+
+        bucket = Mock()
+        bucket.acquire.return_value = defer.succeed(None)
+        dispatcher = Dispatcher(lambda a, m: defer.succeed(None), repo, bucket, clock=Clock())
+
+        dispatcher.dispatch([OpenMarket(
+            slave_account_id=101, master_position_id=78, symbol_id=100, side=Side.BUY,
+            volume=10_000, stop_loss=None, take_profit=None, label="copy:m78",
+        )])
+
+        account = next(a for a in repo.load_accounts() if a.account_id == 101)
+        assert account.status == 'paused'
+
+    def test_failed_send_still_degrades_and_is_not_cleared(self, seed_accounts, repo):
+        """The auto-clear must not paper over a send that actually failed."""
+        clock = Clock()
+        bucket = Mock()
+        bucket.acquire.return_value = defer.succeed(None)
+
+        def failing_send(account_id, msg):
+            return defer.fail(SendNotAttempted("no connected transport"))
+
+        dispatcher = Dispatcher(failing_send, repo, bucket, clock=clock)
+        dispatcher.dispatch([OpenMarket(
+            slave_account_id=101, master_position_id=79, symbol_id=100, side=Side.BUY,
+            volume=10_000, stop_loss=None, take_profit=None, label="copy:m79",
+        )])
+        for delay in RETRY_DELAYS:
+            clock.advance(delay)
+
+        account = next(a for a in repo.load_accounts() if a.account_id == 101)
+        assert account.status == 'degraded'
+        assert account.last_error

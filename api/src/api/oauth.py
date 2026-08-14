@@ -8,7 +8,7 @@ from typing import Optional
 import psycopg
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request
 from cryptography.fernet import Fernet
-from itsdangerous import URLSafeTimedSerializer, BadData
+from itsdangerous import BadData
 import httpx
 
 from .config import ApiConfig
@@ -17,15 +17,33 @@ from .db import get_conn
 
 logger = logging.getLogger(__name__)
 
+# How long an unconsumed OAuth state stays usable. Previously enforced by
+# the signed state's own max_age; now enforced against oauth_states.created_at,
+# since the state parameter carries no self-describing timestamp any more.
+STATE_TTL_SECONDS = 3600
 
-def get_state_serializer(cfg: ApiConfig = Depends(ApiConfig.from_env)):
-    """Get a state serializer for OAuth state parameter."""
-    return URLSafeTimedSerializer(cfg.session_secret, salt="oauth-state")
 
+def _digest(value: str) -> str:
+    """SHA-256 hex digest.
 
-def _create_state_hash(state: str) -> str:
-    """Create a hash of the state for database tracking."""
-    return hashlib.sha256(state.encode()).hexdigest()
+    N4 -- used for BOTH columns of oauth_states, and neither is reversible:
+
+    - `state_hash`: the stored lookup key for the opaque nonce that travels
+      to cTrader. Storing the digest rather than the nonce means a read of
+      this table does not hand anyone a usable, still-unconsumed state.
+    - `session`: a BINDING for the admin session that started the flow, not
+      the session itself. The state parameter used to be
+      `URLSafeTimedSerializer(...).dumps({"state": ..., "session": session})`
+      -- SIGNED, NOT ENCRYPTED, so its payload was plain base64 JSON
+      containing the full, currently-valid admin session cookie. That value
+      travelled in a query string to openapi.ctrader.com (their request
+      logs), sat in browser history, and came back in the callback URL;
+      anyone who read it anywhere along that path could decode it and replay
+      the admin session for its remaining 12 h. A digest binds the flow to
+      the session just as tightly (an attacker still cannot produce a
+      matching cookie) while carrying nothing worth stealing.
+    """
+    return hashlib.sha256(value.encode()).hexdigest()
 
 
 def create_oauth_router() -> APIRouter:
@@ -51,17 +69,16 @@ def create_oauth_router() -> APIRouter:
         except BadData:
             raise HTTPException(status_code=401, detail="Not authenticated")
 
-        # Generate random state and bind it to the session cookie value
-        serializer = get_state_serializer(cfg)
-        state_value = secrets.token_urlsafe(32)
-        # State includes random value and session cookie binding for verification
-        state = serializer.dumps({
-            "state": state_value,
-            "session": session,  # Bind state to the current admin session
-        })
+        # N4: the state parameter is now an OPAQUE RANDOM NONCE and nothing
+        # else. Everything the callback needs to validate it -- that it was
+        # issued by us, which admin session it belongs to, when it was
+        # issued, and whether it has already been used -- lives server-side
+        # in oauth_states, keyed by the nonce's digest. The nonce itself
+        # carries no payload, so there is nothing in the URL that reaches
+        # cTrader's logs or the browser's history worth stealing.
+        state = secrets.token_urlsafe(32)
 
         # Store state in database as consumed=False for single-use enforcement
-        state_hash = _create_state_hash(state)
         try:
             conn.execute(
                 """
@@ -69,7 +86,7 @@ def create_oauth_router() -> APIRouter:
                 VALUES (%s, %s, NULL)
                 ON CONFLICT (state_hash) DO NOTHING
                 """,
-                (state_hash, session),
+                (_digest(state), _digest(session)),
             )
         except Exception as e:
             logger.error(f"Failed to store OAuth state: {e}")
@@ -105,31 +122,47 @@ def create_oauth_router() -> APIRouter:
             logger.warning("OAuth callback missing code or state")
             raise HTTPException(status_code=400, detail="Missing authorization code or state")
 
-        # Verify state signature and structure
-        serializer = get_state_serializer(cfg)
-        try:
-            state_data = serializer.loads(state, max_age=3600)  # 1 hour TTL
-        except BadData:
-            logger.warning("OAuth state verification failed")
-            raise HTTPException(status_code=403, detail="Invalid or expired state")
-
-        # Verify state is bound to the current session
-        if state_data.get("session") != session:
-            logger.warning("OAuth state session mismatch - possible CSRF attempt")
-            raise HTTPException(status_code=403, detail="State does not match session")
-
-        # Atomically consume state (single-use enforcement)
-        # UPDATE with WHERE consumed_at IS NULL and RETURNING ensures state was unconsumed
-        state_hash = _create_state_hash(state)
+        # N4: validate and consume the state in ONE atomic statement.
+        #
+        # Every condition the old code checked separately is now a predicate
+        # in this UPDATE's WHERE clause, so there is no window between
+        # "checked" and "consumed", and -- because session binding is part
+        # of the same predicate -- a request presenting a valid nonce under
+        # the WRONG session does not consume (and therefore cannot burn) a
+        # legitimate flow's state:
+        #   - the nonce was issued by us and is not forged  (state_hash match)
+        #   - it has not already been used                  (consumed_at IS NULL)
+        #   - it belongs to THIS admin session              (session digest match)
+        #   - it has not expired                            (created_at within TTL)
+        # `session` is guaranteed non-empty here: require_admin already
+        # rejected the request otherwise.
         try:
             result = conn.execute(
-                "UPDATE oauth_states SET consumed_at = %s WHERE state_hash = %s AND consumed_at IS NULL RETURNING state_hash",
-                (datetime.now(timezone.utc), state_hash),
+                """
+                UPDATE oauth_states SET consumed_at = %s
+                WHERE state_hash = %s
+                  AND consumed_at IS NULL
+                  AND session = %s
+                  AND created_at > %s - make_interval(secs => %s)
+                RETURNING state_hash
+                """,
+                (
+                    datetime.now(timezone.utc),
+                    _digest(state),
+                    _digest(session or ""),
+                    datetime.now(timezone.utc),
+                    STATE_TTL_SECONDS,
+                ),
             ).fetchone()
 
             if not result:
-                # Either state_hash doesn't exist or it was already consumed (race-safe check)
-                logger.warning("OAuth state not found or already consumed - possible replay/forgery")
+                # Unknown/forged nonce, already consumed, expired, or bound
+                # to a different session -- all indistinguishable to the
+                # caller on purpose.
+                logger.warning(
+                    "OAuth state rejected (unknown, already consumed, expired, or "
+                    "bound to a different session) - possible replay/forgery"
+                )
                 raise HTTPException(status_code=403, detail="Invalid or already-used state")
         except HTTPException:
             raise

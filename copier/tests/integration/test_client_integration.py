@@ -21,7 +21,8 @@ from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
 )
 from twisted.internet import defer, reactor
 
-from copier.ctrader.client import CTraderClient, make_sdk_client
+from copier.ctrader.client import (
+    TLS_INSECURE_ENV, CTraderClient, make_sdk_client)
 from copier.testing.fake_server import FakeCTraderServer
 
 ACCOUNT_ID = 1001
@@ -229,3 +230,85 @@ def test_refresh_token_roundtrip(server):
     assert extracted.expiresIn == 3600
 
     client.stop()
+
+
+# ---------- T1: the default TLS path really does verify ----------
+
+@pytest_twisted.inlineCallbacks
+def test_default_tls_path_rejects_the_self_signed_fake_server(server, monkeypatch):
+    """The strongest available proof that T1's fix is live: with the
+    insecure knob OFF, a real connection attempt to FakeCTraderServer's
+    self-signed certificate must FAIL.
+
+    Every other test in this package connects to that same certificate
+    happily -- because tests/integration/conftest.py's autouse fixture sets
+    CTRADER_TLS_INSECURE=1. Removing it here (and only here) exercises the
+    exact code path a real demo/live cTrader connection takes: an endpoint
+    built with `optionsForClientTLS(host, trustRoot=platformTrust())`, which
+    no self-signed certificate can satisfy and whose CN ("localhost") does
+    not match the host we dial ("127.0.0.1") either.
+
+    RED before the fix: the vendored SDK's `clientFromString("ssl:host:port")`
+    endpoint produced `CertificateOptions(trustRoot=None)` -- VERIFY_NONE,
+    no hostname check -- so this connection SUCCEEDED, which is precisely
+    the defect. Real-money OAuth access tokens and trade traffic were being
+    handed to whatever answered the handshake.
+
+    This is also residual-risk item 7's pre-Stage-4 check, made automatic:
+    "confirm the copier FAILS to connect when pointed at a host with a
+    mismatched certificate".
+    """
+    srv, port = server
+    monkeypatch.delenv(TLS_INSECURE_ENV, raising=False)
+
+    sdk = make_sdk_client("127.0.0.1", port)
+    client = CTraderClient(sdk, "cid", "csecret")
+
+    # Record why the connection dies. Twisted's TLS wrapper calls
+    # makeConnection on the wrapped protocol optimistically, BEFORE the
+    # handshake completes, so ClientService.whenConnected() still fires --
+    # the verification verdict arrives as connectionLost's reason. That
+    # reason is the direct evidence of what the peer certificate check did.
+    disconnect_reasons = []
+    inner_on_disconnected = client._on_disconnected
+
+    def _record_disconnect(sdk_, reason):
+        disconnect_reasons.append(reason)
+        return inner_on_disconnected(sdk_, reason)
+
+    sdk.setDisconnectedCallback(_record_disconnect)
+
+    client.start()
+    try:
+        yield _wait_until(lambda: disconnect_reasons, timeout=20.0)
+
+        assert "certificate verify failed" in str(disconnect_reasons[0]), (
+            "expected the TLS handshake to be rejected for an untrusted "
+            f"certificate; got {disconnect_reasons[0]!r}"
+        )
+        # The security property that actually matters: no cTrader protobuf
+        # ever crossed this connection. `ready` -- which only fires once the
+        # server has answered ProtoOAApplicationAuthReq -- is still pending.
+        assert srv.app_auths == []
+        assert not client.ready.called
+    finally:
+        client.stop()
+
+
+@pytest_twisted.inlineCallbacks
+def test_insecure_knob_reaches_the_same_server(server):
+    """The other half of the pair: with the knob set (as
+    tests/integration/conftest.py sets it, and as
+    docker-compose.test.yml sets it for the fake-ctrader-facing copier),
+    the very same server IS reachable -- so the test above is proving
+    verification, not a broken fake."""
+    srv, port = server                       # conftest's autouse fixture has the knob on
+
+    sdk = make_sdk_client("127.0.0.1", port)
+    client = CTraderClient(sdk, "cid", "csecret")
+    client.start()
+    try:
+        yield client.ready
+        assert srv.app_auths == [("cid", "csecret")]
+    finally:
+        client.stop()

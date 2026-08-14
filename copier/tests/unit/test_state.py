@@ -13,7 +13,8 @@ from twisted.internet.task import Clock
 
 from copier.ctrader.client import CTraderClient
 from copier.domain.models import Side, SymbolInfo
-from copier.engine.state import unrealized_pnl_quote, AccountStateTracker, PositionSnapshot
+from copier.engine.state import (
+    SPOT_PRICE_SCALE, unrealized_pnl_quote, AccountStateTracker, PositionSnapshot)
 from test_client import StubSdk, of_type
 
 
@@ -124,7 +125,20 @@ def test_spot_event_updates_pnl_with_5_digit_symbol():
 
 
 def test_spot_event_scaling_for_3_digit_symbol():
-    """Spot event scaling respects per-symbol digits (USDJPY with digits=3)."""
+    """N5: spot prices are FIXED 1/100_000 units, even for a 3-digit symbol.
+
+    This test previously PINNED THE BUG: it encoded USDJPY's 110.50 as
+    `int(110.50 * 1000)` -- i.e. it assumed the wire scaled by the symbol's
+    `digits` -- and asserted the tracker divided by the same 1000. cTrader
+    does not: `ProtoOASpotEvent.bid`/`.ask` are 1/100_000 units for every
+    symbol regardless of `digits` (which is display precision only), which
+    is why the official OpenApiPy samples divide by 100000 unconditionally.
+
+    So a real USDJPY quote of 110.50 arrives as 11_050_000, and `/10**3`
+    turned that into 11_050.0 -- a price 100x too large, and therefore an
+    open P&L and equity 100x too large, on exactly the Overview numbers the
+    rollout stages tell the operator to watch.
+    """
     sdk, clock = StubSdk(), Clock()
     client = CTraderClient(sdk, "cid", "csecret", clock=clock)
     client.start()
@@ -133,7 +147,7 @@ def test_spot_event_scaling_for_3_digit_symbol():
     class MockRepo:
         pass
 
-    # USDJPY has digits=3 (e.g., 110.50 is represented as 110500 in protocol)
+    # USDJPY: digits=3 (display precision), lot 10_000_000.
     symbols = {2: SymbolInfo(symbol_id=2, name="USDJPY", digits=3,
                             lot_size=10_000_000, min_volume=100_000, step_volume=100_000)}
     tracker = AccountStateTracker(client, MockRepo(), 1001, symbols)
@@ -147,23 +161,82 @@ def test_spot_event_scaling_for_3_digit_symbol():
                         volume=10_000_000, price=110.00, label="")
     ]
 
-    # Push spot event with bid 110.50 (scaled by 10**3 = 1000)
+    # How the wire really carries 110.50 / 110.51 for a JPY pair.
     spot_evt = ProtoOASpotEvent()
     spot_evt.symbolId = 2
-    spot_evt.bid = int(110.50 * 1000)  # 110500
-    spot_evt.ask = int(110.51 * 1000)  # 110510
+    spot_evt.bid = 11_050_000
+    spot_evt.ask = 11_051_000
+    assert spot_evt.bid == int(110.50 * SPOT_PRICE_SCALE)
 
     tracker.on_spot(spot_evt)
 
-    # Verify spot was correctly scaled
     bid, ask = tracker._spots[2]
-    assert bid == pytest.approx(110.50, rel=1e-4)
-    assert ask == pytest.approx(110.51, rel=1e-4)
+    assert bid == pytest.approx(110.50, rel=1e-9)
+    assert ask == pytest.approx(110.51, rel=1e-9)
+    # The specific defect: dividing by 10**digits would give 11_050.0 here.
+    assert bid != pytest.approx(11_050.0)
 
     # P&L: units = 10_000_000 / 100 = 100_000
     # pnl = (110.50 - 110.00) * 100_000 = 0.50 * 100_000 = 50_000
     snapshot = tracker.snapshot()
     assert snapshot[1001]["open_pnl"] == pytest.approx(50000.0)
+    assert snapshot[1001]["equity"] == pytest.approx(51000.0)
+
+
+def test_spot_scaling_is_identical_for_3_and_5_digit_symbols():
+    """N5 regression guard: `digits` must play no part in spot scaling.
+
+    The same raw wire value must decode to the same price whether the
+    symbol is a 5-digit major or a 3-digit JPY pair -- which is precisely
+    what a `10 ** digits` divisor cannot do.
+    """
+    sdk, clock = StubSdk(), Clock()
+    client = CTraderClient(sdk, "cid", "csecret", clock=clock)
+    client.start()
+    sdk.connect()
+
+    class MockRepo:
+        pass
+
+    symbols = {
+        1: SymbolInfo(symbol_id=1, name="EURUSD", digits=5, lot_size=10_000_000,
+                      min_volume=100_000, step_volume=100_000),
+        2: SymbolInfo(symbol_id=2, name="USDJPY", digits=3, lot_size=10_000_000,
+                      min_volume=100_000, step_volume=100_000),
+    }
+    tracker = AccountStateTracker(client, MockRepo(), 1001, symbols)
+
+    for symbol_id in (1, 2):
+        evt = ProtoOASpotEvent()
+        evt.symbolId = symbol_id
+        evt.bid = 12_345_600
+        evt.ask = 12_345_700
+        tracker.on_spot(evt)
+
+    assert tracker._spots[1] == tracker._spots[2]
+    assert tracker._spots[2][0] == pytest.approx(123.456)
+
+
+def test_spot_scaling_for_an_unknown_symbol_matches_a_known_one():
+    """A symbol absent from the symbol map must decode identically: the
+    scale is a protocol constant, not something looked up per symbol."""
+    sdk, clock = StubSdk(), Clock()
+    client = CTraderClient(sdk, "cid", "csecret", clock=clock)
+    client.start()
+    sdk.connect()
+
+    class MockRepo:
+        pass
+
+    tracker = AccountStateTracker(client, MockRepo(), 1001, {})
+
+    evt = ProtoOASpotEvent()
+    evt.symbolId = 4242            # not in the (empty) symbol map
+    evt.bid = 110_500
+    evt.ask = 110_520
+    tracker.on_spot(evt)
+
+    assert tracker._spots[4242][0] == pytest.approx(1.105)
 
 
 def test_balance_scaling_with_non_2_money_digits():

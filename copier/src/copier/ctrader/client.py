@@ -1,25 +1,41 @@
 """Thin wrapper around the Spotware SDK client.
 
 Owns: app auth on every (re)connect, per-account re-auth registry, 8 s heartbeat,
-typed routing of pushed events. Reconnect scheduling itself is Twisted
-ClientService's retryPolicy (see make_sdk_client).
+typed routing of pushed events, and the TLS endpoint the SDK connects over
+(see make_sdk_client / build_tls_endpoint). Reconnect scheduling itself is
+Twisted ClientService's retryPolicy (see make_sdk_client).
 """
 import logging
+import os
 from collections import deque
+from pathlib import Path
 from typing import Callable
 
 from ctrader_open_api import Client, Protobuf, TcpProtocol
-from ctrader_open_api.messages.OpenApiCommonMessages_pb2 import ProtoHeartbeatEvent
+from ctrader_open_api.factory import Factory
+from ctrader_open_api.messages.OpenApiCommonMessages_pb2 import (
+    ProtoErrorRes, ProtoHeartbeatEvent)
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOAAccountAuthReq, ProtoOAAccountDisconnectEvent,
     ProtoOAAccountsTokenInvalidatedEvent, ProtoOAApplicationAuthReq,
     ProtoOAErrorRes, ProtoOAExecutionEvent, ProtoOAOrderErrorEvent,
     ProtoOASpotEvent)
-from twisted.application.internet import backoffPolicy
-from twisted.internet import defer, task
+from twisted.application.internet import ClientService, backoffPolicy
+from twisted.internet import defer, ssl, task
+from twisted.internet.endpoints import HostnameEndpoint, wrapClientTLS
 from twisted.python.failure import Failure
 
 log = logging.getLogger(__name__)
+
+# ---- TLS knobs (see build_tls_endpoint) --------------------------------
+#
+# Both are OFF unless the corresponding environment variable is explicitly
+# set, so the DEFAULT path -- the one every real demo/live cTrader
+# connection takes -- always verifies the server certificate chain against
+# the platform trust store AND checks the hostname. Nothing here can weaken
+# that by accident: an unset/empty variable is inert.
+TLS_INSECURE_ENV = "CTRADER_TLS_INSECURE"   # "1"/"true"/"yes" -> NO verification (tests only)
+TLS_CA_FILE_ENV = "CTRADER_TLS_CA_FILE"     # path to a PEM CA to trust INSTEAD of platformTrust
 
 HEARTBEAT_INTERVAL_S = 8.0   # server requires <= 10 s
 
@@ -53,9 +69,114 @@ class _PerConnectionTcpProtocol(TcpProtocol):
         super().connectionMade()
 
 
-def make_sdk_client(host: str, port: int) -> Client:
-    return Client(host, port, _PerConnectionTcpProtocol,
-                  retryPolicy=backoffPolicy(initialDelay=1.0, maxDelay=60.0, factor=2.0))
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def client_tls_options(host: str):
+    """Build the TLS connection creator used for every cTrader connection.
+
+    DEFAULT (nothing set in the environment): `optionsForClientTLS(host,
+    trustRoot=platformTrust())` -- the server's certificate chain must
+    validate against the operating system's CA store AND its identity must
+    match `host`. This is what the vendored SDK does NOT do: it builds its
+    endpoint from the string `f"ssl:{host}:{port}"`, and Twisted's parser
+    for that form (`_parseClientSSL`/`_parseClientSSLOptions`) only enables
+    verification when a `hostname=` or `caCertsDir=` parameter is present in
+    the string -- neither ever is -- so it produces
+    `CertificateOptions(trustRoot=None)`, i.e. VERIFY_NONE with no hostname
+    check. Real-money OAuth access tokens and trade traffic were therefore
+    being handed to whatever answered on the far end of an unauthenticated
+    TLS handshake.
+
+    Two escape hatches exist, both strictly opt-in via environment variable
+    and both inert when unset (see TLS_INSECURE_ENV / TLS_CA_FILE_ENV):
+
+    - CTRADER_TLS_INSECURE=1 -> no verification at all. This exists ONLY so
+      the test rigs that speak to `FakeCTraderServer`'s in-process,
+      per-run self-signed certificate (copier/tests/integration and the
+      `fake-ctrader` service in docker-compose.test.yml) can connect. It is
+      set in exactly those two places, never in docker-compose.yml, and it
+      logs a WARNING every time it is honoured so an accidental production
+      set is visible in the copier's logs.
+    - CTRADER_TLS_CA_FILE=/path/ca.pem -> verify against that CA instead of
+      the platform store (hostname checking still applies). For a private
+      CA / pinned test CA; unused by this repo's own test rigs but the
+      non-blunt alternative to the insecure knob.
+    """
+    if _env_flag(TLS_INSECURE_ENV):
+        log.warning(
+            "%s is set: TLS certificate and hostname verification are DISABLED "
+            "for cTrader connections to %s. This must only ever be set by the "
+            "test rigs; unset it for any real broker connection.",
+            TLS_INSECURE_ENV, host,
+        )
+        # trustRoot=None -> OpenSSL VERIFY_NONE and no hostname check; this
+        # reproduces the vendored SDK's old behaviour verbatim, on purpose,
+        # so the fake server's self-signed cert is accepted.
+        return ssl.CertificateOptions()
+
+    ca_file = os.environ.get(TLS_CA_FILE_ENV, "").strip()
+    if ca_file:
+        trust_root = ssl.Certificate.loadPEM(Path(ca_file).read_bytes())
+        log.info("using custom CA %s for cTrader TLS (hostname checking still on)", ca_file)
+        return ssl.optionsForClientTLS(host, trustRoot=trust_root)
+
+    return ssl.optionsForClientTLS(host, trustRoot=ssl.platformTrust())
+
+
+def build_tls_endpoint(reactor_, host: str, port: int):
+    """A verifying TLS client endpoint for (host, port).
+
+    `wrapClientTLS` over a plain `HostnameEndpoint` rather than
+    `clientFromString("ssl:...")`: it is the only form that lets us hand in
+    our own connection creator (see client_tls_options) instead of the
+    string parser's verify-nothing default.
+    """
+    return wrapClientTLS(client_tls_options(host), HostnameEndpoint(reactor_, host, port))
+
+
+class _VerifiedTLSClient(Client):
+    """`ctrader_open_api.Client` with a caller-supplied endpoint.
+
+    The vendored `Client.__init__` (SDK 0.9.2) hardcodes
+    `clientFromString(reactor, f"ssl:{host}:{port}")` -- the verify-nothing
+    endpoint T1 exists to remove -- and there is no hook to override it: the
+    endpoint is passed straight into `ClientService.__init__`, which buries
+    it in a private state machine (`self._machine._endpoint`). So this
+    bypasses `Client.__init__` entirely and re-does the (small, pinned:
+    ctrader-open-api==0.9.2) remainder of its body verbatim against
+    `ClientService.__init__`, with `endpoint` supplied by the caller. Every
+    other Client method is inherited unchanged.
+    """
+
+    def __init__(self, host, port, protocol, endpoint, retryPolicy=None, clock=None,
+                 prepareConnection=None, numberOfMessagesToSendPerSecond=5):
+        from twisted.internet import reactor as _reactor
+        # Verbatim from Client.__init__, minus the clientFromString endpoint.
+        self._runningReactor = _reactor
+        self.numberOfMessagesToSendPerSecond = numberOfMessagesToSendPerSecond
+        factory = Factory.forProtocol(protocol, client=self)
+        ClientService.__init__(self, endpoint, factory, retryPolicy=retryPolicy,
+                               clock=clock, prepareConnection=prepareConnection)
+        self._events = dict()
+        self._responseDeferreds = dict()
+        self.isConnected = False
+
+
+def make_sdk_client(host: str, port: int, reactor_=None) -> Client:
+    """Build the SDK client for (host, port) over a VERIFYING TLS endpoint.
+
+    See build_tls_endpoint/client_tls_options for the verification contract
+    and the two opt-in test knobs.
+    """
+    if reactor_ is None:
+        from twisted.internet import reactor as reactor_
+    return _VerifiedTLSClient(
+        host, port, _PerConnectionTcpProtocol,
+        endpoint=build_tls_endpoint(reactor_, host, port),
+        retryPolicy=backoffPolicy(initialDelay=1.0, maxDelay=60.0, factor=2.0),
+    )
 
 
 class CTraderClient:
@@ -254,10 +375,57 @@ class CTraderClient:
     def _on_app_authed(self, _res) -> None:
         if not self._hb.running:
             self._hb.start(HEARTBEAT_INTERVAL_S, now=False)
-        for account_id in list(self._accounts):
-            self._send_account_auth(account_id)
+        d = self._reauth_all()
+        d.addErrback(lambda f: log.error("bulk re-auth failed: %s", f))
+        d.addBoth(self._fire_ready)
+
+    def _fire_ready(self, _ignored=None) -> None:
+        """Fire `ready` once the bulk re-auth for this connection is done.
+
+        Ordering matters and is unchanged from before T2: `ready` fires
+        AFTER the account-auth work for this connection has been handed off,
+        never before it. On a FIRST connect `_accounts` is still empty (the
+        only callers of authorize_account -- CopierApp._connect_and_authorize
+        and reload() -- wait on `ready` first), so `_reauth_all` completes
+        synchronously and this fires in the same turn, exactly as it used
+        to. Firing it EARLIER would let a waiter's authorize_account() run
+        in the middle of `_reauth_all`, so the account it just registered
+        would be auth'd twice on the same connection.
+        """
         if not self.ready.called:
             self.ready.callback(self)
+
+    @defer.inlineCallbacks
+    def _reauth_all(self):
+        """Re-authorize every registered account, ONE AT A TIME.
+
+        T2: the previous version fired `_send_account_auth` for all accounts
+        in a single reactor turn. Each one goes through the vendored SDK's
+        `send()`, which arms its 5 s response timeout AT SEND TIME while the
+        messages themselves drain out of TcpProtocol's queue at only
+        `numberOfMessagesToSendPerSecond` (5) per second. So on a reconnect
+        with N accounts, everything at queue index >= ~25 timed out before
+        it was ever written; the SDK's `isCanceled` check then DROPPED it
+        from the queue instead of sending it, and nothing ever retried --
+        those accounts stayed un-authed for the whole life of that
+        connection. At the ~50-account target with SHARDS=1, every
+        reconnect blip permanently silenced half the fleet (every send for
+        them raising SendNotAttempted via main.send_for_account's
+        is_account_authed gate) until a manual reload.
+
+        Awaiting each auth before sending the next is exactly what
+        CopierApp._connect_and_authorize already does for the initial
+        authorization pass, and it means a request's 5 s timer only starts
+        once its predecessor has been answered -- the queue never builds a
+        backlog deeper than one message, so the timeout can never expire on
+        a message that has not been written yet. See the README's SHARDS
+        note for sizing beyond one connection.
+        """
+        for account_id in list(self._accounts):
+            # _send_account_auth already attaches an errback that logs and
+            # swallows, so this never raises and one bad account can never
+            # abandon the accounts queued behind it.
+            yield self._send_account_auth(account_id)
 
     def _send_account_auth(self, account_id: int) -> defer.Deferred:
         req = ProtoOAAccountAuthReq()
@@ -269,24 +437,37 @@ class CTraderClient:
         return d
 
     def _on_account_auth_response(self, response, account_id: int):
-        """Mark `account_id` authed on the current connection unless the
-        response is an explicit rejection (ProtoOAErrorRes).
+        """Mark `account_id` authed on the current connection ONLY on a
+        response this method can positively read as non-rejection.
 
         `response` is send()'s raw ProtoMessage envelope; unwrap it to
-        check for an explicit error. Any other outcome -- including a
-        genuine ProtoOAAccountAuthRes, or a shape Protobuf.extract can't
-        recognize at all -- is treated as authed: this method only needs to
-        rule out the one case the real server actually uses to signal
-        rejection (see testing/fake_server.py:_handle_account_auth_req),
-        and failing open on an unrecognized response avoids requiring every
-        test double's send() to fabricate a realistic ProtoOAAccountAuthRes
-        just to exercise unrelated code paths.
+        inspect it. T3 -- this gate guards a real-money send path
+        (main.send_for_account refuses to put a trade on the wire for an
+        account that is not authed here), so both of the previously
+        fail-OPEN outcomes are now fail-CLOSED, and both are logged rather
+        than passing silently:
+
+        - `ProtoErrorRes` (common protocol, payloadType 50) is a rejection
+          just as much as `ProtoOAErrorRes` (2142) is; treating only the
+          latter as failure meant a common-protocol error left the account
+          marked authed and every subsequent trade for it going to the wire
+          on a connection the server does not consider authorized -- where
+          it is rejected untagged, i.e. silently.
+        - A response `Protobuf.extract` cannot decode at all is not
+          evidence of success either. Leaving the account un-authed costs
+          only a SendNotAttempted (which Dispatcher retries at 1s/2s/4s,
+          and which the next reconnect's re-auth clears) instead of a
+          silently-rejected live order.
         """
         try:
             payload = Protobuf.extract(response)
-        except Exception:
-            payload = None
-        if isinstance(payload, ProtoOAErrorRes):
+        except Exception as e:
+            log.warning(
+                "account auth %s: response could not be decoded (%s); "
+                "treating account as NOT authed on this connection", account_id, e,
+            )
+            return response
+        if isinstance(payload, (ProtoOAErrorRes, ProtoErrorRes)):
             log.error("account auth %s rejected: %s", account_id, payload.errorCode)
             return response
         self._authed_accounts.add(account_id)

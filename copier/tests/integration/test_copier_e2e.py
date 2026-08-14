@@ -976,3 +976,112 @@ def test_reload_skips_symbol_fetch_for_already_cached_accounts(db):
             main_module.fetch_symbol_map = real_fetch_symbol_map
     finally:
         _teardown(app, server)
+
+
+@pytest.mark.timeout(60)
+@pytest_twisted.inlineCallbacks
+def test_master_position_increase_fans_out_as_an_additional_open(db):
+    """N2: the master ADDS to an open position; both slaves receive a
+    proportional additional open and their mappings reflect both entries.
+
+    cTrader aggregates same-direction fills on the same symbol into ONE
+    position (new volume, volume-weighted entry), so the master's add
+    arrives as a second ORDER_FILLED carrying the ORIGINAL positionId --
+    which normalize() turns into a second MasterPositionOpened and decide()
+    correctly turns into an OpenMarket for the DELTA (pinned in the pure
+    layer by test_decision_positions.py:
+    test_increase_emits_delta_open_for_mapped_position). FakeCTraderServer
+    models that aggregation (see register_market_fill), on the slave side
+    too.
+
+    RED before the fix, at the persistence/dispatch seam: `_create_mapping`
+    re-inserted the same deterministic `cm{pid}.{slave}`, hit
+    `mappings.client_order_id TEXT UNIQUE`, and Dispatcher's per-intent
+    handler swallowed the UniqueViolation into `intent_processing_failed` +
+    a DEGRADED account -- with the send abandoned before it was ever
+    attempted. So: zero additional ProtoOANewOrderReq on the wire, both
+    slaves degraded, mapping volumes frozen at the original size, and the
+    resulting master/slave volume divergence invisible to compute_drift
+    (the position still has active mapping rows). Scaling into a position is
+    routine; its copy failed fleet-wide and silently.
+    """
+    server, repo, app = _setup(db)
+    try:
+        yield app.startup()
+        client = app.clients[False][0]
+
+        # --- the original 1.00 lot open ---
+        _fire_and_forget(client, _market_order(MASTER_ID, ProtoOATradeSide.BUY, ONE_LOT))
+        yield _wait_until(lambda: len(_active_rows(repo)) >= 2)
+
+        opened = repo.mapping_rows()
+        master_position_id = opened[0]["master_position_id"]
+        slave_position_id = {r["slave_account_id"]: r["slave_position_id"] for r in opened}
+        assert len(_new_order_reqs_to_slaves(server)) == 2
+
+        # --- the master scales in by +0.50 lot on the SAME position ---
+        half_lot = ONE_LOT // 2
+        _fire_and_forget(client, _market_order(MASTER_ID, ProtoOATradeSide.BUY, half_lot))
+
+        yield _wait_until(lambda: len(_new_order_reqs_to_slaves(server)) >= 4, timeout=20.0)
+
+        # Both slaves received an ADDITIONAL open, each sized by its own
+        # multiplier against the DELTA (not the new total).
+        increase_reqs = _new_order_reqs_to_slaves(server)[2:]
+        assert len(increase_reqs) == 2
+        by_account = {r.ctidTraderAccountId: r for r in increase_reqs}
+        assert by_account[SLAVE1_ID].volume == half_lot            # multiplier 1.0
+        assert by_account[SLAVE2_ID].volume == half_lot // 2       # multiplier 0.5
+        for r in increase_reqs:
+            assert r.orderType == ProtoOAOrderType.MARKET
+            assert r.tradeSide == ProtoOATradeSide.BUY
+            # Same master position -> same label and same correlation id: the
+            # increase belongs to the copy that already exists.
+            assert r.label == f"copy:m{master_position_id}"
+            assert r.clientOrderId == f"cm{master_position_id}.{r.ctidTraderAccountId}"
+            assert len(r.clientOrderId) <= 50
+
+        # Mappings reflect BOTH entries: one row per (master position, slave),
+        # volume aggregated, still pointing at the slave's single merged position.
+        yield _wait_until(
+            lambda: all(
+                r["slave_volume"] == {SLAVE1_ID: ONE_LOT + half_lot,
+                                      SLAVE2_ID: (ONE_LOT + half_lot) // 2}[r["slave_account_id"]]
+                for r in repo.mapping_rows()
+            ),
+            timeout=20.0,
+        )
+        rows = repo.mapping_rows()
+        assert len(rows) == 2, f"an increase must not add mapping rows: {rows}"
+        by_slave = {r["slave_account_id"]: r for r in rows}
+        assert by_slave[SLAVE1_ID]["slave_volume"] == 15_000_000
+        assert by_slave[SLAVE2_ID]["slave_volume"] == 7_500_000
+        for slave_id in (SLAVE1_ID, SLAVE2_ID):
+            assert by_slave[slave_id]["status"] == "active"
+            assert by_slave[slave_id]["slave_position_id"] == slave_position_id[slave_id]
+            assert by_slave[slave_id]["fill_price"] is not None   # T9c
+
+        # Neither slave was degraded, and nothing was logged as a failure.
+        accounts_after = {a.account_id: a.status for a in repo.load_accounts()}
+        assert accounts_after[SLAVE1_ID] == 'ok'
+        assert accounts_after[SLAVE2_ID] == 'ok'
+        errors = [e for e in _events(db, "slave_action") if e["severity"] == "error"]
+        assert errors == [], errors
+
+        # --- and the aggregate is what a later close is computed against ---
+        _fire_and_forget(client, _close_position(MASTER_ID, master_position_id, ONE_LOT + half_lot))
+        yield _wait_until(
+            lambda: sum(1 for r in repo.mapping_rows() if r["status"] == "closed") >= 2,
+            timeout=20.0,
+        )
+        close_reqs = [
+            r for r in server.requests
+            if isinstance(r, ProtoOAClosePositionReq) and r.ctidTraderAccountId in (SLAVE1_ID, SLAVE2_ID)
+        ]
+        assert len(close_reqs) == 2, "one close per slave, sized against the aggregate"
+        by_account = {r.ctidTraderAccountId: r for r in close_reqs}
+        assert by_account[SLAVE1_ID].volume == 15_000_000
+        assert by_account[SLAVE2_ID].volume == 7_500_000
+        assert all(r["slave_volume"] == 0 for r in repo.mapping_rows())
+    finally:
+        _teardown(app, server)

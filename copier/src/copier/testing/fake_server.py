@@ -56,6 +56,13 @@ class FakeCTraderServer:
             }
         ]
         self.balances: dict[int, int] = {}
+        # Price every auto-filled deal reports as ProtoOADeal.executionPrice.
+        # The real server always sets it on a fill; without it the copier's
+        # slave-fill handler had no price to stamp onto the mapping row, so
+        # the Positions screen's Fill Price / Slippage columns (spec §7, see
+        # T9c) were untestable end to end. Scriptable so a test can model a
+        # slave filling away from the master's price.
+        self.execution_price: float = 1.10500
         self.open_positions: dict[int, list] = {}
         self.pending_orders: dict[int, list] = {}
         self.next_tokens: tuple[str, str] | None = None
@@ -182,6 +189,53 @@ class FakeCTraderServer:
         spot.bid = bid
         spot.ask = ask
         self.broadcast(spot)
+
+    def register_market_fill(self, account_id: int, symbol_id: int, trade_side: int,
+                             volume: int, label: str = "") -> tuple[int, int]:
+        """Book a MARKET fill against this account, MERGING same-side adds.
+
+        Returns (position_id, position_total_volume_after_this_fill).
+
+        Real cTrader aggregates: a second market order in the SAME direction
+        on the SAME symbol does not open a second position, it increases the
+        existing one -- the resulting ORDER_FILLED carries the ORIGINAL
+        positionId, a `deal.filledVolume` of just the added amount, and a
+        `position.tradeData.volume` of the new total. (An OPPOSITE-side
+        order is a different matter -- hedging accounts open a separate
+        position -- and is left as a new position here, matching this
+        fake's previous behaviour for every case any other test exercises.)
+
+        This fake used to mint a fresh position_id for every single market
+        fill, i.e. it modelled a broker that never aggregates. That made the
+        entire position-increase path (spec/plan Task 5, domain/decision.py's
+        delta OpenMarket, and the N2 defect in the persistence seam beneath
+        it) structurally unreachable from any test that drives real wire
+        traffic -- both for a MASTER add (scripted through fake_main's
+        /fill) and for the SLAVE side, where the copier's own second
+        ProtoOANewOrderReq has to land on the slave's existing position for
+        the mapping row's aggregate volume to mean anything.
+        """
+        existing = next(
+            (p for p in self.open_positions.get(account_id, [])
+             if p["symbol_id"] == symbol_id and p["trade_side"] == trade_side),
+            None,
+        )
+        if existing is not None:
+            position_id = existing["position_id"]
+            existing["volume"] += volume
+            total = existing["volume"]
+        else:
+            position_id = next(self._position_ids)
+            total = volume
+            self.open_positions.setdefault(account_id, []).append({
+                "position_id": position_id,
+                "symbol_id": symbol_id,
+                "volume": volume,
+                "trade_side": trade_side,
+                "label": label,
+            })
+        self._position_volumes[position_id] = total
+        return position_id, total
 
     def handle(self, proto, msg):
         """Handle an incoming message."""
@@ -420,9 +474,13 @@ class FakeCTraderServer:
                 accept_evt.order.clientOrderId = req.clientOrderId
                 self.broadcast(accept_evt)
 
-                # Broadcast ORDER_FILLED event (untagged)
-                position_id = next(self._position_ids)
-                self._position_volumes[position_id] = req.volume
+                # Broadcast ORDER_FILLED event (untagged). register_market_fill
+                # also keeps open_positions/_position_volumes in sync and
+                # MERGES a same-side add into the existing position (real
+                # cTrader aggregation) -- see its docstring.
+                position_id, position_total = self.register_market_fill(
+                    req.ctidTraderAccountId, req.symbolId, req.tradeSide, req.volume, req.label,
+                )
                 deal_id = next(self._deal_ids)
                 fill_evt = oa.ProtoOAExecutionEvent()
                 fill_evt.ctidTraderAccountId = req.ctidTraderAccountId
@@ -437,9 +495,17 @@ class FakeCTraderServer:
                 fill_evt.deal.dealStatus = model.ProtoOADealStatus.FILLED
                 fill_evt.deal.createTimestamp = int(time.time() * 1000)
                 fill_evt.deal.executionTimestamp = int(time.time() * 1000)
+                # Real cTrader always reports the price a deal filled at; the
+                # copier stamps it onto the mapping row (T9c) so the
+                # Positions screen can show Fill Price and Slippage.
+                fill_evt.deal.executionPrice = self.execution_price
                 fill_evt.position.positionId = position_id
                 fill_evt.position.tradeData.symbolId = req.symbolId
-                fill_evt.position.tradeData.volume = req.volume
+                # The position's TOTAL volume after this fill (== req.volume
+                # for a first open, more for a same-side add); deal.volume /
+                # deal.filledVolume above stay the DELTA, which is what
+                # normalize() reads as MasterPositionOpened.volume.
+                fill_evt.position.tradeData.volume = position_total
                 fill_evt.position.tradeData.tradeSide = req.tradeSide
                 fill_evt.position.tradeData.label = req.label
                 fill_evt.position.positionStatus = model.ProtoOAPositionStatus.POSITION_STATUS_OPEN
@@ -453,24 +519,11 @@ class FakeCTraderServer:
                 fill_evt.order.tradeData.label = req.label
                 fill_evt.order.clientOrderId = req.clientOrderId
                 self.broadcast(fill_evt)
-
-                # Also record the position for _handle_reconcile_req (so a
-                # ProtoOAReconcileReq sent AFTER this fill -- e.g. the
-                # copier's resync()/state-tracker refresh -- reports it as
-                # open instead of empty, which previously made every fresh
-                # fill look like "unmapped_master_position"/"missing_
-                # slave_copy" drift, or a master position invisible to
-                # get_state(), the moment anything reconciled after a real
-                # fill rather than only after a hand-scripted
-                # open_positions dict). Kept in sync by
-                # _handle_close_position_req below.
-                self.open_positions.setdefault(req.ctidTraderAccountId, []).append({
-                    "position_id": position_id,
-                    "symbol_id": req.symbolId,
-                    "volume": req.volume,
-                    "trade_side": req.tradeSide,
-                    "label": req.label,
-                })
+                # NB: register_market_fill above already recorded the
+                # position in open_positions, so a ProtoOAReconcileReq sent
+                # AFTER this fill -- e.g. the copier's resync()/state-tracker
+                # refresh -- reports it as open instead of empty. Kept in
+                # sync by _handle_close_position_req below.
             else:
                 # For LIMIT/STOP orders: just accept (untagged)
                 order_id = next(self._order_ids)
@@ -533,6 +586,7 @@ class FakeCTraderServer:
             fill_evt.deal.dealStatus = model.ProtoOADealStatus.FILLED
             fill_evt.deal.createTimestamp = int(time.time() * 1000)
             fill_evt.deal.executionTimestamp = int(time.time() * 1000)
+            fill_evt.deal.executionPrice = self.execution_price
             fill_evt.deal.closePositionDetail.closedVolume = req.volume
             fill_evt.deal.closePositionDetail.entryPrice = 10000  # Plausible default
             fill_evt.deal.closePositionDetail.grossProfit = 1000  # Plausible default

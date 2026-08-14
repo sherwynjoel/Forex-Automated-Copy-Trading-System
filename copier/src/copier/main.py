@@ -52,6 +52,16 @@ log = logging.getLogger(__name__)
 
 DEFAULT_SHARDS = 1
 TOKEN_REFRESH_INTERVAL_S = 86400.0  # once per day
+# N9: how often to re-read every enabled account's balance from the broker.
+# Balance changes on every REALIZED close, so a boot-time-only read (which
+# is all there was) went stale within hours of live trading -- and stayed
+# plausible-looking, because open P&L kept moving underneath it, so
+# Overview's balance/equity quietly drifted away from reality rather than
+# visibly freezing. 60 s is one ProtoOATraderReq per enabled account per
+# minute; those drain on the SDK's 5 msg/s queued path, which for the
+# ~50-account target is ~10 s of queue every minute -- comfortably clear,
+# and it never touches the instant-write trade path.
+BALANCE_REFRESH_INTERVAL_S = 60.0
 CONTROL_PORT = 8080
 # Docker-internal only: host isolation comes from compose NOT publishing this
 # port, not from binding loopback. Binding 127.0.0.1 would make the endpoint
@@ -115,14 +125,46 @@ class CopierApp:
             log.exception("startup: initial reconciliation failed")
             self.repo.log_event('connection', 'error', {'action': 'initial_reconcile_failed'})
 
-        enabled_ids = [a.account_id for a in accounts if a.enabled]
-        if enabled_ids and self.state_tracker is not None:
-            try:
-                yield self.state_tracker.refresh_balances(enabled_ids)
-            except Exception:
-                log.exception("startup: refresh_balances failed")
+        yield self.refresh_balances()
 
         log.info("startup: complete")
+
+    def refresh_balances(self) -> defer.Deferred:
+        """Re-read every enabled account's balance/equity from the broker.
+
+        N9: this used to happen exactly once, inline in startup(). Balance
+        moves on every realized close, so Overview's balance and equity for
+        master and slaves were stale within hours of live trading. Now
+        called from startup(), from resync() (so an operator-triggered
+        resync also refreshes what they are about to look at), and on a
+        BALANCE_REFRESH_INTERVAL_S LoopingCall wired in boot().
+
+        Never raises or errbacks: it is a LoopingCall body, and a
+        LoopingCall whose Deferred fails stops looping permanently -- a
+        single transient broker hiccup would otherwise silently end balance
+        refreshing for the life of the process.
+        """
+        d = defer.maybeDeferred(self._refresh_balances_body)
+        d.addErrback(lambda f: log.error("refresh_balances: unexpected failure: %s", f))
+        return d
+
+    @defer.inlineCallbacks
+    def _refresh_balances_body(self):
+        if self.state_tracker is None:
+            return
+        try:
+            enabled_ids = [a.account_id for a in self.repo.load_accounts() if a.enabled]
+        except Exception:
+            log.exception("refresh_balances: failed to load accounts")
+            return
+        if not enabled_ids:
+            return
+        try:
+            # refresh_balances() fans out one ProtoOATraderReq per account and
+            # DeferredLists them; the SDK's own 5 msg/s queue paces the wire.
+            yield self.state_tracker.refresh_balances(enabled_ids)
+        except Exception:
+            log.exception("refresh_balances: broker request failed")
 
     @defer.inlineCallbacks
     def _connect_and_authorize(self, accounts):
@@ -265,6 +307,9 @@ class CopierApp:
                 yield self.state_tracker.ensure_spot_subscriptions()
             except Exception:
                 log.exception("resync: ensure_spot_subscriptions failed")
+            # N9: an operator running a resync is about to look at Overview;
+            # give them a current balance, not the one from process boot.
+            yield self.refresh_balances()
         return items
 
     @defer.inlineCallbacks
@@ -459,43 +504,103 @@ class CopierApp:
         }
 
     def get_state(self) -> dict:
+        """Read model behind GET /state (and, proxied, GET /api/state).
+
+        T9c -- the copies and master rows carry the fields the dashboard's
+        Positions screen actually renders, not just raw ids:
+
+        - per-copy `fill_price` (from the mapping row, stamped at
+          activation) and `volume_lots` (the copy's own volume expressed in
+          the SLAVE's lots, via that slave's cached symbol lot_size). The
+          screen's "Fill Price" and "Slippage (pts)" columns rendered a
+          literal "-" forever without the first, and volumes were shown in
+          raw protocol units without the second.
+        - per-master-position `symbol` (name, not `ID:<n>`), `volume_lots`
+          and live `pnl_quote` from the state tracker.
+
+        Everything here is a local read (mapping rows, the symbol cache, the
+        in-memory tracker snapshot) -- no broker round trips -- so it stays
+        cheap enough for the dashboard's 5 s poll.
+        """
         accounts_snapshot = self.state_tracker.snapshot() if self.state_tracker is not None else {}
         mappings = self.repo.mapping_rows()
 
-        def copies_for(key: str, value: int) -> list[dict]:
-            return [
-                {
-                    'slave_account_id': m.get('slave_account_id'),
+        # Per-call memo: several copies usually belong to the same slave, and
+        # load_symbol_cache() is a database round trip each time.
+        slave_symbol_caches: dict[int, dict] = {}
+
+        def slave_symbols(account_id: int) -> dict:
+            if account_id not in slave_symbol_caches:
+                slave_symbol_caches[account_id] = self.repo.load_symbol_cache(account_id)
+            return slave_symbol_caches[account_id]
+
+        def lots(volume, lot_size) -> str | None:
+            if volume is None or not lot_size:
+                return None
+            return f"{volume / lot_size:.2f}"
+
+        def master_symbol(symbol_id: int):
+            return self.master_symbols_by_id.get(symbol_id)
+
+        def copies_for(key: str, value: int, symbol_name: str | None) -> list[dict]:
+            out = []
+            for m in mappings:
+                if m.get(key) != value:
+                    continue
+                slave_account_id = m.get('slave_account_id')
+                slave_lot_size = None
+                if symbol_name is not None and slave_account_id is not None:
+                    sym = slave_symbols(slave_account_id).get(symbol_name)
+                    slave_lot_size = sym.lot_size if sym is not None else None
+                out.append({
+                    'slave_account_id': slave_account_id,
                     'slave_position_id': m.get('slave_position_id'),
                     'slave_order_id': m.get('slave_order_id'),
                     'slave_volume': m.get('slave_volume'),
+                    'volume_lots': lots(m.get('slave_volume'), slave_lot_size),
+                    'fill_price': m.get('fill_price'),
                     'status': m.get('status'),
                     'error': m.get('error'),
-                }
-                for m in mappings
-                if m.get(key) == value
-            ]
+                })
+            return out
 
         master_positions = []
         pending_orders = []
         if self.state_tracker is not None:
+            # Live per-position P&L, keyed by position id, from the same
+            # snapshot the accounts block is built from -- so the Positions
+            # screen and the Overview never disagree about a position.
+            master_pnl_by_position: dict[int, float | None] = {}
+            if self.master_account_id is not None:
+                for tracked in accounts_snapshot.get(self.master_account_id, {}).get('positions', []):
+                    master_pnl_by_position[tracked['position_id']] = tracked.get('pnl_quote')
+
             for pos in self.reconciler.master_positions:
+                sym = master_symbol(pos.symbol_id)
+                symbol_name = sym.name if sym is not None else None
                 master_positions.append({
                     'position_id': pos.position_id,
                     'symbol_id': pos.symbol_id,
+                    'symbol': symbol_name,
                     'side': pos.side.value,
                     'volume': pos.volume,
+                    'volume_lots': lots(pos.volume, sym.lot_size if sym is not None else None),
                     'price': pos.price,
+                    'pnl_quote': master_pnl_by_position.get(pos.position_id),
                     'label': pos.label,
-                    'copies': copies_for('master_position_id', pos.position_id),
+                    'copies': copies_for('master_position_id', pos.position_id, symbol_name),
                 })
             for order in self.reconciler.master_orders:
+                sym = master_symbol(order.symbol_id)
+                symbol_name = sym.name if sym is not None else None
                 pending_orders.append({
                     'order_id': order.order_id,
                     'symbol_id': order.symbol_id,
+                    'symbol': symbol_name,
                     'volume': order.volume,
+                    'volume_lots': lots(order.volume, sym.lot_size if sym is not None else None),
                     'label': order.label,
-                    'copies': copies_for('master_order_id', order.order_id),
+                    'copies': copies_for('master_order_id', order.order_id, symbol_name),
                 })
 
         return {
@@ -751,6 +856,19 @@ def boot(config: BootConfig, reactor_) -> CopierApp:
         start_d.addErrback(lambda f: log.error("token refresh loop failed to start: %s", f))
 
     reactor_.callWhenRunning(_start_refresh_loop)
+
+    # N9: keep Overview's balance/equity honest between resyncs.
+    balance_refresh_call = task.LoopingCall(app.refresh_balances)
+    balance_refresh_call.clock = reactor_
+    app.balance_refresh_call = balance_refresh_call
+
+    def _start_balance_loop():
+        # now=False: startup() already does the first refresh, and firing
+        # immediately here would race it onto the same queued path.
+        start_d = balance_refresh_call.start(BALANCE_REFRESH_INTERVAL_S, now=False)
+        start_d.addErrback(lambda f: log.error("balance refresh loop failed to start: %s", f))
+
+    reactor_.callWhenRunning(_start_balance_loop)
 
     site = make_control_site(app)
     reactor_.listenTCP(CONTROL_PORT, site, interface=CONTROL_BIND_INTERFACE)

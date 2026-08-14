@@ -1,7 +1,32 @@
 import { useState, useEffect } from 'react'
 import { api } from '../lib/api'
-import type { Account, Settings, StateSnapshot } from '../lib/types'
+import type { Account, ApiState, Settings, StateSnapshot } from '../lib/types'
 import KillSwitch from '../components/KillSwitch'
+
+/**
+ * Fetch GET /api/state and return just its per-account block.
+ *
+ * `/api/state` is a verbatim pass-through of the copier's `get_state()`, so
+ * its shape is `{accounts, master_positions, pending_orders, drift}` -- the
+ * per-account balance/equity/positions live under `accounts`, keyed by
+ * account id as a STRING (JSON has no integer keys).
+ *
+ * This screen used to do `api<StateSnapshot>('/api/state')` and index the
+ * result directly, i.e. it read the envelope as if it were the account map:
+ * every `state[String(accountId)]` was `undefined`, so the master card never
+ * rendered at all and every slave tile silently omitted its equity, balance
+ * and position count. `api<T>()` is an unchecked cast, so the wrong type
+ * argument cost nothing at compile time, and Overview.test.tsx mocked a bare
+ * `StateSnapshot` -- the wrong shape -- so the suite agreed with the bug.
+ *
+ * Typing the fetch as `ApiState` and projecting explicitly here is what makes
+ * a future shape change a type error rather than a blank screen; the tests
+ * now mock the real envelope and assert the numbers actually render.
+ */
+async function loadAccountState(): Promise<StateSnapshot> {
+  const state = await api<ApiState>('/api/state')
+  return state.accounts ?? {}
+}
 
 export default function Overview() {
   const [accounts, setAccounts] = useState<Account[]>([])
@@ -35,8 +60,7 @@ export default function Overview() {
   useEffect(() => {
     const loadState = async () => {
       try {
-        const st = await api<StateSnapshot>('/api/state')
-        setState(st)
+        setState(await loadAccountState())
       } catch (err) {
         console.error('Failed to load state:', err)
       }
@@ -58,8 +82,7 @@ export default function Overview() {
         body: JSON.stringify({ account_id: accountId }),
       })
       // Reload state after action
-      const st = await api<StateSnapshot>('/api/state')
-      setState(st)
+      setState(await loadAccountState())
     } catch (err) {
       console.error('Failed to update account status:', err)
     }

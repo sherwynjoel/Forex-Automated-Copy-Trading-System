@@ -16,6 +16,7 @@ Interfaces:
 import hashlib
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Callable
 
 from twisted.internet import defer
@@ -31,6 +32,14 @@ from copier.engine.dispatch import Dispatcher
 from copier.domain.models import ClosePosition
 
 log = logging.getLogger(__name__)
+
+# N8: how long a mapping may sit in 'pending' before compute_drift calls it
+# stale. A copy normally goes pending -> active within the round trip of one
+# execution event (milliseconds to low seconds), so five minutes is far past
+# any plausible broker latency while still being short enough that an
+# operator running a resync after an incident sees the problem in that
+# resync rather than the next one.
+STALE_PENDING_AFTER_S = 300.0
 
 
 @dataclass(frozen=True)
@@ -57,7 +66,9 @@ class OrderSnapshot:
 class DriftItem:
     """Immutable drift detection result."""
     id: str  # Stable hash of (kind, account_id, position_id, order_id)
-    kind: str  # 'orphan_slave_position', 'missing_slave_copy', 'unmapped_master_position', 'unfilled_slave_order'
+    # 'orphan_slave_position', 'missing_slave_copy', 'unmapped_master_position',
+    # 'unfilled_slave_order', 'stale_pending_copy'
+    kind: str
     account_id: int | None
     position_id: int | None
     order_id: int | None
@@ -87,15 +98,19 @@ def compute_drift(
     slave_orders: dict[int, list[OrderSnapshot]],
     mappings: list[dict],
     enabled_slave_ids: set[int],
+    now: datetime | None = None,
+    stale_pending_after_s: float = STALE_PENDING_AFTER_S,
+    dry_run: bool = False,
 ) -> list[DriftItem]:
     """Compute drift between broker reality and mappings (pure, no side effects).
 
-    Detects four drift categories:
+    Detects five drift categories:
     1. orphan_slave_position: slave position labeled copy:* with no active mapping,
        or mapping whose master position is gone
     2. missing_slave_copy: active mapping exists but slave position vanished
     3. unmapped_master_position: master position with zero mapping rows (missed while down)
     4. unfilled_slave_order: order mapping linked to master fill but slave position never materialized
+    5. stale_pending_copy: a mapping that never left 'pending' (N8)
 
     Args:
         master_positions: List of PositionSnapshot from master account
@@ -104,6 +119,17 @@ def compute_drift(
         slave_orders: Dict[account_id, list[OrderSnapshot]] from slave accounts
         mappings: List[dict] of mapping rows from database
         enabled_slave_ids: Set[int] of enabled slave account IDs
+        now: Reference time for the stale-pending age check; defaults to
+            datetime.now(timezone.utc). Injectable so the check is a pure
+            function of its inputs and testable without sleeping.
+        stale_pending_after_s: Age (seconds) past which a still-'pending'
+            mapping is reported. See STALE_PENDING_AFTER_S.
+        dry_run: When True, the stale-pending check is skipped entirely --
+            dry-run deliberately creates mappings that STAY pending and are
+            never activated (engine/dispatch.py:_handle_dry_run), so every
+            one of them would otherwise be reported as drift for as long as
+            Stage 1 runs. Those rows do become genuine leftovers once
+            dry-run is switched off, and are reported from that point on.
 
     Returns:
         list[DriftItem] sorted by id for stable output
@@ -257,6 +283,59 @@ def compute_drift(
             )
             drift_items.append(item)
 
+    # 5. Stale pending copies (N8): a mapping row that never reached 'active'.
+    #
+    # A copy is written 'pending' the instant its intent is dispatched and
+    # only flips to 'active' when the SLAVE's own execution event confirms
+    # the fill. If that confirmation never arrives -- send_no_reply's
+    # success only means "written to a connected transport", not "the broker
+    # received it", so a transport that dies before flush loses the order
+    # silently -- the row sits 'pending' forever and, before this check, was
+    # invisible to EVERY other category above: unmapped_master_position
+    # looks only at 'active' rows (the other slaves' rows exist, so it never
+    # fires), missing_slave_copy requires a slave_position_id the pending
+    # row does not have, and the orphan checks work from broker-side labels
+    # that a never-placed order never produced. The gap surfaced only when
+    # the master next amended or closed that position -- i.e. one slave
+    # silently carried no exposure at all, for as long as the position was
+    # open, with nothing an operator could have looked at to find out.
+    if not dry_run:
+        reference_now = now if now is not None else datetime.now(timezone.utc)
+        for m in mappings:
+            if m.get('status') != 'pending':
+                continue
+
+            account_id = m.get('slave_account_id')
+            if account_id not in enabled_slave_ids:
+                continue
+
+            created_at = m.get('created_at')
+            if created_at is None:
+                continue
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+
+            age_s = (reference_now - created_at).total_seconds()
+            if age_s < stale_pending_after_s:
+                continue
+
+            master_position_id = m.get('master_position_id')
+            master_order_id = m.get('master_order_id')
+            drift_items.append(DriftItem(
+                id=_stable_id('stale_pending_copy', account_id, m.get('client_order_id')),
+                kind='stale_pending_copy',
+                account_id=account_id,
+                position_id=master_position_id,
+                order_id=master_order_id,
+                detail=(
+                    f"Copy for master "
+                    f"{'position ' + str(master_position_id) if master_position_id else 'order ' + str(master_order_id)} "
+                    f"has been pending for {int(age_s)}s and never activated "
+                    f"(client_order_id={m.get('client_order_id')}); the slave may be "
+                    f"carrying no exposure for it"
+                ),
+            ))
+
     # Sort for stable output
     drift_items.sort(key=lambda item: item.id)
     return drift_items
@@ -378,9 +457,18 @@ class Reconciler:
 
         mappings = self.repo.mapping_rows()
 
+        # dry_run gates the stale-pending check only (see compute_drift):
+        # dry-run mappings are pending BY DESIGN and must not be reported as
+        # drift while Stage 1 is running.
+        try:
+            dry_run = self.repo.get_settings().dry_run
+        except Exception:
+            log.exception("reconcile: could not read settings; assuming dry_run=False")
+            dry_run = False
+
         items = compute_drift(
             master_positions, master_orders, slave_positions, slave_orders,
-            mappings, enabled_slave_ids,
+            mappings, enabled_slave_ids, dry_run=dry_run,
         )
 
         for item in items:
