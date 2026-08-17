@@ -9,7 +9,7 @@ from unittest.mock import Mock, MagicMock, AsyncMock
 
 from ctrader_open_api import Client, TcpProtocol
 from ctrader_open_api.messages.OpenApiModelMessages_pb2 import ProtoOATradeSide
-from twisted.internet import reactor
+from twisted.internet import defer, reactor
 
 from copier.ctrader.client import CTraderClient
 from copier.domain.models import ClosePosition, Side
@@ -696,7 +696,8 @@ class TestReconciler:
         dispatcher.dispatch.assert_not_called()  # adopt() never trades
 
     def test_dismiss_logs_event_without_trading(self, repo, dispatcher):
-        """dismiss() is a log-only no-op: it logs an event and never dispatches."""
+        """dismiss() logs an event, hides the item immediately, and never
+        dispatches."""
         reconciler = Reconciler(
             clients_by_account=Mock(),
             repo=repo,
@@ -722,7 +723,58 @@ class TestReconciler:
         info_rows = [r for r in rows if r['severity'] == 'info']
         assert len(info_rows) == 1
         assert info_rows[0]['payload']['action'] == 'dismissed'
+        # The dismissal takes effect immediately, not on the next resync.
+        assert reconciler.current == []
         dispatcher.dispatch.assert_not_called()
+
+    @pytest_twisted.inlineCallbacks
+    def test_periodic_reruns_log_once_and_dismissals_stick(self, repo, dispatcher):
+        """run() now also fires from the periodic resync loop, so: a
+        persisting item is logged as a 'drift' warning exactly once (not
+        once per minute); a dismissed item stays suppressed across reruns;
+        and a dismissal whose condition clears is pruned, so the same
+        condition re-alerts if it ever comes back."""
+        reconciler = Reconciler(
+            clients_by_account=Mock(),
+            repo=repo,
+            dispatcher=dispatcher,
+            master_account_id=MASTER_ID,
+        )
+        pos = PositionSnapshot(position_id=999, symbol_id=1, side=Side.BUY,
+                               volume=100_000, price=1.10, label="")
+        snapshots = {'master': ([pos], [])}
+        reconciler._fetch_snapshot = lambda account_id: defer.succeed(
+            snapshots['master'] if account_id == MASTER_ID else ([], []))
+
+        items = yield reconciler.run()
+        assert [i.kind for i in items] == ['unmapped_master_position']
+        item_id = items[0].id
+
+        def warning_count():
+            return len([r for r in self._drift_events(repo)
+                        if r['severity'] == 'warning'])
+
+        assert warning_count() == 1
+
+        # Rerun with unchanged broker state: item persists, no second log.
+        items = yield reconciler.run()
+        assert [i.id for i in items] == [item_id]
+        assert warning_count() == 1
+
+        # Dismiss: suppressed on every subsequent rerun.
+        yield reconciler.dismiss(item_id)
+        items = yield reconciler.run()
+        assert items == []
+        assert warning_count() == 1
+
+        # Condition clears -> dismissal pruned; reappearance re-alerts.
+        snapshots['master'] = ([], [])
+        items = yield reconciler.run()
+        assert items == []
+        snapshots['master'] = ([pos], [])
+        items = yield reconciler.run()
+        assert [i.id for i in items] == [item_id]
+        assert warning_count() == 2
 
 
 # ---------- N8: a copy that never activates ----------

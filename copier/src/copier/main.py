@@ -62,6 +62,7 @@ TOKEN_REFRESH_INTERVAL_S = 86400.0  # once per day
 # ~50-account target is ~10 s of queue every minute -- comfortably clear,
 # and it never touches the instant-write trade path.
 BALANCE_REFRESH_INTERVAL_S = 60.0
+RESYNC_INTERVAL_S = 60.0
 CONTROL_PORT = 8080
 # Docker-internal only: host isolation comes from compose NOT publishing this
 # port, not from binding loopback. Binding 127.0.0.1 would make the endpoint
@@ -99,6 +100,7 @@ class CopierApp:
         self.master_symbols_by_id = master_symbols_by_id
         self.master_account_id = master_account_id
         self.clock = clock
+        self._resync_in_flight = False
 
     # ---------- lifecycle ----------
 
@@ -289,6 +291,35 @@ class CopierApp:
         self.repo.set_setting("dry_run", enabled)
         self.repo.log_event('control', 'info', {'action': 'set_dry_run', 'enabled': enabled})
         log.info("dry-run mode: %s", "enabled" if enabled else "disabled")
+
+    def periodic_resync(self) -> defer.Deferred:
+        """LoopingCall body: keep Positions and drift current between
+        operator-triggered resyncs. A master fill updates mappings the
+        moment it arrives, but the Positions page reads
+        reconciler.master_positions, which only resync() refreshes -- so a
+        position opened after boot stayed invisible until someone clicked
+        resync (a live Stage-1 trade sat like that).
+
+        Skips a tick rather than overlapping: resync() fans one
+        ProtoOAReconcileReq out per enabled account, and a slow broker
+        answer must not stack a second fan-out on top. Never raises or
+        errbacks, same contract as refresh_balances().
+        """
+        if self._resync_in_flight or self.master_account_id is None:
+            return defer.succeed(None)
+        self._resync_in_flight = True
+        d = defer.maybeDeferred(self.resync)
+
+        def _clear(result):
+            self._resync_in_flight = False
+            return None
+
+        def _failed(f):
+            self._resync_in_flight = False
+            log.error("periodic resync: unexpected failure: %s", f)
+
+        d.addCallbacks(_clear, _failed)
+        return d
 
     @defer.inlineCallbacks
     def resync(self):
@@ -869,6 +900,20 @@ def boot(config: BootConfig, reactor_) -> CopierApp:
         start_d.addErrback(lambda f: log.error("balance refresh loop failed to start: %s", f))
 
     reactor_.callWhenRunning(_start_balance_loop)
+
+    # Positions and drift read reconciler state, which only resync
+    # refreshes; without this loop they go stale the moment the master
+    # trades after boot.
+    resync_call = task.LoopingCall(app.periodic_resync)
+    resync_call.clock = reactor_
+    app.resync_call = resync_call
+
+    def _start_resync_loop():
+        # now=False: startup() already runs the first resync.
+        start_d = resync_call.start(RESYNC_INTERVAL_S, now=False)
+        start_d.addErrback(lambda f: log.error("resync loop failed to start: %s", f))
+
+    reactor_.callWhenRunning(_start_resync_loop)
 
     site = make_control_site(app)
     reactor_.listenTCP(CONTROL_PORT, site, interface=CONTROL_BIND_INTERFACE)

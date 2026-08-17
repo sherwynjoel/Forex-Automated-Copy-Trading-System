@@ -380,6 +380,13 @@ class Reconciler:
         # AccountStateTracker.set_positions() and answer /state truthfully.
         self.master_positions: list[PositionSnapshot] = []
         self.master_orders: list[OrderSnapshot] = []
+        # Drift ids the operator dismissed. In-memory on purpose: a process
+        # restart re-surfaces dismissed items for a fresh look, but the
+        # periodic resync loop must not (before this set existed, dismiss()
+        # only logged, and every run() resurrected the item). DriftItem ids
+        # are _stable_id() digests, so the same condition maps to the same
+        # id across runs.
+        self._dismissed: set[str] = set()
 
     def _fetch_snapshot(self, account_id: int):
         """Send ProtoOAReconcileReq for one account and extract snapshots.
@@ -471,7 +478,21 @@ class Reconciler:
             mappings, enabled_slave_ids, dry_run=dry_run,
         )
 
+        # Suppress items the operator dismissed, and prune dismissals whose
+        # condition has cleared -- if the same condition ever comes back,
+        # it alerts again instead of staying muted forever.
+        computed_ids = {item.id for item in items}
+        self._dismissed &= computed_ids
+        items = [item for item in items if item.id not in self._dismissed]
+
+        # Log only drift that is NEW since the previous run. run() now also
+        # fires from the periodic resync loop, and re-logging every
+        # persisting item each tick would put one warning per item per
+        # minute into events.
+        known_ids = {item.id for item in self.current}
         for item in items:
+            if item.id in known_ids:
+                continue
             self.repo.log_event(
                 'drift',
                 'warning',
@@ -652,6 +673,11 @@ class Reconciler:
                 },
                 account_id=item.account_id,
             )
+            # Make the dismissal actually stick: hide the item from /state
+            # immediately and keep it suppressed across periodic resyncs
+            # (see _dismissed in __init__).
+            self._dismissed.add(item_id)
+            self.current = [i for i in self.current if i.id != item_id]
             d.callback(None)
         except Exception as e:
             d.errback(e)

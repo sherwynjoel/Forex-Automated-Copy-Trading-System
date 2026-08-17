@@ -220,8 +220,15 @@ class AccountStateTracker:
         Args:
             evt: ProtoOASpotEvent with bid/ask in 1/100_000 protocol units.
         """
-        bid = evt.bid / SPOT_PRICE_SCALE
-        ask = evt.ask / SPOT_PRICE_SCALE
+        # A spot event carries only the side(s) that changed: bid and ask
+        # are optional fields, and live ticks routinely update one side at
+        # a time. Reading an absent side yields protobuf's default 0, so
+        # storing both unconditionally clobbered the retained side with 0 --
+        # a BUY position's P&L then computed against bid=0 and displayed
+        # -(entry x volume) as a huge bogus loss.
+        prev_bid, prev_ask = self._spots.get(evt.symbolId, (None, None))
+        bid = evt.bid / SPOT_PRICE_SCALE if evt.HasField('bid') else prev_bid
+        ask = evt.ask / SPOT_PRICE_SCALE if evt.HasField('ask') else prev_ask
         self._spots[evt.symbolId] = (bid, ask)
 
     def snapshot(self) -> dict[int, dict[str, Any]]:
@@ -262,8 +269,15 @@ class AccountStateTracker:
                     })
                     continue
 
-                # Get current bid/ask for this symbol
-                bid, ask = self._spots.get(pos.symbol_id, (pos.price, pos.price))
+                # Get current bid/ask for this symbol. A side we have never
+                # received stays None in _spots; fall back to the entry
+                # price for that side (P&L 0), same as when no spot has
+                # arrived at all.
+                bid, ask = self._spots.get(pos.symbol_id, (None, None))
+                if bid is None:
+                    bid = pos.price
+                if ask is None:
+                    ask = pos.price
 
                 # Calculate P&L for this position
                 pnl = unrealized_pnl_quote(pos.side, pos.price, pos.volume, bid, ask)

@@ -124,6 +124,85 @@ def test_spot_event_updates_pnl_with_5_digit_symbol():
     assert snapshot[1001]["equity"] == pytest.approx(1500.0)
 
 
+def test_partial_spot_event_retains_the_other_side():
+    """RED before the fix: live ticks routinely carry only one side (bid
+    and ask are optional fields), and reading the absent side yields
+    protobuf's default 0 -- so an ask-only tick clobbered the retained bid
+    with 0 and a BUY position's P&L displayed -(entry x volume) as a huge
+    bogus loss (seen live on Stage 1: -5797.05 on a 0.05-lot EURUSD BUY)."""
+    sdk, clock = StubSdk(), Clock()
+    client = CTraderClient(sdk, "cid", "csecret", clock=clock)
+    client.start()
+    sdk.connect()
+
+    class MockRepo:
+        pass
+
+    symbols = {1: SymbolInfo(symbol_id=1, name="EURUSD", digits=5,
+                            lot_size=10_000_000, min_volume=100_000, step_volume=100_000)}
+    tracker = AccountStateTracker(client, MockRepo(), 1001, symbols)
+    tracker._balances[1001] = 1000.0
+    tracker._balance_known[1001] = True
+    tracker._positions[1001] = [
+        PositionSnapshot(position_id=1, symbol_id=1, side=Side.BUY,
+                        volume=500_000, price=1.15941, label="")
+    ]
+
+    # Full tick first: both sides known
+    full = ProtoOASpotEvent()
+    full.ctidTraderAccountId = 1001
+    full.symbolId = 1
+    full.bid = 115964
+    full.ask = 115966
+    tracker.on_spot(full)
+
+    # Ask-only tick: bid field absent on the wire
+    partial = ProtoOASpotEvent()
+    partial.ctidTraderAccountId = 1001
+    partial.symbolId = 1
+    partial.ask = 115968
+    tracker.on_spot(partial)
+
+    bid, ask = tracker._spots[1]
+    assert bid == pytest.approx(1.15964)   # retained, not zeroed
+    assert ask == pytest.approx(1.15968)
+    pnl = tracker.snapshot()[1001]["positions"][0]["pnl_quote"]
+    assert pnl == pytest.approx((1.15964 - 1.15941) * 5000)
+
+
+def test_spot_side_never_seen_falls_back_to_entry_price():
+    """A side that has never arrived stays None internally; P&L must fall
+    back to the entry price for that side (P&L 0), matching the behavior
+    when no spot has arrived at all."""
+    sdk, clock = StubSdk(), Clock()
+    client = CTraderClient(sdk, "cid", "csecret", clock=clock)
+    client.start()
+    sdk.connect()
+
+    class MockRepo:
+        pass
+
+    symbols = {1: SymbolInfo(symbol_id=1, name="EURUSD", digits=5,
+                            lot_size=10_000_000, min_volume=100_000, step_volume=100_000)}
+    tracker = AccountStateTracker(client, MockRepo(), 1001, symbols)
+    tracker._balances[1001] = 1000.0
+    tracker._balance_known[1001] = True
+    tracker._positions[1001] = [
+        PositionSnapshot(position_id=1, symbol_id=1, side=Side.BUY,
+                        volume=500_000, price=1.15941, label="")
+    ]
+
+    # Only an ask-side tick ever arrives; a BUY closes at bid, which is unknown
+    partial = ProtoOASpotEvent()
+    partial.ctidTraderAccountId = 1001
+    partial.symbolId = 1
+    partial.ask = 115968
+    tracker.on_spot(partial)
+
+    pnl = tracker.snapshot()[1001]["positions"][0]["pnl_quote"]
+    assert pnl == pytest.approx(0.0)
+
+
 def test_spot_event_scaling_for_3_digit_symbol():
     """N5: spot prices are FIXED 1/100_000 units, even for a 3-digit symbol.
 

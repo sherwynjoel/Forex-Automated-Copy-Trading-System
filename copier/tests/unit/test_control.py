@@ -246,10 +246,11 @@ def test_boot_composes_without_crashing_and_binds_all_interfaces(db, fernet_key)
     assert call["port"] == main.CONTROL_PORT
     assert call["interface"] == "0.0.0.0"
     assert call["interface"] != "127.0.0.1"
-    # startup + token-refresh loop + balance-refresh loop (N9) were
-    # scheduled, not run inline (no reactor loop here).
-    assert len(fake_reactor.callWhenRunning_calls) == 3
+    # startup + token-refresh loop + balance-refresh loop (N9) + resync
+    # loop were scheduled, not run inline (no reactor loop here).
+    assert len(fake_reactor.callWhenRunning_calls) == 4
     assert app.balance_refresh_call.interval is None   # not started until the reactor runs
+    assert app.resync_call.interval is None            # not started until the reactor runs
 
 
 def test_build_app_tolerates_zero_accounts_and_wires_dispatcher_before_app_exists(db, fernet_key):
@@ -814,6 +815,101 @@ def test_balance_refresh_survives_a_broker_failure_and_keeps_looping(db, fernet_
     # And it can be called again afterwards.
     app.refresh_balances()
     assert len(tracker.refresh_calls) == 2
+
+
+def test_boot_schedules_a_periodic_resync(db, fernet_key):
+    """Positions and drift read reconciler state, which only resync()
+    refreshes -- so a position the master opened after boot stayed
+    invisible on the Positions page until an operator clicked resync (a
+    live Stage-1 trade sat exactly like that). boot() must wire a resync
+    loop the same way it wires the balance loop.
+
+    Drives the real LoopingCall boot() wires, on a Clock.
+    """
+    seed_db(db, fernet_key)
+    config = main.BootConfig(
+        postgres_dsn=db, fernet_key=fernet_key, client_id="cid", client_secret="secret",
+        demo_host="demo.example.invalid", live_host="live.example.invalid",
+        ctrader_port=5035, shards=1,
+    )
+    fake_reactor = _FakeReactor()
+    app = main.boot(config, fake_reactor)
+
+    calls = []
+
+    def recording_resync():
+        calls.append(1)
+        return defer.succeed([])
+
+    app.resync = recording_resync
+    app.master_account_id = 999
+
+    clock = Clock()
+    app.resync_call.clock = clock
+    app.resync_call.start(main.RESYNC_INTERVAL_S, now=False)
+    try:
+        assert calls == []                    # nothing before the first tick
+        clock.advance(main.RESYNC_INTERVAL_S)
+        assert len(calls) == 1
+        clock.advance(main.RESYNC_INTERVAL_S)
+        assert len(calls) == 2
+    finally:
+        app.resync_call.stop()
+
+
+def test_periodic_resync_skips_overlap_no_master_and_survives_failure(db, fernet_key):
+    """periodic_resync must (a) no-op without a master, (b) skip a tick
+    while a previous resync's broker fan-out is still in flight rather
+    than stacking a second one on top, (c) resume after completion, and
+    (d) never errback on failure (a LoopingCall whose Deferred fails
+    stops looping forever) while still clearing the in-flight flag."""
+    seed_db(db, fernet_key)
+    repo = Repo(db)
+    token_store = TokenStore(db, fernet_key)
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+
+    calls = []
+    pending = defer.Deferred()
+
+    def slow_resync():
+        calls.append(1)
+        return pending
+
+    app.resync = slow_resync
+
+    # (a) no master -> no-op
+    app.master_account_id = None
+    app.periodic_resync()
+    assert calls == []
+
+    # normal tick runs
+    app.master_account_id = 999
+    app.periodic_resync()
+    assert len(calls) == 1
+
+    # (b) still in flight -> skipped
+    app.periodic_resync()
+    assert len(calls) == 1
+
+    # (c) completes -> next tick runs again
+    pending.callback([])
+    app.periodic_resync()
+    assert len(calls) == 2
+
+    # (d) failure clears the flag and never errbacks
+    def exploding_resync():
+        calls.append(1)
+        return defer.fail(RuntimeError("broker said no"))
+
+    app.resync = exploding_resync
+    d = app.periodic_resync()
+    results = []
+    d.addBoth(results.append)
+    assert len(results) == 1
+    assert not isinstance(results[0], Failure), "periodic_resync must never errback"
+    assert len(calls) == 3
+    app.periodic_resync()                     # and it can run again afterwards
+    assert len(calls) == 4
 
 
 def test_balance_refresh_skips_disabled_accounts(db, fernet_key):
