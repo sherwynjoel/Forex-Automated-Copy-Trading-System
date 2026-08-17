@@ -32,6 +32,26 @@ def test_market_fill_opens_position():
                                          10_000_000, None, None)
 
 
+def test_market_range_fill_opens_position():
+    """RED before the fix: the first live Stage-1 trade arrived as a
+    MARKET_RANGE fill (cTrader's slippage-protected market variant, the
+    platform UI's default in several configurations) and normalize()
+    dropped it as an unknown order type -- nothing was copied."""
+    e = base_event(ProtoOAExecutionType.ORDER_FILLED,
+                   ProtoOAOrderType.MARKET_RANGE)
+    e.deal.positionId = 11
+    e.deal.filledVolume = 10_000_000
+    out = normalize(e, SYMS)
+    assert out == m.MasterPositionOpened(11, "EURUSD", m.Side.BUY, 10_000_000,
+                                         10_000_000, None, None)
+
+
+def test_market_range_accept_is_ignored():
+    e = base_event(ProtoOAExecutionType.ORDER_ACCEPTED,
+                   ProtoOAOrderType.MARKET_RANGE)
+    assert normalize(e, SYMS) is None
+
+
 def test_fill_with_close_detail_is_a_close():
     e = base_event(ProtoOAExecutionType.ORDER_FILLED)
     e.deal.positionId = 11

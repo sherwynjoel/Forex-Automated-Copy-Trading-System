@@ -70,8 +70,11 @@ def normalize(evt: ProtoOAExecutionEvent,
                 position_id=evt.deal.positionId
             )
 
-        # For MARKET orders, it's a position open
-        if order_type == ProtoOAOrderType.MARKET:
+        # For MARKET orders, it's a position open. MARKET_RANGE is cTrader's
+        # market-with-slippage-protection variant -- the platform UI places
+        # those instead of plain MARKET in several default configurations --
+        # and its fills carry the same shape.
+        if order_type in (ProtoOAOrderType.MARKET, ProtoOAOrderType.MARKET_RANGE):
             side = _proto_side_to_side(evt.order.tradeData.tradeSide)
             stop_loss = evt.position.stopLoss if evt.position.HasField('stopLoss') else None
             take_profit = evt.position.takeProfit if evt.position.HasField('takeProfit') else None

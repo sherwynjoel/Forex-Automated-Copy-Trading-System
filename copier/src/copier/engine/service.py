@@ -11,7 +11,8 @@ import time
 from typing import Callable, Mapping
 
 from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOAExecutionEvent
-from ctrader_open_api.messages.OpenApiModelMessages_pb2 import ProtoOAExecutionType
+from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
+    ProtoOAExecutionType, ProtoOAOrderType)
 
 from copier.db.repo import Repo, MappingNotFound
 from copier.domain.models import SymbolInfo, SlaveConfig, MasterPendingFilled
@@ -119,6 +120,13 @@ class CopierService:
             'execution_type': ProtoOAExecutionType.Name(evt.executionType),
             'normalized': type(normalized).__name__ if normalized else None,
         }
+        if normalized is None:
+            # An event we chose not to act on must explain itself in the
+            # log: which order type and symbol the miss was about. A live
+            # MARKET_RANGE fill sat invisible behind a bare
+            # {"normalized": null} for exactly this lack of detail.
+            payload['order_type'] = ProtoOAOrderType.Name(evt.order.orderType)
+            payload['symbol_id'] = evt.order.tradeData.symbolId
         self._repo.log_event(
             'master_event',
             'info',
