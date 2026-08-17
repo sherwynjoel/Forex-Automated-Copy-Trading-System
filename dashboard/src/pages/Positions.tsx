@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { ApiState, MasterPosition, PendingOrder, PositionCopy, DriftItem } from '../lib/types'
 import { api } from '../lib/api'
+import { useLiveRefresh } from '../hooks/useLiveRefresh'
 
 export default function Positions() {
   const [state, setState] = useState<ApiState | null>(null)
@@ -26,6 +27,9 @@ export default function Positions() {
     const interval = setInterval(fetchState, 5000)
     return () => clearInterval(interval)
   }, [])
+
+  // Refetch immediately when a trade event streams in (5s poll is fallback)
+  useLiveRefresh(fetchState)
 
   const handleCloseOrphan = async (driftId: string) => {
     if (!window.confirm('Close this orphan position?')) return

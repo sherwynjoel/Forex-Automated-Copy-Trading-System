@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { api } from '../lib/api'
 import type { Account, ApiState, Settings, StateSnapshot } from '../lib/types'
 import KillSwitch from '../components/KillSwitch'
+import { useLiveRefresh } from '../hooks/useLiveRefresh'
 
 /**
  * Fetch GET /api/state and return just its per-account block.
@@ -73,6 +74,15 @@ export default function Overview() {
     const interval = setInterval(loadState, 5000)
     return () => clearInterval(interval)
   }, [])
+
+  // Refetch immediately when a trade event streams in (5s poll is fallback)
+  useLiveRefresh(async () => {
+    try {
+      setState(await loadAccountState())
+    } catch (err) {
+      console.error('Failed to load state:', err)
+    }
+  })
 
   const handlePauseResume = async (accountId: number, isPaused: boolean) => {
     try {

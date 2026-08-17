@@ -62,6 +62,22 @@ class CopierService:
             from twisted.internet import reactor as clock
         self._clock = clock
 
+        # Set by build_app() after CopierApp exists (service is constructed
+        # first, so this cannot be a ctor argument). Called after any event
+        # that changes positions/orders/mappings, so /state can refresh
+        # immediately instead of waiting for the next periodic resync tick.
+        self.on_positions_changed: Callable[[], None] | None = None
+
+    def _notify_positions_changed(self) -> None:
+        """Invoke on_positions_changed; a callback failure must never break
+        event processing."""
+        if self.on_positions_changed is None:
+            return
+        try:
+            self.on_positions_changed()
+        except Exception:
+            log.exception("on_positions_changed callback failed")
+
     def handle_execution(self, account_id: int, evt: ProtoOAExecutionEvent) -> None:
         """Handle execution event from master or slave.
 
@@ -151,6 +167,9 @@ class CopierService:
         if isinstance(normalized, MasterPendingFilled):
             self._schedule_pending_fill_check(normalized)
 
+        # The master's positions/orders just changed; let /state catch up now.
+        self._notify_positions_changed()
+
     def _schedule_pending_fill_check(self, pending_filled: MasterPendingFilled) -> None:
         """Schedule a check for unmapped slave fills after PENDING_FILL_ALERT_S.
 
@@ -232,18 +251,22 @@ class CopierService:
         if execution_type in (ProtoOAExecutionType.ORDER_FILLED,
                              ProtoOAExecutionType.ORDER_PARTIAL_FILL):
             self._handle_slave_fill(account_id, evt)
+            self._notify_positions_changed()
 
         # Handle ORDER_ACCEPTED
         elif execution_type == ProtoOAExecutionType.ORDER_ACCEPTED:
             self._handle_slave_order_accepted(account_id, evt)
+            self._notify_positions_changed()
 
         # Handle ORDER_CANCELLED
         elif execution_type == ProtoOAExecutionType.ORDER_CANCELLED:
             self._handle_slave_order_cancelled(account_id, evt)
+            self._notify_positions_changed()
 
         # Handle ORDER_REJECTED
         elif execution_type == ProtoOAExecutionType.ORDER_REJECTED:
             self._handle_slave_order_rejected(account_id, evt)
+            self._notify_positions_changed()
 
         # Log unclassified slave events
         else:

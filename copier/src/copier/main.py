@@ -63,6 +63,7 @@ TOKEN_REFRESH_INTERVAL_S = 86400.0  # once per day
 # and it never touches the instant-write trade path.
 BALANCE_REFRESH_INTERVAL_S = 60.0
 RESYNC_INTERVAL_S = 60.0
+RESYNC_DEBOUNCE_S = 0.5
 CONTROL_PORT = 8080
 # Docker-internal only: host isolation comes from compose NOT publishing this
 # port, not from binding loopback. Binding 127.0.0.1 would make the endpoint
@@ -101,6 +102,7 @@ class CopierApp:
         self.master_account_id = master_account_id
         self.clock = clock
         self._resync_in_flight = False
+        self._resync_requested = False
 
     # ---------- lifecycle ----------
 
@@ -291,6 +293,27 @@ class CopierApp:
         self.repo.set_setting("dry_run", enabled)
         self.repo.log_event('control', 'info', {'action': 'set_dry_run', 'enabled': enabled})
         log.info("dry-run mode: %s", "enabled" if enabled else "disabled")
+
+    def request_resync(self) -> None:
+        """Schedule a near-immediate resync in response to a position-
+        changing event, so /state reflects a fill within ~1s instead of
+        waiting for the next RESYNC_INTERVAL_S tick. Debounced: the burst
+        a single trade produces (master fill + one fill per slave)
+        collapses into one resync, and periodic_resync's in-flight guard
+        still applies on top.
+        """
+        if self._resync_requested:
+            return
+        self._resync_requested = True
+
+        def _fire():
+            self._resync_requested = False
+            self.periodic_resync()
+
+        clock = self.clock
+        if clock is None:
+            from twisted.internet import reactor as clock
+        clock.callLater(RESYNC_DEBOUNCE_S, _fire)
 
     def periodic_resync(self) -> defer.Deferred:
         """LoopingCall body: keep Positions and drift current between
@@ -808,6 +831,11 @@ def build_app(
         client_factory=client_factory, shards=shards, master_symbols_by_id=master_symbols_by_id,
         master_account_id=master_account_id, clock=clock,
     )
+
+    # Service is constructed before the app (see module docstring on wiring
+    # order), so the position-change hook is attached here instead of via
+    # its ctor: any fill/close/cancel refreshes /state within ~1s.
+    service.on_positions_changed = app.request_resync
 
     # Wire execution + tokens-invalidated to EVERY client (all shards, both
     # environments) -- slave shards must deliver execution events too, and any

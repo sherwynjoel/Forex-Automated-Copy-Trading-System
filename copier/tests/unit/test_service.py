@@ -537,3 +537,56 @@ class TestExceptionBoundary:
             ).fetchone()
         # The error should be logged
         assert errors[0] >= 1
+
+
+class TestPositionsChangedNotification:
+    """on_positions_changed fires for events that change positions, orders,
+    or mappings, so /state refreshes within ~1s (via request_resync)
+    instead of on the next periodic resync tick."""
+
+    def test_master_fill_notifies(self, service, recording_dispatcher):
+        calls = []
+        service.on_positions_changed = lambda: calls.append(1)
+        evt = base_event(account_id=999, execution_type=ProtoOAExecutionType.ORDER_FILLED)
+        evt.deal.positionId = 11
+        evt.deal.filledVolume = 10_000_000
+
+        service.handle_execution(999, evt)
+
+        assert calls == [1]
+
+    def test_non_replication_master_event_does_not_notify(self, service):
+        """MARKET ORDER_ACCEPTED normalizes to None -- nothing changed,
+        nothing to refresh."""
+        calls = []
+        service.on_positions_changed = lambda: calls.append(1)
+        evt = base_event(account_id=999, execution_type=ProtoOAExecutionType.ORDER_ACCEPTED)
+
+        service.handle_execution(999, evt)
+
+        assert calls == []
+
+    def test_slave_fill_notifies(self, service):
+        calls = []
+        service.on_positions_changed = lambda: calls.append(1)
+        evt = base_event(account_id=100, execution_type=ProtoOAExecutionType.ORDER_FILLED)
+        evt.deal.positionId = 500
+        evt.deal.filledVolume = 10_000_000
+
+        service.handle_execution(100, evt)
+
+        assert calls == [1]
+
+    def test_callback_failure_does_not_break_event_processing(self, service, recording_dispatcher):
+        def boom():
+            raise RuntimeError("boom")
+
+        service.on_positions_changed = boom
+        evt = base_event(account_id=999, execution_type=ProtoOAExecutionType.ORDER_FILLED)
+        evt.deal.positionId = 11
+        evt.deal.filledVolume = 10_000_000
+
+        service.handle_execution(999, evt)   # must not raise
+
+        open_intents = [i for i in recording_dispatcher.intents if isinstance(i, OpenMarket)]
+        assert len(open_intents) == 2

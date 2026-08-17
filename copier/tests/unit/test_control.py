@@ -912,6 +912,43 @@ def test_periodic_resync_skips_overlap_no_master_and_survives_failure(db, fernet
     assert len(calls) == 4
 
 
+def test_request_resync_debounces_a_burst_into_one_resync(db, fernet_key):
+    """request_resync collapses the burst a single trade produces (master
+    fill + one fill per slave) into ONE near-immediate resync, and a later
+    event schedules a fresh one."""
+    seed_db(db, fernet_key)
+    repo = Repo(db)
+    token_store = TokenStore(db, fernet_key)
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+
+    clock = Clock()
+    app.clock = clock
+    calls = []
+    app.periodic_resync = lambda: calls.append(1)
+
+    app.request_resync()
+    app.request_resync()
+    app.request_resync()
+    assert calls == []                     # debounce window still open
+    clock.advance(main.RESYNC_DEBOUNCE_S)
+    assert calls == [1]                    # one resync for the whole burst
+
+    app.request_resync()
+    clock.advance(main.RESYNC_DEBOUNCE_S)
+    assert calls == [1, 1]                 # a later event fires again
+
+
+def test_build_app_wires_the_position_change_hook(db, fernet_key):
+    """The service's on_positions_changed must be attached to
+    app.request_resync (service is built before the app, so the wiring
+    happens post-construction and is easy to lose)."""
+    seed_db(db, fernet_key)
+    repo = Repo(db)
+    token_store = TokenStore(db, fernet_key)
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    assert app.service.on_positions_changed == app.request_resync
+
+
 def test_balance_refresh_skips_disabled_accounts(db, fernet_key):
     seed_db(db, fernet_key)
     with psycopg.connect(db, autocommit=True) as conn:
