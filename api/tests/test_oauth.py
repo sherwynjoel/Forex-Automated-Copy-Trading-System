@@ -274,23 +274,63 @@ def test_callback_exchanges_code_and_stores_encrypted_tokens(app_client, db):
     assert abs((expires_at - expected_expiry).total_seconds()) < 5
 
 
-def test_callback_missing_code_or_state(app_client):
-    """GET /api/oauth/callback with missing code or state returns 400."""
+def test_callback_missing_code(app_client):
+    """GET /api/oauth/callback without a code returns 400; a code without
+    state and without any pending connect flow returns 403 (no nonce to
+    consume), not 400 -- cTrader never echoes state, so its absence alone
+    is not an error."""
     # First login
     response = app_client.post("/api/login", json={"password": "hunter2!"})
     assert response.status_code == 204
 
-    # Missing code
+    # Missing code (state present)
     response = app_client.get("/api/oauth/callback?state=test", follow_redirects=False)
-    assert response.status_code == 400
-
-    # Missing state
-    response = app_client.get("/api/oauth/callback?code=test", follow_redirects=False)
     assert response.status_code == 400
 
     # Missing both
     response = app_client.get("/api/oauth/callback", follow_redirects=False)
     assert response.status_code == 400
+
+    # Code but no state AND no pending flow for this session
+    response = app_client.get("/api/oauth/callback?code=test", follow_redirects=False)
+    assert response.status_code == 403
+
+
+def test_callback_without_state_consumes_pending_session_nonce(app_client, db):
+    """The real cTrader callback shape: `?code=...` with NO state echoed.
+
+    RED before the fix: every live OAuth attempt died with 400 "Missing
+    authorization code or state" because cTrader's authorize endpoint only
+    appends `code` to the redirect. The callback must fall back to the
+    pending nonce bound to this admin session -- and consuming it must stay
+    single-use.
+    """
+    response = app_client.post("/api/login", json={"password": "hunter2!"})
+    assert response.status_code == 204
+
+    # Mint a pending state via connect (the browser leg cTrader won't return)
+    state = _state_from_connect(app_client)
+    assert state
+
+    # Callback exactly as cTrader sends it: code only
+    response = app_client.get(
+        "/api/oauth/callback?code=test-auth-code", follow_redirects=False
+    )
+    assert response.status_code == 307
+    assert "connected=1" in response.headers.get("location", "")
+
+    # The pending nonce was consumed and a grant stored
+    with psycopg.connect(db, autocommit=True) as conn:
+        consumed = conn.execute("SELECT consumed_at FROM oauth_states").fetchone()[0]
+        count = conn.execute("SELECT COUNT(*) FROM ctid_connections").fetchone()[0]
+    assert consumed is not None
+    assert count == 1
+
+    # Replay without state finds no pending nonce left -> rejected
+    response = app_client.get(
+        "/api/oauth/callback?code=test-auth-code", follow_redirects=False
+    )
+    assert response.status_code == 403
 
 
 def test_callback_malformed_token_response(app_client, db):

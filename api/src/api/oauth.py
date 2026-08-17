@@ -117,10 +117,15 @@ def create_oauth_router() -> APIRouter:
         """Handle OAuth callback from cTrader."""
         from fastapi.responses import RedirectResponse
 
-        # Validate code and state parameters
-        if not code or not state:
-            logger.warning("OAuth callback missing code or state")
-            raise HTTPException(status_code=400, detail="Missing authorization code or state")
+        # Validate the code parameter. `state` is deliberately NOT required:
+        # cTrader's authorize endpoint does not echo the state parameter back
+        # on redirect -- the callback arrives as `?code=...` and nothing else
+        # (their docs describe only `code` being appended). When state IS
+        # present it is validated strictly; when absent, the consume below
+        # falls back to the pending nonce bound to this admin session.
+        if not code:
+            logger.warning("OAuth callback missing authorization code")
+            raise HTTPException(status_code=400, detail="Missing authorization code")
 
         # N4: validate and consume the state in ONE atomic statement.
         #
@@ -137,23 +142,53 @@ def create_oauth_router() -> APIRouter:
         # `session` is guaranteed non-empty here: require_admin already
         # rejected the request otherwise.
         try:
-            result = conn.execute(
-                """
-                UPDATE oauth_states SET consumed_at = %s
-                WHERE state_hash = %s
-                  AND consumed_at IS NULL
-                  AND session = %s
-                  AND created_at > %s - make_interval(secs => %s)
-                RETURNING state_hash
-                """,
-                (
-                    datetime.now(timezone.utc),
-                    _digest(state),
-                    _digest(session or ""),
-                    datetime.now(timezone.utc),
-                    STATE_TTL_SECONDS,
-                ),
-            ).fetchone()
+            now = datetime.now(timezone.utc)
+            if state:
+                result = conn.execute(
+                    """
+                    UPDATE oauth_states SET consumed_at = %s
+                    WHERE state_hash = %s
+                      AND consumed_at IS NULL
+                      AND session = %s
+                      AND created_at > %s - make_interval(secs => %s)
+                    RETURNING state_hash
+                    """,
+                    (
+                        now,
+                        _digest(state),
+                        _digest(session or ""),
+                        now,
+                        STATE_TTL_SECONDS,
+                    ),
+                ).fetchone()
+            else:
+                # cTrader never echoes `state`, so the callback cannot present
+                # the nonce. Consume the most recent pending nonce bound to
+                # THIS admin session instead: still single-use, still
+                # TTL-bounded, still session-bound. The outer
+                # `consumed_at IS NULL` re-checks on the row the subquery
+                # picked, so concurrent callbacks cannot both consume it.
+                result = conn.execute(
+                    """
+                    UPDATE oauth_states SET consumed_at = %s
+                    WHERE consumed_at IS NULL
+                      AND state_hash = (
+                        SELECT state_hash FROM oauth_states
+                        WHERE consumed_at IS NULL
+                          AND session = %s
+                          AND created_at > %s - make_interval(secs => %s)
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                      )
+                    RETURNING state_hash
+                    """,
+                    (
+                        now,
+                        _digest(session or ""),
+                        now,
+                        STATE_TTL_SECONDS,
+                    ),
+                ).fetchone()
 
             if not result:
                 # Unknown/forged nonce, already consumed, expired, or bound
