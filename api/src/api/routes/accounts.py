@@ -8,14 +8,14 @@ from psycopg import errors
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from ..auth import require_admin
 from ..config import ApiConfig
 from ..db import get_conn
+from ..rbac import OrgContext, require_org_role, require_account_in_org
 from .settings_control import _proxy_to_copier
 
 
 class PatchAccountRequest(BaseModel):
-    """Request body for PATCH /api/accounts/{id}."""
+    """Request body for PATCH /api/orgs/{org_id}/accounts/{id}."""
     role: Optional[str] = None
     multiplier: Optional[Any] = None  # Accept any type, validate manually
     enabled: Optional[bool] = None
@@ -38,20 +38,22 @@ class AccountResponse(BaseModel):
 
 def create_accounts_router() -> APIRouter:
     """Create router for accounts management."""
-    router = APIRouter(prefix="/api", tags=["accounts"])
+    router = APIRouter(prefix="/api/orgs/{org_id}", tags=["accounts"])
 
     @router.get("/accounts", response_model=List[AccountResponse])
     async def list_accounts(
-        _: bool = Depends(require_admin),
+        ctx: OrgContext = Depends(require_org_role("viewer")),
         conn: psycopg.Connection = Depends(get_conn),
     ) -> List[AccountResponse]:
-        """List all accounts with their connection status."""
+        """List this org's accounts with their connection status."""
         rows = conn.execute(
             """SELECT a.ctid_trader_account_id, a.trader_login, a.is_live, a.role, a.enabled,
                       a.multiplier, a.status, a.last_error, c.status as conn_status, a.nickname
                FROM accounts a
                JOIN ctid_connections c ON a.ctid_connection_id = c.id
-               ORDER BY a.ctid_trader_account_id"""
+               WHERE a.org_id = %s
+               ORDER BY a.ctid_trader_account_id""",
+            (ctx.org_id,),
         ).fetchall()
 
         return [
@@ -75,7 +77,7 @@ def create_accounts_router() -> APIRouter:
         account_id: int,
         request: PatchAccountRequest,
         http_request: Request,
-        _: bool = Depends(require_admin),
+        ctx: OrgContext = Depends(require_org_role("admin")),
         conn: psycopg.Connection = Depends(get_conn),
         cfg: ApiConfig = Depends(ApiConfig.from_env),
     ):
@@ -96,13 +98,7 @@ def create_accounts_router() -> APIRouter:
             except (InvalidOperation, ValueError, TypeError):
                 raise HTTPException(status_code=400, detail="multiplier must be a valid positive number")
 
-        # Check if account exists
-        exists = conn.execute(
-            "SELECT 1 FROM accounts WHERE ctid_trader_account_id = %s",
-            (account_id,)
-        ).fetchone()
-        if not exists:
-            raise HTTPException(status_code=404, detail="Account not found")
+        require_account_in_org(conn, ctx.org_id, account_id)
 
         # Build dynamic update
         updates = []
@@ -130,8 +126,8 @@ def create_accounts_router() -> APIRouter:
             row = conn.execute(
                 """SELECT ctid_trader_account_id, trader_login, is_live, role, enabled,
                           multiplier, status, last_error, nickname FROM accounts
-                   WHERE ctid_trader_account_id = %s""",
-                (account_id,)
+                   WHERE ctid_trader_account_id = %s AND org_id = %s""",
+                (account_id, ctx.org_id)
             ).fetchone()
             return {
                 "ctid_trader_account_id": row[0],
@@ -146,7 +142,11 @@ def create_accounts_router() -> APIRouter:
             }
 
         params.append(account_id)
-        update_sql = f"UPDATE accounts SET {', '.join(updates)} WHERE ctid_trader_account_id = %s"
+        params.append(ctx.org_id)
+        update_sql = (
+            f"UPDATE accounts SET {', '.join(updates)} "
+            "WHERE ctid_trader_account_id = %s AND org_id = %s"
+        )
 
         try:
             conn.execute(update_sql, params)
@@ -161,8 +161,8 @@ def create_accounts_router() -> APIRouter:
         row = conn.execute(
             """SELECT ctid_trader_account_id, trader_login, is_live, role, enabled,
                       multiplier, status, last_error, nickname FROM accounts
-               WHERE ctid_trader_account_id = %s""",
-            (account_id,)
+               WHERE ctid_trader_account_id = %s AND org_id = %s""",
+            (account_id, ctx.org_id)
         ).fetchone()
 
         result = {
@@ -193,7 +193,7 @@ def create_accounts_router() -> APIRouter:
     async def account_details(
         account_id: int,
         http_request: Request,
-        _: bool = Depends(require_admin),
+        ctx: OrgContext = Depends(require_org_role("viewer")),
         conn: psycopg.Connection = Depends(get_conn),
         cfg: ApiConfig = Depends(ApiConfig.from_env),
     ) -> dict:
@@ -207,8 +207,8 @@ def create_accounts_router() -> APIRouter:
                       c.granted_at, c.expires_at, c.status, c.scope
                FROM accounts a
                JOIN ctid_connections c ON a.ctid_connection_id = c.id
-               WHERE a.ctid_trader_account_id = %s""",
-            (account_id,),
+               WHERE a.ctid_trader_account_id = %s AND a.org_id = %s""",
+            (account_id, ctx.org_id),
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Account not found")
@@ -246,7 +246,7 @@ def create_accounts_router() -> APIRouter:
         http_request: Request,
         from_ms: int = Query(..., alias="from"),
         to_ms: int = Query(..., alias="to"),
-        _: bool = Depends(require_admin),
+        ctx: OrgContext = Depends(require_org_role("viewer")),
         conn: psycopg.Connection = Depends(get_conn),
         cfg: ApiConfig = Depends(ApiConfig.from_env),
     ) -> dict:
@@ -255,12 +255,7 @@ def create_accounts_router() -> APIRouter:
         window per request, so the dashboard pages by date range."""
         if kind not in ("deals", "orders"):
             raise HTTPException(status_code=400, detail="kind must be deals or orders")
-        exists = conn.execute(
-            "SELECT 1 FROM accounts WHERE ctid_trader_account_id = %s",
-            (account_id,),
-        ).fetchone()
-        if not exists:
-            raise HTTPException(status_code=404, detail="Account not found")
+        require_account_in_org(conn, ctx.org_id, account_id)
 
         client = http_request.app.state.http
         return await _proxy_to_copier(
@@ -273,17 +268,12 @@ def create_accounts_router() -> APIRouter:
     @router.get("/accounts/{account_id}/symbols", response_model=List[dict])
     async def account_symbols(
         account_id: int,
-        _: bool = Depends(require_admin),
+        ctx: OrgContext = Depends(require_org_role("viewer")),
         conn: psycopg.Connection = Depends(get_conn),
     ) -> List[dict]:
         """The account's tradeable symbols from the local symbol cache (for
         the order ticket) -- no copier or broker round trip."""
-        exists = conn.execute(
-            "SELECT 1 FROM accounts WHERE ctid_trader_account_id = %s",
-            (account_id,),
-        ).fetchone()
-        if not exists:
-            raise HTTPException(status_code=404, detail="Account not found")
+        require_account_in_org(conn, ctx.org_id, account_id)
 
         rows = conn.execute(
             """SELECT name, symbol_id, digits, lot_size, min_volume, step_volume
@@ -305,7 +295,7 @@ def create_accounts_router() -> APIRouter:
     async def disconnect_account(
         account_id: int,
         http_request: Request,
-        _: bool = Depends(require_admin),
+        ctx: OrgContext = Depends(require_org_role("admin")),
         conn: psycopg.Connection = Depends(get_conn),
         cfg: ApiConfig = Depends(ApiConfig.from_env),
     ):
@@ -317,8 +307,8 @@ def create_accounts_router() -> APIRouter:
         accounts are de-authorized immediately rather than on next restart.
         """
         row = conn.execute(
-            "SELECT ctid_connection_id FROM accounts WHERE ctid_trader_account_id = %s",
-            (account_id,),
+            "SELECT ctid_connection_id FROM accounts WHERE ctid_trader_account_id = %s AND org_id = %s",
+            (account_id, ctx.org_id),
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Account not found")
@@ -329,7 +319,10 @@ def create_accounts_router() -> APIRouter:
             (connection_id,),
         ).fetchone()
 
-        conn.execute("DELETE FROM ctid_connections WHERE id = %s", (connection_id,))
+        conn.execute(
+            "DELETE FROM ctid_connections WHERE id = %s AND org_id = %s",
+            (connection_id, ctx.org_id),
+        )
 
         result = {
             "detail": "Connection deleted. Note: tokens remain revocable at ctrader.com",
