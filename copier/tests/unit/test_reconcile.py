@@ -29,29 +29,35 @@ def repo(db):
 
 @pytest.fixture(autouse=True)
 def seed_accounts_and_mappings(db):
-    """Seed accounts for testing."""
+    """Seed one org (id=1, thanks to RESTART IDENTITY in the db fixture) with
+    accounts for testing."""
     with psycopg.connect(db, autocommit=True) as conn:
+        (org_id,) = conn.execute(
+            "INSERT INTO orgs (name) VALUES ('Test Org') RETURNING id"
+        ).fetchone()
+
         # Create a ctid_connection
         conn.execute(
             """
-            INSERT INTO ctid_connections (access_token_enc, refresh_token_enc, granted_at, expires_at)
-            VALUES (%s, %s, now(), now() + interval '1 hour')
+            INSERT INTO ctid_connections (org_id, access_token_enc, refresh_token_enc, granted_at, expires_at)
+            VALUES (%s, %s, %s, now(), now() + interval '1 hour')
             RETURNING id
             """,
-            ("token_access", "token_refresh"),
+            (org_id, "token_access", "token_refresh"),
         )
 
         # Create accounts: 1001 (master), 2001/2002 (slaves)
         conn.execute(
             """
-            INSERT INTO accounts (ctid_trader_account_id, ctid_connection_id, trader_login, is_live, role, enabled, multiplier)
+            INSERT INTO accounts (ctid_trader_account_id, org_id, ctid_connection_id, trader_login, is_live, role, enabled, multiplier)
             VALUES
-                (1001, 1, 10001, false, 'master', true, 1.0),
-                (2001, 1, 20001, false, 'slave', true, 1.0),
-                (2002, 1, 20002, false, 'slave', false, 1.0)
-            """
+                (1001, %(org_id)s, 1, 10001, false, 'master', true, 1.0),
+                (2001, %(org_id)s, 1, 20001, false, 'slave', true, 1.0),
+                (2002, %(org_id)s, 1, 20002, false, 'slave', false, 1.0)
+            """,
+            {"org_id": org_id},
         )
-    yield
+    yield org_id
 
 
 class TestPositionSnapshot:
@@ -443,6 +449,7 @@ class TestComputeDrift:
 MASTER_ID = 1001
 SLAVE_ID = 2001            # enabled, per seed_accounts_and_mappings
 DISABLED_SLAVE_ID = 2002   # disabled, per seed_accounts_and_mappings
+ORG_ID = 1                 # per seed_accounts_and_mappings (first org after RESTART IDENTITY)
 
 
 class TestReconciler:
@@ -505,6 +512,7 @@ class TestReconciler:
             repo=repo,
             dispatcher=dispatcher,
             master_account_id=MASTER_ID,
+            org_id=ORG_ID,
         )
         assert reconciler.master_account_id == MASTER_ID
         assert reconciler.current == []
@@ -538,12 +546,12 @@ class TestReconciler:
 
         # Seed the missing_slave_copy mapping: master position 2 -> slave position
         # 5002, which never materializes on the slave broker.
-        repo.create_position_mapping(master_position_id=2, slave_account_id=SLAVE_ID, client_order_id="cm2.2001")
+        repo.create_position_mapping(master_position_id=2, slave_account_id=SLAVE_ID, client_order_id="cm2.2001", org_id=ORG_ID)
         repo.activate_position_mapping(2001, "cm2.2001", slave_position_id=5002, slave_volume=100_000)
 
         # Seed the unfilled_slave_order mapping: order placed & linked to a master
         # fill, but no corresponding slave position ever appeared.
-        repo.create_order_mapping(master_order_id=100, slave_account_id=SLAVE_ID, client_order_id="co100.2001")
+        repo.create_order_mapping(master_order_id=100, slave_account_id=SLAVE_ID, client_order_id="co100.2001", org_id=ORG_ID)
         repo.activate_order_mapping(2001, "co100.2001", slave_order_id=9000)
         repo.link_pending_fill(master_order_id=100, slave_account_id=SLAVE_ID, master_position_id=55)
 
@@ -552,6 +560,7 @@ class TestReconciler:
             repo=repo,
             dispatcher=dispatcher,
             master_account_id=MASTER_ID,
+            org_id=ORG_ID,
         )
 
         items = yield reconciler.run()
@@ -608,6 +617,7 @@ class TestReconciler:
             repo=repo,
             dispatcher=dispatcher,
             master_account_id=MASTER_ID,
+            org_id=ORG_ID,
         )
 
         items = yield reconciler.run()
@@ -638,6 +648,7 @@ class TestReconciler:
             repo=repo,
             dispatcher=dispatcher,
             master_account_id=MASTER_ID,
+            org_id=ORG_ID,
         )
 
         items = yield reconciler.run()
@@ -677,6 +688,7 @@ class TestReconciler:
             repo=repo,
             dispatcher=dispatcher,
             master_account_id=MASTER_ID,
+            org_id=ORG_ID,
         )
 
         items = yield reconciler.run()
@@ -703,6 +715,7 @@ class TestReconciler:
             repo=repo,
             dispatcher=dispatcher,
             master_account_id=MASTER_ID,
+            org_id=ORG_ID,
         )
         item = DriftItem(
             id="test_1",
@@ -739,6 +752,7 @@ class TestReconciler:
             repo=repo,
             dispatcher=dispatcher,
             master_account_id=MASTER_ID,
+            org_id=ORG_ID,
         )
         pos = PositionSnapshot(position_id=999, symbol_id=1, side=Side.BUY,
                                volume=100_000, price=1.10, label="")
@@ -775,6 +789,160 @@ class TestReconciler:
         items = yield reconciler.run()
         assert [i.id for i in items] == [item_id]
         assert warning_count() == 2
+
+    @pytest_twisted.inlineCallbacks
+    def test_run_is_org_scoped(self, repo, dispatcher, fake_server, make_client, db):
+        """Org A's reconciler must not fetch snapshots for, or report drift
+        against, org B's accounts or mappings."""
+        srv, port = fake_server
+
+        with psycopg.connect(db, autocommit=True) as conn:
+            (org_a,) = conn.execute(
+                "INSERT INTO orgs (name) VALUES ('Org A') RETURNING id").fetchone()
+            (org_b,) = conn.execute(
+                "INSERT INTO orgs (name) VALUES ('Org B') RETURNING id").fetchone()
+            (conn_a,) = conn.execute(
+                """INSERT INTO ctid_connections (org_id, access_token_enc, refresh_token_enc,
+                       granted_at, expires_at)
+                   VALUES (%s, 'x', 'x', now(), now() + interval '30 days')
+                   RETURNING id""", (org_a,)).fetchone()
+            (conn_b,) = conn.execute(
+                """INSERT INTO ctid_connections (org_id, access_token_enc, refresh_token_enc,
+                       granted_at, expires_at)
+                   VALUES (%s, 'x', 'x', now(), now() + interval '30 days')
+                   RETURNING id""", (org_b,)).fetchone()
+            conn.execute(
+                """
+                INSERT INTO accounts (ctid_trader_account_id, org_id, ctid_connection_id,
+                                       trader_login, is_live, role, enabled, multiplier)
+                VALUES
+                    (100, %(org_a)s, %(conn_a)s, 100, false, 'master', true, 1.0),
+                    (101, %(org_a)s, %(conn_a)s, 101, false, 'slave', true, 1.0),
+                    (200, %(org_b)s, %(conn_b)s, 200, false, 'master', true, 1.0),
+                    (201, %(org_b)s, %(conn_b)s, 201, false, 'slave', true, 1.0)
+                """,
+                {"org_a": org_a, "conn_a": conn_a, "org_b": org_b, "conn_b": conn_b},
+            )
+
+        # One active mapping per org, each matching what the broker reports
+        # (so it produces no drift on its own).
+        repo.create_position_mapping(master_position_id=1, slave_account_id=101,
+                                      client_order_id="cm1.101", org_id=org_a)
+        repo.activate_position_mapping(101, "cm1.101", slave_position_id=5002, slave_volume=100_000)
+        repo.create_position_mapping(master_position_id=2, slave_account_id=201,
+                                      client_order_id="cm2.201", org_id=org_b)
+        repo.activate_position_mapping(201, "cm2.201", slave_position_id=9002, slave_volume=100_000)
+
+        srv.accounts = {100: "tok-100", 101: "tok-101", 200: "tok-200", 201: "tok-201"}
+        srv.open_positions = {
+            100: [{"position_id": 1, "symbol_id": 1, "volume": 100_000,
+                   "trade_side": ProtoOATradeSide.BUY, "price": 1.10}],
+            101: [
+                {"position_id": 5002, "symbol_id": 1, "volume": 100_000,
+                 "trade_side": ProtoOATradeSide.BUY, "price": 1.10, "label": "copy:m1"},
+                # Labeled, unmapped -- a genuine orphan for org A.
+                {"position_id": 5001, "symbol_id": 1, "volume": 50_000,
+                 "trade_side": ProtoOATradeSide.BUY, "price": 1.20, "label": "copy:m999"},
+            ],
+            200: [{"position_id": 2, "symbol_id": 1, "volume": 100_000,
+                   "trade_side": ProtoOATradeSide.BUY, "price": 1.15}],
+            201: [
+                {"position_id": 9002, "symbol_id": 1, "volume": 100_000,
+                 "trade_side": ProtoOATradeSide.BUY, "price": 1.15, "label": "copy:m2"},
+                # Same shape of orphan as org A's -- must NEVER be seen by
+                # org A's Reconciler.
+                {"position_id": 9000, "symbol_id": 1, "volume": 50_000,
+                 "trade_side": ProtoOATradeSide.BUY, "price": 1.20, "label": "copy:m999"},
+            ],
+        }
+
+        client = yield make_client([100, 101, 200, 201])
+        requested_accounts = []
+
+        def _clients_by_account(account_id):
+            requested_accounts.append(account_id)
+            return client
+
+        reconciler = Reconciler(
+            clients_by_account=_clients_by_account,
+            repo=repo,
+            dispatcher=dispatcher,
+            master_account_id=100,
+            org_id=org_a,
+        )
+
+        items = yield reconciler.run()
+
+        # Snapshot requests confined to org A's accounts -- org B's master/slave
+        # (200/201) must never be queried, even though 201 is scripted with an
+        # orphan of the exact same shape as org A's.
+        assert set(requested_accounts) <= {100, 101}
+        assert 200 not in requested_accounts
+        assert 201 not in requested_accounts
+
+        # Only org A's own orphan is reported; org B's identically-shaped
+        # orphan (account 201) never leaks in.
+        assert [(i.kind, i.account_id, i.position_id) for i in items] == [
+            ('orphan_slave_position', 101, 5001),
+        ]
+        assert reconciler.current is items
+        assert all(i.account_id in (100, 101) for i in reconciler.current)
+
+        # 'drift' events are logged for org A only; org B's org_id never appears.
+        rows = self._drift_events(repo)
+        assert len(rows) == 1
+        assert rows[0]['org_id'] == org_a
+        assert all(r['org_id'] != org_b for r in rows)
+
+    @pytest_twisted.inlineCallbacks
+    def test_dry_run_org_stale_pending_is_not_reported_as_drift(self, repo, dispatcher, db):
+        """Regression pin: run() must read dry_run from repo.get_org(self.org_id),
+        not the removed Settings.dry_run. Before the fix, that read raised
+        AttributeError, was swallowed, and silently fell back to dry_run=False
+        -- so a dry-run org's stale-pending mappings (which STAY pending by
+        design, see compute_drift) got reported as drift on every tick."""
+        with psycopg.connect(db, autocommit=True) as conn:
+            (org_id,) = conn.execute(
+                "INSERT INTO orgs (name, dry_run) VALUES ('Dry Run Org', true) RETURNING id"
+            ).fetchone()
+            (conn_id,) = conn.execute(
+                """INSERT INTO ctid_connections (org_id, access_token_enc, refresh_token_enc,
+                       granted_at, expires_at)
+                   VALUES (%s, 'x', 'x', now(), now() + interval '30 days')
+                   RETURNING id""", (org_id,)).fetchone()
+            conn.execute(
+                """
+                INSERT INTO accounts (ctid_trader_account_id, org_id, ctid_connection_id,
+                                       trader_login, is_live, role, enabled, multiplier)
+                VALUES
+                    (300, %(org_id)s, %(conn_id)s, 300, false, 'master', true, 1.0),
+                    (301, %(org_id)s, %(conn_id)s, 301, false, 'slave', true, 1.0)
+                """,
+                {"org_id": org_id, "conn_id": conn_id},
+            )
+
+        repo.create_position_mapping(master_position_id=1, slave_account_id=301,
+                                      client_order_id="cm1.301", org_id=org_id)
+        with psycopg.connect(db, autocommit=True) as conn:
+            conn.execute(
+                "UPDATE mappings SET created_at = now() - interval '10 minutes' "
+                "WHERE client_order_id = %s",
+                ("cm1.301",),
+            )
+
+        reconciler = Reconciler(
+            clients_by_account=Mock(),
+            repo=repo,
+            dispatcher=dispatcher,
+            master_account_id=300,
+            org_id=org_id,
+        )
+        reconciler._fetch_snapshot = lambda account_id: defer.succeed(([], []))
+
+        items = yield reconciler.run()
+
+        assert [i for i in items if i.kind == 'stale_pending_copy'] == []
+        assert self._drift_events(repo) == []
 
 
 # ---------- N8: a copy that never activates ----------

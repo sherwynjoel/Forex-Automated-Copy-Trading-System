@@ -357,6 +357,7 @@ class Reconciler:
         repo: Repo,
         dispatcher: Dispatcher,
         master_account_id: int,
+        org_id: int,
     ):
         """Initialize Reconciler.
 
@@ -365,11 +366,15 @@ class Reconciler:
             repo: Repository for mappings and events
             dispatcher: Dispatcher for remedies (only used by close_orphan for user-initiated close)
             master_account_id: The master account ID
+            org_id: The org this Reconciler serves -- exactly one org per
+                instance. Every repo read/write it performs is scoped or
+                stamped with this id.
         """
         self.clients_by_account = clients_by_account
         self.repo = repo
         self.dispatcher = dispatcher
         self.master_account_id = master_account_id
+        self.org_id = org_id
         self.current: list[DriftItem] = []
         # Snapshot of the most recent slave positions per account, captured by
         # run(). Used by close_orphan()/adopt() to determine the real live
@@ -442,7 +447,7 @@ class Reconciler:
         Returns:
             Deferred[list[DriftItem]] - the computed drift items
         """
-        accounts = self.repo.load_accounts()
+        accounts = [a for a in self.repo.load_accounts() if a.org_id == self.org_id]
         enabled_slave_ids = {a.account_id for a in accounts if a.role == 'slave' and a.enabled}
 
         master_positions, master_orders = yield self._fetch_snapshot(self.master_account_id)
@@ -462,15 +467,15 @@ class Reconciler:
             for account_id, positions in slave_positions.items()
         }
 
-        mappings = self.repo.mapping_rows()
+        mappings = self.repo.mapping_rows(org_id=self.org_id)
 
         # dry_run gates the stale-pending check only (see compute_drift):
         # dry-run mappings are pending BY DESIGN and must not be reported as
         # drift while Stage 1 is running.
         try:
-            dry_run = self.repo.get_settings().dry_run
+            dry_run = self.repo.get_org(self.org_id).dry_run
         except Exception:
-            log.exception("reconcile: could not read settings; assuming dry_run=False")
+            log.exception("reconcile: could not read org settings; assuming dry_run=False")
             dry_run = False
 
         items = compute_drift(
@@ -503,6 +508,7 @@ class Reconciler:
                     'detail': item.detail,
                 },
                 account_id=item.account_id,
+                org_id=self.org_id,
             )
 
         self.current = items
@@ -525,7 +531,7 @@ class Reconciler:
         if snapshot is not None:
             return snapshot.volume
 
-        for m in self.repo.mapping_rows():
+        for m in self.repo.mapping_rows(org_id=self.org_id):
             if (m.get('slave_account_id') == account_id and
                 m.get('slave_position_id') == position_id and
                 m.get('status') == 'active'):
@@ -577,7 +583,7 @@ class Reconciler:
 
         # Dispatch it
         try:
-            self.dispatcher.dispatch([intent])
+            self.dispatcher.dispatch([intent], org_id=self.org_id)
             d.callback(None)
         except Exception as e:
             d.errback(e)
@@ -628,6 +634,7 @@ class Reconciler:
                 slave_account_id=item.account_id,
                 slave_position_id=item.position_id,
                 slave_volume=slave_volume,
+                org_id=self.org_id,
             )
             d.callback(None)
         except Exception as e:
@@ -672,6 +679,7 @@ class Reconciler:
                     'detail': item.detail,
                 },
                 account_id=item.account_id,
+                org_id=self.org_id,
             )
             # Make the dismissal actually stick: hide the item from /state
             # immediately and keep it suppressed across periodic resyncs
