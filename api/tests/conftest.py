@@ -90,7 +90,6 @@ def app_client(db):
     # Set up test environment variables
     os.environ["POSTGRES_DSN"] = db
     os.environ["SESSION_SECRET"] = "test-secret"
-    os.environ["ADMIN_BOOTSTRAP_PASSWORD"] = "hunter2!"
     os.environ["COPIER_CONTROL_URL"] = "http://copier.test"
     os.environ["COOKIE_SECURE"] = "false"  # Disable Secure flag in tests
     os.environ["CTRADER_CLIENT_ID"] = "test-client-id"
@@ -102,10 +101,6 @@ def app_client(db):
 
     # Import after setting env vars
     from api.main import create_app
-    from api.auth import ensure_admin
-
-    # Explicitly bootstrap admin BEFORE creating the app
-    ensure_admin(db, "hunter2!")
 
     # Create injectable mock transport with configurable callback
     mock_transport = MockTransportWrapper(default_mock_callback)
@@ -143,7 +138,6 @@ def app_client_with_lifespan(db):
     # Set up test environment variables
     os.environ["POSTGRES_DSN"] = db
     os.environ["SESSION_SECRET"] = "test-secret"
-    os.environ["ADMIN_BOOTSTRAP_PASSWORD"] = "hunter2!"
     os.environ["COPIER_CONTROL_URL"] = "http://copier.test"
     os.environ["COOKIE_SECURE"] = "false"  # Disable Secure flag in tests
     os.environ["CTRADER_CLIENT_ID"] = "test-client-id"
@@ -155,11 +149,7 @@ def app_client_with_lifespan(db):
 
     # Import after setting env vars
     from api.main import create_app
-    from api.auth import ensure_admin
     from api.ws import broadcaster
-
-    # Explicitly bootstrap admin BEFORE creating the app
-    ensure_admin(db, "hunter2!")
 
     # Reset broadcaster for this test (clean slate)
     broadcaster.connections.clear()
@@ -194,7 +184,6 @@ def _set_live_test_env(db: str) -> None:
     fernet_key = Fernet.generate_key().decode()
     os.environ["POSTGRES_DSN"] = db
     os.environ["SESSION_SECRET"] = "test-secret"
-    os.environ["ADMIN_BOOTSTRAP_PASSWORD"] = "hunter2!"
     os.environ["COPIER_CONTROL_URL"] = "http://copier.test"
     os.environ["COOKIE_SECURE"] = "false"
     os.environ["CTRADER_CLIENT_ID"] = "test-client-id"
@@ -223,11 +212,7 @@ def live_server(db):
     _set_live_test_env(db)
 
     from api.main import create_app
-    from api.auth import ensure_admin
     from api.ws import broadcaster
-
-    # Bootstrap admin before the server starts serving requests.
-    ensure_admin(db, "hunter2!")
 
     # broadcaster is a module-level singleton reused across tests/fixtures in this
     # process -- reset it to a clean slate before this test's server starts.
@@ -345,3 +330,53 @@ def copier_error_response(app_client):
             self.wrapper.set_callback(default_mock_callback)
 
     return CopierResponseConfig(wrapper)
+
+
+@pytest.fixture
+def make_user(db):
+    """Create a user directly in the DB; returns {id, email, password, display_name}."""
+    from api.auth import hash_password
+
+    def _make(email="user@example.com", password="a-solid-password", display_name="User"):
+        with psycopg.connect(db, autocommit=True) as conn:
+            (user_id,) = conn.execute(
+                "INSERT INTO users (email, password_hash, display_name) "
+                "VALUES (%s, %s, %s) RETURNING id",
+                (email, hash_password(password), display_name),
+            ).fetchone()
+        return {"id": user_id, "email": email, "password": password,
+                "display_name": display_name}
+
+    return _make
+
+
+@pytest.fixture
+def make_org(db):
+    """Create an org with memberships: make_org(name, members=[(user, role), ...])."""
+
+    def _make(name="Desk", members=()):
+        with psycopg.connect(db, autocommit=True) as conn:
+            (org_id,) = conn.execute(
+                "INSERT INTO orgs (name) VALUES (%s) RETURNING id", (name,)
+            ).fetchone()
+            for user, role in members:
+                conn.execute(
+                    "INSERT INTO org_memberships (org_id, user_id, role) "
+                    "VALUES (%s, %s, %s)",
+                    (org_id, user["id"], role),
+                )
+        return org_id
+
+    return _make
+
+
+@pytest.fixture
+def login_as():
+    """Log a TestClient in as a make_user() user (sets session+csrf cookies)."""
+
+    def _login(client, user):
+        r = client.post("/api/login", json={
+            "email": user["email"], "password": user["password"]})
+        assert r.status_code == 204, f"login failed: {r.status_code} {r.text}"
+
+    return _login

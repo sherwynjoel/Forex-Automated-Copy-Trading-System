@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import ApiConfig
 from .auth import (
-    ensure_admin,
+    ensure_bootstrap_user,
     LoginRateLimiter,
     CSRFMiddleware,
     create_auth_router,
@@ -38,7 +38,9 @@ def create_app(http_transport: Optional[httpx.BaseTransport] = None) -> FastAPI:
         """Manage app startup and shutdown."""
         # Startup
         cfg = ApiConfig.from_env()
-        ensure_admin(cfg.postgres_dsn, cfg.admin_bootstrap_password)
+        if cfg.bootstrap_admin_email and cfg.bootstrap_admin_password:
+            ensure_bootstrap_user(
+                cfg.postgres_dsn, cfg.bootstrap_admin_email, cfg.bootstrap_admin_password)
 
         # Set up async HTTP client with optional transport injection
         if http_transport:

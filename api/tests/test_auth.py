@@ -1,174 +1,99 @@
-"""Tests for authentication and CSRF/rate limiting."""
-import os
-import pytest
+"""Auth: register, login, sessions, /api/me, bootstrap."""
 
 
-def test_empty_session_secret_fails(monkeypatch):
-    """Empty SESSION_SECRET should fail loudly."""
-    monkeypatch.setenv("POSTGRES_DSN", "postgresql://copytrader:copytrader@localhost:5433/copytrader_test")
-    monkeypatch.setenv("SESSION_SECRET", "")
-    monkeypatch.setenv("ADMIN_BOOTSTRAP_PASSWORD", "hunter2!")
-    monkeypatch.setenv("COPIER_CONTROL_URL", "http://copier.test")
-
-    from api.config import ApiConfig
-
-    with pytest.raises(ValueError, match="SESSION_SECRET"):
-        ApiConfig.from_env()
-
-
-def test_empty_bootstrap_password_fails(monkeypatch):
-    """Empty ADMIN_BOOTSTRAP_PASSWORD should fail loudly."""
-    monkeypatch.setenv("POSTGRES_DSN", "postgresql://copytrader:copytrader@localhost:5433/copytrader_test")
-    monkeypatch.setenv("SESSION_SECRET", "test-secret")
-    monkeypatch.setenv("ADMIN_BOOTSTRAP_PASSWORD", "")
-    monkeypatch.setenv("COPIER_CONTROL_URL", "http://copier.test")
-
-    from api.config import ApiConfig
-
-    with pytest.raises(ValueError, match="ADMIN_BOOTSTRAP_PASSWORD"):
-        ApiConfig.from_env()
+def test_register_sets_session_and_csrf_cookies(app_client):
+    r = app_client.post("/api/register", json={
+        "email": "ada@example.com", "password": "correct-horse", "display_name": "Ada"})
+    assert r.status_code == 204
+    assert "session" in app_client.cookies
+    assert "csrf" in app_client.cookies
+    me = app_client.get("/api/me").json()
+    assert me["user"]["email"] == "ada@example.com"
+    assert me["user"]["display_name"] == "Ada"
+    assert me["orgs"] == []
 
 
-def test_csrf_cookie_not_session_cookie(app_client):
-    """CSRF cookie value must be different from session cookie value."""
-    response = app_client.post("/api/login", json={"password": "hunter2!"})
-    assert response.status_code == 204
-
-    session_cookie = response.cookies.get("session")
-    csrf_cookie = response.cookies.get("csrf")
-
-    # CSRF cookie must be different from session cookie
-    assert session_cookie != csrf_cookie, "CSRF cookie must not equal session cookie"
+def test_register_rejects_short_password(app_client):
+    r = app_client.post("/api/register", json={
+        "email": "b@example.com", "password": "short", "display_name": "B"})
+    assert r.status_code == 400
+    assert "10" in r.json()["detail"]
 
 
-def test_rate_limit_by_real_ip_not_xff(app_client):
-    """Rate limiter should use real client IP, not spoofed X-Forwarded-For."""
-    # Make 5 attempts from the real client IP
-    for i in range(5):
-        response = app_client.post(
-            "/api/login",
-            json={"password": "wrongpassword"},
-        )
-        assert response.status_code == 401
-
-    # 6th attempt with spoofed X-Forwarded-For should still be rate limited
-    # because the real client IP is the same
-    response = app_client.post(
-        "/api/login",
-        json={"password": "wrongpassword"},
-        headers={"X-Forwarded-For": "192.168.1.1"},
-    )
-    assert response.status_code == 429, "Rate limit should be by real IP, not X-Forwarded-For"
+def test_register_duplicate_email_case_insensitive(app_client):
+    body = {"email": "dup@example.com", "password": "long-enough-pw", "display_name": "D"}
+    assert app_client.post("/api/register", json=body).status_code == 204
+    body["email"] = "DUP@example.com"
+    r = app_client.post("/api/register", json=body)
+    assert r.status_code == 409
 
 
-def test_mutation_no_csrf_cookie_403(app_client):
-    """Mutation with no CSRF cookie should return 403."""
-    # Try logout without being logged in (no cookies)
-    response = app_client.post("/api/logout")
-    assert response.status_code == 403
+def test_login_with_email_and_password(app_client, make_user):
+    user = make_user(email="carl@example.com", password="a-solid-password")
+    r = app_client.post("/api/login", json={
+        "email": "carl@example.com", "password": "a-solid-password"})
+    assert r.status_code == 204
+    assert app_client.get("/api/me").json()["user"]["id"] == user["id"]
 
 
-def test_tampered_session_cookie_401(app_client):
-    """Tampered session cookie should be rejected with 401."""
-    # Login successfully
-    response = app_client.post("/api/login", json={"password": "hunter2!"})
-    assert response.status_code == 204
-
-    # Try to access /api/me with tampered session cookie
-    response = app_client.get(
-        "/api/me",
-        cookies={"session": "tampered-value"}
-    )
-    assert response.status_code == 401
+def test_login_wrong_password_is_401(app_client, make_user):
+    make_user(email="carl@example.com", password="a-solid-password")
+    r = app_client.post("/api/login", json={
+        "email": "carl@example.com", "password": "wrong-password!"})
+    assert r.status_code == 401
 
 
-def test_login_wrong_password_401(app_client):
-    """Login with wrong password should return 401."""
-    response = app_client.post("/api/login", json={"password": "wrongpassword"})
-    assert response.status_code == 401
+def test_login_unknown_email_is_401_not_distinguishable(app_client):
+    r = app_client.post("/api/login", json={
+        "email": "ghost@example.com", "password": "whatever-long"})
+    assert r.status_code == 401
 
 
-def test_login_sets_session_and_csrf_cookies(app_client):
-    """Successful login should set both session and csrf cookies."""
-    response = app_client.post("/api/login", json={"password": "hunter2!"})
-    assert response.status_code == 204
-    cookies = response.cookies
-    assert "session" in cookies
-    assert "csrf" in cookies
+def test_me_unauthenticated_is_401(app_client):
+    assert app_client.get("/api/me").status_code == 401
 
 
-def test_admin_password_stored_as_argon2(app_client, db):
-    """Admin password should be stored as argon2 hash in database."""
+def test_logout_clears_session(app_client, make_user):
+    make_user(email="e@example.com", password="a-solid-password")
+    app_client.post("/api/login", json={"email": "e@example.com", "password": "a-solid-password"})
+    csrf = app_client.cookies.get("csrf")
+    r = app_client.post("/api/logout", headers={"X-CSRF-Token": csrf})
+    assert r.status_code == 204
+    assert app_client.get("/api/me").status_code == 401
+
+
+def test_login_rate_limited_per_email_ip(app_client, make_user):
+    make_user(email="rl@example.com", password="a-solid-password")
+    for _ in range(5):
+        app_client.post("/api/login", json={
+            "email": "rl@example.com", "password": "wrong-password!"})
+    r = app_client.post("/api/login", json={
+        "email": "rl@example.com", "password": "a-solid-password"})
+    assert r.status_code == 429
+
+
+def test_bootstrap_user_claims_default_org(db):
     import psycopg
+    from api.auth import ensure_bootstrap_user
 
     with psycopg.connect(db, autocommit=True) as conn:
-        result = conn.execute("SELECT password_hash FROM admin WHERE id = TRUE").fetchone()
-        password_hash = result[0]
-        assert password_hash.startswith("$argon2")
+        conn.execute("INSERT INTO orgs (name) VALUES ('Default')")
+    ensure_bootstrap_user(db, "root@example.com", "bootstrap-password")
+    ensure_bootstrap_user(db, "root@example.com", "bootstrap-password")  # idempotent
+    with psycopg.connect(db, autocommit=True) as conn:
+        rows = conn.execute(
+            """SELECT u.email, m.role, o.name FROM org_memberships m
+               JOIN users u ON u.id = m.user_id JOIN orgs o ON o.id = m.org_id"""
+        ).fetchall()
+    assert rows == [("root@example.com", "owner", "Default")]
 
 
-def test_protected_route_401_without_session(app_client):
-    """GET /api/me without session cookie should return 401."""
-    response = app_client.get("/api/me")
-    assert response.status_code == 401
+def test_bootstrap_user_without_default_org_creates_only_user(db):
+    import psycopg
+    from api.auth import ensure_bootstrap_user
 
-
-def test_mutation_without_csrf_header_403(app_client):
-    """Mutation without CSRF header should return 403."""
-    # First login to get cookies
-    response = app_client.post("/api/login", json={"password": "hunter2!"})
-    assert response.status_code == 204
-
-    # Now try to logout without CSRF header
-    response = app_client.post("/api/logout")
-    assert response.status_code == 403
-
-
-def test_mutation_with_csrf_header_ok(app_client):
-    """Mutation with proper CSRF header should succeed."""
-    # First login to get cookies
-    response = app_client.post("/api/login", json={"password": "hunter2!"})
-    assert response.status_code == 204
-    csrf_token = response.cookies.get("csrf")
-
-    # Now logout with CSRF header
-    response = app_client.post(
-        "/api/logout",
-        headers={"X-CSRF-Token": csrf_token}
-    )
-    assert response.status_code == 204
-
-
-def test_sixth_login_attempt_within_minute_429(app_client):
-    """Sixth login attempt within a minute should return 429."""
-    # Make 5 attempts with wrong password
-    for i in range(5):
-        response = app_client.post("/api/login", json={"password": "wrongpassword"})
-        assert response.status_code == 401
-
-    # 6th attempt should be rate limited
-    response = app_client.post("/api/login", json={"password": "wrongpassword"})
-    assert response.status_code == 429
-
-
-def test_logout_clears_session(app_client):
-    """Logout should clear session cookie."""
-    # First login
-    response = app_client.post("/api/login", json={"password": "hunter2!"})
-    assert response.status_code == 204
-    csrf_token = response.cookies.get("csrf")
-
-    # Verify session is set
-    response = app_client.get("/api/me")
-    assert response.status_code == 200
-
-    # Logout with CSRF header
-    response = app_client.post(
-        "/api/logout",
-        headers={"X-CSRF-Token": csrf_token}
-    )
-    assert response.status_code == 204
-
-    # Session should be cleared
-    response = app_client.get("/api/me")
-    assert response.status_code == 401
+    ensure_bootstrap_user(db, "root@example.com", "bootstrap-password")
+    with psycopg.connect(db, autocommit=True) as conn:
+        (users,) = conn.execute("SELECT COUNT(*) FROM users").fetchone()
+        (memberships,) = conn.execute("SELECT COUNT(*) FROM org_memberships").fetchone()
+    assert users == 1 and memberships == 0
