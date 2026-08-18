@@ -55,6 +55,9 @@ from copier.testing.fake_server import FakeCTraderServer
 MASTER_ID = 100
 SLAVE1_ID = 101   # multiplier 1.0
 SLAVE2_ID = 102   # multiplier 0.5
+# The single tenant every test here runs as. The `db` fixture truncates with
+# RESTART IDENTITY, so the org seeded by _setup()/_setup_empty() is always 1.
+ORG_ID = 1
 SYMBOL_ID = 1     # EURUSD, the fake server's only symbol
 ONE_LOT = 10_000_000   # ProtoOASymbol.lotSize for EURUSD in FakeCTraderServer
 ACCESS_TOKEN = "e2e-access-token"
@@ -66,36 +69,39 @@ FERNET_KEY = Fernet.generate_key().decode()
 
 # ---------- setup / teardown ----------
 
+def _seed_org(dsn: str) -> int:
+    """Insert the single org these tests run as (id ORG_ID after truncation).
+
+    Every ctid_connection and account belongs to an org (NOT NULL since
+    migration 005), and the copier's kill switch / dry-run flags live on the
+    org row, so the tenant has to exist before anything else is seeded.
+    """
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        (org_id,) = conn.execute(
+            "INSERT INTO orgs (name) VALUES ('E2E Org') RETURNING id").fetchone()
+    return org_id
+
+
 def _setup(dsn: str, auto_fill: bool = True):
     """Build a fresh FakeCTraderServer + real CopierApp wired via build_app().
 
-    Seeds one ctid_connections row and three accounts (100 master, 101 slave
-    @1.0x, 102 slave @0.5x) sharing that connection's token pair -- exactly
-    what a single cTrader OAuth grant covering multiple accounts looks like.
-    All accounts are demo (is_live=False), so build_app's shards=1 wiring
+    Seeds one org, one ctid_connections row and three accounts (100 master,
+    101 slave @1.0x, 102 slave @0.5x) sharing that connection's token pair --
+    exactly what a single cTrader OAuth grant covering multiple accounts looks
+    like. All accounts are demo (is_live=False), so build_app's shards=1 wiring
     gives them a single shared CTraderClient/TCP connection to this one
     server. Caller must yield app.startup() and eventually call _teardown().
     """
     server = FakeCTraderServer(auto_fill=auto_fill)
     port = server.listen(reactor)
 
+    org_id = _seed_org(dsn)
     token_store = TokenStore(dsn, FERNET_KEY)
     expires_at = datetime.utcnow() + timedelta(days=60)
-    connection_id = token_store.save_grant(ACCESS_TOKEN, "e2e-refresh-token", expires_at)
+    connection_id = token_store.save_grant(
+        ACCESS_TOKEN, "e2e-refresh-token", expires_at, org_id)
 
-    with psycopg.connect(dsn, autocommit=True) as conn:
-        conn.execute(
-            """
-            INSERT INTO accounts
-                (ctid_trader_account_id, ctid_connection_id, trader_login, is_live,
-                 role, enabled, multiplier)
-            VALUES
-                (%(master)s, %(conn)s, 90100, false, 'master', true, 1.0),
-                (%(slave1)s, %(conn)s, 90101, false, 'slave',  true, 1.0),
-                (%(slave2)s, %(conn)s, 90102, false, 'slave',  true, 0.5)
-            """,
-            {"master": MASTER_ID, "slave1": SLAVE1_ID, "slave2": SLAVE2_ID, "conn": connection_id},
-        )
+    _insert_accounts(dsn, connection_id, org_id)
 
     server.accounts = {MASTER_ID: ACCESS_TOKEN, SLAVE1_ID: ACCESS_TOKEN, SLAVE2_ID: ACCESS_TOKEN}
 
@@ -125,9 +131,11 @@ def _setup_empty(dsn: str, auto_fill: bool = True):
     server = FakeCTraderServer(auto_fill=auto_fill)
     port = server.listen(reactor)
 
+    org_id = _seed_org(dsn)
     token_store = TokenStore(dsn, FERNET_KEY)
     expires_at = datetime.utcnow() + timedelta(days=60)
-    connection_id = token_store.save_grant(ACCESS_TOKEN, "e2e-refresh-token", expires_at)
+    connection_id = token_store.save_grant(
+        ACCESS_TOKEN, "e2e-refresh-token", expires_at, org_id)
 
     server.accounts = {MASTER_ID: ACCESS_TOKEN, SLAVE1_ID: ACCESS_TOKEN, SLAVE2_ID: ACCESS_TOKEN}
 
@@ -141,7 +149,7 @@ def _setup_empty(dsn: str, auto_fill: bool = True):
     return server, repo, app, connection_id
 
 
-def _insert_accounts(dsn: str, connection_id: int) -> None:
+def _insert_accounts(dsn: str, connection_id: int, org_id: int = ORG_ID) -> None:
     """Insert the same three accounts (100 master, 101 slave @1.0x, 102
     slave @0.5x) _setup() seeds up front, but as a standalone step -- used
     by tests that need them to arrive AFTER the app already exists (see
@@ -150,14 +158,15 @@ def _insert_accounts(dsn: str, connection_id: int) -> None:
         conn.execute(
             """
             INSERT INTO accounts
-                (ctid_trader_account_id, ctid_connection_id, trader_login, is_live,
+                (ctid_trader_account_id, org_id, ctid_connection_id, trader_login, is_live,
                  role, enabled, multiplier)
             VALUES
-                (%(master)s, %(conn)s, 90100, false, 'master', true, 1.0),
-                (%(slave1)s, %(conn)s, 90101, false, 'slave',  true, 1.0),
-                (%(slave2)s, %(conn)s, 90102, false, 'slave',  true, 0.5)
+                (%(master)s, %(org)s, %(conn)s, 90100, false, 'master', true, 1.0),
+                (%(slave1)s, %(org)s, %(conn)s, 90101, false, 'slave',  true, 1.0),
+                (%(slave2)s, %(org)s, %(conn)s, 90102, false, 'slave',  true, 0.5)
             """,
-            {"master": MASTER_ID, "slave1": SLAVE1_ID, "slave2": SLAVE2_ID, "conn": connection_id},
+            {"master": MASTER_ID, "slave1": SLAVE1_ID, "slave2": SLAVE2_ID,
+             "org": org_id, "conn": connection_id},
         )
 
 
@@ -652,8 +661,8 @@ def test_dry_run_sends_nothing_but_logs(db):
         yield app.startup()
         client = app.clients[False][0]
 
-        app.set_dry_run(True)
-        assert repo.get_settings().dry_run is True
+        app.set_dry_run(ORG_ID, True)
+        assert repo.get_org(ORG_ID).dry_run is True
 
         _fire_and_forget(client, _market_order(MASTER_ID, ProtoOATradeSide.BUY, ONE_LOT))
 
@@ -685,8 +694,8 @@ def test_kill_switch_blocks_fanout(db):
         yield app.startup()
         client = app.clients[False][0]
 
-        yield app.pause()
-        assert repo.get_settings().copying_enabled is False
+        yield app.pause(ORG_ID)
+        assert repo.get_org(ORG_ID).copying_enabled is False
 
         _fire_and_forget(client, _market_order(MASTER_ID, ProtoOATradeSide.BUY, ONE_LOT))
 
@@ -720,7 +729,7 @@ def test_reconnect_reauths_and_resyncs(db):
     server, repo, app = _setup(db)
     try:
         yield app.startup()
-        assert app.reconciler.current == []
+        assert app.reconcilers[ORG_ID].current == []
 
         auths_before = {
             acc: server.account_auths.count(acc) for acc in (MASTER_ID, SLAVE1_ID, SLAVE2_ID)
@@ -753,7 +762,7 @@ def test_reconnect_reauths_and_resyncs(db):
         assert len(orphan_items) == 1
         assert orphan_items[0].account_id == SLAVE1_ID
         assert orphan_items[0].position_id == 424242
-        assert app.reconciler.current == items
+        assert app.reconcilers[ORG_ID].current == items
 
         matching_drift_events = [
             e for e in _events(db, "drift")
@@ -829,7 +838,7 @@ def test_trade_dispatched_during_reconnect_reauth_window_retries_and_lands(db):
             take_profit=None,
             label="copy:m999001",
         )
-        app.dispatcher.dispatch([intent])
+        app.dispatcher.dispatch([intent], ORG_ID)
 
         yield _wait_until(
             lambda: any(
@@ -872,34 +881,34 @@ def test_reload_fetches_symbols_for_accounts_added_after_boot(db):
     calling _fetch_and_cache_symbols (main.py:100-103). Accounts added
     after that only ever traverse reload() -- which, before this fix,
     never called _fetch_and_cache_symbols either. Consequence:
-    master_symbols_by_id stayed empty forever, so normalize()'s
+    each org's master symbol map stayed empty forever, so normalize()'s
     unknown-symbol gate silently dropped EVERY master event
     (engine/normalize.py:30-34), and every slave's symbol_cache stayed
     empty, so mirror_volume had no lot_size/step_volume to size a copy
-    with. Proves both the direct symptom (symbol_cache / master_symbols_by_id
-    populated after reload()) and the actual consequence the brief cares
+    with. Proves both the direct symptom (symbol_cache / the org's master
+    symbol map populated after reload()) and the actual consequence the brief cares
     about: a real master fill dispatched AFTER reload() fans out to both
     slaves at the correct volumes -- the exact thing that was silently
     broken end-to-end before this fix, and the exact thing task-30's
     compose-level e2e (e2e/test_full_stack.py) exercises against the real
     stack. Confirmed RED against the pre-fix reload() (see
     task-30-report.md's "Fix Round 1" section for the revert-and-rerun
-    evidence: this test fails with an empty master_symbols_by_id, an empty
+    evidence: this test fails with an empty master symbol map, an empty
     symbol_cache, and zero mapping rows when the
     `_fetch_and_cache_symbols` call is removed from reload()).
     """
     server, repo, app, connection_id = _setup_empty(db)
     try:
         yield app.startup()  # zero accounts: hits the early-return branch, exactly like a real boot
-        assert app.master_symbols_by_id == {}
+        assert app.master_symbols_by_org == {}
         assert repo.load_symbol_cache(SLAVE1_ID) == {}
 
         _insert_accounts(db, connection_id)
         yield app.reload()
 
         # Direct symptom: the bug's own diagnosis.
-        assert app.master_symbols_by_id, (
-            "master_symbols_by_id still empty after reload() -- normalize() "
+        assert app.master_symbols_by_org.get(ORG_ID), (
+            "the org's master symbol map is still empty after reload() -- normalize() "
             "would silently drop every master event"
         )
         slave1_symbols = repo.load_symbol_cache(SLAVE1_ID)

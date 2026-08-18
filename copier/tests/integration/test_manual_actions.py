@@ -19,7 +19,7 @@ from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
 )
 
 from integration.test_copier_e2e import (
-    MASTER_ID, SLAVE1_ID, SLAVE2_ID, SYMBOL_ID, ONE_LOT,
+    MASTER_ID, ORG_ID, SLAVE1_ID, SLAVE2_ID, SYMBOL_ID, ONE_LOT,
     _setup, _teardown, _wait_until,
 )
 
@@ -60,7 +60,7 @@ def test_close_all_one_account_closes_positions_and_cancels_orders(db):
     try:
         yield app.startup()
 
-        result = yield app.close_all(SLAVE1_ID)
+        result = yield app.close_all(ORG_ID, SLAVE1_ID)
 
         assert result["paused"] is False
         summary = result["accounts"][0]
@@ -78,14 +78,14 @@ def test_close_all_one_account_closes_positions_and_cancels_orders(db):
         cancels = _reqs_of(server, ProtoOACancelOrderReq, SLAVE1_ID)
         assert cancels[0].orderId == 9101
 
-        # A single-account kill switch must NOT touch global copying.
-        assert repo.get_settings().copying_enabled is True
+        # A single-account kill switch must NOT touch the org's copying flag.
+        assert repo.get_org(ORG_ID).copying_enabled is True
     finally:
         _teardown(app, server)
 
 
 @pytest_twisted.inlineCallbacks
-def test_close_all_global_pauses_copying_and_flattens_every_account(db):
+def test_close_all_org_wide_pauses_copying_and_flattens_every_account(db):
     server, repo, app = _setup(db)
     _seed_position(server, MASTER_ID, 7001, 100_000)
     _seed_position(server, SLAVE1_ID, 7002, 100_000)
@@ -93,10 +93,10 @@ def test_close_all_global_pauses_copying_and_flattens_every_account(db):
     try:
         yield app.startup()
 
-        result = yield app.close_all(None)
+        result = yield app.close_all(ORG_ID)
 
         assert result["paused"] is True
-        assert repo.get_settings().copying_enabled is False
+        assert repo.get_org(ORG_ID).copying_enabled is False
         by_account = {s["account_id"]: s for s in result["accounts"]}
         assert by_account[MASTER_ID]["positions_closed"] == 1
         assert by_account[SLAVE1_ID]["positions_closed"] == 1
@@ -118,10 +118,10 @@ def test_close_all_works_while_copying_disabled_and_dry_run(db):
     _seed_position(server, SLAVE1_ID, 7001, 200_000)
     try:
         yield app.startup()
-        repo.set_setting("copying_enabled", False)
-        repo.set_setting("dry_run", True)
+        repo.set_org_setting(ORG_ID, "copying_enabled", False)
+        repo.set_org_setting(ORG_ID, "dry_run", True)
 
-        yield app.close_all(SLAVE1_ID)
+        yield app.close_all(ORG_ID, SLAVE1_ID)
 
         yield _wait_until(
             lambda: len(_reqs_of(server, ProtoOAClosePositionReq, SLAVE1_ID)) == 1)

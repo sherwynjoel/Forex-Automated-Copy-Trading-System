@@ -32,13 +32,21 @@ class TokenStore:
     def _dec(self, value: str) -> str:
         return self._fernet.decrypt(value.encode()).decode()
 
-    def save_grant(self, access_token: str, refresh_token: str, expires_at: datetime) -> int:
+    def save_grant(self, access_token: str, refresh_token: str, expires_at: datetime,
+                   org_id: int) -> int:
+        """Persist a new OAuth grant for one org.
+
+        `org_id` is not optional: ctid_connections.org_id is NOT NULL (every
+        connection belongs to exactly one tenant, and connection_org() is what
+        discovery resolves an account's owner from), so a grant with no org
+        could never be stored at all.
+        """
         with psycopg.connect(self._dsn) as conn:
             row = conn.execute(
                 "INSERT INTO ctid_connections"
-                " (access_token_enc, refresh_token_enc, granted_at, expires_at)"
-                " VALUES (%s, %s, now(), %s) RETURNING id",
-                (self._enc(access_token), self._enc(refresh_token), expires_at),
+                " (org_id, access_token_enc, refresh_token_enc, granted_at, expires_at)"
+                " VALUES (%s, %s, %s, now(), %s) RETURNING id",
+                (org_id, self._enc(access_token), self._enc(refresh_token), expires_at),
             ).fetchone()
             conn.commit()
             return row[0]
