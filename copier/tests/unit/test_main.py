@@ -734,8 +734,13 @@ def test_close_all_flattens_only_the_org(db, fernet_key):
         yield _wait_until(lambda: len(_closes_for(server, MASTER_A)) == 1
                           and len(_closes_for(server, SLAVE_A1)) == 1)
 
-        # Nothing was ever sent for org B, and its positions are still open
-        # on the broker.
+        # Org A really was flattened on the broker (so the "still open"
+        # assertions below are not vacuously true) ...
+        yield _wait_until(lambda: server.open_positions[MASTER_A] == []
+                          and server.open_positions[SLAVE_A1] == [])
+
+        # ... while nothing was ever sent for org B, whose positions are
+        # still open.
         assert _closes_for(server, MASTER_B) == []
         assert _closes_for(server, SLAVE_B1) == []
         assert [p["position_id"] for p in server.open_positions[MASTER_B]] == [7003]
