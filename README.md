@@ -166,10 +166,44 @@ slave, confirm a few real trades copy correctly, then scale up.
 
 ## 5. Operations
 
-- **Kill switch** — a single global pause (Overview screen or `POST
+- **Copy pause** — a single global pause (Overview screen or `POST
   /api/control/pause` with no account id). It stops all copying immediately;
   resume with the matching resume control. It does not disconnect accounts
   or lose state — mappings and settings are untouched.
+- **Kill switch (close-all)** — flattens actual positions, not just copying.
+  The desk strip's "Close all positions" button (every page; requires typing
+  `CLOSE ALL`) closes every open position and cancels every working order in
+  every enabled account from a fresh broker snapshot, and pauses copying
+  first so the master's closes can't race their own copy-closes. Per-account:
+  the "Flatten" button on the Accounts screen (`POST /api/control/close-all`
+  with `{"account_id": N}`) does the same for one account without touching
+  the global pause.
+- **Manual orders** — the Trade screen places market/limit/stop orders (with
+  optional SL/TP, volume in lots) on ANY connected account. Orders are
+  labeled `manual`: a manual order on the **master** fills and replicates
+  through the normal copy pipeline exactly like a platform trade; a manual
+  order on a **slave** is deliberately not copied anywhere, its fill is
+  logged as `manual_fill` (info, not an unmatched-fill warning), and the
+  resulting position is never flagged as orphan drift. The same screen
+  closes/partially closes positions and cancels working orders on the
+  selected account.
+- **Account details & nicknames** — the Accounts screen's Details drawer
+  shows everything the broker exposes (balance, currency, leverage, broker
+  name, account type, access rights, swap-free, registration date, live
+  open positions) plus the OAuth grant behind the account. The account
+  holder's name/email are NOT available — cTrader's Open API exposes no
+  personal profile data — so each account can carry an operator-set
+  nickname instead (stored in `accounts.nickname`).
+- **Trade history** — the History screen serves account-wise closed
+  positions (realized P&L reconstructed from closing deals), every fill,
+  and the order log, straight from the broker
+  (`GET /api/accounts/{id}/history/{deals,orders}?from&to`). cTrader caps
+  each request at a one-week window, so the screen pages by week.
+- **Disconnect** — the Accounts screen's Disconnect button removes the
+  cTrader ID grant behind an account (`DELETE
+  /api/accounts/{id}/connection`), which cascades to every account under
+  that same grant and triggers a copier reload so they de-authorize
+  immediately. Open positions are not touched.
 - **Per-slave pause** — pauses one slave account without affecting the
   master subscription or other slaves (`POST /api/control/pause` /
   `/resume` with an `account_id`).
@@ -278,8 +312,8 @@ api/              FastAPI backend
   tests/          route + auth + oauth tests against a real Postgres
   .venv/          local virtualenv (not committed)
 dashboard/        React + Vite + TypeScript frontend
-  src/pages/      Overview, Accounts, Positions, Logs, Login
-  src/components/ shared UI (kill switch, layout)
+  src/pages/      Overview, Accounts, Positions, Trade, History, Logs, Login
+  src/components/ shared UI (kill switch, layout + desk strip, confirm dialog)
 db/
   migrations/     ordered .sql files, applied by the compose `migrate` service
   migrate.py      migration runner
@@ -333,7 +367,7 @@ Two consequences worth knowing before you lose half an hour to them:
 cd copier && .venv/bin/pytest tests --timeout=60
 ```
 
-278 tests (unit + integration), takes roughly six minutes — most of that is
+321 tests (unit + integration), takes roughly nine minutes — most of that is
 the integration suite, which spins up a real, self-signed-TLS, in-process
 fake cTrader server (`copier/src/copier/testing/fake_server.py`) speaking
 the same protobuf messages as the real API (auth, heartbeats, order
@@ -347,7 +381,7 @@ against it. Nothing here talks to the real cTrader network.
 cd api && .venv/bin/pytest tests
 ```
 
-82 tests. Uses the same Postgres instance (a fresh `copytrader_test`
+98 tests. Uses the same Postgres instance (a fresh `copytrader_test`
 database, dropped and recreated per session) and a mocked HTTP transport for
 any outbound calls to cTrader's OAuth token endpoint — no real network calls.
 
@@ -357,7 +391,7 @@ any outbound calls to cTrader's OAuth token endpoint — no real network calls.
 cd dashboard && npm test
 ```
 
-Runs `tsc --noEmit` (typecheck) followed by `vitest run`. 7 test files, 50
+Runs `tsc --noEmit` (typecheck) followed by `vitest run`. 11 test files, 71
 tests, all component/page tests with mocked `fetch`/WebSocket — no backend
 required.
 
