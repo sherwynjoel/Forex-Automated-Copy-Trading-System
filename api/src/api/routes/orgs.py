@@ -34,14 +34,6 @@ class PatchMemberRequest(BaseModel):
     role: str
 
 
-def _owner_count(conn, org_id: int) -> int:
-    (count,) = conn.execute(
-        "SELECT COUNT(*) FROM org_memberships WHERE org_id = %s AND role = 'owner'",
-        (org_id,),
-    ).fetchone()
-    return count
-
-
 def create_orgs_router() -> APIRouter:
     router = APIRouter(prefix="/api/orgs", tags=["orgs"])
 
@@ -154,6 +146,17 @@ def create_orgs_router() -> APIRouter:
         if body.role not in ROLE_RANK:
             raise HTTPException(status_code=400, detail="Unknown role")
         with conn.transaction():
+            # Lock the whole owner set (not just the target row) so two
+            # concurrent demotions of two different owners can't both see
+            # count=2 and both proceed to zero owners. Under READ COMMITTED
+            # the second transaction blocks here until the first commits,
+            # then re-reads and sees the reduced owner set.
+            owner_rows = conn.execute(
+                "SELECT user_id FROM org_memberships "
+                "WHERE org_id = %s AND role = 'owner' FOR UPDATE",
+                (ctx.org_id,),
+            ).fetchall()
+            owner_ids = {r[0] for r in owner_rows}
             row = conn.execute(
                 "SELECT role FROM org_memberships WHERE org_id = %s AND user_id = %s "
                 "FOR UPDATE",
@@ -161,8 +164,7 @@ def create_orgs_router() -> APIRouter:
             ).fetchone()
             if not row:
                 raise HTTPException(status_code=404, detail="Member not found")
-            if (row[0] == "owner" and body.role != "owner"
-                    and _owner_count(conn, ctx.org_id) == 1):
+            if row[0] == "owner" and body.role != "owner" and len(owner_ids) == 1:
                 raise HTTPException(
                     status_code=409, detail="An org must keep at least one owner")
             conn.execute(
@@ -181,6 +183,17 @@ def create_orgs_router() -> APIRouter:
         if ctx.role != "owner" and member_user_id != ctx.user_id:
             raise HTTPException(status_code=403, detail="Insufficient role")
         with conn.transaction():
+            # Lock the whole owner set (not just the target row) so two
+            # concurrent removals of two different owners can't both see
+            # count=2 and both proceed to zero owners. Under READ COMMITTED
+            # the second transaction blocks here until the first commits,
+            # then re-reads and sees the reduced owner set.
+            owner_rows = conn.execute(
+                "SELECT user_id FROM org_memberships "
+                "WHERE org_id = %s AND role = 'owner' FOR UPDATE",
+                (ctx.org_id,),
+            ).fetchall()
+            owner_ids = {r[0] for r in owner_rows}
             row = conn.execute(
                 "SELECT role FROM org_memberships WHERE org_id = %s AND user_id = %s "
                 "FOR UPDATE",
@@ -188,7 +201,7 @@ def create_orgs_router() -> APIRouter:
             ).fetchone()
             if not row:
                 raise HTTPException(status_code=404, detail="Member not found")
-            if row[0] == "owner" and _owner_count(conn, ctx.org_id) == 1:
+            if row[0] == "owner" and len(owner_ids) == 1:
                 raise HTTPException(
                     status_code=409, detail="An org must keep at least one owner")
             conn.execute(

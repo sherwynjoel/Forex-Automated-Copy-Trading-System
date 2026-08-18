@@ -20,7 +20,10 @@ class OrgContext:
 def require_org_role(min_role: str):
     """Dependency factory: resolve the caller's membership for the path's
     {org_id}. Non-members (and nonexistent orgs) get 404 so org existence
-    never leaks; members below min_role get 403."""
+    never leaks; members below min_role get 403.
+
+    Reads org_id as a FastAPI path parameter by name, so every consuming
+    route must declare {org_id} in its path (never as a query param)."""
     assert min_role in ROLE_RANK
 
     def dependency(
