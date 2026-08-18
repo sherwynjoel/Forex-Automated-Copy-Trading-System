@@ -1,25 +1,29 @@
 """WebSocket handlers and event broadcaster."""
 import asyncio
 import logging
-from typing import Set
 
+import psycopg
 from psycopg import AsyncConnection
 import psycopg.errors
 from fastapi import APIRouter
 from fastapi.websockets import WebSocket
-from itsdangerous import SignatureExpired, BadSignature
+from starlette.websockets import WebSocketState
 
-from .auth import get_session_serializer
+from .auth import user_id_from_session_cookie
 from .config import ApiConfig
 
 logger = logging.getLogger(__name__)
 
 
 class EventBroadcaster:
-    """Manages WebSocket connections and broadcasts events from Postgres LISTEN/NOTIFY."""
+    """Manages WebSocket connections and broadcasts events from Postgres LISTEN/NOTIFY.
+
+    Connections are keyed by org_id so each org's sockets only ever receive
+    that org's events.
+    """
 
     def __init__(self):
-        self.connections: Set[WebSocket] = set()
+        self.connections: dict[int, set[WebSocket]] = {}
         self.listener_task = None
         self.listener_connection: AsyncConnection = None
         self.query_connection: AsyncConnection = None
@@ -30,23 +34,31 @@ class EventBroadcaster:
         # it does not wait for LISTEN to be issued).
         self.listening = False
 
-    async def connect(self, ws: WebSocket):
-        """Add a WebSocket connection."""
-        await ws.accept()
-        self.connections.add(ws)
+    async def connect(self, ws: WebSocket, org_id: int):
+        """Register a WebSocket connection under its org, accepting it first
+        if the caller hasn't already done so (idempotent: the endpoint may
+        need to accept early -- see websocket_endpoint -- so a real WS close
+        frame, rather than a pre-accept HTTP rejection, carries a custom
+        close code back to the client)."""
+        if ws.application_state != WebSocketState.CONNECTED:
+            await ws.accept()
+        self.connections.setdefault(org_id, set()).add(ws)
 
-    def disconnect(self, ws: WebSocket):
-        """Remove a WebSocket connection."""
-        self.connections.discard(ws)
+    def disconnect(self, ws: WebSocket, org_id: int):
+        """Remove a WebSocket connection from its org."""
+        self.connections.get(org_id, set()).discard(ws)
 
-    async def broadcast(self, message: dict):
-        """Broadcast a message to all connected clients."""
-        for ws in list(self.connections):
+    async def broadcast(self, org_id: int | None, message: dict):
+        """Send to the org's sockets only. org_id None (infrastructure
+        events) is delivered to no one."""
+        if org_id is None:
+            return
+        for ws in list(self.connections.get(org_id, set())):
             try:
                 await ws.send_json(message)
             except Exception as e:
                 logger.warning(f"Failed to send to client: {e}")
-                self.disconnect(ws)
+                self.disconnect(ws, org_id)
 
     async def start_listener(self, dsn: str):
         """Start listening for Postgres events and broadcast them."""
@@ -78,7 +90,8 @@ class EventBroadcaster:
                     # Fetch the event details on the separate query connection.
                     async with self.query_connection.cursor() as cur:
                         await cur.execute(
-                            """SELECT id, ts, account_id, category, severity, latency_ms, payload
+                            """SELECT id, ts, account_id, category, severity, latency_ms,
+                                      payload, org_id
                                FROM events WHERE id = %s""",
                             (event_id,)
                         )
@@ -93,9 +106,10 @@ class EventBroadcaster:
                             "severity": row[4],
                             "latency_ms": row[5],
                             "payload": row[6],
+                            "org_id": row[7],
                         }
                         logger.debug(f"Broadcasting event: {event['id']}")
-                        await self.broadcast(event)
+                        await self.broadcast(row[7], event)
                 except Exception as e:
                     logger.error(f"Error processing event: {e}")
 
@@ -137,45 +151,49 @@ def create_ws_router() -> APIRouter:
 
     @router.websocket("/api/ws")
     async def websocket_endpoint(ws: WebSocket):
-        """WebSocket endpoint for real-time event streaming.
-
-        Requires authentication via session cookie.
+        """Org-scoped event stream. Auth: session cookie; membership in the
+        org_id query parameter is required.
         """
-        # Check authentication
         cfg = ApiConfig.from_env()
-        authenticated = False
-
-        # Extract session cookie from headers
-        cookies = ws.cookies
-        session = cookies.get("session")
-
-        if session:
-            serializer = get_session_serializer(cfg)
-            try:
-                # max_age=12h = 43200 seconds
-                data = serializer.loads(session, max_age=43200)
-                # Verify the session data contains authenticated flag
-                if data.get("authenticated"):
-                    authenticated = True
-            except (SignatureExpired, BadSignature):
-                pass
-
-        # Reject before accepting the connection
-        if not authenticated:
+        session = ws.cookies.get("session")
+        user_id = user_id_from_session_cookie(session, cfg) if session else None
+        if user_id is None:
             await ws.close(code=4401, reason="Unauthorized")
             return
 
-        # Accept the connection
-        await broadcaster.connect(ws)
-
+        raw_org = ws.query_params.get("org_id")
         try:
-            # Keep connection open and listen for client messages (if any)
+            org_id = int(raw_org)
+        except (TypeError, ValueError):
+            await ws.close(code=4400, reason="org_id required")
+            return
+
+        with psycopg.connect(cfg.postgres_dsn, autocommit=True) as conn:
+            member = conn.execute(
+                "SELECT 1 FROM org_memberships WHERE org_id = %s AND user_id = %s",
+                (org_id, user_id),
+            ).fetchone()
+
+        # Accept before the membership check fails closed: uvicorn collapses
+        # any "websocket.close" sent *before* "websocket.accept" into a bare
+        # HTTP-level rejection (403), discarding the ASGI close code -- so a
+        # pre-accept close(4404) would reach real clients as an opaque
+        # handshake failure, not a WS close frame carrying 4404. Auth
+        # (4401) and org_id parsing (4400) are cheap, pre-DB checks where
+        # that HTTP-level rejection is fine; membership is denied post-accept
+        # so the close code is preserved end to end.
+        if not member:
+            await ws.accept()
+            await ws.close(code=4404, reason="Not found")
+            return
+
+        await broadcaster.connect(ws, org_id)
+        try:
             while True:
-                # Just receive to detect disconnection
                 await ws.receive_text()
         except Exception as e:
             logger.debug(f"WebSocket error: {e}")
         finally:
-            broadcaster.disconnect(ws)
+            broadcaster.disconnect(ws, org_id)
 
     return router

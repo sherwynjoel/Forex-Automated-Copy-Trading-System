@@ -259,19 +259,89 @@ class TestWebSocket:
                 pass
         assert exc_info.value.code == 4401
 
-    def test_ws_accepts_authenticated(self, app_client_with_lifespan):
-        """WebSocket connection is accepted with valid session cookie."""
-        # Login first
-        response = app_client_with_lifespan.post("/api/login", json={"password": "hunter2!"})
-        assert response.status_code == 204
+    def test_ws_accepts_authenticated(self, app_client_with_lifespan, make_user, make_org, login_as):
+        """WebSocket connection is accepted with valid session cookie and org membership."""
+        user = make_user(email="ws-accept@example.com")
+        org_id = make_org(name="WS Org", members=[(user, "viewer")])
+        login_as(app_client_with_lifespan, user)
 
         # Should be able to connect to WS now
         try:
-            with app_client_with_lifespan.websocket_connect("/api/ws") as ws:
+            with app_client_with_lifespan.websocket_connect(f"/api/ws?org_id={org_id}") as ws:
                 # Just check that connection succeeded
                 pass
         except Exception as e:
             pytest.fail(f"WS connection should succeed with auth, got: {e}")
+
+
+def test_ws_delivers_only_own_org_events(live_server, db, make_user, make_org):
+    """Two orgs, two sockets: each socket sees only its org's events."""
+    import json
+    import psycopg
+    import httpx
+    from websockets.sync.client import connect as ws_connect
+
+    base_url, ws_url = live_server
+
+    def session_cookies(email):
+        r = httpx.post(f"{base_url}/api/register", json={
+            "email": email, "password": "a-solid-password", "display_name": email})
+        assert r.status_code == 204
+        return {"session": r.cookies["session"], "csrf": r.cookies["csrf"]}
+
+    cookies_a = session_cookies("a@example.com")
+    cookies_b = session_cookies("b@example.com")
+    with psycopg.connect(db, autocommit=True) as conn:
+        (uid_a,) = conn.execute(
+            "SELECT id FROM users WHERE email = 'a@example.com'").fetchone()
+        (uid_b,) = conn.execute(
+            "SELECT id FROM users WHERE email = 'b@example.com'").fetchone()
+    org_a = make_org(name="A", members=[({"id": uid_a}, "viewer")])
+    org_b = make_org(name="B", members=[({"id": uid_b}, "viewer")])
+
+    def hdr(cookies):
+        return {"Cookie": f"session={cookies['session']}"}
+
+    with ws_connect(f"{ws_url}?org_id={org_a}",
+                    additional_headers=hdr(cookies_a)) as ws_a, \
+         ws_connect(f"{ws_url}?org_id={org_b}",
+                    additional_headers=hdr(cookies_b)) as ws_b:
+        with psycopg.connect(db, autocommit=True) as conn:
+            conn.execute(
+                """INSERT INTO events (org_id, category, severity, payload)
+                   VALUES (%s, 'control', 'info', '{"which": "a"}'::jsonb)""",
+                (org_a,))
+            conn.execute(
+                """INSERT INTO events (org_id, category, severity, payload)
+                   VALUES (%s, 'control', 'info', '{"which": "b"}'::jsonb)""",
+                (org_b,))
+        got_a = json.loads(ws_a.recv(timeout=10))
+        got_b = json.loads(ws_b.recv(timeout=10))
+        assert got_a["payload"]["which"] == "a" and got_a["org_id"] == org_a
+        assert got_b["payload"]["which"] == "b" and got_b["org_id"] == org_b
+        # and nothing else arrives on A within a short window
+        import pytest as _pytest
+        with _pytest.raises(TimeoutError):
+            ws_a.recv(timeout=1)
+
+
+def test_ws_nonmember_closed_4404(live_server, db, make_user, make_org):
+    import httpx
+    from websockets.sync.client import connect as ws_connect
+    from websockets.exceptions import ConnectionClosed
+
+    base_url, ws_url = live_server
+    r = httpx.post(f"{base_url}/api/register", json={
+        "email": "x@example.com", "password": "a-solid-password", "display_name": "x"})
+    stranger_org = make_org(name="NotYours", members=[])
+    try:
+        with ws_connect(f"{ws_url}?org_id={stranger_org}",
+                        additional_headers={"Cookie": f"session={r.cookies['session']}"}) as ws:
+            ws.recv(timeout=5)
+            raise AssertionError("socket should have been closed")
+    except ConnectionClosed as e:
+        assert e.rcvd.code == 4404
+
 
 class TestWebSocketLiveDelivery:
     """Delivery tests against a REAL uvicorn server + REAL TCP `websockets` client.
@@ -285,13 +355,18 @@ class TestWebSocketLiveDelivery:
     """
 
     @pytest.mark.asyncio
-    async def test_ws_delivers_inserted_event(self, live_server, db):
-        """An events row inserted into the app's DB is delivered to a connected WS client."""
+    async def test_ws_delivers_inserted_event(self, live_server, db, make_user, make_org):
+        """An events row inserted into the app's DB is delivered to a connected WS client
+        that is a member of the event's org."""
         base_url, ws_url = live_server
+
+        user = make_user(email="live-delivery@example.com")
+        org_id = make_org(name="Live Org", members=[(user, "viewer")])
 
         # Log in over real HTTP against the live server to get a valid session cookie.
         async with httpx.AsyncClient(base_url=base_url) as http:
-            resp = await http.post("/api/login", json={"password": "hunter2!"})
+            resp = await http.post("/api/login", json={
+                "email": user["email"], "password": user["password"]})
             assert resp.status_code == 204, resp.text
             session_cookie = resp.cookies.get("session")
             assert session_cookie, "login did not set a session cookie"
@@ -299,7 +374,9 @@ class TestWebSocketLiveDelivery:
         # ws.py reads the cookie via ws.cookies["session"], populated from the Cookie header.
         headers = {"Cookie": f"session={session_cookie}"}
 
-        async with websockets.connect(ws_url, additional_headers=headers, open_timeout=5) as ws:
+        async with websockets.connect(
+            f"{ws_url}?org_id={org_id}", additional_headers=headers, open_timeout=5
+        ) as ws:
             # Confirm the connection actually stayed open (wasn't rejected/closed
             # immediately) before we go on to assert delivery.
             assert ws.close_code is None, (
@@ -313,9 +390,9 @@ class TestWebSocketLiveDelivery:
             payload = {"message": "live delivery test", "nonce": str(uuid.uuid4())}
             with psycopg.connect(db, autocommit=True) as conn:
                 row = conn.execute(
-                    """INSERT INTO events (account_id, category, severity, latency_ms, payload)
-                       VALUES (%s, %s, %s, %s, %s) RETURNING id""",
-                    (None, "control", "info", None, json.dumps(payload)),
+                    """INSERT INTO events (org_id, account_id, category, severity, latency_ms, payload)
+                       VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
+                    (org_id, None, "control", "info", None, json.dumps(payload)),
                 ).fetchone()
                 event_id = row[0]
 
@@ -326,6 +403,7 @@ class TestWebSocketLiveDelivery:
         assert data["category"] == "control"
         assert data["severity"] == "info"
         assert data["payload"] == payload
+        assert data["org_id"] == org_id
 
     @pytest.mark.asyncio
     async def test_ws_rejects_unauthenticated_live(self, live_server):
