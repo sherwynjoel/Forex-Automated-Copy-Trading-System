@@ -20,6 +20,10 @@ from .db import get_conn
 # Password hashing
 _hasher = PasswordHasher()
 
+# Verified against for unknown emails so login timing does not reveal
+# whether an email exists (one argon2 verify on both paths).
+_DUMMY_HASH = _hasher.hash("timing-equalizer")
+
 
 def hash_password(password: str) -> str:
     """Hash a password using argon2."""
@@ -254,11 +258,13 @@ def create_auth_router(rate_limiter: LoginRateLimiter) -> APIRouter:
         row = conn.execute(
             "SELECT id, password_hash FROM users WHERE lower(email) = %s", (email,)
         ).fetchone()
-        # Verify against a real hash even for unknown emails so response
-        # timing does not reveal which emails exist.
-        if not row or not verify_password(row[1], request_data.password):
-            if not row:
-                verify_password(hash_password("timing-equalizer"), request_data.password)
+        # Verify against a dummy hash for unknown emails so login timing
+        # does not reveal whether an email exists (one argon2 verify on
+        # both paths).
+        if not row:
+            verify_password(_DUMMY_HASH, request_data.password)
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+        if not verify_password(row[1], request_data.password):
             raise HTTPException(status_code=401, detail="Invalid email or password")
 
         response = Response(status_code=204)
