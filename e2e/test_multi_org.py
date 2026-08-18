@@ -249,6 +249,24 @@ def test_two_orgs_never_touch_each_others_books():
     assert cross_org_order.status_code == 404, cross_org_order.text
 
     # ---------- 5: org B's kill switch leaves org A entirely alone ----------
+    # Establish org B's book is NOT empty first, or the "flat afterwards"
+    # assertion below passes vacuously -- master_positions is also empty for
+    # an org whose engine never reconciled at all, or that lost its master.
+    resync_b = client_b.post(f"{b}/control/resync", json={})
+    assert resync_b.status_code == 200, resync_b.text
+
+    def _org_b_state_position():
+        resp = client_b.get(f"{b}/state")
+        assert resp.status_code == 200, resp.text
+        matches = [p for p in resp.json().get("master_positions", [])
+                   if p["position_id"] == b_position_id]
+        return matches[0] if matches else None
+
+    b_master_position = _poll_until(
+        _org_b_state_position, description="org B's master position in org B's state")
+    assert {c["slave_account_id"] for c in b_master_position["copies"]} == {
+        ORG_B_SLAVE}, b_master_position
+
     close_all = client_b.post(f"{b}/control/close-all", json={})
     assert close_all.status_code == 200, close_all.text
     assert close_all.json()["paused"] is True, close_all.text

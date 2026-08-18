@@ -23,9 +23,6 @@ from .routes.settings_control import create_settings_control_router, create_stat
 from .routes.trading import create_trading_router
 from .ws import create_ws_router, broadcaster
 
-# Read/write timeout for proxied copier calls; see create_app's lifespan.
-COPIER_PROXY_TIMEOUT_S = 60.0
-
 
 def create_app(http_transport: Optional[httpx.BaseTransport] = None) -> FastAPI:
     """Create and configure the FastAPI application.
@@ -48,20 +45,17 @@ def create_app(http_transport: Optional[httpx.BaseTransport] = None) -> FastAPI:
 
         # Set up async HTTP client with optional transport injection.
         #
-        # The timeout is explicit because httpx's default is 5s, and this one
-        # client proxies every control command to the copier -- including
-        # /resync and /close-all, which are bounded by BROKER round trips the
-        # cTrader SDK paces at 5 messages/second. An org with a couple of
-        # dozen accounts blows past 5s legitimately, and the caller then sees
-        # a 502 "copier unreachable" for a command that in fact ran to
-        # completion. Long enough to cover a real resync; still short enough
-        # that a genuinely wedged copier surfaces rather than hanging a
-        # dashboard request forever.
-        timeout = httpx.Timeout(COPIER_PROXY_TIMEOUT_S, connect=5.0)
+        # Left on httpx's default (5s) deliberately: the dashboard polls
+        # GET /state every 5 seconds, so a client-wide long timeout would
+        # have every one of those reads sit on a half-dead copier for the
+        # full duration instead of failing fast. The two commands that
+        # legitimately outrun 5s (resync, close-all -- both bounded by broker
+        # round trips) raise it per request; see
+        # routes/settings_control.py:COPIER_SLOW_COMMAND_TIMEOUT_S.
         if http_transport:
-            app.state.http = httpx.AsyncClient(transport=http_transport, timeout=timeout)
+            app.state.http = httpx.AsyncClient(transport=http_transport)
         else:
-            app.state.http = httpx.AsyncClient(timeout=timeout)
+            app.state.http = httpx.AsyncClient()
 
         # Set DSN and start listener task immediately
         broadcaster.dsn = cfg.postgres_dsn

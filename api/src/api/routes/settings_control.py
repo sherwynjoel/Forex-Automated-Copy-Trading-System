@@ -10,6 +10,18 @@ from ..config import ApiConfig
 from ..db import get_conn
 from ..rbac import OrgContext, require_org_role, require_account_in_org
 
+# Per-request timeout for the two copier commands bounded by BROKER round
+# trips rather than by local work: /resync (one ProtoOAReconcileReq per
+# account in the org, plus a balance refresh) and /close-all (a reconcile
+# plus one close/cancel per open position and working order). The cTrader
+# SDK paces its outbound queue at 5 messages/second, so an org with a couple
+# of dozen accounts legitimately outruns httpx's 5s default -- and the caller
+# then sees "502 copier unreachable" for a command that in fact ran to
+# completion. Applied ONLY to those two: the shared AsyncClient stays on the
+# default so the dashboard's 5s /state poll still fails fast against a
+# half-dead copier (see main.create_app).
+COPIER_SLOW_COMMAND_TIMEOUT_S = 60.0
+
 
 class SettingsResponse(BaseModel):
     """Response for settings."""
@@ -48,17 +60,25 @@ async def _proxy_to_copier(
     url: str,
     method: str = "POST",
     json: Optional[Dict[str, Any]] = None,
+    timeout: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Proxy a request to copier, handling errors appropriately.
 
+    `timeout` overrides the shared client's default for THIS request only;
+    leave it None for everything that should keep failing fast (see
+    COPIER_SLOW_COMMAND_TIMEOUT_S above). A timeout that does expire is an
+    httpx.TimeoutException, itself an httpx.RequestError, so it lands on the
+    same 502 path as a copier that is simply not answering.
+
     Returns the response JSON or raises HTTPException.
     """
+    kwargs: Dict[str, Any] = {} if timeout is None else {"timeout": timeout}
     try:
         if method == "GET":
-            response = await client.get(url)
+            response = await client.get(url, **kwargs)
         else:
-            response = await client.post(url, json=json or {})
+            response = await client.post(url, json=json or {}, **kwargs)
 
         # Forward non-2xx responses faithfully
         if response.status_code >= 500:
@@ -240,7 +260,9 @@ def create_settings_control_router() -> APIRouter:
         """Proxy resync command to copier."""
         client = http_request.app.state.http
         url = f"{cfg.copier_control_url}/resync"
-        return await _proxy_to_copier(client, url, method="POST", json={"org_id": ctx.org_id})
+        return await _proxy_to_copier(
+            client, url, method="POST", json={"org_id": ctx.org_id},
+            timeout=COPIER_SLOW_COMMAND_TIMEOUT_S)
 
     return router
 

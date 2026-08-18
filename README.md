@@ -512,6 +512,10 @@ E2E_POSTGRES_PORT=5436 \
 docker compose -p tbe2e down -v
 ```
 
+`docker-compose.tbe2e-ports.yml` needs **Docker Compose ≥ 2.24** (it uses the
+`!override` YAML tag; older CLIs fail with a YAML tag error — check with
+`docker compose version`).
+
 Notes:
 
 - **Run it as its own compose project (`-p tbe2e`).** Without a project name

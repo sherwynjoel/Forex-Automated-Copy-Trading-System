@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from ..config import ApiConfig
 from ..db import get_conn
 from ..rbac import OrgContext, require_org_role, require_account_in_org
-from .settings_control import _proxy_to_copier
+from .settings_control import COPIER_SLOW_COMMAND_TIMEOUT_S, _proxy_to_copier
 
 
 def _required_account_id(body: Dict[str, Any]) -> int:
@@ -95,6 +95,7 @@ def create_trading_router() -> APIRouter:
         client = http_request.app.state.http
         return await _proxy_to_copier(
             client, f"{cfg.copier_control_url}/close-all",
-            method="POST", json=forward)
+            method="POST", json=forward,
+            timeout=COPIER_SLOW_COMMAND_TIMEOUT_S)
 
     return router

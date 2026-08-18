@@ -28,6 +28,9 @@
 # only ever delete data this run created. Deliberately NOT combined with
 # docker-compose.override.yml (git-ignored, the dev stack's own port choices).
 #
+# REQUIRES DOCKER COMPOSE >= 2.24 for the `!override` tag; older CLIs fail
+# with a YAML tag error (check with `docker compose version`).
+#
 # `!override` is required on every `ports` entry: compose CONCATENATES the
 # multi-value `ports` option across -f files rather than replacing it, so
 # without the tag each service would try to bind BOTH the base port and the
