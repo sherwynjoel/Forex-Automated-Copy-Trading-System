@@ -20,7 +20,8 @@ import copier.main as main
 from copier.domain.models import Side
 from copier.engine.control import (
     make_control_site, HealthResource, StateResource, PauseResource, ResumeResource,
-    DryRunResource, DriftCloseOrphanResource,
+    ResyncResource, DryRunResource, CloseAllResource, DriftCloseOrphanResource,
+    DriftDismissResource,
 )
 from copier.engine.reconcile import OrderSnapshot, PositionSnapshot
 
@@ -145,3 +146,37 @@ def test_drift_close_orphan_on_unknown_id_reports_error_not_fake_success(repo, t
     body = _written_json(request)
     assert "error" in body
     assert body.get("status") != "closed"
+
+
+# ---------- org_id is required on every scoped command ----------
+
+def test_scoped_commands_without_org_id_are_400():
+    """POST /pause, /resume, /resync, /dry-run, /close-all, /drift/dismiss
+    with no org_id in the body must 400 with 'org_id required' -- a scoped
+    command with no org must never fall through to anything global."""
+    cases = [
+        (PauseResource, [b"pause"], {"account_id": None}),
+        (ResumeResource, [b"resume"], {"account_id": None}),
+        (ResyncResource, [b"resync"], {}),
+        (DryRunResource, [b"dry-run"], {"enabled": True}),
+        (CloseAllResource, [b"close-all"], {}),
+        (DriftDismissResource, [b"drift", b"dismiss"], {"id": "some-id"}),
+    ]
+    for resource_cls, path, body in cases:
+        request = DummyRequest(path)
+        request.method = b"POST"
+        request.content = BytesIO(json.dumps(body).encode())
+        resource_cls(object()).render_POST(request)
+
+        assert request.responseCode == 400, resource_cls.__name__
+        assert _written_json(request) == {"error": "org_id required"}, resource_cls.__name__
+
+
+def test_state_requires_org_id():
+    """GET /state without ?org_id= is a 400."""
+    request = DummyRequest([b"state"])
+    request.method = b"GET"
+    StateResource(object()).render_GET(request)
+
+    assert request.responseCode == 400
+    assert "org_id" in _written_json(request)["error"]

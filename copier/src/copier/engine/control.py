@@ -10,26 +10,32 @@ success response without having performed the underlying work; when a
 CopierApp method's Deferred errbacks, the route reports an HTTP 500 with the
 error, never a fake "ok".
 
+Every scoped route below requires "org_id" in its body (or, for /state, in
+the query string) -- a scoped command with no org never falls through to
+anything global; a missing/invalid org_id is a 400 "org_id required".
+
 Routes:
 - GET /health: service status
-- GET /state: account snapshots, master positions (with slave copies),
-  pending orders, and drift
-- POST /pause: pause copying (global or per-slave), body {"account_id": int|null}
-- POST /resume: resume copying (global or per-slave), body {"account_id": int|null}
-- POST /resync: trigger reconciliation
+- GET /state?org_id=N: one org's account snapshots, master positions (with
+  slave copies), pending orders, and drift
+- POST /pause: pause copying for an org (or one of its slaves), body
+  {"org_id": int, "account_id": int|null}
+- POST /resume: resume copying for an org (or one of its slaves), body
+  {"org_id": int, "account_id": int|null}
+- POST /resync: trigger reconciliation for one org, body {"org_id": int}
 - POST /reload: reload accounts/settings
-- POST /dry-run: toggle dry-run mode, body {"enabled": bool}
+- POST /dry-run: toggle an org's dry-run mode, body {"org_id": int, "enabled": bool}
 - POST /discover: discover accounts from a connection, body {"connection_id": int}
-- POST /drift/close-orphan, /drift/adopt, /drift/dismiss: drift remedies,
-  body {"id": str, "master_position_id": int?}
+- POST /drift/close-orphan, /drift/adopt, /drift/dismiss: drift remedies for
+  one org, body {"org_id": int, "id": str, "master_position_id": int?}
 - GET /details?account_id: full broker-side account profile
 - GET /history/deals, /history/orders (?account_id&from&to): trade history
 - POST /order: place a manual order, body {account_id, symbol, side,
   order_type, volume_lots, limit_price?, stop_price?, stop_loss?, take_profit?}
 - POST /positions/close: close a position, body {account_id, position_id, volume_lots?}
 - POST /orders/cancel: cancel a working order, body {account_id, order_id}
-- POST /close-all: kill switch, body {"account_id": int|null} (null = every
-  enabled account, pausing copying first)
+- POST /close-all: kill switch for one org, body {"org_id": int, "account_id": int?}
+  (no account_id = every enabled account in that org, pausing copying first)
 """
 
 import json
@@ -65,6 +71,22 @@ def _int_arg(request, name: bytes) -> int:
         return int(values[0])
     except (TypeError, ValueError):
         raise ValueError(f"{name.decode()} must be an integer")
+
+
+def _org_id_from(body: dict) -> int:
+    """Parse the required "org_id" from a JSON body or raise ValueError.
+
+    Every scoped command requires org_id -- there is no fall-through to a
+    global default, so a missing org fails loudly here before anything is
+    read or written.
+    """
+    org_id = body.get("org_id")
+    if org_id is None:
+        raise ValueError("org_id required")
+    try:
+        return int(org_id)
+    except (TypeError, ValueError):
+        raise ValueError("org_id must be an integer")
 
 
 class _JsonResource(resource.Resource):
@@ -135,37 +157,44 @@ class HealthResource(_JsonResource):
 
 
 class StateResource(_JsonResource):
-    """GET /state: account snapshots, master positions, pending orders, drift."""
+    """GET /state?org_id=N: one org's account snapshots, master positions,
+    pending orders, and drift."""
 
     def _handle(self, request, body):
-        return self.app.get_state()
+        org_id = _int_arg(request, b"org_id")
+        return self.app.get_state(org_id)
 
 
 class PauseResource(_JsonResource):
-    """POST /pause: pause copying globally or per-slave."""
+    """POST /pause: pause copying for an org, or one of its slaves."""
 
     def _handle(self, request, body):
+        org_id = _org_id_from(body)
         account_id = body.get("account_id")
-        d = self.app.pause(account_id=account_id)
-        d.addCallback(lambda _: {"status": "paused", "account_id": account_id})
+        d = self.app.pause(org_id, account_id=account_id)
+        d.addCallback(lambda _: {"status": "paused", "org_id": org_id,
+                                 "account_id": account_id})
         return d
 
 
 class ResumeResource(_JsonResource):
-    """POST /resume: resume copying globally or per-slave."""
+    """POST /resume: resume copying for an org, or one of its slaves."""
 
     def _handle(self, request, body):
+        org_id = _org_id_from(body)
         account_id = body.get("account_id")
-        d = self.app.resume(account_id=account_id)
-        d.addCallback(lambda _: {"status": "resumed", "account_id": account_id})
+        d = self.app.resume(org_id, account_id=account_id)
+        d.addCallback(lambda _: {"status": "resumed", "org_id": org_id,
+                                 "account_id": account_id})
         return d
 
 
 class ResyncResource(_JsonResource):
-    """POST /resync: trigger reconciliation."""
+    """POST /resync: trigger reconciliation for one org."""
 
     def _handle(self, request, body):
-        d = self.app.resync()
+        org_id = _org_id_from(body)
+        d = self.app.resync(org_id)
         d.addCallback(lambda items: {"status": "resynced", "drift_count": len(items or [])})
         return d
 
@@ -180,11 +209,12 @@ class ReloadResource(_JsonResource):
 
 
 class DryRunResource(_JsonResource):
-    """POST /dry-run: toggle dry-run mode."""
+    """POST /dry-run: toggle an org's dry-run mode."""
 
     def _handle(self, request, body):
+        org_id = _org_id_from(body)
         enabled = bool(body.get("enabled", False))
-        self.app.set_dry_run(enabled)
+        self.app.set_dry_run(org_id, enabled)
         return {"status": "ok", "dry_run": enabled}
 
 
@@ -204,40 +234,44 @@ class DiscoverResource(_JsonResource):
 
 
 class DriftCloseOrphanResource(_JsonResource):
-    """POST /drift/close-orphan: close an orphan slave position."""
+    """POST /drift/close-orphan: close an orphan slave position in one org."""
 
     def _handle(self, request, body):
+        org_id = _org_id_from(body)
         item_id = body.get("id")
         if item_id is None:
             raise ValueError("id required")
-        d = self.app.reconciler.close_orphan(item_id)
+        d = self.app.reconciler_for(org_id).close_orphan(item_id)
         d.addCallback(lambda _: {"status": "closed", "id": item_id})
         return d
 
 
 class DriftAdoptResource(_JsonResource):
-    """POST /drift/adopt: adopt an orphan slave position under a master position."""
+    """POST /drift/adopt: adopt an orphan slave position under a master
+    position, in one org."""
 
     def _handle(self, request, body):
+        org_id = _org_id_from(body)
         item_id = body.get("id")
         master_position_id = body.get("master_position_id")
         if item_id is None:
             raise ValueError("id required")
         if master_position_id is None:
             raise ValueError("master_position_id required")
-        d = self.app.reconciler.adopt(item_id, master_position_id)
+        d = self.app.reconciler_for(org_id).adopt(item_id, master_position_id)
         d.addCallback(lambda _: {"status": "adopted", "id": item_id})
         return d
 
 
 class DriftDismissResource(_JsonResource):
-    """POST /drift/dismiss: dismiss a drift item."""
+    """POST /drift/dismiss: dismiss a drift item in one org."""
 
     def _handle(self, request, body):
+        org_id = _org_id_from(body)
         item_id = body.get("id")
         if item_id is None:
             raise ValueError("id required")
-        d = self.app.reconciler.dismiss(item_id)
+        d = self.app.reconciler_for(org_id).dismiss(item_id)
         d.addCallback(lambda _: {"status": "dismissed", "id": item_id})
         return d
 
@@ -285,16 +319,18 @@ class CancelOrderResource(_JsonResource):
 
 
 class CloseAllResource(_JsonResource):
-    """POST /close-all: the kill switch.
+    """POST /close-all: the kill switch for one org.
 
-    Body {account_id} flattens one account; an empty body (or null
-    account_id) flattens EVERY enabled account and pauses copying first.
+    Body {org_id, account_id} flattens one account of that org; body
+    {org_id} (no account_id, or a null one) flattens EVERY enabled account
+    in that org and pauses its copying first.
     """
 
     def _handle(self, request, body):
+        org_id = _org_id_from(body)
         account_id = body.get("account_id")
         return self.app.close_all(
-            int(account_id) if account_id is not None else None)
+            org_id, int(account_id) if account_id is not None else None)
 
 
 class PositionsResource(resource.Resource):
