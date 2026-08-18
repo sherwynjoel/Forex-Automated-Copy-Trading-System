@@ -77,6 +77,15 @@ class FakeCTraderServer:
             {"asset_id": 1, "name": "USD", "display_name": "US Dollar"},
         ]
         self.trader_details: dict[int, dict] = {}
+        # (buy_factor, sell_factor): expected margin = volume * factor, in
+        # broker cents (moneyDigits=2).
+        self.margin_factors: tuple[float, float] = (0.002, 0.002)
+        # (account_id, symbol_id, period) -> list of bar dicts for
+        # _handle_get_trendbars_req.
+        self.trendbars: dict[tuple, list[dict]] = {}
+        # account_id -> list of deposit/withdraw dicts for
+        # _handle_cash_flow_req.
+        self.cash_flows: dict[int, list[dict]] = {}
         # When set, the NEXT tagged read-model request (trader, asset list,
         # deal list, order list) answers with a ProtoOAErrorRes carrying
         # this errorCode instead of data, then clears -- so tests can prove
@@ -157,6 +166,18 @@ class FakeCTraderServer:
         self._handlers[oa.ProtoOAOrderListReq().payloadType] = (
             self._handle_order_list_req
         )
+        self._handlers[oa.ProtoOAExpectedMarginReq().payloadType] = (
+            self._handle_expected_margin_req
+        )
+        self._handlers[oa.ProtoOAGetTrendbarsReq().payloadType] = (
+            self._handle_get_trendbars_req
+        )
+        self._handlers[oa.ProtoOACashFlowHistoryListReq().payloadType] = (
+            self._handle_cash_flow_req
+        )
+        self._handlers[oa.ProtoOADealListByPositionIdReq().payloadType] = (
+            self._handle_deal_list_by_position_req
+        )
         self._handlers[oa.ProtoOANewOrderReq().payloadType] = (
             self._handle_new_order_req
         )
@@ -204,6 +225,25 @@ class FakeCTraderServer:
 
     def push_execution(self, evt):
         """Push an execution event to all clients."""
+        self.broadcast(evt)
+
+    def push_trader_update(self, account_id: int, balance: int, money_digits: int = 2):
+        """Broadcast a ProtoOATraderUpdatedEvent (pushed balance change)."""
+        evt = oa.ProtoOATraderUpdatedEvent()
+        evt.ctidTraderAccountId = account_id
+        evt.trader.ctidTraderAccountId = account_id
+        evt.trader.balance = balance
+        evt.trader.moneyDigits = money_digits
+        evt.trader.depositAssetId = 1  # required field in proto2
+        self.broadcast(evt)
+
+    def push_margin_call(self, account_id: int, threshold: float = 50.0):
+        """Broadcast a ProtoOAMarginCallTriggerEvent."""
+        evt = oa.ProtoOAMarginCallTriggerEvent()
+        evt.ctidTraderAccountId = account_id
+        evt.marginCall.marginCallType = (
+            model.ProtoOANotificationType.MARGIN_LEVEL_THRESHOLD_1)
+        evt.marginCall.marginLevelThreshold = threshold
         self.broadcast(evt)
 
     def push_spot(self, ctid_trader_account_id: int, symbol_id: int, bid: int, ask: int):
@@ -429,6 +469,102 @@ class FakeCTraderServer:
 
         proto.send_payload(res, msg.clientMsgId)
 
+    def _handle_expected_margin_req(self, proto, msg):
+        """Handle expected margin request: volume * margin_factors, cents."""
+        req = oa.ProtoOAExpectedMarginReq()
+        req.ParseFromString(msg.payload)
+
+        if self._maybe_fail_query(proto, msg):
+            return
+
+        res = oa.ProtoOAExpectedMarginRes()
+        res.ctidTraderAccountId = req.ctidTraderAccountId
+        res.moneyDigits = 2
+        buy_f, sell_f = self.margin_factors
+        for volume in req.volume:
+            entry = res.margin.add()
+            entry.volume = volume
+            entry.buyMargin = int(volume * buy_f)
+            entry.sellMargin = int(volume * sell_f)
+
+        proto.send_payload(res, msg.clientMsgId)
+
+    def _handle_get_trendbars_req(self, proto, msg):
+        """Handle trendbars request from the scriptable self.trendbars table,
+        filtered to the requested window."""
+        req = oa.ProtoOAGetTrendbarsReq()
+        req.ParseFromString(msg.payload)
+
+        if self._maybe_fail_query(proto, msg):
+            return
+
+        res = oa.ProtoOAGetTrendbarsRes()
+        res.ctidTraderAccountId = req.ctidTraderAccountId
+        res.period = req.period
+        res.symbolId = req.symbolId
+        res.timestamp = req.toTimestamp  # required field in proto2
+        key = (req.ctidTraderAccountId, req.symbolId, req.period)
+        for b in self.trendbars.get(key, []):
+            ts_ms = b["utc_ts_minutes"] * 60_000
+            if not (req.fromTimestamp <= ts_ms <= req.toTimestamp):
+                continue
+            bar = res.trendbar.add()
+            bar.utcTimestampInMinutes = b["utc_ts_minutes"]
+            bar.volume = b["volume"]
+            bar.low = b["low"]
+            bar.deltaOpen = b["delta_open"]
+            bar.deltaHigh = b["delta_high"]
+            if "delta_close" in b:
+                bar.deltaClose = b["delta_close"]
+            bar.period = req.period
+
+        proto.send_payload(res, msg.clientMsgId)
+
+    def _handle_cash_flow_req(self, proto, msg):
+        """Handle cash flow history request from self.cash_flows."""
+        req = oa.ProtoOACashFlowHistoryListReq()
+        req.ParseFromString(msg.payload)
+
+        if self._maybe_fail_query(proto, msg):
+            return
+
+        res = oa.ProtoOACashFlowHistoryListRes()
+        res.ctidTraderAccountId = req.ctidTraderAccountId
+        for c in self.cash_flows.get(req.ctidTraderAccountId, []):
+            if not (req.fromTimestamp <= c["timestamp"] <= req.toTimestamp):
+                continue
+            op = res.depositWithdraw.add()
+            op.balanceHistoryId = c["id"]
+            op.operationType = c["operation_type"]
+            op.balance = c["balance"]
+            op.delta = c["delta"]
+            op.changeBalanceTimestamp = c["timestamp"]
+            op.moneyDigits = c.get("money_digits", 2)
+            if c.get("note"):
+                op.externalNote = c["note"]
+
+        proto.send_payload(res, msg.clientMsgId)
+
+    def _handle_deal_list_by_position_req(self, proto, msg):
+        """Handle deals-by-position request: self.deals filtered by
+        position_id and window."""
+        req = oa.ProtoOADealListByPositionIdReq()
+        req.ParseFromString(msg.payload)
+
+        if self._maybe_fail_query(proto, msg):
+            return
+
+        res = oa.ProtoOADealListByPositionIdRes()
+        res.ctidTraderAccountId = req.ctidTraderAccountId
+        for d in self.deals.get(req.ctidTraderAccountId, []):
+            if d["position_id"] != req.positionId:
+                continue
+            if not (req.fromTimestamp <= d["execution_timestamp"] <= req.toTimestamp):
+                continue
+            self._fill_deal(res.deal.add(), d)
+
+        proto.send_payload(res, msg.clientMsgId)
+
     def _maybe_fail_query(self, proto, msg) -> bool:
         """One-shot scripted failure for tagged read-model requests."""
         if not self.fail_next_query_error_code:
@@ -516,32 +652,37 @@ class FakeCTraderServer:
         for d in self.deals.get(req.ctidTraderAccountId, []):
             if not (req.fromTimestamp <= d["execution_timestamp"] <= req.toTimestamp):
                 continue
-            deal = res.deal.add()
-            deal.dealId = d["deal_id"]
-            deal.orderId = d["order_id"]
-            deal.positionId = d["position_id"]
-            deal.volume = d["volume"]
-            deal.filledVolume = d["filled_volume"]
-            deal.symbolId = d["symbol_id"]
-            deal.createTimestamp = d["create_timestamp"]
-            deal.executionTimestamp = d["execution_timestamp"]
-            deal.executionPrice = d["execution_price"]
-            deal.tradeSide = d["trade_side"]
-            deal.dealStatus = d["status"]
-            if "commission" in d:
-                deal.commission = d["commission"]
-            deal.moneyDigits = d.get("money_digits", 2)
-            cpd = d.get("close_position_detail")
-            if cpd:
-                deal.closePositionDetail.entryPrice = cpd["entry_price"]
-                deal.closePositionDetail.grossProfit = cpd["gross_profit"]
-                deal.closePositionDetail.swap = cpd["swap"]
-                deal.closePositionDetail.commission = cpd["commission"]
-                deal.closePositionDetail.balance = cpd["balance"]
-                deal.closePositionDetail.closedVolume = cpd["closed_volume"]
-                deal.closePositionDetail.moneyDigits = cpd.get("money_digits", 2)
+            self._fill_deal(res.deal.add(), d)
 
         proto.send_payload(res, msg.clientMsgId)
+
+    @staticmethod
+    def _fill_deal(deal, d: dict) -> None:
+        """Populate one ProtoOADeal from a scriptable deal dict (shared by
+        the full-history and by-position handlers)."""
+        deal.dealId = d["deal_id"]
+        deal.orderId = d["order_id"]
+        deal.positionId = d["position_id"]
+        deal.volume = d["volume"]
+        deal.filledVolume = d["filled_volume"]
+        deal.symbolId = d["symbol_id"]
+        deal.createTimestamp = d["create_timestamp"]
+        deal.executionTimestamp = d["execution_timestamp"]
+        deal.executionPrice = d["execution_price"]
+        deal.tradeSide = d["trade_side"]
+        deal.dealStatus = d["status"]
+        if "commission" in d:
+            deal.commission = d["commission"]
+        deal.moneyDigits = d.get("money_digits", 2)
+        cpd = d.get("close_position_detail")
+        if cpd:
+            deal.closePositionDetail.entryPrice = cpd["entry_price"]
+            deal.closePositionDetail.grossProfit = cpd["gross_profit"]
+            deal.closePositionDetail.swap = cpd["swap"]
+            deal.closePositionDetail.commission = cpd["commission"]
+            deal.closePositionDetail.balance = cpd["balance"]
+            deal.closePositionDetail.closedVolume = cpd["closed_volume"]
+            deal.closePositionDetail.moneyDigits = cpd.get("money_digits", 2)
 
     def _handle_order_list_req(self, proto, msg):
         """Handle order list (history) request, filtered by the requested

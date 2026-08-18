@@ -46,7 +46,8 @@ def _position_opened(e: m.MasterPositionOpened,
                        f"cannot copy position {e.position_id}: mirrored volume rounds to 0"))
             continue
         out.append(m.OpenMarket(s.account_id, e.position_id, sym.symbol_id, e.side, vol,
-                                e.stop_loss, e.take_profit, f"copy:m{e.position_id}"))
+                                e.stop_loss, e.take_profit, f"copy:m{e.position_id}",
+                                symbol_name=e.symbol_name))
     return out
 
 
@@ -114,7 +115,8 @@ def _decide_pending(event, mappings: m.MappingState,
                     continue
                 out.append(m.PlacePending(s.account_id, e.order_id, sym.symbol_id, e.side,
                                           e.order_type, vol, e.price, e.stop_loss,
-                                          e.take_profit, e.expiry_ts_ms, f"copy:o{e.order_id}"))
+                                          e.take_profit, e.expiry_ts_ms, f"copy:o{e.order_id}",
+                                          symbol_name=e.symbol_name))
         case m.MasterPendingReplaced() as e:
             covered: set[int] = set()
             for entry in mappings.order_entries(e.order_id):

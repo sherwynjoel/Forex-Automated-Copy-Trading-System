@@ -33,7 +33,7 @@ def database():
 def db(database):
     with psycopg.connect(database, autocommit=True) as conn:
         conn.execute(
-            "TRUNCATE events, mappings, symbol_cache, accounts, ctid_connections, admin "
+            "TRUNCATE events, portfolio_snapshots, mappings, symbol_cache, accounts, ctid_connections, admin "
             "RESTART IDENTITY CASCADE"
         )
         conn.execute("UPDATE settings SET copying_enabled = true, dry_run = false, shards = 1")

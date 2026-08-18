@@ -23,7 +23,12 @@ Routes:
 - POST /drift/close-orphan, /drift/adopt, /drift/dismiss: drift remedies,
   body {"id": str, "master_position_id": int?}
 - GET /details?account_id: full broker-side account profile
-- GET /history/deals, /history/orders (?account_id&from&to): trade history
+- GET /history/deals, /history/orders, /history/cashflow
+  (?account_id&from&to): trade and cash-flow history
+- GET /margin-estimate?account_id&symbol&volume_lots: pre-trade margin
+- GET /trendbars?account_id&symbol&period&from&to: historical candles
+- GET /position-deals?account_id&position_id&from&to: one position's deals
+- GET /analytics?account_id&weeks: performance aggregation
 - POST /order: place a manual order, body {account_id, symbol, side,
   order_type, volume_lots, limit_price?, stop_price?, stop_loss?, take_profit?}
 - POST /positions/close: close a position, body {account_id, position_id, volume_lots?}
@@ -56,15 +61,35 @@ def _read_json_body(request) -> dict:
     return json.loads(body) if body else {}
 
 
-def _int_arg(request, name: bytes) -> int:
-    """Parse a required integer query-string argument or raise ValueError."""
+def _int_arg(request, name: bytes, default: int | None = None) -> int:
+    """Parse an integer query-string argument; required unless a default is
+    given. Raises ValueError on absence (without default) or non-integers."""
     values = request.args.get(name)
     if not values:
+        if default is not None:
+            return default
         raise ValueError(f"{name.decode()} query parameter required")
     try:
         return int(values[0])
     except (TypeError, ValueError):
         raise ValueError(f"{name.decode()} must be an integer")
+
+
+def _float_arg(request, name: bytes) -> float:
+    values = request.args.get(name)
+    if not values:
+        raise ValueError(f"{name.decode()} query parameter required")
+    try:
+        return float(values[0])
+    except (TypeError, ValueError):
+        raise ValueError(f"{name.decode()} must be a number")
+
+
+def _str_arg(request, name: bytes) -> str:
+    values = request.args.get(name)
+    if not values or not values[0]:
+        raise ValueError(f"{name.decode()} query parameter required")
+    return values[0].decode()
 
 
 class _JsonResource(resource.Resource):
@@ -343,14 +368,70 @@ class OrderHistoryResource(_JsonResource):
         return self.app.get_order_history(account_id, from_ms, to_ms)
 
 
+class CashFlowHistoryResource(_JsonResource):
+    """GET /history/cashflow?account_id=N&from=ms&to=ms: deposits/withdrawals."""
+
+    def _handle(self, request, body):
+        account_id = _int_arg(request, b"account_id")
+        from_ms = _int_arg(request, b"from")
+        to_ms = _int_arg(request, b"to")
+        return self.app.get_cash_flow(account_id, from_ms, to_ms)
+
+
+class MarginEstimateResource(_JsonResource):
+    """GET /margin-estimate?account_id&symbol&volume_lots: what margin the
+    broker would require for that order, both directions."""
+
+    def _handle(self, request, body):
+        account_id = _int_arg(request, b"account_id")
+        symbol = _str_arg(request, b"symbol")
+        volume_lots = _float_arg(request, b"volume_lots")
+        return self.app.get_expected_margin(account_id, symbol, volume_lots)
+
+
+class TrendbarsResource(_JsonResource):
+    """GET /trendbars?account_id&symbol&period&from&to: historical candles."""
+
+    def _handle(self, request, body):
+        account_id = _int_arg(request, b"account_id")
+        symbol = _str_arg(request, b"symbol")
+        period = _str_arg(request, b"period")
+        from_ms = _int_arg(request, b"from")
+        to_ms = _int_arg(request, b"to")
+        return self.app.get_trendbars(account_id, symbol, period, from_ms, to_ms)
+
+
+class PositionDealsResource(_JsonResource):
+    """GET /position-deals?account_id&position_id&from&to: one position's
+    full deal lifecycle."""
+
+    def _handle(self, request, body):
+        account_id = _int_arg(request, b"account_id")
+        position_id = _int_arg(request, b"position_id")
+        from_ms = _int_arg(request, b"from")
+        to_ms = _int_arg(request, b"to")
+        return self.app.get_position_deals(account_id, position_id, from_ms, to_ms)
+
+
+class AnalyticsResource(_JsonResource):
+    """GET /analytics?account_id&weeks: performance aggregation over the
+    last N weeks of deal history (default 4, capped in the app)."""
+
+    def _handle(self, request, body):
+        account_id = _int_arg(request, b"account_id")
+        weeks = _int_arg(request, b"weeks", default=4)
+        return self.app.get_analytics(account_id, weeks)
+
+
 class HistoryResource(resource.Resource):
-    """Parent resource for /history/{deals,orders}."""
+    """Parent resource for /history/{deals,orders,cashflow}."""
 
     def __init__(self, app):
         super().__init__()
         self.app = app
         self.putChild(b"deals", DealHistoryResource(app))
         self.putChild(b"orders", OrderHistoryResource(app))
+        self.putChild(b"cashflow", CashFlowHistoryResource(app))
 
 
 class DriftResource(resource.Resource):
@@ -382,6 +463,10 @@ class RootResource(resource.Resource):
         self.putChild(b"details", DetailsResource(app))
         self.putChild(b"history", HistoryResource(app))
         self.putChild(b"order", PlaceOrderResource(app))
+        self.putChild(b"margin-estimate", MarginEstimateResource(app))
+        self.putChild(b"trendbars", TrendbarsResource(app))
+        self.putChild(b"position-deals", PositionDealsResource(app))
+        self.putChild(b"analytics", AnalyticsResource(app))
         self.putChild(b"positions", PositionsResource(app))
         self.putChild(b"orders", OrdersResource(app))
         self.putChild(b"close-all", CloseAllResource(app))

@@ -257,6 +257,7 @@ class Repo:
         master_position_id: int,
         slave_account_id: int,
         client_order_id: str,
+        symbol: str | None = None,
     ) -> None:
         """Create a pending position mapping, or leave the existing one alone.
 
@@ -291,11 +292,11 @@ class Repo:
         with psycopg.connect(self.dsn, autocommit=True) as conn:
             conn.execute(
                 """
-                INSERT INTO mappings (master_position_id, slave_account_id, client_order_id, status)
-                VALUES (%s, %s, %s, 'pending')
+                INSERT INTO mappings (master_position_id, slave_account_id, client_order_id, status, symbol)
+                VALUES (%s, %s, %s, 'pending', %s)
                 ON CONFLICT (client_order_id) DO NOTHING
                 """,
-                (master_position_id, slave_account_id, client_order_id),
+                (master_position_id, slave_account_id, client_order_id, symbol),
             )
 
     def activate_position_mapping(
@@ -402,15 +403,16 @@ class Repo:
         master_order_id: int,
         slave_account_id: int,
         client_order_id: str,
+        symbol: str | None = None,
     ) -> None:
         """Create a pending order mapping."""
         with psycopg.connect(self.dsn, autocommit=True) as conn:
             conn.execute(
                 """
-                INSERT INTO mappings (master_order_id, slave_account_id, client_order_id, status)
-                VALUES (%s, %s, %s, 'pending')
+                INSERT INTO mappings (master_order_id, slave_account_id, client_order_id, status, symbol)
+                VALUES (%s, %s, %s, 'pending', %s)
                 """,
-                (master_order_id, slave_account_id, client_order_id),
+                (master_order_id, slave_account_id, client_order_id, symbol),
             )
 
     def activate_order_mapping(self, client_order_id: str, slave_order_id: int) -> None:
@@ -523,6 +525,24 @@ class Repo:
                 (master_position_id, slave_account_id, slave_position_id, slave_volume),
             )
 
+    def save_portfolio_snapshot(
+        self, snapshot_date, account_id: int,
+        balance: float | None, equity: float | None,
+    ) -> None:
+        """Upsert one account's daily snapshot; the last write of a day wins,
+        so a day's row converges on that day's closing value."""
+        with psycopg.connect(self.dsn, autocommit=True) as conn:
+            conn.execute(
+                """
+                INSERT INTO portfolio_snapshots (snapshot_date, account_id, balance, equity)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (snapshot_date, account_id)
+                DO UPDATE SET balance = EXCLUDED.balance, equity = EXCLUDED.equity,
+                              updated_at = now()
+                """,
+                (snapshot_date, account_id, balance, equity),
+            )
+
     def mapping_rows(self) -> list[dict]:
         """Get all mapping rows as dictionaries."""
         with psycopg.connect(self.dsn, autocommit=True) as conn:
@@ -532,7 +552,7 @@ class Repo:
                 """
                 SELECT id, master_position_id, master_order_id, slave_account_id,
                        slave_position_id, slave_order_id, slave_volume, client_order_id,
-                       status, error, fill_price, created_at, updated_at
+                       status, error, fill_price, symbol, created_at, updated_at
                 FROM mappings
                 """
             ).fetchall()

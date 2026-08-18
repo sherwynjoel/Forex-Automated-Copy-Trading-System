@@ -26,6 +26,7 @@ client factory, calls boot(), and runs the reactor forever.
 
 import logging
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Callable
@@ -38,7 +39,7 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOARefreshTokenReq, ProtoOAReconcileReq,
 )
 from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
-    ProtoOAOrderType, ProtoOATradeSide,
+    ProtoOANotificationType, ProtoOAOrderType, ProtoOATradeSide,
 )
 
 from copier.ctrader.client import CTraderClient, make_sdk_client
@@ -53,6 +54,7 @@ from copier.engine.dispatch import Dispatcher, SendNotAttempted
 from copier.engine.throttle import TokenBucket
 from copier.engine.control import make_control_site
 from copier.engine import queries
+from copier.engine.analytics import compute_analytics
 
 log = logging.getLogger(__name__)
 
@@ -115,6 +117,41 @@ class CopierApp:
         self.clock = clock
         self._resync_in_flight = False
         self._resync_requested = False
+
+    # ---------- client event wiring ----------
+
+    def wire_client(self, client: CTraderClient) -> None:
+        """Attach every push-event consumer to a client.
+
+        The single wiring site for all three client-creation paths
+        (build_app, reload's new-environment clients, discover's bootstrap
+        client) -- so a newly built client can never silently miss a
+        consumer the others have.
+        """
+        client.on_execution(self.service.handle_execution)
+        client.on_tokens_invalidated(lambda _ids: self.refresh_due_tokens())
+        client.on_trader_updated(self._on_trader_updated)
+        client.on_margin_call(self._on_margin_call)
+
+    def _on_trader_updated(self, evt) -> None:
+        """Pushed balance change: apply immediately, no waiting for the poll."""
+        if self.state_tracker is not None:
+            self.state_tracker.on_trader_updated(evt)
+
+    def _on_margin_call(self, evt) -> None:
+        """Broker margin call: a 'risk' error event -- Logs, the dashboard
+        banner, and the email alerter all key off it."""
+        mc = evt.marginCall
+        try:
+            self.repo.log_event(
+                'risk', 'error',
+                {'action': 'margin_call',
+                 'margin_call_type': ProtoOANotificationType.Name(mc.marginCallType),
+                 'margin_level_threshold': mc.marginLevelThreshold},
+                account_id=evt.ctidTraderAccountId,
+            )
+        except Exception:
+            log.exception("failed to log margin call event")
 
     # ---------- lifecycle ----------
 
@@ -181,6 +218,23 @@ class CopierApp:
             yield self.state_tracker.refresh_balances(enabled_ids)
         except Exception:
             log.exception("refresh_balances: broker request failed")
+            return
+
+        # Daily portfolio snapshot: upsert each refreshed account under
+        # today's UTC date -- the last write of a day wins, so yesterday's
+        # rows hold yesterday's closing values (Overview's vs-yesterday
+        # comparison reads them).
+        try:
+            today = datetime.utcnow().date()
+            snapshot = self.state_tracker.snapshot()
+            for account_id in enabled_ids:
+                state = snapshot.get(account_id)
+                if state is None or state.get("balance") is None:
+                    continue
+                self.repo.save_portfolio_snapshot(
+                    today, account_id, state["balance"], state.get("equity"))
+        except Exception:
+            log.exception("refresh_balances: snapshot write failed")
 
     @defer.inlineCallbacks
     def _connect_and_authorize(self, accounts):
@@ -394,8 +448,7 @@ class CopierApp:
                 if shard in env_clients:
                     continue
                 client = self.client_factory(is_live)
-                client.on_execution(self.service.handle_execution)
-                client.on_tokens_invalidated(lambda _ids: self.refresh_due_tokens())
+                self.wire_client(client)
                 env_clients[shard] = client
                 client.start()
                 try:
@@ -497,8 +550,7 @@ class CopierApp:
             )
 
         if built_new:
-            client.on_execution(self.service.handle_execution)
-            client.on_tokens_invalidated(lambda _ids: self.refresh_due_tokens())
+            self.wire_client(client)
             self.clients.setdefault(False, {}).setdefault(0, client)
 
         self.repo.log_event(
@@ -815,6 +867,81 @@ class CopierApp:
         return {"account_id": account_id, "positions_closed": positions_closed,
                 "orders_cancelled": orders_cancelled, "error": None}
 
+    def get_expected_margin(self, account_id: int, symbol_name: str,
+                            volume_lots) -> defer.Deferred:
+        """Pre-trade margin estimate for volume_lots of symbol_name."""
+        def go(ctx):
+            client, _symbols = ctx
+            sym = self.repo.load_symbol_cache(account_id).get(symbol_name)
+            if sym is None:
+                raise ValueError(
+                    f"unknown symbol {symbol_name!r} for account {account_id}")
+            volume = int(float(volume_lots) * sym.lot_size)
+            if volume <= 0:
+                raise ValueError("volume_lots must be greater than 0")
+            return queries.expected_margin(client, account_id, sym, volume)
+
+        d = defer.maybeDeferred(self._query_context, account_id)
+        d.addCallback(go)
+        return d
+
+    def get_trendbars(self, account_id: int, symbol_name: str, period: str,
+                      from_ms: int, to_ms: int) -> defer.Deferred:
+        """Historical candles for one of the account's symbols."""
+        def go(ctx):
+            client, _symbols = ctx
+            sym = self.repo.load_symbol_cache(account_id).get(symbol_name)
+            if sym is None:
+                raise ValueError(
+                    f"unknown symbol {symbol_name!r} for account {account_id}")
+            return queries.trendbars(client, account_id, sym, period, from_ms, to_ms)
+
+        d = defer.maybeDeferred(self._query_context, account_id)
+        d.addCallback(go)
+        return d
+
+    def get_cash_flow(self, account_id: int, from_ms: int, to_ms: int) -> defer.Deferred:
+        """Deposit/withdrawal history for one account."""
+        d = defer.maybeDeferred(self._query_context, account_id)
+        d.addCallback(lambda ctx: queries.cash_flow_history(
+            ctx[0], account_id, from_ms, to_ms))
+        return d
+
+    def get_position_deals(self, account_id: int, position_id: int,
+                           from_ms: int, to_ms: int) -> defer.Deferred:
+        """Every deal of one position (the drill-down view)."""
+        d = defer.maybeDeferred(self._query_context, account_id)
+        d.addCallback(lambda ctx: queries.position_deals(
+            ctx[0], account_id, position_id, ctx[1], from_ms, to_ms))
+        return d
+
+    @defer.inlineCallbacks
+    def get_analytics(self, account_id: int, weeks: int = 4):
+        """Performance aggregation over the last `weeks` of deal history.
+
+        cTrader caps each DealListReq at one week, so this loops windows and
+        dedupes by deal id (boundary timestamps can land in two windows).
+        Capped at 26 weeks = 26 broker round trips.
+        """
+        weeks = max(1, min(int(weeks), 26))
+        client, symbols = self._query_context(account_id)
+        now_ms = int(time.time() * 1000)
+        week_ms = 7 * 24 * 3600 * 1000
+
+        by_deal_id: dict[int, dict] = {}
+        truncated = False
+        for i in range(weeks):
+            to_ms = now_ms - i * week_ms
+            from_ms = to_ms - week_ms
+            result = yield queries.deal_history(
+                client, account_id, symbols, from_ms, to_ms)
+            truncated = truncated or result["has_more"]
+            for deal in result["deals"]:
+                by_deal_id[deal["deal_id"]] = deal
+
+        stats = compute_analytics(list(by_deal_id.values()))
+        return {**stats, "weeks": weeks, "truncated": truncated}
+
     # ---------- read models ----------
 
     def get_health(self) -> dict:
@@ -1108,13 +1235,12 @@ def build_app(
     # its ctor: any fill/close/cancel refreshes /state within ~1s.
     service.on_positions_changed = app.request_resync
 
-    # Wire execution + tokens-invalidated to EVERY client (all shards, both
+    # Wire every push-event consumer to EVERY client (all shards, both
     # environments) -- slave shards must deliver execution events too, and any
     # client observing a token invalidation must trigger an immediate refresh.
     for env_clients in clients.values():
         for client in env_clients.values():
-            client.on_execution(service.handle_execution)
-            client.on_tokens_invalidated(lambda _ids, app=app: app.refresh_due_tokens())
+            app.wire_client(client)
 
     return app
 

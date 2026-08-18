@@ -563,3 +563,27 @@ def test_fallback_spot_scaling_when_symbol_digits_unavailable():
     bid, ask = tracker._spots[999]
     assert bid == pytest.approx(1.1050)
     assert ask == pytest.approx(1.1052)
+
+def test_trader_updated_event_updates_balance_immediately():
+    """A pushed ProtoOATraderUpdatedEvent updates the tracked balance without
+    waiting for the next 60s poll."""
+    from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOATraderUpdatedEvent
+
+    sdk, clock = StubSdk(), Clock()
+    client = CTraderClient(sdk, "cid", "csecret", clock=clock)
+    client.start()
+    sdk.connect()
+
+    class MockRepo:
+        pass
+
+    tracker = AccountStateTracker(client, MockRepo(), 1001, {})
+
+    evt = ProtoOATraderUpdatedEvent()
+    evt.ctidTraderAccountId = 2002
+    evt.trader.ctidTraderAccountId = 2002
+    evt.trader.balance = 1_234_567
+    evt.trader.moneyDigits = 2
+    tracker.on_trader_updated(evt)
+
+    assert tracker.snapshot()[2002]["balance"] == pytest.approx(12345.67)

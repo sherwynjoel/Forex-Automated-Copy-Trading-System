@@ -176,6 +176,39 @@ def test_execution_events_routed_with_account_id():
     assert seen and seen[0][0] == 1001
 
 
+def test_trader_updated_and_margin_call_events_are_routed():
+    """Pushed ProtoOATraderUpdatedEvent / ProtoOAMarginCallTriggerEvent reach
+    their typed callback lists -- the broker pushes balance changes and
+    margin calls; dropping them (the old behavior) forced balance polling
+    and made margin calls invisible."""
+    from ctrader_open_api.messages.OpenApiMessages_pb2 import (
+        ProtoOAMarginCallTriggerEvent, ProtoOATraderUpdatedEvent)
+    from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
+        ProtoOANotificationType)
+
+    sdk, _, client = make()
+    updates, margin_calls = [], []
+    client.on_trader_updated(lambda evt: updates.append(evt))
+    client.on_margin_call(lambda evt: margin_calls.append(evt))
+    sdk.connect()
+
+    evt = ProtoOATraderUpdatedEvent()
+    evt.ctidTraderAccountId = 1001
+    evt.trader.ctidTraderAccountId = 1001
+    evt.trader.balance = 999_900
+    sdk.deliver(evt)
+
+    mc = ProtoOAMarginCallTriggerEvent()
+    mc.ctidTraderAccountId = 1001
+    mc.marginCall.marginCallType = ProtoOANotificationType.MARGIN_LEVEL_THRESHOLD_1
+    mc.marginCall.marginLevelThreshold = 50.0
+    sdk.deliver(mc)
+
+    assert len(updates) == 1 and updates[0].trader.balance == 999_900
+    assert len(margin_calls) == 1
+    assert margin_calls[0].marginCall.marginLevelThreshold == 50.0
+
+
 def test_ready_fires_after_first_app_auth():
     sdk, _, client = make()
     fired = []

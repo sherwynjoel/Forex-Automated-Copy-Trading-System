@@ -33,7 +33,8 @@ def test_open_fans_out_to_enabled_slaves_with_label():
     assert [type(i) for i in out] == [m.OpenMarket, m.OpenMarket]
     assert out[0] == m.OpenMarket(slave_account_id=101, master_position_id=11, symbol_id=1,
                                   side=m.Side.BUY, volume=10_000_000,
-                                  stop_loss=1.09, take_profit=1.12, label="copy:m11")
+                                  stop_loss=1.09, take_profit=1.12, label="copy:m11",
+                                  symbol_name="EURUSD")
 
 
 def test_open_applies_multiplier():
@@ -95,7 +96,7 @@ def test_increase_emits_delta_open_for_mapped_position():
                                  volume=2_000_000, lot_size=10_000_000,
                                  stop_loss=None, take_profit=None)
     out = decide(inc, st, [slave(101)])
-    assert out == [m.OpenMarket(101, 11, 1, m.Side.BUY, 2_000_000, None, None, "copy:m11")]
+    assert out == [m.OpenMarket(101, 11, 1, m.Side.BUY, 2_000_000, None, None, "copy:m11", symbol_name="EURUSD")]
 
 
 def test_sltp_amend_maps_to_each_entry():
@@ -138,3 +139,10 @@ def test_sltp_amend_no_mapping_alerts():
     ev = m.MasterPositionSLTPAmended(position_id=11, stop_loss=1.05, take_profit=1.15)
     out = decide(ev, st, [slave(101)])
     assert out == [m.Alert(101, "SL/TP change on master position 11 but slave has no mapped copy")]
+
+
+def test_open_intent_carries_symbol_name():
+    """OpenMarket carries the slave-resolved symbol NAME too, so dispatch can
+    stamp it onto the mapping row for the copy feed."""
+    out = decide(OPEN, MapState(), [slave(101)])
+    assert out[0].symbol_name == "EURUSD"
