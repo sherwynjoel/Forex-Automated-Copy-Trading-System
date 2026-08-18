@@ -131,9 +131,9 @@ test('renders severity-coded rows', async () => {
 
   // Check that severity is color-coded (error should have different style)
   const errorSeverityCells = screen.getAllByText('error')
-  const errorSeveritySpan = errorSeverityCells.find((el) => el.classList.contains('bg-red-100'))
+  const errorSeveritySpan = errorSeverityCells.find((el) => el.classList.contains('bg-loss-wash'))
   expect(errorSeveritySpan).toBeDefined()
-  expect(errorSeveritySpan).toHaveClass('bg-red-100')
+  expect(errorSeveritySpan).toHaveClass('bg-loss-wash')
 })
 
 test('live websocket event prepends a row', async () => {

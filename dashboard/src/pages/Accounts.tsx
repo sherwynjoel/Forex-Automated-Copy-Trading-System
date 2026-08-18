@@ -1,21 +1,45 @@
 import { useEffect, useState } from 'react'
 import { api } from '../lib/api'
-import { Account } from '../lib/types'
+import type { Account, AccountDetails, CloseAllResult } from '../lib/types'
+import ConfirmDialog from '../components/ConfirmDialog'
+
+function formatDate(iso: string | undefined): string {
+  if (!iso) return '—'
+  return new Date(iso).toLocaleDateString('en-GB', {
+    day: '2-digit', month: 'short', year: 'numeric',
+  })
+}
+
+function formatTimestamp(ms: number | null | undefined): string {
+  if (!ms) return '—'
+  return new Date(ms).toLocaleDateString('en-GB', {
+    day: '2-digit', month: 'short', year: 'numeric',
+  })
+}
 
 export default function Accounts() {
   const [accounts, setAccounts] = useState<Account[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
   const [roleErrors, setRoleErrors] = useState<Record<number, string>>({})
   const [multiplierErrors, setMultiplierErrors] = useState<Record<number, string>>({})
   const [pendingRows, setPendingRows] = useState<Set<number>>(new Set())
-  const [originalMultipliers, setOriginalMultipliers] = useState<Record<number, number>>({})
+  const [multiplierDrafts, setMultiplierDrafts] = useState<Record<number, string>>({})
+  const [nicknameDrafts, setNicknameDrafts] = useState<Record<number, string>>({})
+  const [disconnecting, setDisconnecting] = useState<Account | null>(null)
+  const [flattening, setFlattening] = useState<Account | null>(null)
+  const [detailsFor, setDetailsFor] = useState<Account | null>(null)
+  const [details, setDetails] = useState<AccountDetails | null>(null)
+  const [detailsError, setDetailsError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
 
   const fetchAccounts = async () => {
     try {
-      setIsLoading(true)
       const data = await api<Account[]>('/api/accounts')
       setAccounts(data || [])
+      setMultiplierDrafts({})
+      setNicknameDrafts({})
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load accounts')
@@ -28,290 +52,358 @@ export default function Accounts() {
     fetchAccounts()
   }, [])
 
-  // Listen for OAuth popup close and refetch
+  // Refetch when the OAuth popup closes and focus returns to this window.
   useEffect(() => {
     const handleFocus = () => {
       fetchAccounts()
     }
-
     window.addEventListener('focus', handleFocus)
     return () => window.removeEventListener('focus', handleFocus)
   }, [])
+
+  const withPending = async (accountId: number, action: () => Promise<void>) => {
+    setPendingRows((prev) => new Set([...prev, accountId]))
+    try {
+      await action()
+    } finally {
+      setPendingRows((prev) => {
+        const next = new Set(prev)
+        next.delete(accountId)
+        return next
+      })
+    }
+  }
 
   const handleConnectOAuth = () => {
     window.open('/api/oauth/connect', 'ctrader-oauth', 'width=520,height=680')
   }
 
-  const handleRoleChange = async (accountId: number, newRole: string) => {
-    try {
-      setPendingRows((prev) => new Set([...prev, accountId]))
-      setRoleErrors((prev) => ({ ...prev, [accountId]: '' }))
-      await api(`/api/accounts/${accountId}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ role: newRole }),
-      })
-      await fetchAccounts()
-    } catch (err) {
-      const errorCode = err instanceof Error ? err.message : 'Unknown error'
-      if (errorCode === '409') {
-        setRoleErrors((prev) => ({ ...prev, [accountId]: 'A master already exists' }))
-      } else {
-        setRoleErrors((prev) => ({ ...prev, [accountId]: `Failed to update role (${errorCode})` }))
+  const handleRoleChange = (accountId: number, newRole: string) =>
+    withPending(accountId, async () => {
+      try {
+        setRoleErrors((prev) => ({ ...prev, [accountId]: '' }))
+        await api(`/api/accounts/${accountId}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ role: newRole }),
+        })
+        await fetchAccounts()
+      } catch (err) {
+        const errorCode = err instanceof Error ? err.message : 'Unknown error'
+        setRoleErrors((prev) => ({
+          ...prev,
+          [accountId]: errorCode === '409'
+            ? 'A master already exists'
+            : `Failed to update role (${errorCode})`,
+        }))
       }
-    } finally {
-      setPendingRows((prev) => {
-        const next = new Set(prev)
-        next.delete(accountId)
-        return next
-      })
-    }
-  }
+    })
 
-  const handleEnabledToggle = async (accountId: number, currentEnabled: boolean) => {
-    try {
-      setPendingRows((prev) => new Set([...prev, accountId]))
-      await api(`/api/accounts/${accountId}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ enabled: !currentEnabled }),
-      })
-      await fetchAccounts()
-    } catch (err) {
-      const errorCode = err instanceof Error ? err.message : 'Unknown error'
-      setError(`Failed to update enabled status (${errorCode})`)
-    } finally {
-      setPendingRows((prev) => {
-        const next = new Set(prev)
-        next.delete(accountId)
-        return next
-      })
-    }
-  }
+  const handleEnabledToggle = (accountId: number, currentEnabled: boolean) =>
+    withPending(accountId, async () => {
+      try {
+        await api(`/api/accounts/${accountId}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ enabled: !currentEnabled }),
+        })
+        await fetchAccounts()
+      } catch (err) {
+        setError(`Failed to update enabled status (${err instanceof Error ? err.message : 'unknown'})`)
+      }
+    })
 
-  const handleMultiplierChange = async (accountId: number, newMultiplier: string) => {
-    const multiplier = parseFloat(newMultiplier)
-
+  const handleMultiplierBlur = (accountId: number) => {
+    const draft = multiplierDrafts[accountId]
+    if (draft === undefined) return
+    const multiplier = parseFloat(draft)
     if (isNaN(multiplier) || multiplier <= 0) {
       setMultiplierErrors((prev) => ({ ...prev, [accountId]: 'Multiplier must be greater than 0' }))
-      // Reset to original value
-      const account = accounts.find((a) => a.ctid_trader_account_id === accountId)
-      if (account) {
-        const newAccounts = accounts.map((acc) =>
-          acc.ctid_trader_account_id === accountId
-            ? { ...acc, multiplier: originalMultipliers[accountId] ?? account.multiplier }
-            : acc
-        )
-        setAccounts(newAccounts)
-      }
-      return
-    }
-
-    try {
-      setPendingRows((prev) => new Set([...prev, accountId]))
-      setMultiplierErrors((prev) => ({ ...prev, [accountId]: '' }))
-      await api(`/api/accounts/${accountId}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ multiplier }),
-      })
-      await fetchAccounts()
-    } catch (err) {
-      const errorCode = err instanceof Error ? err.message : 'Unknown error'
-      setMultiplierErrors((prev) => ({ ...prev, [accountId]: `Failed to update multiplier (${errorCode})` }))
-      // Reset to original value on error
-      const account = accounts.find((a) => a.ctid_trader_account_id === accountId)
-      if (account) {
-        const newAccounts = accounts.map((acc) =>
-          acc.ctid_trader_account_id === accountId
-            ? { ...acc, multiplier: originalMultipliers[accountId] ?? account.multiplier }
-            : acc
-        )
-        setAccounts(newAccounts)
-      }
-    } finally {
-      setPendingRows((prev) => {
-        const next = new Set(prev)
-        next.delete(accountId)
+      setMultiplierDrafts((prev) => {
+        const next = { ...prev }
+        delete next[accountId]
         return next
       })
+      return
+    }
+    withPending(accountId, async () => {
+      try {
+        setMultiplierErrors((prev) => ({ ...prev, [accountId]: '' }))
+        await api(`/api/accounts/${accountId}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ multiplier }),
+        })
+        await fetchAccounts()
+      } catch (err) {
+        const errorCode = err instanceof Error ? err.message : 'Unknown error'
+        setMultiplierErrors((prev) => ({
+          ...prev, [accountId]: `Failed to update multiplier (${errorCode})`,
+        }))
+        setMultiplierDrafts((prev) => {
+          const next = { ...prev }
+          delete next[accountId]
+          return next
+        })
+      }
+    })
+  }
+
+  const handleNicknameBlur = (account: Account) => {
+    const draft = nicknameDrafts[account.ctid_trader_account_id]
+    if (draft === undefined || draft === (account.nickname ?? '')) return
+    withPending(account.ctid_trader_account_id, async () => {
+      try {
+        await api(`/api/accounts/${account.ctid_trader_account_id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ nickname: draft }),
+        })
+        await fetchAccounts()
+      } catch (err) {
+        setError(`Failed to update nickname (${err instanceof Error ? err.message : 'unknown'})`)
+      }
+    })
+  }
+
+  const handleDisconnect = async () => {
+    if (!disconnecting) return
+    const accountId = disconnecting.ctid_trader_account_id
+    try {
+      setBusy(true)
+      const result = await api<{ accounts_removed: number }>(
+        `/api/accounts/${accountId}/connection`, { method: 'DELETE' })
+      setNotice(
+        `Disconnected. ${result.accounts_removed} account${result.accounts_removed === 1 ? '' : 's'} ` +
+        'removed. The token stays revocable at ctrader.com.')
+      setDisconnecting(null)
+      await fetchAccounts()
+    } catch (err) {
+      setDisconnecting(null)
+      setError(err instanceof Error ? err.message : 'Failed to disconnect account')
+    } finally {
+      setBusy(false)
     }
   }
 
-  const handleDisconnect = async (accountId: number) => {
-    if (!confirm('Are you sure you want to disconnect this account?')) {
-      return
-    }
-
+  const handleFlatten = async () => {
+    if (!flattening) return
+    const accountId = flattening.ctid_trader_account_id
     try {
-      setPendingRows((prev) => new Set([...prev, accountId]))
-      await api(`/api/accounts/connections/${accountId}`, {
-        method: 'DELETE',
+      setBusy(true)
+      const result = await api<CloseAllResult>('/api/control/close-all', {
+        method: 'POST',
+        body: JSON.stringify({ account_id: accountId }),
       })
-      await fetchAccounts()
+      const summary = result.accounts[0]
+      setNotice(
+        `Closed ${summary.positions_closed} position${summary.positions_closed === 1 ? '' : 's'} ` +
+        `and cancelled ${summary.orders_cancelled} order${summary.orders_cancelled === 1 ? '' : 's'} ` +
+        `on account ${flattening.trader_login}.`)
+      setFlattening(null)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to disconnect account')
+      setFlattening(null)
+      setError(`Flatten failed: ${err instanceof Error ? err.message : 'unknown error'}`)
     } finally {
-      setPendingRows((prev) => {
-        const next = new Set(prev)
-        next.delete(accountId)
-        return next
-      })
+      setBusy(false)
+    }
+  }
+
+  const openDetails = async (account: Account) => {
+    setDetailsFor(account)
+    setDetails(null)
+    setDetailsError(null)
+    try {
+      setDetails(await api<AccountDetails>(
+        `/api/accounts/${account.ctid_trader_account_id}/details`))
+    } catch (err) {
+      setDetailsError(
+        `Could not fetch details: ${err instanceof Error ? err.message : 'unknown error'}. ` +
+        'The copier may be offline or the account not yet authorized.')
     }
   }
 
   if (isLoading) {
-    return <div className="text-gray-500">Loading accounts...</div>
+    return <div className="text-ink-faint">Loading accounts…</div>
   }
 
   return (
-    <div className="space-y-6">
-      {error && (
-        <div className="rounded-md bg-red-50 p-4">
-          <p className="text-sm font-medium text-red-800">{error}</p>
+    <div className="space-y-6 max-w-6xl">
+      <header className="flex items-end justify-between">
+        <div>
+          <h1 className="font-display text-2xl text-ink">Accounts</h1>
+          <p className="text-sm text-ink-soft mt-1">
+            One cTrader ID grant covers every account under it. Roles,
+            multipliers, and nicknames apply per account.
+          </p>
         </div>
-      )}
-
-      <div className="flex gap-4">
         <button
           onClick={handleConnectOAuth}
-          className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
+          className="px-4 py-2 bg-brand text-white text-sm font-semibold rounded hover:bg-brand-deep transition-colors"
         >
           Connect cTrader ID
         </button>
-      </div>
+      </header>
+
+      {notice && (
+        <div className="rounded border border-line bg-brand-wash px-4 py-3 text-sm text-ink flex justify-between items-center">
+          <span>{notice}</span>
+          <button onClick={() => setNotice(null)} className="text-xs font-medium text-ink-soft hover:text-ink">
+            Dismiss
+          </button>
+        </div>
+      )}
+      {error && (
+        <div className="rounded border border-loss/30 bg-loss-wash px-4 py-3 text-sm text-loss-deep">
+          {error}
+        </div>
+      )}
 
       {accounts.length === 0 ? (
-        <div className="text-gray-500">No accounts connected</div>
+        <div className="bg-card border border-line rounded-lg px-6 py-12 text-center">
+          <p className="text-ink-soft">No accounts connected yet.</p>
+          <p className="text-sm text-ink-faint mt-1">
+            Connect a cTrader ID to discover its trading accounts.
+          </p>
+        </div>
       ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full border-collapse border border-gray-300">
-            <thead className="bg-gray-50">
-              <tr>
-                <th className="border border-gray-300 px-4 py-2 text-left text-sm font-semibold">
-                  Login
-                </th>
-                <th className="border border-gray-300 px-4 py-2 text-left text-sm font-semibold">
-                  Type
-                </th>
-                <th className="border border-gray-300 px-4 py-2 text-left text-sm font-semibold">
-                  Role
-                </th>
-                <th className="border border-gray-300 px-4 py-2 text-left text-sm font-semibold">
-                  Multiplier
-                </th>
-                <th className="border border-gray-300 px-4 py-2 text-left text-sm font-semibold">
-                  Enabled
-                </th>
-                <th className="border border-gray-300 px-4 py-2 text-left text-sm font-semibold">
-                  Connection Status
-                </th>
-                <th className="border border-gray-300 px-4 py-2 text-left text-sm font-semibold">
-                  Actions
-                </th>
+        <div className="bg-card rounded-lg border border-line overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left border-b border-line">
+                <th className="desk-label px-5 py-2.5 font-semibold">Account</th>
+                <th className="desk-label px-3 py-2.5 font-semibold">Nickname</th>
+                <th className="desk-label px-3 py-2.5 font-semibold">Env</th>
+                <th className="desk-label px-3 py-2.5 font-semibold">Role</th>
+                <th className="desk-label px-3 py-2.5 font-semibold">Multiplier</th>
+                <th className="desk-label px-3 py-2.5 font-semibold">Enabled</th>
+                <th className="desk-label px-3 py-2.5 font-semibold">Grant</th>
+                <th className="desk-label px-5 py-2.5 font-semibold text-right">Actions</th>
               </tr>
             </thead>
             <tbody>
               {accounts.map((account) => {
-                const isPending = pendingRows.has(account.ctid_trader_account_id)
+                const id = account.ctid_trader_account_id
+                const isPending = pendingRows.has(id)
                 return (
-                  <tr key={account.ctid_trader_account_id} className={`hover:bg-gray-50 ${isPending ? 'opacity-60' : ''}`}>
-                    <td className="border border-gray-300 px-4 py-2 text-sm">
-                      {account.trader_login}
+                  <tr key={id} className={`border-b border-line last:border-0 align-top ${isPending ? 'opacity-60' : ''}`}>
+                    <td className="px-5 py-3">
+                      <div className="num text-ink">{account.trader_login}</div>
+                      <div className="text-xs text-ink-faint">cTID {id}</div>
+                      {account.status === 'degraded' && (
+                        <div
+                          className="mt-1 text-xs text-loss-deep bg-loss-wash rounded px-1.5 py-0.5 max-w-44 truncate"
+                          title={account.last_error ?? undefined}
+                        >
+                          degraded{account.last_error ? `: ${account.last_error}` : ''}
+                        </div>
+                      )}
                     </td>
-                    <td className="border border-gray-300 px-4 py-2 text-sm">
-                      <span className={`inline-block px-2 py-1 rounded text-xs font-medium ${
-                        account.is_live
-                          ? 'bg-red-100 text-red-800'
-                          : 'bg-blue-100 text-blue-800'
+                    <td className="px-3 py-3">
+                      <input
+                        type="text"
+                        aria-label={`Nickname for account ${account.trader_login}`}
+                        placeholder="Add a name"
+                        value={nicknameDrafts[id] ?? account.nickname ?? ''}
+                        onChange={(e) =>
+                          setNicknameDrafts((prev) => ({ ...prev, [id]: e.target.value }))}
+                        onBlur={() => handleNicknameBlur(account)}
+                        disabled={isPending}
+                        className="w-32 rounded border border-transparent hover:border-line-strong focus:border-line-strong px-2 py-1 text-sm bg-transparent"
+                      />
+                    </td>
+                    <td className="px-3 py-3">
+                      <span className={`text-xs font-semibold px-2 py-0.5 rounded ${
+                        account.is_live ? 'bg-loss-wash text-loss' : 'bg-paper text-ink-soft'
                       }`}>
                         {account.is_live ? 'Live' : 'Demo'}
                       </span>
                     </td>
-                    <td className="border border-gray-300 px-4 py-2 text-sm">
+                    <td className="px-3 py-3">
                       <select
+                        aria-label={`Role for account ${account.trader_login}`}
                         value={account.role}
-                        onChange={(e) => handleRoleChange(account.ctid_trader_account_id, e.target.value)}
+                        onChange={(e) => handleRoleChange(id, e.target.value)}
                         disabled={isPending}
-                        className="px-2 py-1 border border-gray-300 rounded text-sm disabled:opacity-50"
+                        className="rounded border border-line-strong px-2 py-1 text-sm bg-card disabled:opacity-50"
                       >
                         <option value="master">Master</option>
                         <option value="slave">Slave</option>
                         <option value="ignored">Ignored</option>
                       </select>
-                      {roleErrors[account.ctid_trader_account_id] && (
-                        <div className="text-red-600 text-xs mt-1">
-                          {roleErrors[account.ctid_trader_account_id]}
-                        </div>
+                      {roleErrors[id] && (
+                        <div className="text-loss text-xs mt-1">{roleErrors[id]}</div>
                       )}
                     </td>
-                    <td className="border border-gray-300 px-4 py-2 text-sm">
+                    <td className="px-3 py-3">
                       {account.role === 'slave' ? (
                         <div>
                           <input
                             type="number"
                             step="0.01"
                             min="0.01"
-                            value={account.multiplier}
-                            onBlur={(e) => {
-                              setOriginalMultipliers((prev) => ({
-                                ...prev,
-                                [account.ctid_trader_account_id]: account.multiplier,
-                              }))
-                              handleMultiplierChange(account.ctid_trader_account_id, e.target.value)
-                            }}
-                            onChange={(e) => {
-                              // Update local state for input feedback
-                              const newAccounts = accounts.map((acc) =>
-                                acc.ctid_trader_account_id === account.ctid_trader_account_id
-                                  ? { ...acc, multiplier: parseFloat(e.target.value) || 0 }
-                                  : acc
-                              )
-                              setAccounts(newAccounts)
-                            }}
+                            aria-label={`Multiplier for account ${account.trader_login}`}
+                            value={multiplierDrafts[id] ?? String(account.multiplier)}
+                            onChange={(e) =>
+                              setMultiplierDrafts((prev) => ({ ...prev, [id]: e.target.value }))}
+                            onBlur={() => handleMultiplierBlur(id)}
                             disabled={isPending}
-                            className="px-2 py-1 border border-gray-300 rounded text-sm w-20 disabled:opacity-50"
+                            className="num w-20 rounded border border-line-strong px-2 py-1 text-sm disabled:opacity-50"
                           />
-                          {multiplierErrors[account.ctid_trader_account_id] && (
-                            <div className="text-red-600 text-xs mt-1">
-                              {multiplierErrors[account.ctid_trader_account_id]}
-                            </div>
+                          {multiplierErrors[id] && (
+                            <div className="text-loss text-xs mt-1 max-w-36">{multiplierErrors[id]}</div>
                           )}
                         </div>
                       ) : (
-                        <span className="text-gray-400">—</span>
+                        <span className="text-ink-faint">—</span>
                       )}
                     </td>
-                    <td className="border border-gray-300 px-4 py-2 text-sm">
+                    <td className="px-3 py-3">
                       <input
                         type="checkbox"
+                        aria-label={`Copying enabled for account ${account.trader_login}`}
                         checked={account.enabled}
-                        onChange={() => handleEnabledToggle(account.ctid_trader_account_id, account.enabled)}
+                        onChange={() => handleEnabledToggle(id, account.enabled)}
                         disabled={isPending}
-                        className="w-4 h-4 disabled:opacity-50"
+                        className="w-4 h-4 accent-brand disabled:opacity-50"
                       />
                     </td>
-                    <td className="border border-gray-300 px-4 py-2 text-sm">
-                      <span className={`inline-block px-2 py-1 rounded text-xs font-medium ${
-                        account.connection_status === 'connected'
-                          ? 'bg-green-100 text-green-800'
-                          : 'bg-yellow-100 text-yellow-800'
+                    <td className="px-3 py-3">
+                      <span className={`text-xs font-medium px-2 py-0.5 rounded ${
+                        account.connection_status === 'active'
+                          ? 'bg-profit-wash text-profit'
+                          : 'bg-warn-wash text-warn'
                       }`}>
-                        {account.connection_status}
+                        {account.connection_status === 'active' ? 'Active' : account.connection_status}
                       </span>
                     </td>
-                    <td className="border border-gray-300 px-4 py-2 text-sm space-x-2">
-                      <button
-                        onClick={() => handleDisconnect(account.ctid_trader_account_id)}
-                        disabled={isPending}
-                        className="px-2 py-1 bg-red-600 text-white rounded text-xs hover:bg-red-700 transition-colors disabled:opacity-50"
-                      >
-                        Disconnect
-                      </button>
-                      <button
-                        onClick={handleConnectOAuth}
-                        disabled={isPending}
-                        className="px-2 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700 transition-colors disabled:opacity-50"
-                      >
-                        Re-grant access
-                      </button>
+                    <td className="px-5 py-3">
+                      <div className="flex justify-end gap-2 flex-wrap">
+                        <button
+                          onClick={() => openDetails(account)}
+                          disabled={isPending}
+                          className="px-2.5 py-1 text-xs font-medium rounded border border-line-strong text-ink-soft hover:text-ink hover:border-ink transition-colors disabled:opacity-50"
+                        >
+                          Details
+                        </button>
+                        <button
+                          onClick={handleConnectOAuth}
+                          disabled={isPending}
+                          className="px-2.5 py-1 text-xs font-medium rounded border border-line-strong text-ink-soft hover:text-ink hover:border-ink transition-colors disabled:opacity-50"
+                        >
+                          Re-grant access
+                        </button>
+                        <button
+                          onClick={() => setFlattening(account)}
+                          disabled={isPending}
+                          className="px-2.5 py-1 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-white transition-colors disabled:opacity-50"
+                        >
+                          Flatten
+                        </button>
+                        <button
+                          onClick={() => setDisconnecting(account)}
+                          disabled={isPending}
+                          className="px-2.5 py-1 text-xs font-medium rounded border border-line-strong text-ink-soft hover:text-loss hover:border-loss transition-colors disabled:opacity-50"
+                        >
+                          Disconnect
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 )
@@ -320,6 +412,174 @@ export default function Accounts() {
           </table>
         </div>
       )}
+
+      {/* Disconnect confirmation */}
+      <ConfirmDialog
+        open={disconnecting != null}
+        title={`Disconnect account ${disconnecting?.trader_login ?? ''}`}
+        confirmLabel="Disconnect grant"
+        danger
+        busy={busy}
+        onConfirm={handleDisconnect}
+        onCancel={() => setDisconnecting(null)}
+      >
+        <p>
+          This removes the cTrader ID grant behind this account — and with it{' '}
+          <strong>every account under that same grant</strong>. Open positions
+          are not touched; the copier just stops seeing these accounts.
+        </p>
+        <p>You can reconnect any time with Connect cTrader ID.</p>
+      </ConfirmDialog>
+
+      {/* Per-account kill switch */}
+      <ConfirmDialog
+        open={flattening != null}
+        title={`Flatten account ${flattening?.trader_login ?? ''}`}
+        confirmLabel="Close everything here"
+        danger
+        busy={busy}
+        onConfirm={handleFlatten}
+        onCancel={() => setFlattening(null)}
+      >
+        <p>
+          Every open position in this account is closed at market and every
+          working order cancelled. Other accounts are untouched
+          {flattening?.is_live ? ' — and this is a live account' : ''}.
+        </p>
+      </ConfirmDialog>
+
+      {/* Details drawer */}
+      {detailsFor && (
+        <div className="fixed inset-0 z-40 flex justify-end bg-ink/30" onClick={() => setDetailsFor(null)}>
+          <aside
+            className="w-full max-w-md h-full bg-card border-l border-line overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+            role="complementary"
+            aria-label={`Details for account ${detailsFor.trader_login}`}
+          >
+            <div className="px-6 py-5 border-b border-line flex items-start justify-between">
+              <div>
+                <h2 className="font-display text-xl text-ink">
+                  {detailsFor.nickname || `Account ${detailsFor.trader_login}`}
+                </h2>
+                <p className="num text-sm text-ink-soft mt-0.5">
+                  {detailsFor.trader_login} · cTID {detailsFor.ctid_trader_account_id}
+                </p>
+              </div>
+              <button
+                onClick={() => setDetailsFor(null)}
+                aria-label="Close details"
+                className="text-ink-soft hover:text-ink text-xl leading-none"
+              >
+                ×
+              </button>
+            </div>
+
+            {detailsError ? (
+              <p className="px-6 py-4 text-sm text-loss-deep">{detailsError}</p>
+            ) : !details ? (
+              <p className="px-6 py-4 text-sm text-ink-faint">Fetching from the broker…</p>
+            ) : (
+              <div className="px-6 py-4 space-y-6">
+                <section>
+                  <h3 className="desk-label mb-2">Broker profile</h3>
+                  <dl className="space-y-1.5 text-sm">
+                    <DetailRow label="Broker" value={details.broker_name ?? '—'} />
+                    <DetailRow
+                      label="Balance"
+                      value={details.balance != null
+                        ? `${details.balance.toLocaleString('en-US', { minimumFractionDigits: 2 })} ${details.deposit_currency ?? ''}`
+                        : '—'}
+                      mono
+                    />
+                    <DetailRow label="Currency" value={details.deposit_currency ?? '—'} />
+                    <DetailRow
+                      label="Leverage"
+                      value={details.leverage != null ? `1:${details.leverage}` : '—'}
+                      mono
+                    />
+                    <DetailRow
+                      label="Max leverage"
+                      value={details.max_leverage != null ? `1:${details.max_leverage}` : '—'}
+                      mono
+                    />
+                    <DetailRow label="Account type" value={details.account_type ?? '—'} />
+                    <DetailRow label="Access" value={details.access_rights ?? '—'} />
+                    <DetailRow
+                      label="Swap-free"
+                      value={details.swap_free == null ? '—' : details.swap_free ? 'Yes' : 'No'}
+                    />
+                    <DetailRow
+                      label="Registered"
+                      value={formatTimestamp(details.registration_timestamp)}
+                    />
+                  </dl>
+                  <p className="mt-3 text-xs text-ink-faint">
+                    The account holder's name and email are not exposed by the
+                    cTrader Open API — set a nickname instead.
+                  </p>
+                </section>
+
+                <section>
+                  <h3 className="desk-label mb-2">Copy settings</h3>
+                  <dl className="space-y-1.5 text-sm">
+                    <DetailRow label="Role" value={details.role ?? detailsFor.role} />
+                    <DetailRow
+                      label="Multiplier"
+                      value={String(details.multiplier ?? detailsFor.multiplier)}
+                      mono
+                    />
+                    <DetailRow
+                      label="Enabled"
+                      value={(details.enabled ?? detailsFor.enabled) ? 'Yes' : 'No'}
+                    />
+                    <DetailRow label="Status" value={details.status ?? detailsFor.status} />
+                  </dl>
+                </section>
+
+                <section>
+                  <h3 className="desk-label mb-2">OAuth grant</h3>
+                  <dl className="space-y-1.5 text-sm">
+                    <DetailRow label="Granted" value={formatDate(details.connection?.granted_at)} />
+                    <DetailRow label="Token expires" value={formatDate(details.connection?.expires_at)} />
+                    <DetailRow label="Grant status" value={details.connection?.status ?? '—'} />
+                    <DetailRow label="Scope" value={details.connection?.scope ?? '—'} />
+                  </dl>
+                </section>
+
+                <section>
+                  <h3 className="desk-label mb-2">
+                    Open positions ({details.open_positions.length})
+                  </h3>
+                  {details.open_positions.length === 0 ? (
+                    <p className="text-sm text-ink-faint">None.</p>
+                  ) : (
+                    <ul className="space-y-1 text-sm">
+                      {details.open_positions.map((pos) => (
+                        <li key={pos.position_id} className="flex justify-between">
+                          <span className="num">{pos.symbol ?? pos.symbol_id}</span>
+                          <span className={pos.side === 'BUY' ? 'text-profit' : 'text-loss'}>
+                            {pos.side} <span className="num">{pos.volume_lots ?? pos.volume}</span>
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </section>
+              </div>
+            )}
+          </aside>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function DetailRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="flex justify-between gap-4">
+      <dt className="text-ink-soft">{label}</dt>
+      <dd className={`text-ink text-right ${mono ? 'num' : ''}`}>{value}</dd>
     </div>
   )
 }

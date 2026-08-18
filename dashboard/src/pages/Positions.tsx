@@ -120,31 +120,37 @@ export default function Positions() {
   }
 
   return (
-    <div className="p-6 space-y-8">
-      <h1 className="text-3xl font-bold">Positions</h1>
+    <div className="space-y-8 max-w-6xl">
+      <header>
+        <h1 className="font-display text-2xl text-ink">Positions</h1>
+        <p className="text-sm text-ink-soft mt-1">
+          The master's open book and how each slave copy tracks it. Close or
+          trim positions from the Trade page.
+        </p>
+      </header>
 
       {error && (
-        <div className="p-4 bg-red-50 border border-red-200 rounded text-red-700">
+        <div className="p-4 bg-loss-wash border border-loss/30 rounded text-loss-deep">
           {error}
         </div>
       )}
 
       {/* Master Positions Section */}
       <section>
-        <h2 className="text-2xl font-semibold mb-4">Master Positions</h2>
+        <h2 className="font-display text-xl text-ink mb-4">Master Positions</h2>
         {state.master_positions.length === 0 ? (
-          <p className="text-gray-500">No open master positions</p>
+          <p className="text-ink-faint">No open master positions</p>
         ) : (
-          <div className="overflow-x-auto border rounded">
+          <div className="overflow-x-auto bg-card border border-line rounded-lg">
             <table className="w-full border-collapse">
-              <thead className="bg-gray-100">
+              <thead>
                 <tr>
-                  <th className="border p-3 text-left font-semibold">Symbol</th>
-                  <th className="border p-3 text-left font-semibold">Side</th>
-                  <th className="border p-3 text-right font-semibold">Volume (units)</th>
-                  <th className="border p-3 text-right font-semibold">Entry Price</th>
-                  <th className="border p-3 text-right font-semibold">P&L</th>
-                  <th className="border p-3 text-center font-semibold">Actions</th>
+                  <th className="desk-label p-3 text-left border-b border-line">Symbol</th>
+                  <th className="desk-label p-3 text-left border-b border-line">Side</th>
+                  <th className="desk-label p-3 text-right border-b border-line">Volume (units)</th>
+                  <th className="desk-label p-3 text-right border-b border-line">Entry Price</th>
+                  <th className="desk-label p-3 text-right border-b border-line">P&L</th>
+                  <th className="desk-label p-3 text-center border-b border-line">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -164,17 +170,17 @@ export default function Positions() {
 
       {/* Pending Orders Section */}
       <section>
-        <h2 className="text-2xl font-semibold mb-4">Pending Orders</h2>
+        <h2 className="font-display text-xl text-ink mb-4">Pending Orders</h2>
         {state.pending_orders.length === 0 ? (
-          <p className="text-gray-500">No pending orders</p>
+          <p className="text-ink-faint">No pending orders</p>
         ) : (
-          <div className="overflow-x-auto border rounded">
+          <div className="overflow-x-auto bg-card border border-line rounded-lg">
             <table className="w-full border-collapse">
-              <thead className="bg-gray-100">
+              <thead>
                 <tr>
-                  <th className="border p-3 text-left font-semibold">Symbol</th>
-                  <th className="border p-3 text-right font-semibold">Volume (units)</th>
-                  <th className="border p-3 text-center font-semibold">Actions</th>
+                  <th className="desk-label p-3 text-left border-b border-line">Symbol</th>
+                  <th className="desk-label p-3 text-right border-b border-line">Volume (units)</th>
+                  <th className="desk-label p-3 text-center border-b border-line">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -194,9 +200,9 @@ export default function Positions() {
 
       {/* Drift/Orphan Section */}
       <section>
-        <h2 className="text-2xl font-semibold mb-4">Drift Items</h2>
+        <h2 className="font-display text-xl text-ink mb-4">Drift Items</h2>
         {state.drift.length === 0 ? (
-          <p className="text-gray-500">No drift items</p>
+          <p className="text-ink-faint">No drift items</p>
         ) : (
           <div className="space-y-3">
             {state.drift.map((drift) => (
@@ -226,36 +232,36 @@ function PositionRow({
 }) {
   return (
     <>
-      <tr className="border-t hover:bg-gray-50">
-        <td className="border p-3">{position.symbol || `ID:${position.symbol_id}`}</td>
-        <td className="border p-3">{position.side}</td>
-        <td className="border p-3 text-right">{position.volume_lots || position.volume}</td>
-        <td className="border p-3 text-right">{position.price.toFixed(5)}</td>
-        <td className="border p-3 text-right">
+      <tr className="border-b border-line last:border-0 hover:bg-paper">
+        <td className="num p-3">{position.symbol || `ID:${position.symbol_id}`}</td>
+        <td className="num p-3">{position.side}</td>
+        <td className="num p-3 text-right">{position.volume_lots || position.volume}</td>
+        <td className="num p-3 text-right">{position.price.toFixed(5)}</td>
+        <td className="num p-3 text-right">
           {position.pnl_quote != null ? position.pnl_quote.toFixed(2) : '-'}
         </td>
-        <td className="border p-3 text-center">
+        <td className="p-3 text-center">
           <button
             onClick={onToggleExpand}
-            className="px-3 py-1 bg-blue-500 text-white rounded hover:bg-blue-600 text-sm"
+            className="px-3 py-1 text-xs font-medium rounded border border-line-strong text-ink-soft hover:text-ink hover:border-ink transition-colors"
           >
             {isExpanded ? 'Hide' : 'Show'} Copies
           </button>
         </td>
       </tr>
       {isExpanded && position.copies.length > 0 && (
-        <tr className="bg-gray-50 border-t">
+        <tr className="bg-paper border-b border-line">
           <td colSpan={6} className="p-4">
             <div className="ml-4 space-y-2">
-              <h4 className="font-semibold mb-2">Slave Copies</h4>
-              <table className="w-full text-sm border">
-                <thead className="bg-gray-200">
+              <h4 className="desk-label mb-2">Slave Copies</h4>
+              <table className="w-full text-sm">
+                <thead>
                   <tr>
-                    <th className="border p-2 text-left">Account</th>
-                    <th className="border p-2 text-left">Status</th>
-                    <th className="border p-2 text-right">Fill Price</th>
-                    <th className="border p-2 text-right">Slippage (pts)</th>
-                    <th className="border p-2 text-left">Error</th>
+                    <th className="desk-label p-2 text-left border-b border-line">Account</th>
+                    <th className="desk-label p-2 text-left border-b border-line">Status</th>
+                    <th className="desk-label p-2 text-right border-b border-line">Fill Price</th>
+                    <th className="desk-label p-2 text-right border-b border-line">Slippage (pts)</th>
+                    <th className="desk-label p-2 text-left border-b border-line">Error</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -283,14 +289,14 @@ function OrderRow({
 }) {
   return (
     <>
-      <tr className="border-t hover:bg-gray-50">
-        <td className="border p-3">{order.symbol || `ID:${order.symbol_id}`}</td>
-        <td className="border p-3 text-right">{order.volume_lots || order.volume}</td>
-        <td className="border p-3 text-center">
+      <tr className="border-b border-line last:border-0 hover:bg-paper">
+        <td className="num p-3">{order.symbol || `ID:${order.symbol_id}`}</td>
+        <td className="num p-3 text-right">{order.volume_lots || order.volume}</td>
+        <td className="p-3 text-center">
           {order.copies.length > 0 && (
             <button
               onClick={onToggleExpand}
-              className="px-3 py-1 bg-blue-500 text-white rounded hover:bg-blue-600 text-sm"
+              className="px-3 py-1 text-xs font-medium rounded border border-line-strong text-ink-soft hover:text-ink hover:border-ink transition-colors"
             >
               {isExpanded ? 'Hide' : 'Show'} Copies
             </button>
@@ -298,24 +304,24 @@ function OrderRow({
         </td>
       </tr>
       {isExpanded && order.copies.length > 0 && (
-        <tr className="bg-gray-50 border-t">
+        <tr className="bg-paper border-b border-line">
           <td colSpan={3} className="p-4">
             <div className="ml-4 space-y-2">
-              <h4 className="font-semibold mb-2">Slave Copies</h4>
-              <table className="w-full text-sm border">
-                <thead className="bg-gray-200">
+              <h4 className="desk-label mb-2">Slave Copies</h4>
+              <table className="w-full text-sm">
+                <thead>
                   <tr>
-                    <th className="border p-2 text-left">Account</th>
-                    <th className="border p-2 text-left">Status</th>
-                    <th className="border p-2 text-left">Error</th>
+                    <th className="desk-label p-2 text-left border-b border-line">Account</th>
+                    <th className="desk-label p-2 text-left border-b border-line">Status</th>
+                    <th className="desk-label p-2 text-left border-b border-line">Error</th>
                   </tr>
                 </thead>
                 <tbody>
                   {order.copies.map((copy) => (
                     <tr key={`${copy.slave_account_id}-${copy.slave_order_id}`}>
-                      <td className="border p-2">{copy.slave_account_id}</td>
-                      <td className="border p-2">{copy.status}</td>
-                      <td className="border p-2">{copy.error || '-'}</td>
+                      <td className="num p-2">{copy.slave_account_id}</td>
+                      <td className="num p-2">{copy.status}</td>
+                      <td className="num p-2">{copy.error || '-'}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -343,12 +349,12 @@ function CopyRow({
   const fillPriceDisplay = hasFillPrice ? copy.fill_price!.toFixed(5) : '—'
 
   return (
-    <tr className="border-t hover:bg-gray-100">
-      <td className="border p-2">{copy.slave_account_id}</td>
-      <td className="border p-2">{copy.status}</td>
-      <td className="border p-2 text-right">{fillPriceDisplay}</td>
-      <td className="border p-2 text-right">{slippageDisplay}</td>
-      <td className="border p-2">{copy.error || '-'}</td>
+    <tr className="border-b border-line last:border-0">
+      <td className="num p-2">{copy.slave_account_id}</td>
+      <td className="num p-2">{copy.status}</td>
+      <td className="desk-label p-2 text-right border-b border-line">{fillPriceDisplay}</td>
+      <td className="desk-label p-2 text-right border-b border-line">{slippageDisplay}</td>
+      <td className="num p-2">{copy.error || '-'}</td>
     </tr>
   )
 }
@@ -371,16 +377,16 @@ function DriftItemRow({
     .join(' ')
 
   return (
-    <div className="border rounded p-4 bg-white">
+    <div className="border border-line rounded-lg p-4 bg-card">
       <div className="mb-3">
         <p className="font-semibold">{kindDisplay}</p>
-        <p className="text-sm text-gray-600">{drift.detail}</p>
+        <p className="text-sm text-ink-soft">{drift.detail}</p>
       </div>
       <div className="flex gap-2">
         {isOrphanSlave && (
           <button
             onClick={onCloseOrphan}
-            className="px-3 py-2 bg-red-500 text-white rounded hover:bg-red-600 text-sm"
+            className="px-3 py-2 bg-loss text-white rounded hover:bg-loss-deep text-sm font-medium transition-colors"
           >
             Close Orphan
           </button>
@@ -388,14 +394,14 @@ function DriftItemRow({
         {isOrphanSlave && (
           <button
             onClick={onAdopt}
-            className="px-3 py-2 bg-green-500 text-white rounded hover:bg-green-600 text-sm"
+            className="px-3 py-2 bg-brand text-white rounded hover:bg-brand-deep text-sm font-medium transition-colors"
           >
             Adopt
           </button>
         )}
         <button
           onClick={onDismiss}
-          className="px-3 py-2 bg-gray-500 text-white rounded hover:bg-gray-600 text-sm"
+          className="px-3 py-2 rounded border border-line-strong text-ink-soft hover:text-ink text-sm font-medium transition-colors"
         >
           Dismiss
         </button>

@@ -8,6 +8,136 @@ export interface Account {
   status: string
   last_error?: string | null
   connection_status: string
+  nickname?: string | null
+}
+
+export interface OpenPosition {
+  position_id: number
+  symbol_id: number
+  symbol?: string | null
+  side: string
+  volume: number
+  volume_lots?: string | null
+  price: number
+  label: string
+  stop_loss?: number | null
+  take_profit?: number | null
+  swap?: number | null
+  open_timestamp?: number | null
+}
+
+export interface WorkingOrder {
+  order_id: number
+  symbol_id: number
+  symbol?: string | null
+  side: string
+  volume: number
+  volume_lots?: string | null
+  order_type: string
+  limit_price?: number | null
+  stop_price?: number | null
+  label: string
+}
+
+export interface AccountDetails {
+  account_id: number
+  trader_login?: number | null
+  balance?: number | null
+  deposit_currency?: string | null
+  leverage?: number | null
+  max_leverage?: number | null
+  broker_name?: string | null
+  registration_timestamp?: number | null
+  account_type?: string | null
+  access_rights?: string | null
+  swap_free?: boolean | null
+  is_limited_risk?: boolean
+  open_positions: OpenPosition[]
+  pending_orders: WorkingOrder[]
+  // Merged in by the api from its own database:
+  nickname?: string | null
+  role?: string
+  enabled?: boolean
+  multiplier?: number
+  status?: string
+  last_error?: string | null
+  is_live?: boolean
+  connection?: {
+    granted_at: string
+    expires_at: string
+    status: string
+    scope: string
+  }
+}
+
+export interface DealClose {
+  entry_price: number
+  gross_profit: number
+  swap: number
+  commission: number
+  balance: number
+  closed_volume: number
+  closed_volume_lots?: string | null
+}
+
+export interface Deal {
+  deal_id: number
+  order_id: number
+  position_id: number
+  symbol_id: number
+  symbol?: string | null
+  side: string
+  volume: number
+  filled_volume: number
+  volume_lots?: string | null
+  execution_price?: number | null
+  status: string
+  commission?: number | null
+  create_timestamp: number
+  execution_timestamp: number
+  close: DealClose | null
+}
+
+export interface HistoricalOrder {
+  order_id: number
+  symbol_id: number
+  symbol?: string | null
+  side: string
+  volume: number
+  volume_lots?: string | null
+  order_type: string
+  status: string
+  limit_price?: number | null
+  stop_price?: number | null
+  execution_price?: number | null
+  executed_volume?: number | null
+  position_id?: number | null
+  label: string
+  open_timestamp?: number | null
+  update_timestamp?: number | null
+  stop_loss?: number | null
+  take_profit?: number | null
+}
+
+export interface TradeSymbol {
+  name: string
+  symbol_id: number
+  digits: number
+  min_volume_lots?: number | null
+  step_volume_lots?: number | null
+}
+
+export interface FlattenSummary {
+  account_id: number
+  positions_closed: number
+  orders_cancelled: number
+  error?: string | null
+}
+
+export interface CloseAllResult {
+  status: string
+  paused: boolean
+  accounts: FlattenSummary[]
 }
 
 export interface Settings {

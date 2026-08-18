@@ -1,1 +1,85 @@
 @import "tailwindcss";
+
+/* ---------------------------------------------------------------------------
+   Copy Desk design tokens — "private trading desk" direction.
+
+   Palette: cool paper ground, white card surfaces, ledger-ink text, and a
+   deep bank green as the single brand hue.  Profit/loss/warning are the only
+   other saturated colors on the page; everything else stays hairline-quiet
+   so the numbers (always IBM Plex Mono, always tabular) carry the screen.
+--------------------------------------------------------------------------- */
+
+@theme {
+  --color-paper: #f7f8f7;
+  --color-card: #ffffff;
+  --color-ink: #1a2421;
+  --color-ink-soft: #5c6b66;
+  --color-ink-faint: #8a968f;
+  --color-line: #e3e8e5;
+  --color-line-strong: #c9d2cd;
+  --color-brand: #0e5a45;
+  --color-brand-deep: #0a4534;
+  --color-brand-wash: #e9f1ee;
+  --color-profit: #0b7a4b;
+  --color-profit-wash: #e8f4ee;
+  --color-loss: #b42332;
+  --color-loss-deep: #8f1b27;
+  --color-loss-wash: #f9ebec;
+  --color-warn: #9a6b0b;
+  --color-warn-wash: #f8f1df;
+
+  --font-sans: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", "SFMono-Regular", Menlo, monospace;
+  --font-display: "Fraunces", Georgia, "Times New Roman", serif;
+}
+
+body {
+  background-color: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Every number on a trading desk lines up in columns. */
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.font-display {
+  font-family: var(--font-display);
+}
+
+/* Small-caps section labels — the quiet structural voice of the desk. */
+.desk-label {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-ink-soft);
+}
+
+/* Visible keyboard focus everywhere, in the brand hue. */
+:focus-visible {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 2px;
+}
+
+/* The live-copying pulse on the desk strip. */
+@keyframes desk-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+.pulse-dot {
+  animation: desk-pulse 2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse-dot {
+    animation: none;
+  }
+  * {
+    transition-duration: 0.01ms !important;
+  }
+}
