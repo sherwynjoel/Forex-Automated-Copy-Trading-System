@@ -311,6 +311,19 @@ class Dispatcher:
         # Send with retries
         self._send_with_retries(account_id, req, attempt=0)
 
+    def send_direct(self, account_id: int, req: message.Message) -> None:
+        """Send an operator-initiated trade request, bypassing the copy gates.
+
+        Deliberately NOT routed through dispatch(): the copying_enabled and
+        dry_run gates exist to stop COPYING, and the operator actions that
+        use this (kill-switch flatten, manual orders/closes/cancels from the
+        dashboard) must work exactly when those gates are engaged -- a global
+        kill switch pauses copying first and then flattens through this very
+        path.  Keeps the same throttle, retry ladder (SendNotAttempted only),
+        and degraded bookkeeping as every copy send.
+        """
+        self._send_with_retries(account_id, req, attempt=0)
+
     def _send_with_retries(self, account_id: int, req: message.Message, attempt: int) -> None:
         """Send a request with retry logic on failure."""
         d = self._bucket.acquire()

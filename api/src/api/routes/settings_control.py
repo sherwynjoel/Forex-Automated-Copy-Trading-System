@@ -67,9 +67,12 @@ async def _proxy_to_copier(
             raise HTTPException(status_code=502, detail="copier unreachable")
 
         if response.status_code >= 400:
-            # Forward 4xx from copier
+            # Forward 4xx from copier. Its control endpoint reports
+            # failures as {"error": ...} (copier/src/copier/engine/control.py),
+            # so read that key too instead of forwarding raw JSON text.
             try:
-                detail = response.json().get("detail", response.text)
+                payload = response.json()
+                detail = payload.get("detail") or payload.get("error") or response.text
             except Exception:
                 detail = response.text or "copier error"
             raise HTTPException(status_code=response.status_code, detail=detail)

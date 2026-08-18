@@ -6,6 +6,8 @@ import Login from './pages/Login'
 import Overview from './pages/Overview'
 import Accounts from './pages/Accounts'
 import Positions from './pages/Positions'
+import Trade from './pages/Trade'
+import History from './pages/History'
 import Logs from './pages/Logs'
 
 function ProtectedLayout() {
@@ -45,6 +47,8 @@ export default function App() {
           <Route index element={<Overview />} />
           <Route path="accounts" element={<Accounts />} />
           <Route path="positions" element={<Positions />} />
+          <Route path="trade" element={<Trade />} />
+          <Route path="history" element={<History />} />
           <Route path="logs" element={<Logs />} />
         </Route>
       </Routes>

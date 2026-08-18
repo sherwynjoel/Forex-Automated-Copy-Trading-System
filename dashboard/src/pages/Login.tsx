@@ -28,20 +28,20 @@ export default function Login() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
+    <div className="min-h-screen flex items-center justify-center bg-paper py-12 px-4 sm:px-6 lg:px-8">
       <div className="max-w-md w-full space-y-8">
         <div>
-          <h2 className="mt-6 text-center text-3xl font-extrabold text-gray-900">
-            Forex Dashboard
+          <h2 className="mt-6 text-center font-display text-3xl text-brand">
+            Copy Desk
           </h2>
-          <p className="mt-2 text-center text-sm text-gray-600">
-            Enter your password to access the dashboard
+          <p className="mt-2 text-center text-sm text-ink-soft">
+            Enter the admin password to open the desk
           </p>
         </div>
         <form className="mt-8 space-y-6" onSubmit={handleSubmit}>
           {error && (
-            <div className="rounded-md bg-red-50 p-4">
-              <p className="text-sm font-medium text-red-800">{error}</p>
+            <div className="rounded-md bg-loss-wash p-4">
+              <p className="text-sm font-medium text-loss-deep">{error}</p>
             </div>
           )}
           <div className="rounded-md shadow-sm -space-y-px">
@@ -55,7 +55,7 @@ export default function Login() {
                 type="password"
                 autoComplete="current-password"
                 required
-                className="appearance-none rounded-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500 focus:z-10 sm:text-sm"
+                className="appearance-none relative block w-full px-3 py-2 border border-line-strong placeholder-ink-faint text-ink rounded-md bg-card sm:text-sm"
                 placeholder="Password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
@@ -67,7 +67,7 @@ export default function Login() {
             <button
               type="submit"
               disabled={isLoading}
-              className="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50"
+              className="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-semibold rounded-md text-white bg-brand hover:bg-brand-deep transition-colors disabled:opacity-50"
             >
               {isLoading ? 'Signing in...' : 'Sign in'}
             </button>

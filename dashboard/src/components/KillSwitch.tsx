@@ -68,12 +68,12 @@ export default function KillSwitch({ settings, onUpdate }: KillSwitchProps) {
   }
 
   const buttonText = settings.copying_enabled ? 'STOP COPYING' : 'RESUME COPYING'
-  const buttonColor = settings.copying_enabled ? 'bg-red-600 hover:bg-red-700' : 'bg-green-600 hover:bg-green-700'
+  const buttonColor = settings.copying_enabled ? 'bg-loss hover:bg-loss-deep' : 'bg-profit hover:bg-brand-deep'
 
   return (
-    <div className="flex items-center gap-4">
+    <div className="flex items-center gap-3 flex-wrap">
       {settings.dry_run && (
-        <div className="px-3 py-1 bg-yellow-100 text-yellow-800 text-sm font-semibold rounded-full">
+        <div className="px-3 py-1 bg-warn-wash text-warn text-sm font-semibold rounded-full">
           DRY RUN
         </div>
       )}
@@ -81,10 +81,10 @@ export default function KillSwitch({ settings, onUpdate }: KillSwitchProps) {
         data-testid="dry-run-toggle"
         onClick={handleToggleDryRun}
         disabled={isLoading}
-        className={`px-4 py-2 font-semibold rounded-lg border transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+        className={`px-4 py-2 text-sm font-semibold rounded border transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
           settings.dry_run
-            ? 'bg-yellow-500 hover:bg-yellow-600 text-white border-yellow-600'
-            : 'bg-white hover:bg-gray-100 text-gray-800 border-gray-300'
+            ? 'bg-warn text-white border-warn hover:opacity-90'
+            : 'bg-card hover:bg-paper text-ink border-line-strong'
         }`}
       >
         {settings.dry_run ? 'Turn dry-run off' : 'Turn dry-run on'}
@@ -92,7 +92,7 @@ export default function KillSwitch({ settings, onUpdate }: KillSwitchProps) {
       <button
         onClick={handleToggleCopying}
         disabled={isLoading}
-        className={`px-6 py-2 text-white font-bold rounded-lg ${buttonColor} disabled:opacity-50 disabled:cursor-not-allowed transition-colors`}
+        className={`px-5 py-2 text-sm text-white font-bold rounded ${buttonColor} disabled:opacity-50 disabled:cursor-not-allowed transition-colors`}
       >
         {buttonText}
       </button>

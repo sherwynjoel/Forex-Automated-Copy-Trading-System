@@ -67,10 +67,7 @@ export default function Overview() {
       }
     }
 
-    // Load immediately
     loadState()
-
-    // Poll every 5 seconds
     const interval = setInterval(loadState, 5000)
     return () => clearInterval(interval)
   }, [])
@@ -91,7 +88,6 @@ export default function Overview() {
         method: 'POST',
         body: JSON.stringify({ account_id: accountId }),
       })
-      // Reload state after action
       setState(await loadAccountState())
     } catch (err) {
       console.error('Failed to update account status:', err)
@@ -103,14 +99,13 @@ export default function Overview() {
   }
 
   if (loading) {
-    return <div className="text-center py-12">Loading...</div>
+    return <div className="text-center py-12 text-ink-faint">Loading...</div>
   }
 
   if (error) {
-    return <div className="text-red-600">Error: {error}</div>
+    return <div className="text-loss">Error: {error}</div>
   }
 
-  // Find master account
   const masterAccount = accounts.find((a) => a.role === 'master')
   const slaveAccounts = accounts.filter((a) => a.role === 'slave')
 
@@ -122,13 +117,13 @@ export default function Overview() {
   const refreshFailedAccounts = accounts.filter((a) => a.connection_status === 'refresh_failed')
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 max-w-6xl">
       {/* Token Refresh Failure Alert */}
       {refreshFailedAccounts.length > 0 && (
         <div
           data-testid="refresh-failed-banner"
           role="alert"
-          className="bg-red-600 text-white p-4 rounded-lg shadow-md border-2 border-red-800 flex items-start gap-3"
+          className="bg-loss text-white p-4 rounded-lg flex items-start gap-3"
         >
           <span className="text-2xl leading-none" aria-hidden="true">⚠️</span>
           <div>
@@ -136,7 +131,7 @@ export default function Overview() {
               Token refresh failed for account{refreshFailedAccounts.length > 1 ? 's' : ''}:{' '}
               {refreshFailedAccounts.map((a) => a.trader_login).join(', ')}
             </p>
-            <p className="text-sm mt-1 text-red-50">
+            <p className="text-sm mt-1 text-white/80">
               Copying for these accounts will stop when the token expires. Reconnect via
               Accounts &rarr; Connect cTrader ID.
             </p>
@@ -145,10 +140,10 @@ export default function Overview() {
       )}
 
       {/* Kill Switch and Status Bar */}
-      <div className="bg-white p-6 rounded-lg shadow-md flex items-center justify-between">
+      <div className="bg-card p-6 rounded-lg border border-line flex items-center justify-between flex-wrap gap-4">
         <div>
-          <h2 className="text-lg font-semibold text-gray-900">Copying Status</h2>
-          <p className="text-sm text-gray-600 mt-1">
+          <h2 className="font-display text-lg text-ink">Copying Status</h2>
+          <p className="text-sm text-ink-soft mt-1">
             {settings?.copying_enabled ? 'Actively copying trades' : 'Copying paused'}
           </p>
         </div>
@@ -157,24 +152,29 @@ export default function Overview() {
 
       {/* Master Card */}
       {masterAccount && masterState && (
-        <div className="bg-gradient-to-br from-blue-50 to-blue-100 p-8 rounded-lg shadow-md border-2 border-blue-200">
-          <h3 className="text-2xl font-bold text-gray-900 mb-6">Master Account ({masterAccount.trader_login})</h3>
-          <div className="grid grid-cols-3 gap-6">
-            <div className="bg-white p-4 rounded-lg shadow">
-              <div className="text-sm text-gray-600 font-medium">Equity</div>
-              <div className="text-3xl font-bold text-blue-600">${masterState.equity?.toFixed(2)}</div>
+        <div className="bg-card p-6 rounded-lg border border-line">
+          <div className="flex items-baseline justify-between mb-5">
+            <h3 className="font-display text-xl text-ink">
+              Master Account ({masterAccount.trader_login})
+            </h3>
+            {masterAccount.nickname && (
+              <span className="text-sm text-ink-soft">{masterAccount.nickname}</span>
+            )}
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="rounded border border-line bg-paper p-4">
+              <div className="desk-label">Equity</div>
+              <div className="num text-2xl mt-1 text-brand">${masterState.equity?.toFixed(2)}</div>
             </div>
-            <div className="bg-white p-4 rounded-lg shadow">
-              <div className="text-sm text-gray-600 font-medium">Balance</div>
-              <div className="text-3xl font-bold text-gray-900">${masterState.balance?.toFixed(2)}</div>
+            <div className="rounded border border-line bg-paper p-4">
+              <div className="desk-label">Balance</div>
+              <div className="num text-2xl mt-1 text-ink">${masterState.balance?.toFixed(2)}</div>
             </div>
-            <div className="bg-white p-4 rounded-lg shadow">
-              <div className={`text-sm font-medium ${masterState.open_pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+            <div className="rounded border border-line bg-paper p-4">
+              <div className={`desk-label ${masterState.open_pnl >= 0 ? 'text-profit' : 'text-loss'}`}>
                 Open P&L
               </div>
-              <div
-                className={`text-3xl font-bold ${masterState.open_pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}
-              >
+              <div className={`num text-2xl mt-1 ${masterState.open_pnl >= 0 ? 'text-profit' : 'text-loss'}`}>
                 ${masterState.open_pnl?.toFixed(2)}
               </div>
             </div>
@@ -185,7 +185,7 @@ export default function Overview() {
       {/* Slave Grid */}
       {slaveAccounts.length > 0 && (
         <div>
-          <h3 className="text-xl font-bold text-gray-900 mb-4">Slave Accounts</h3>
+          <h3 className="font-display text-xl text-ink mb-4">Slave Accounts</h3>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {slaveAccounts.map((slave) => {
               const slaveState = state[String(slave.ctid_trader_account_id)]
@@ -193,7 +193,6 @@ export default function Overview() {
               const isDegraded = slave.status === 'degraded'
               const isRefreshFailed = slave.connection_status === 'refresh_failed'
 
-              // Status icon
               let statusIcon = '🟢'
               let statusLabel = 'OK'
               if (isPaused) {
@@ -208,19 +207,23 @@ export default function Overview() {
                 <div
                   key={slave.ctid_trader_account_id}
                   data-testid="slave-tile"
-                  className={`bg-white p-6 rounded-lg shadow-md hover:shadow-lg transition-shadow ${
-                    isRefreshFailed ? 'border-2 border-orange-500' : ''
+                  className={`bg-card p-5 rounded-lg border transition-shadow hover:shadow-md ${
+                    isRefreshFailed ? 'border-warn' : 'border-line'
                   }`}
                 >
                   {/* Header with status */}
                   <div className="flex items-center justify-between mb-4">
                     <div>
-                      <h4 className="font-semibold text-gray-900">Account {slave.trader_login}</h4>
-                      <p className="text-sm text-gray-500">ID: {slave.ctid_trader_account_id}</p>
+                      <h4 className="font-semibold text-ink">
+                        {slave.nickname || `Account ${slave.trader_login}`}
+                      </h4>
+                      <p className="num text-xs text-ink-faint mt-0.5">
+                        {slave.nickname ? `${slave.trader_login} · ` : ''}ID: {slave.ctid_trader_account_id}
+                      </p>
                     </div>
                     <div className="text-center">
-                      <div className="text-3xl">{statusIcon}</div>
-                      <p className="text-xs text-gray-600 font-medium">{statusLabel}</p>
+                      <div className="text-2xl">{statusIcon}</div>
+                      <p className="desk-label mt-0.5">{statusLabel}</p>
                     </div>
                   </div>
 
@@ -229,7 +232,7 @@ export default function Overview() {
                     <p
                       data-testid="slave-last-error"
                       title={slave.last_error}
-                      className="mb-4 text-xs text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1 truncate"
+                      className="mb-4 text-xs text-loss-deep bg-loss-wash border border-loss/20 rounded px-2 py-1 truncate"
                     >
                       {slave.last_error}
                     </p>
@@ -239,7 +242,7 @@ export default function Overview() {
                   {isRefreshFailed && (
                     <div
                       data-testid="slave-refresh-failed-marker"
-                      className="mb-4 px-3 py-2 bg-orange-100 border border-orange-400 text-orange-800 text-xs font-semibold rounded flex items-center gap-1"
+                      className="mb-4 px-3 py-2 bg-warn-wash border border-warn/40 text-warn text-xs font-semibold rounded flex items-center gap-1"
                     >
                       <span aria-hidden="true">🔑</span> Token Refresh Failed - reconnect required
                     </div>
@@ -247,18 +250,18 @@ export default function Overview() {
 
                   {/* Stats */}
                   {slaveState && (
-                    <div className="space-y-2 mb-4 text-sm">
+                    <div className="space-y-1.5 mb-4 text-sm">
                       <div className="flex justify-between">
-                        <span className="text-gray-600">Equity:</span>
-                        <span className="font-semibold text-gray-900">${slaveState.equity?.toFixed(2)}</span>
+                        <span className="text-ink-soft">Equity:</span>
+                        <span className="num text-ink">${slaveState.equity?.toFixed(2)}</span>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-gray-600">Balance:</span>
-                        <span className="font-semibold text-gray-900">${slaveState.balance?.toFixed(2)}</span>
+                        <span className="text-ink-soft">Balance:</span>
+                        <span className="num text-ink">${slaveState.balance?.toFixed(2)}</span>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-gray-600">Open Positions:</span>
-                        <span className="font-semibold text-gray-900">{slaveState.positions?.length || 0}</span>
+                        <span className="text-ink-soft">Open Positions:</span>
+                        <span className="num text-ink">{slaveState.positions?.length || 0}</span>
                       </div>
                     </div>
                   )}
@@ -266,10 +269,10 @@ export default function Overview() {
                   {/* Action Button */}
                   <button
                     onClick={() => handlePauseResume(slave.ctid_trader_account_id, isPaused)}
-                    className={`w-full py-2 px-4 rounded font-medium text-white transition-colors ${
+                    className={`w-full py-2 px-4 rounded text-sm font-semibold text-white transition-colors ${
                       isPaused
-                        ? 'bg-green-500 hover:bg-green-600'
-                        : 'bg-orange-500 hover:bg-orange-600'
+                        ? 'bg-profit hover:bg-brand-deep'
+                        : 'bg-warn hover:opacity-90'
                     }`}
                   >
                     {isPaused ? 'Resume' : 'Pause'}
@@ -282,7 +285,7 @@ export default function Overview() {
       )}
 
       {slaveAccounts.length === 0 && (
-        <div className="text-center py-12 text-gray-500">No slave accounts configured</div>
+        <div className="text-center py-12 text-ink-faint">No slave accounts configured</div>
       )}
     </div>
   )

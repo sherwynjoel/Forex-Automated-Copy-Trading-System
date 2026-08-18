@@ -49,18 +49,20 @@ test('Layout renders sidebar navigation', async () => {
   )
 
   // Sidebar should be visible with title
-  expect(screen.getByText(/Forex Dashboard/i)).toBeInTheDocument()
+  expect(screen.getByText(/Copy Desk/i)).toBeInTheDocument()
 
   // Navigation links should be present (check for all matches)
   const overviewLinks = screen.getAllByText(/Overview/i)
   expect(overviewLinks.length).toBeGreaterThan(0)
 
-  expect(screen.getByText(/Accounts/i)).toBeInTheDocument()
-  expect(screen.getByText(/Positions/i)).toBeInTheDocument()
-  expect(screen.getByText(/Logs/i)).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: 'Accounts' })).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: 'Positions' })).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: 'Trade' })).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: 'History' })).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: 'Logs' })).toBeInTheDocument()
 
   // Logout button should be present
-  expect(screen.getByText(/Logout/i)).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: /log out/i })).toBeInTheDocument()
 })
 
 test('protected screen content renders through Outlet after auth', async () => {
@@ -99,7 +101,7 @@ test('protected screen content renders through Outlet after auth', async () => {
   // After auth check, should render Layout with Outlet content
   // This REQUIRES <Outlet/> in Layout to work — will FAIL if Outlet is removed
   await waitFor(() => {
-    expect(screen.getByText(/Forex Dashboard/i)).toBeInTheDocument()
+    expect(screen.getByText(/Copy Desk/i)).toBeInTheDocument()
     expect(screen.getByText(/Overview - Coming soon/i)).toBeInTheDocument()
   })
 })

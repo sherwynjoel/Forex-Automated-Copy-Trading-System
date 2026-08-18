@@ -5,12 +5,13 @@ from typing import Optional, List, Any
 import httpx
 import psycopg
 from psycopg import errors
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from ..auth import require_admin
 from ..config import ApiConfig
 from ..db import get_conn
+from .settings_control import _proxy_to_copier
 
 
 class PatchAccountRequest(BaseModel):
@@ -18,6 +19,7 @@ class PatchAccountRequest(BaseModel):
     role: Optional[str] = None
     multiplier: Optional[Any] = None  # Accept any type, validate manually
     enabled: Optional[bool] = None
+    nickname: Optional[str] = None
 
 
 class AccountResponse(BaseModel):
@@ -31,11 +33,7 @@ class AccountResponse(BaseModel):
     status: str
     last_error: Optional[str] = None
     connection_status: str = "active"
-
-
-class DeleteConnectionResponse(BaseModel):
-    """Response for deleting a connection."""
-    detail: str
+    nickname: Optional[str] = None
 
 
 def create_accounts_router() -> APIRouter:
@@ -50,7 +48,7 @@ def create_accounts_router() -> APIRouter:
         """List all accounts with their connection status."""
         rows = conn.execute(
             """SELECT a.ctid_trader_account_id, a.trader_login, a.is_live, a.role, a.enabled,
-                      a.multiplier, a.status, a.last_error, c.status as conn_status
+                      a.multiplier, a.status, a.last_error, c.status as conn_status, a.nickname
                FROM accounts a
                JOIN ctid_connections c ON a.ctid_connection_id = c.id
                ORDER BY a.ctid_trader_account_id"""
@@ -67,6 +65,7 @@ def create_accounts_router() -> APIRouter:
                 status=row[6],
                 last_error=row[7],
                 connection_status=row[8],
+                nickname=row[9],
             )
             for row in rows
         ]
@@ -121,11 +120,16 @@ def create_accounts_router() -> APIRouter:
             updates.append("enabled = %s")
             params.append(request.enabled)
 
+        if request.nickname is not None:
+            # An empty (or whitespace) nickname clears it.
+            updates.append("nickname = %s")
+            params.append(request.nickname.strip() or None)
+
         if not updates:
             # No updates requested, just return current account
             row = conn.execute(
                 """SELECT ctid_trader_account_id, trader_login, is_live, role, enabled,
-                          multiplier, status, last_error FROM accounts
+                          multiplier, status, last_error, nickname FROM accounts
                    WHERE ctid_trader_account_id = %s""",
                 (account_id,)
             ).fetchone()
@@ -138,6 +142,7 @@ def create_accounts_router() -> APIRouter:
                 "multiplier": float(row[5]),
                 "status": row[6],
                 "last_error": row[7],
+                "nickname": row[8],
             }
 
         params.append(account_id)
@@ -155,7 +160,7 @@ def create_accounts_router() -> APIRouter:
         # Get updated account
         row = conn.execute(
             """SELECT ctid_trader_account_id, trader_login, is_live, role, enabled,
-                      multiplier, status, last_error FROM accounts
+                      multiplier, status, last_error, nickname FROM accounts
                WHERE ctid_trader_account_id = %s""",
             (account_id,)
         ).fetchone()
@@ -169,6 +174,7 @@ def create_accounts_router() -> APIRouter:
             "multiplier": float(row[5]),
             "status": row[6],
             "last_error": row[7],
+            "nickname": row[8],
         }
 
         # If role was changed, trigger copier reload
@@ -183,21 +189,159 @@ def create_accounts_router() -> APIRouter:
 
         return result
 
-    @router.delete("/accounts/connections/{connection_id}")
-    async def delete_connection(
-        connection_id: int,
+    @router.get("/accounts/{account_id}/details", response_model=dict)
+    async def account_details(
+        account_id: int,
+        http_request: Request,
         _: bool = Depends(require_admin),
         conn: psycopg.Connection = Depends(get_conn),
-    ):
-        """Delete a connection (cascades to accounts)."""
-        # Delete the connection (cascades to accounts due to ON DELETE CASCADE)
-        conn.execute(
-            "DELETE FROM ctid_connections WHERE id = %s",
-            (connection_id,)
+        cfg: ApiConfig = Depends(ApiConfig.from_env),
+    ) -> dict:
+        """Full account profile: the copier's live broker-side details
+        (balance, leverage, broker, account type, open positions...) merged
+        with what only this database knows (nickname, role, multiplier, and
+        the OAuth grant behind the account)."""
+        row = conn.execute(
+            """SELECT a.nickname, a.role, a.enabled, a.multiplier, a.status,
+                      a.last_error, a.is_live, a.trader_login,
+                      c.granted_at, c.expires_at, c.status, c.scope
+               FROM accounts a
+               JOIN ctid_connections c ON a.ctid_connection_id = c.id
+               WHERE a.ctid_trader_account_id = %s""",
+            (account_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Account not found")
+
+        client = http_request.app.state.http
+        details = await _proxy_to_copier(
+            client,
+            f"{cfg.copier_control_url}/details?account_id={account_id}",
+            method="GET",
         )
 
-        return {
-            "detail": "Connection deleted. Note: tokens remain revocable at ctrader.com"
+        details.update({
+            "nickname": row[0],
+            "role": row[1],
+            "enabled": row[2],
+            "multiplier": float(row[3]),
+            "status": row[4],
+            "last_error": row[5],
+            "is_live": row[6],
+            "connection": {
+                "granted_at": row[8].isoformat(),
+                "expires_at": row[9].isoformat(),
+                "status": row[10],
+                "scope": row[11],
+            },
+        })
+        if not details.get("trader_login"):
+            details["trader_login"] = row[7]
+        return details
+
+    @router.get("/accounts/{account_id}/history/{kind}", response_model=dict)
+    async def account_history(
+        account_id: int,
+        kind: str,
+        http_request: Request,
+        from_ms: int = Query(..., alias="from"),
+        to_ms: int = Query(..., alias="to"),
+        _: bool = Depends(require_admin),
+        conn: psycopg.Connection = Depends(get_conn),
+        cfg: ApiConfig = Depends(ApiConfig.from_env),
+    ) -> dict:
+        """Proxy deal/order history for one account from the copier.
+        `from`/`to` are epoch milliseconds; cTrader allows at most a one-week
+        window per request, so the dashboard pages by date range."""
+        if kind not in ("deals", "orders"):
+            raise HTTPException(status_code=400, detail="kind must be deals or orders")
+        exists = conn.execute(
+            "SELECT 1 FROM accounts WHERE ctid_trader_account_id = %s",
+            (account_id,),
+        ).fetchone()
+        if not exists:
+            raise HTTPException(status_code=404, detail="Account not found")
+
+        client = http_request.app.state.http
+        return await _proxy_to_copier(
+            client,
+            f"{cfg.copier_control_url}/history/{kind}"
+            f"?account_id={account_id}&from={from_ms}&to={to_ms}",
+            method="GET",
+        )
+
+    @router.get("/accounts/{account_id}/symbols", response_model=List[dict])
+    async def account_symbols(
+        account_id: int,
+        _: bool = Depends(require_admin),
+        conn: psycopg.Connection = Depends(get_conn),
+    ) -> List[dict]:
+        """The account's tradeable symbols from the local symbol cache (for
+        the order ticket) -- no copier or broker round trip."""
+        exists = conn.execute(
+            "SELECT 1 FROM accounts WHERE ctid_trader_account_id = %s",
+            (account_id,),
+        ).fetchone()
+        if not exists:
+            raise HTTPException(status_code=404, detail="Account not found")
+
+        rows = conn.execute(
+            """SELECT name, symbol_id, digits, lot_size, min_volume, step_volume
+               FROM symbol_cache WHERE account_id = %s ORDER BY name""",
+            (account_id,),
+        ).fetchall()
+        return [
+            {
+                "name": r[0],
+                "symbol_id": r[1],
+                "digits": r[2],
+                "min_volume_lots": r[4] / r[3] if r[3] else None,
+                "step_volume_lots": r[5] / r[3] if r[3] else None,
+            }
+            for r in rows
+        ]
+
+    @router.delete("/accounts/{account_id}/connection")
+    async def disconnect_account(
+        account_id: int,
+        http_request: Request,
+        _: bool = Depends(require_admin),
+        conn: psycopg.Connection = Depends(get_conn),
+        cfg: ApiConfig = Depends(ApiConfig.from_env),
+    ):
+        """Disconnect the cTrader ID grant behind an account.
+
+        Resolves the account's connection server-side (the dashboard never
+        sees raw connection ids), deletes it -- cascading to every account
+        discovered under that grant -- and asks the copier to reload so the
+        accounts are de-authorized immediately rather than on next restart.
+        """
+        row = conn.execute(
+            "SELECT ctid_connection_id FROM accounts WHERE ctid_trader_account_id = %s",
+            (account_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Account not found")
+        connection_id = row[0]
+
+        count_row = conn.execute(
+            "SELECT COUNT(*) FROM accounts WHERE ctid_connection_id = %s",
+            (connection_id,),
+        ).fetchone()
+
+        conn.execute("DELETE FROM ctid_connections WHERE id = %s", (connection_id,))
+
+        result = {
+            "detail": "Connection deleted. Note: tokens remain revocable at ctrader.com",
+            "accounts_removed": count_row[0],
+            "copier_reloaded": False,
         }
+        try:
+            client = http_request.app.state.http
+            response = await client.post(f"{cfg.copier_control_url}/reload")
+            result["copier_reloaded"] = response.status_code == 200
+        except Exception:
+            pass
+        return result
 
     return router
