@@ -6,23 +6,21 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 import psycopg
 
-from ..auth import require_admin
 from ..config import ApiConfig
 from ..db import get_conn
+from ..rbac import OrgContext, require_org_role, require_account_in_org
 
 
 class SettingsResponse(BaseModel):
     """Response for settings."""
     copying_enabled: bool
     dry_run: bool
-    shards: int
 
 
 class SettingsUpdateRequest(BaseModel):
     """Request body for updating settings."""
     copying_enabled: Optional[bool] = None
     dry_run: Optional[bool] = None
-    shards: Optional[int] = None
 
 
 class ControlRequest(BaseModel):
@@ -93,16 +91,16 @@ async def _proxy_to_copier(
 
 def create_settings_control_router() -> APIRouter:
     """Create router for settings and control endpoints."""
-    router = APIRouter(prefix="/api", tags=["settings", "control"])
+    router = APIRouter(prefix="/api/orgs/{org_id}", tags=["settings", "control"])
 
     @router.get("/settings", response_model=SettingsResponse)
     async def get_settings(
-        _: bool = Depends(require_admin),
+        ctx: OrgContext = Depends(require_org_role("viewer")),
         conn: psycopg.Connection = Depends(get_conn),
     ) -> SettingsResponse:
-        """Get current settings."""
+        """Get this org's settings."""
         row = conn.execute(
-            "SELECT copying_enabled, dry_run, shards FROM settings WHERE id = TRUE"
+            "SELECT copying_enabled, dry_run FROM orgs WHERE id = %s", (ctx.org_id,)
         ).fetchone()
 
         if not row:
@@ -111,18 +109,17 @@ def create_settings_control_router() -> APIRouter:
         return SettingsResponse(
             copying_enabled=row[0],
             dry_run=row[1],
-            shards=row[2],
         )
 
     @router.put("/settings", response_model=Dict[str, Any])
     async def update_settings(
         request_data: SettingsUpdateRequest,
         http_request: Request,
-        _: bool = Depends(require_admin),
+        ctx: OrgContext = Depends(require_org_role("admin")),
         conn: psycopg.Connection = Depends(get_conn),
         cfg: ApiConfig = Depends(ApiConfig.from_env),
     ) -> Dict[str, Any]:
-        """Update settings and trigger copier reload on any change."""
+        """Update this org's settings and trigger copier reload on any change."""
         updates = []
         params = []
 
@@ -134,23 +131,18 @@ def create_settings_control_router() -> APIRouter:
             updates.append("dry_run = %s")
             params.append(request_data.dry_run)
 
-        if request_data.shards is not None:
-            updates.append("shards = %s")
-            params.append(request_data.shards)
-
         if updates:
-            update_sql = f"UPDATE settings SET {', '.join(updates)} WHERE id = TRUE"
-            conn.execute(update_sql, params)
+            update_sql = f"UPDATE orgs SET {', '.join(updates)} WHERE id = %s"
+            conn.execute(update_sql, params + [ctx.org_id])
 
         # Get updated settings
         row = conn.execute(
-            "SELECT copying_enabled, dry_run, shards FROM settings WHERE id = TRUE"
+            "SELECT copying_enabled, dry_run FROM orgs WHERE id = %s", (ctx.org_id,)
         ).fetchone()
 
         result = {
             "copying_enabled": row[0],
             "dry_run": row[1],
-            "shards": row[2],
         }
 
         # On ANY settings change, notify copier
@@ -188,7 +180,7 @@ def create_settings_control_router() -> APIRouter:
                             client,
                             f"{cfg.copier_control_url}/dry-run",
                             method="POST",
-                            json={"enabled": request_data.dry_run},
+                            json={"org_id": ctx.org_id, "enabled": request_data.dry_run},
                         )
                         result["dry_run_applied"] = True
                     except HTTPException:
@@ -203,63 +195,69 @@ def create_settings_control_router() -> APIRouter:
     async def control_pause(
         request: ControlRequest,
         http_request: Request,
-        _: bool = Depends(require_admin),
+        ctx: OrgContext = Depends(require_org_role("admin")),
+        conn: psycopg.Connection = Depends(get_conn),
         cfg: ApiConfig = Depends(ApiConfig.from_env),
     ) -> Dict[str, Any]:
         """Proxy pause command to copier."""
+        if request.account_id is not None:
+            require_account_in_org(conn, ctx.org_id, request.account_id)
         client = http_request.app.state.http
         url = f"{cfg.copier_control_url}/pause"
         return await _proxy_to_copier(
             client,
             url,
             method="POST",
-            json={"account_id": request.account_id},
+            json={"org_id": ctx.org_id, "account_id": request.account_id},
         )
 
     @router.post("/control/resume", response_model=Dict[str, Any])
     async def control_resume(
         request: ControlRequest,
         http_request: Request,
-        _: bool = Depends(require_admin),
+        ctx: OrgContext = Depends(require_org_role("admin")),
+        conn: psycopg.Connection = Depends(get_conn),
         cfg: ApiConfig = Depends(ApiConfig.from_env),
     ) -> Dict[str, Any]:
         """Proxy resume command to copier."""
+        if request.account_id is not None:
+            require_account_in_org(conn, ctx.org_id, request.account_id)
         client = http_request.app.state.http
         url = f"{cfg.copier_control_url}/resume"
         return await _proxy_to_copier(
             client,
             url,
             method="POST",
-            json={"account_id": request.account_id},
+            json={"org_id": ctx.org_id, "account_id": request.account_id},
         )
 
     @router.post("/control/resync", response_model=Dict[str, Any])
     async def control_resync(
         http_request: Request,
-        _: bool = Depends(require_admin),
+        ctx: OrgContext = Depends(require_org_role("admin")),
         cfg: ApiConfig = Depends(ApiConfig.from_env),
     ) -> Dict[str, Any]:
         """Proxy resync command to copier."""
         client = http_request.app.state.http
         url = f"{cfg.copier_control_url}/resync"
-        return await _proxy_to_copier(client, url, method="POST", json={})
+        return await _proxy_to_copier(client, url, method="POST", json={"org_id": ctx.org_id})
 
     return router
 
 
 def create_state_router() -> APIRouter:
     """Create router for state proxy endpoint."""
-    router = APIRouter(prefix="/api", tags=["state"])
+    router = APIRouter(prefix="/api/orgs/{org_id}", tags=["state"])
 
     @router.get("/state", response_model=Dict[str, Any])
     async def get_state(
         http_request: Request,
-        _: bool = Depends(require_admin),
+        ctx: OrgContext = Depends(require_org_role("viewer")),
         cfg: ApiConfig = Depends(ApiConfig.from_env),
     ) -> Dict[str, Any]:
         """Proxy GET state from copier."""
         client = http_request.app.state.http
-        url = f"{cfg.copier_control_url}/state"
+        url = f"{cfg.copier_control_url}/state?org_id={ctx.org_id}"
         return await _proxy_to_copier(client, url, method="GET")
 
     @router.post("/drift/{action}", response_model=Dict[str, Any])
@@ -267,7 +265,7 @@ def create_state_router() -> APIRouter:
         action: str,
         request: DriftActionRequest,
         http_request: Request,
-        _: bool = Depends(require_admin),
+        ctx: OrgContext = Depends(require_org_role("admin")),
         cfg: ApiConfig = Depends(ApiConfig.from_env),
     ) -> Dict[str, Any]:
         """Proxy a drift remedy (and its body) to the copier.
@@ -293,7 +291,8 @@ def create_state_router() -> APIRouter:
         client = http_request.app.state.http
         url = f"{cfg.copier_control_url}/drift/{action}"
         return await _proxy_to_copier(
-            client, url, method="POST", json=request.model_dump(exclude_none=True),
+            client, url, method="POST",
+            json={**request.model_dump(exclude_none=True), "org_id": ctx.org_id},
         )
 
     return router

@@ -380,3 +380,36 @@ def login_as():
         assert r.status_code == 204, f"login failed: {r.status_code} {r.text}"
 
     return _login
+
+
+@pytest.fixture
+def org_client(app_client, make_user, make_org, login_as, db):
+    """app_client logged in as the admin of a fresh org; returns
+    (client, org_id, seed) where seed(account_id, role, ...) inserts an
+    account owned by that org."""
+
+    user = make_user(email="admin@example.com")
+    org_id = make_org(name="Desk", members=[(user, "admin")])
+    login_as(app_client, user)
+
+    with psycopg.connect(db, autocommit=True) as conn:
+        (connection_id,) = conn.execute(
+            """INSERT INTO ctid_connections
+               (org_id, access_token_enc, refresh_token_enc, granted_at, expires_at)
+               VALUES (%s, 'enc', 'enc', now(), now() + interval '30 days')
+               RETURNING id""",
+            (org_id,),
+        ).fetchone()
+
+    def seed(account_id, role="slave", enabled=True, multiplier=1.0, is_live=False):
+        with psycopg.connect(db, autocommit=True) as conn:
+            conn.execute(
+                """INSERT INTO accounts (ctid_trader_account_id, ctid_connection_id,
+                       org_id, trader_login, is_live, role, enabled, multiplier)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                (account_id, connection_id, org_id, account_id, is_live,
+                 role, enabled, multiplier),
+            )
+        return account_id
+
+    return app_client, org_id, seed
