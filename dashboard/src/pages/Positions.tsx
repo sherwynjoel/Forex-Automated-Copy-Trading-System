@@ -1,9 +1,12 @@
 import { useEffect, useState } from 'react'
 import { ApiState, MasterPosition, PendingOrder, PositionCopy, DriftItem } from '../lib/types'
-import { api } from '../lib/api'
+import { orgApi } from '../lib/api'
+import { useOrg } from '../lib/org'
+import { can } from '../lib/roles'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
 
 export default function Positions() {
+  const { orgId, role } = useOrg()
   const [state, setState] = useState<ApiState | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -13,7 +16,7 @@ export default function Positions() {
   const fetchState = async () => {
     try {
       setError(null)
-      const data = await api<ApiState>('/api/state')
+      const data = await orgApi<ApiState>(orgId, 'state')
       setState(data)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch state')
@@ -26,20 +29,16 @@ export default function Positions() {
     fetchState()
     const interval = setInterval(fetchState, 5000)
     return () => clearInterval(interval)
-  }, [])
+  }, [orgId])
 
   // Refetch immediately when a trade event streams in (5s poll is fallback)
-  // Task 17: this page still calls the unscoped /api/* endpoints above and
-  // isn't rendered under org route context in its tests, so useOrg() isn't
-  // trivially available here — orgId is a placeholder until the page is
-  // converted to orgApi/org-scoped routing.
-  useLiveRefresh(fetchState, 0)
+  useLiveRefresh(fetchState, orgId)
 
   const handleCloseOrphan = async (driftId: string) => {
     if (!window.confirm('Close this orphan position?')) return
 
     try {
-      await api('/api/drift/close-orphan', {
+      await orgApi(orgId, 'drift/close-orphan', {
         method: 'POST',
         body: JSON.stringify({ id: driftId }),
       })
@@ -69,7 +68,7 @@ export default function Positions() {
     }
 
     try {
-      await api('/api/drift/adopt', {
+      await orgApi(orgId, 'drift/adopt', {
         method: 'POST',
         body: JSON.stringify({ id: driftId, master_position_id }),
       })
@@ -81,7 +80,7 @@ export default function Positions() {
 
   const handleDismiss = async (driftId: string) => {
     try {
-      await api('/api/drift/dismiss', {
+      await orgApi(orgId, 'drift/dismiss', {
         method: 'POST',
         body: JSON.stringify({ id: driftId }),
       })
@@ -213,6 +212,8 @@ export default function Positions() {
               <DriftItemRow
                 key={drift.id}
                 drift={drift}
+                canClose={can(role, 'trade')}
+                canRemedy={can(role, 'control')}
                 onCloseOrphan={() => handleCloseOrphan(drift.id)}
                 onAdopt={() => handleAdopt(drift.id, drift.detail)}
                 onDismiss={() => handleDismiss(drift.id)}
@@ -365,11 +366,15 @@ function CopyRow({
 
 function DriftItemRow({
   drift,
+  canClose,
+  canRemedy,
   onCloseOrphan,
   onAdopt,
   onDismiss,
 }: {
   drift: DriftItem
+  canClose: boolean
+  canRemedy: boolean
   onCloseOrphan: () => void
   onAdopt: () => void
   onDismiss: () => void
@@ -387,7 +392,7 @@ function DriftItemRow({
         <p className="text-sm text-ink-soft">{drift.detail}</p>
       </div>
       <div className="flex gap-2">
-        {isOrphanSlave && (
+        {isOrphanSlave && canClose && (
           <button
             onClick={onCloseOrphan}
             className="px-3 py-2 bg-loss text-white rounded hover:bg-loss-deep text-sm font-medium transition-colors"
@@ -395,7 +400,7 @@ function DriftItemRow({
             Close Orphan
           </button>
         )}
-        {isOrphanSlave && (
+        {isOrphanSlave && canRemedy && (
           <button
             onClick={onAdopt}
             className="px-3 py-2 bg-brand text-white rounded hover:bg-brand-deep text-sm font-medium transition-colors"
@@ -403,12 +408,14 @@ function DriftItemRow({
             Adopt
           </button>
         )}
-        <button
-          onClick={onDismiss}
-          className="px-3 py-2 rounded border border-line-strong text-ink-soft hover:text-ink text-sm font-medium transition-colors"
-        >
-          Dismiss
-        </button>
+        {canRemedy && (
+          <button
+            onClick={onDismiss}
+            className="px-3 py-2 rounded border border-line-strong text-ink-soft hover:text-ink text-sm font-medium transition-colors"
+          >
+            Dismiss
+          </button>
+        )}
       </div>
     </div>
   )

@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
-import { api } from '../lib/api'
+import { orgApi } from '../lib/api'
+import { useOrg } from '../lib/org'
+import { can } from '../lib/roles'
 import type { Account, AccountDetails, CloseAllResult } from '../lib/types'
 import ConfirmDialog from '../components/ConfirmDialog'
 
@@ -18,6 +20,7 @@ function formatTimestamp(ms: number | null | undefined): string {
 }
 
 export default function Accounts() {
+  const { orgId, role } = useOrg()
   const [accounts, setAccounts] = useState<Account[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -36,7 +39,7 @@ export default function Accounts() {
 
   const fetchAccounts = async () => {
     try {
-      const data = await api<Account[]>('/api/accounts')
+      const data = await orgApi<Account[]>(orgId, 'accounts')
       setAccounts(data || [])
       setMultiplierDrafts({})
       setNicknameDrafts({})
@@ -50,7 +53,7 @@ export default function Accounts() {
 
   useEffect(() => {
     fetchAccounts()
-  }, [])
+  }, [orgId])
 
   // Refetch when the OAuth popup closes and focus returns to this window.
   useEffect(() => {
@@ -59,7 +62,7 @@ export default function Accounts() {
     }
     window.addEventListener('focus', handleFocus)
     return () => window.removeEventListener('focus', handleFocus)
-  }, [])
+  }, [orgId])
 
   const withPending = async (accountId: number, action: () => Promise<void>) => {
     setPendingRows((prev) => new Set([...prev, accountId]))
@@ -75,14 +78,14 @@ export default function Accounts() {
   }
 
   const handleConnectOAuth = () => {
-    window.open('/api/oauth/connect', 'ctrader-oauth', 'width=520,height=680')
+    window.open(`/api/orgs/${orgId}/oauth/connect`, 'ctrader-oauth', 'width=520,height=680')
   }
 
   const handleRoleChange = (accountId: number, newRole: string) =>
     withPending(accountId, async () => {
       try {
         setRoleErrors((prev) => ({ ...prev, [accountId]: '' }))
-        await api(`/api/accounts/${accountId}`, {
+        await orgApi(orgId, `accounts/${accountId}`, {
           method: 'PATCH',
           body: JSON.stringify({ role: newRole }),
         })
@@ -101,7 +104,7 @@ export default function Accounts() {
   const handleEnabledToggle = (accountId: number, currentEnabled: boolean) =>
     withPending(accountId, async () => {
       try {
-        await api(`/api/accounts/${accountId}`, {
+        await orgApi(orgId, `accounts/${accountId}`, {
           method: 'PATCH',
           body: JSON.stringify({ enabled: !currentEnabled }),
         })
@@ -127,7 +130,7 @@ export default function Accounts() {
     withPending(accountId, async () => {
       try {
         setMultiplierErrors((prev) => ({ ...prev, [accountId]: '' }))
-        await api(`/api/accounts/${accountId}`, {
+        await orgApi(orgId, `accounts/${accountId}`, {
           method: 'PATCH',
           body: JSON.stringify({ multiplier }),
         })
@@ -151,7 +154,7 @@ export default function Accounts() {
     if (draft === undefined || draft === (account.nickname ?? '')) return
     withPending(account.ctid_trader_account_id, async () => {
       try {
-        await api(`/api/accounts/${account.ctid_trader_account_id}`, {
+        await orgApi(orgId, `accounts/${account.ctid_trader_account_id}`, {
           method: 'PATCH',
           body: JSON.stringify({ nickname: draft }),
         })
@@ -167,8 +170,8 @@ export default function Accounts() {
     const accountId = disconnecting.ctid_trader_account_id
     try {
       setBusy(true)
-      const result = await api<{ accounts_removed: number }>(
-        `/api/accounts/${accountId}/connection`, { method: 'DELETE' })
+      const result = await orgApi<{ accounts_removed: number }>(
+        orgId, `accounts/${accountId}/connection`, { method: 'DELETE' })
       setNotice(
         `Disconnected. ${result.accounts_removed} account${result.accounts_removed === 1 ? '' : 's'} ` +
         'removed. The token stays revocable at ctrader.com.')
@@ -187,7 +190,7 @@ export default function Accounts() {
     const accountId = flattening.ctid_trader_account_id
     try {
       setBusy(true)
-      const result = await api<CloseAllResult>('/api/control/close-all', {
+      const result = await orgApi<CloseAllResult>(orgId, 'control/close-all', {
         method: 'POST',
         body: JSON.stringify({ account_id: accountId }),
       })
@@ -210,8 +213,8 @@ export default function Accounts() {
     setDetails(null)
     setDetailsError(null)
     try {
-      setDetails(await api<AccountDetails>(
-        `/api/accounts/${account.ctid_trader_account_id}/details`))
+      setDetails(await orgApi<AccountDetails>(
+        orgId, `accounts/${account.ctid_trader_account_id}/details`))
     } catch (err) {
       setDetailsError(
         `Could not fetch details: ${err instanceof Error ? err.message : 'unknown error'}. ` +
@@ -233,12 +236,14 @@ export default function Accounts() {
             multipliers, and nicknames apply per account.
           </p>
         </div>
-        <button
-          onClick={handleConnectOAuth}
-          className="px-4 py-2 bg-brand text-white text-sm font-semibold rounded hover:bg-brand-deep transition-colors"
-        >
-          Connect cTrader ID
-        </button>
+        {can(role, 'control') && (
+          <button
+            onClick={handleConnectOAuth}
+            className="px-4 py-2 bg-brand text-white text-sm font-semibold rounded hover:bg-brand-deep transition-colors"
+          >
+            Connect cTrader ID
+          </button>
+        )}
       </header>
 
       {notice && (
@@ -296,17 +301,21 @@ export default function Accounts() {
                       )}
                     </td>
                     <td className="px-3 py-3">
-                      <input
-                        type="text"
-                        aria-label={`Nickname for account ${account.trader_login}`}
-                        placeholder="Add a name"
-                        value={nicknameDrafts[id] ?? account.nickname ?? ''}
-                        onChange={(e) =>
-                          setNicknameDrafts((prev) => ({ ...prev, [id]: e.target.value }))}
-                        onBlur={() => handleNicknameBlur(account)}
-                        disabled={isPending}
-                        className="w-32 rounded border border-transparent hover:border-line-strong focus:border-line-strong px-2 py-1 text-sm bg-transparent"
-                      />
+                      {can(role, 'control') ? (
+                        <input
+                          type="text"
+                          aria-label={`Nickname for account ${account.trader_login}`}
+                          placeholder="Add a name"
+                          value={nicknameDrafts[id] ?? account.nickname ?? ''}
+                          onChange={(e) =>
+                            setNicknameDrafts((prev) => ({ ...prev, [id]: e.target.value }))}
+                          onBlur={() => handleNicknameBlur(account)}
+                          disabled={isPending}
+                          className="w-32 rounded border border-transparent hover:border-line-strong focus:border-line-strong px-2 py-1 text-sm bg-transparent"
+                        />
+                      ) : (
+                        <span className="text-ink">{account.nickname || '—'}</span>
+                      )}
                     </td>
                     <td className="px-3 py-3">
                       <span className={`text-xs font-semibold px-2 py-0.5 rounded ${
@@ -316,53 +325,65 @@ export default function Accounts() {
                       </span>
                     </td>
                     <td className="px-3 py-3">
-                      <select
-                        aria-label={`Role for account ${account.trader_login}`}
-                        value={account.role}
-                        onChange={(e) => handleRoleChange(id, e.target.value)}
-                        disabled={isPending}
-                        className="rounded border border-line-strong px-2 py-1 text-sm bg-card disabled:opacity-50"
-                      >
-                        <option value="master">Master</option>
-                        <option value="slave">Slave</option>
-                        <option value="ignored">Ignored</option>
-                      </select>
+                      {can(role, 'control') ? (
+                        <select
+                          aria-label={`Role for account ${account.trader_login}`}
+                          value={account.role}
+                          onChange={(e) => handleRoleChange(id, e.target.value)}
+                          disabled={isPending}
+                          className="rounded border border-line-strong px-2 py-1 text-sm bg-card disabled:opacity-50"
+                        >
+                          <option value="master">Master</option>
+                          <option value="slave">Slave</option>
+                          <option value="ignored">Ignored</option>
+                        </select>
+                      ) : (
+                        <span className="text-ink">{account.role}</span>
+                      )}
                       {roleErrors[id] && (
                         <div className="text-loss text-xs mt-1">{roleErrors[id]}</div>
                       )}
                     </td>
                     <td className="px-3 py-3">
                       {account.role === 'slave' ? (
-                        <div>
-                          <input
-                            type="number"
-                            step="0.01"
-                            min="0.01"
-                            aria-label={`Multiplier for account ${account.trader_login}`}
-                            value={multiplierDrafts[id] ?? String(account.multiplier)}
-                            onChange={(e) =>
-                              setMultiplierDrafts((prev) => ({ ...prev, [id]: e.target.value }))}
-                            onBlur={() => handleMultiplierBlur(id)}
-                            disabled={isPending}
-                            className="num w-20 rounded border border-line-strong px-2 py-1 text-sm disabled:opacity-50"
-                          />
-                          {multiplierErrors[id] && (
-                            <div className="text-loss text-xs mt-1 max-w-36">{multiplierErrors[id]}</div>
-                          )}
-                        </div>
+                        can(role, 'control') ? (
+                          <div>
+                            <input
+                              type="number"
+                              step="0.01"
+                              min="0.01"
+                              aria-label={`Multiplier for account ${account.trader_login}`}
+                              value={multiplierDrafts[id] ?? String(account.multiplier)}
+                              onChange={(e) =>
+                                setMultiplierDrafts((prev) => ({ ...prev, [id]: e.target.value }))}
+                              onBlur={() => handleMultiplierBlur(id)}
+                              disabled={isPending}
+                              className="num w-20 rounded border border-line-strong px-2 py-1 text-sm disabled:opacity-50"
+                            />
+                            {multiplierErrors[id] && (
+                              <div className="text-loss text-xs mt-1 max-w-36">{multiplierErrors[id]}</div>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="num text-ink">{account.multiplier}</span>
+                        )
                       ) : (
                         <span className="text-ink-faint">—</span>
                       )}
                     </td>
                     <td className="px-3 py-3">
-                      <input
-                        type="checkbox"
-                        aria-label={`Copying enabled for account ${account.trader_login}`}
-                        checked={account.enabled}
-                        onChange={() => handleEnabledToggle(id, account.enabled)}
-                        disabled={isPending}
-                        className="w-4 h-4 accent-brand disabled:opacity-50"
-                      />
+                      {can(role, 'control') ? (
+                        <input
+                          type="checkbox"
+                          aria-label={`Copying enabled for account ${account.trader_login}`}
+                          checked={account.enabled}
+                          onChange={() => handleEnabledToggle(id, account.enabled)}
+                          disabled={isPending}
+                          className="w-4 h-4 accent-brand disabled:opacity-50"
+                        />
+                      ) : (
+                        <span className="text-ink">{account.enabled ? 'Yes' : 'No'}</span>
+                      )}
                     </td>
                     <td className="px-3 py-3">
                       <span className={`text-xs font-medium px-2 py-0.5 rounded ${
@@ -396,13 +417,15 @@ export default function Accounts() {
                         >
                           Flatten
                         </button>
-                        <button
-                          onClick={() => setDisconnecting(account)}
-                          disabled={isPending}
-                          className="px-2.5 py-1 text-xs font-medium rounded border border-line-strong text-ink-soft hover:text-loss hover:border-loss transition-colors disabled:opacity-50"
-                        >
-                          Disconnect
-                        </button>
+                        {can(role, 'control') && (
+                          <button
+                            onClick={() => setDisconnecting(account)}
+                            disabled={isPending}
+                            className="px-2.5 py-1 text-xs font-medium rounded border border-line-strong text-ink-soft hover:text-loss hover:border-loss transition-colors disabled:opacity-50"
+                          >
+                            Disconnect
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>

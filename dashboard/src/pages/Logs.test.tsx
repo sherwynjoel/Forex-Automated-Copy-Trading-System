@@ -4,6 +4,10 @@ import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi, afterEach, beforeEach } from 'vitest'
 import Logs from './Logs'
 import * as apiModule from '../lib/api'
+import { mockUseOrg } from '../test/orgMock'
+
+const { useOrgMock } = vi.hoisted(() => ({ useOrgMock: vi.fn() }))
+vi.mock('../lib/org', () => ({ useOrg: useOrgMock }))
 
 // Mock WebSocket class that captures instance and allows emit
 class MockWebSocket {
@@ -29,6 +33,7 @@ class MockWebSocket {
 }
 
 beforeEach(() => {
+  useOrgMock.mockReturnValue(mockUseOrg('viewer'))
   vi.spyOn(apiModule, 'eventsSocket').mockReturnValue(new MockWebSocket() as any)
 })
 
@@ -37,7 +42,7 @@ afterEach(() => {
   MockWebSocket.instance = null
 })
 
-test('fetches events with filter query params', async () => {
+test('fetches events with filter query params from the org-scoped route', async () => {
   const events = [
     {
       id: 1,
@@ -65,7 +70,7 @@ test('fetches events with filter query params', async () => {
 
   // Wait for initial fetch
   await waitFor(() => {
-    expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining('/api/events'), expect.any(Object))
+    expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining('/api/orgs/1/events'), expect.any(Object))
   })
 
   // Clear previous calls
@@ -80,7 +85,7 @@ test('fetches events with filter query params', async () => {
     const calls = fetchMock.mock.calls
     expect(calls.length).toBeGreaterThan(0)
     const eventCall = calls.find(
-      (call) => typeof call[0] === 'string' && call[0].includes('/api/events')
+      (call) => typeof call[0] === 'string' && call[0].includes('/api/orgs/1/events')
     )
     expect(eventCall).toBeDefined()
     const url = new URL(eventCall![0] as string, 'http://localhost')
@@ -136,7 +141,7 @@ test('renders severity-coded rows', async () => {
   expect(errorSeveritySpan).toHaveClass('bg-loss-wash')
 })
 
-test('live websocket event prepends a row', async () => {
+test('live websocket event prepends a row, connecting with the org id', async () => {
   const initialEvents = [
     {
       id: 1,
@@ -170,6 +175,7 @@ test('live websocket event prepends a row', async () => {
   await waitFor(() => {
     expect(MockWebSocket.instance).not.toBeNull()
   })
+  expect(apiModule.eventsSocket).toHaveBeenCalledWith(1)
 
   // Emit a new event via WebSocket
   const newEvent = {

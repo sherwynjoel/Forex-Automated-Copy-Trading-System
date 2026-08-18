@@ -85,13 +85,10 @@ export function orgApi<T>(orgId: number, tail: string, init?: RequestInit): Prom
 }
 
 /**
- * Create a WebSocket connection to the events stream, scoped to an org when
- * one is given. `orgId` is optional so pages not yet converted to org-scoped
- * routing (Task 17) keep connecting to the unscoped stream unchanged.
+ * Create a WebSocket connection to the events stream, scoped to an org.
  */
-export function eventsSocket(orgId?: number): WebSocket {
+export function eventsSocket(orgId: number): WebSocket {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const query = orgId != null ? `?org_id=${orgId}` : ''
-  const url = `${protocol}//${window.location.host}/api/ws${query}`
+  const url = `${protocol}//${window.location.host}/api/ws?org_id=${orgId}`
   return new WebSocket(url)
 }

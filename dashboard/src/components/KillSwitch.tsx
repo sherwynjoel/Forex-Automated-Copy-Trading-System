@@ -1,5 +1,7 @@
 import { useState } from 'react'
-import { api } from '../lib/api'
+import { orgApi } from '../lib/api'
+import { useOrg } from '../lib/org'
+import { can } from '../lib/roles'
 import type { Settings } from '../lib/types'
 
 interface KillSwitchProps {
@@ -8,6 +10,7 @@ interface KillSwitchProps {
 }
 
 export default function KillSwitch({ settings, onUpdate }: KillSwitchProps) {
+  const { orgId, role } = useOrg()
   const [isLoading, setIsLoading] = useState(false)
 
   // N1: dry-run had a badge but no control anywhere in the dashboard, so
@@ -31,7 +34,7 @@ export default function KillSwitch({ settings, onUpdate }: KillSwitchProps) {
 
     try {
       setIsLoading(true)
-      await api('/api/settings', {
+      await orgApi(orgId, 'settings', {
         method: 'PUT',
         body: JSON.stringify({ dry_run: newState }),
       })
@@ -55,7 +58,7 @@ export default function KillSwitch({ settings, onUpdate }: KillSwitchProps) {
 
     try {
       setIsLoading(true)
-      await api('/api/settings', {
+      await orgApi(orgId, 'settings', {
         method: 'PUT',
         body: JSON.stringify({ copying_enabled: newState }),
       })
@@ -69,6 +72,9 @@ export default function KillSwitch({ settings, onUpdate }: KillSwitchProps) {
 
   const buttonText = settings.copying_enabled ? 'STOP COPYING' : 'RESUME COPYING'
   const buttonColor = settings.copying_enabled ? 'bg-loss hover:bg-loss-deep' : 'bg-profit hover:bg-brand-deep'
+
+  // Kill switches are a control-level action; viewers/traders never see them.
+  if (!can(role, 'control')) return null
 
   return (
     <div className="flex items-center gap-3 flex-wrap">

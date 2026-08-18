@@ -3,6 +3,10 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi, afterEach } from 'vitest'
 import History from './History'
+import { mockUseOrg } from '../test/orgMock'
+
+const { useOrgMock } = vi.hoisted(() => ({ useOrgMock: vi.fn() }))
+vi.mock('../lib/org', () => ({ useOrg: useOrgMock }))
 
 afterEach(() => {
   vi.clearAllMocks()
@@ -67,7 +71,7 @@ function mockRoutes() {
       })
     if (url.includes('/history/deals')) return respond(deals)
     if (url.includes('/history/orders')) return respond(orders)
-    if (url.includes('/api/accounts')) return respond(accounts)
+    if (url.includes('/api/orgs/1/accounts')) return respond(accounts)
     return respond({})
   })
   vi.stubGlobal('fetch', fetchMock)
@@ -75,6 +79,7 @@ function mockRoutes() {
 }
 
 function renderHistory() {
+  useOrgMock.mockReturnValue(mockUseOrg('viewer'))
   return render(
     <MemoryRouter>
       <History />
@@ -90,7 +95,7 @@ test('loads deal history for the master over the last week by default', async ()
     const call = fetchMock.mock.calls.find(([u]) => String(u).includes('/history/deals'))
     expect(call).toBeTruthy()
     const url = String(call![0])
-    expect(url).toContain('/api/accounts/100/history/deals')
+    expect(url).toContain('/api/orgs/1/accounts/100/history/deals')
     const params = new URLSearchParams(url.split('?')[1])
     const from = Number(params.get('from'))
     const to = Number(params.get('to'))
@@ -141,7 +146,7 @@ test('switching account refetches its history', async () => {
 
   await waitFor(() => {
     expect(fetchMock.mock.calls.some(([u]) =>
-      String(u).includes('/api/accounts/101/history/deals'))).toBe(true)
+      String(u).includes('/api/orgs/1/accounts/101/history/deals'))).toBe(true)
   })
 })
 

@@ -1,9 +1,18 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
-import { expect, test, vi, afterEach, beforeEach } from 'vitest'
+import { expect, test, vi, afterEach } from 'vitest'
 import Overview from './Overview'
 import type { Account, ApiState, Settings, StateSnapshot } from '../lib/types'
+import type { Role } from '../lib/roles'
+import { mockUseOrg } from '../test/orgMock'
+
+const { useOrgMock } = vi.hoisted(() => ({ useOrgMock: vi.fn() }))
+vi.mock('../lib/org', () => ({ useOrg: useOrgMock }))
+
+function setRole(role: Role) {
+  useOrgMock.mockReturnValue(mockUseOrg(role))
+}
 
 // Helper to stub API routes
 function stubApi(routes: Record<string, unknown>) {
@@ -62,11 +71,10 @@ const mockAccounts: Account[] = [
 const mockSettings: Settings = {
   copying_enabled: true,
   dry_run: false,
-  shards: 4,
 }
 
-// The per-account block of GET /api/state. Kept separate so tests can assert
-// against the same numbers the component is expected to render.
+// The per-account block of GET /api/orgs/1/state. Kept separate so tests can
+// assert against the same numbers the component is expected to render.
 const mockAccountState: StateSnapshot = {
   '1': {
     balance: 10000,
@@ -108,7 +116,7 @@ const mockAccountState: StateSnapshot = {
   },
 }
 
-// What GET /api/state ACTUALLY returns: a verbatim pass-through of the
+// What GET /api/orgs/1/state ACTUALLY returns: a verbatim pass-through of the
 // copier's get_state(), i.e. an envelope whose per-account block sits under
 // `accounts`, alongside master_positions/pending_orders/drift.
 //
@@ -124,13 +132,17 @@ const mockState: ApiState = {
   drift: [],
 }
 
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => {
+  vi.unstubAllGlobals()
+  vi.clearAllMocks()
+})
 
 test('renders master card with equity/balance/pnl', async () => {
+  setRole('owner')
   stubApi({
-    '/api/accounts': mockAccounts,
-    '/api/settings': mockSettings,
-    '/api/state': mockState,
+    '/api/orgs/1/accounts': mockAccounts,
+    '/api/orgs/1/settings': mockSettings,
+    '/api/orgs/1/state': mockState,
   })
 
   render(
@@ -151,7 +163,8 @@ test('renders master card with equity/balance/pnl', async () => {
 })
 
 test('master card renders equity/balance/P&L read from the nested accounts block', async () => {
-  // Regression guard for the shape bug: /api/state returns
+  setRole('owner')
+  // Regression guard for the shape bug: /api/orgs/1/state returns
   // {accounts, master_positions, pending_orders, drift}, and the per-account
   // numbers live under `accounts`. Overview used to index the envelope
   // directly, so every lookup was undefined -- the master card did not render
@@ -182,9 +195,9 @@ test('master card renders equity/balance/P&L read from the nested accounts block
   }
 
   stubApi({
-    '/api/accounts': mockAccounts,
-    '/api/settings': mockSettings,
-    '/api/state': envelope,
+    '/api/orgs/1/accounts': mockAccounts,
+    '/api/orgs/1/settings': mockSettings,
+    '/api/orgs/1/state': envelope,
   })
 
   render(
@@ -210,13 +223,14 @@ test('master card renders equity/balance/P&L read from the nested accounts block
 })
 
 test('renders no account stats when the accounts block is empty, without crashing', async () => {
+  setRole('owner')
   // The honest empty case: the copier returns `accounts: {}` before the state
   // tracker has any data (e.g. no master configured). The screen must degrade
   // to "no stats" rather than throwing on an undefined lookup.
   stubApi({
-    '/api/accounts': mockAccounts,
-    '/api/settings': mockSettings,
-    '/api/state': { accounts: {}, master_positions: [], pending_orders: [], drift: [] },
+    '/api/orgs/1/accounts': mockAccounts,
+    '/api/orgs/1/settings': mockSettings,
+    '/api/orgs/1/state': { accounts: {}, master_positions: [], pending_orders: [], drift: [] },
   })
 
   render(
@@ -231,15 +245,16 @@ test('renders no account stats when the accounts block is empty, without crashin
 
   expect(screen.queryByText(/Master Account \(1001\)/)).not.toBeInTheDocument()
   expect(screen.queryByText('$12000.00')).not.toBeInTheDocument()
-  // Slave tiles still render (they come from /api/accounts), just without stats.
+  // Slave tiles still render (they come from /api/orgs/1/accounts), just without stats.
   expect(screen.getAllByTestId('slave-tile').length).toBeGreaterThanOrEqual(2)
 })
 
 test('renders slave tiles with status icons', async () => {
+  setRole('owner')
   stubApi({
-    '/api/accounts': mockAccounts,
-    '/api/settings': mockSettings,
-    '/api/state': mockState,
+    '/api/orgs/1/accounts': mockAccounts,
+    '/api/orgs/1/settings': mockSettings,
+    '/api/orgs/1/state': mockState,
   })
 
   render(
@@ -263,10 +278,11 @@ test('renders slave tiles with status icons', async () => {
 })
 
 test('kill switch confirms then PUTs copying_enabled false', async () => {
+  setRole('owner')
   const fetchMock = stubApi({
-    '/api/accounts': mockAccounts,
-    '/api/settings': mockSettings,
-    '/api/state': mockState,
+    '/api/orgs/1/accounts': mockAccounts,
+    '/api/orgs/1/settings': mockSettings,
+    '/api/orgs/1/state': mockState,
   })
 
   // Mock window.confirm
@@ -293,7 +309,7 @@ test('kill switch confirms then PUTs copying_enabled false', async () => {
   // Verify PUT request was made with copying_enabled: false
   await waitFor(() => {
     const putCall = fetchMock.mock.calls.find(
-      (call) => call[1]?.method === 'PUT' && call[0].includes('/api/settings')
+      (call) => call[1]?.method === 'PUT' && call[0].includes('/api/orgs/1/settings')
     )
     expect(putCall).toBeDefined()
     const body = JSON.parse(putCall![1]?.body as string)
@@ -302,10 +318,11 @@ test('kill switch confirms then PUTs copying_enabled false', async () => {
 })
 
 test('kill switch does not PUT if confirm is rejected', async () => {
+  setRole('owner')
   const fetchMock = stubApi({
-    '/api/accounts': mockAccounts,
-    '/api/settings': mockSettings,
-    '/api/state': mockState,
+    '/api/orgs/1/accounts': mockAccounts,
+    '/api/orgs/1/settings': mockSettings,
+    '/api/orgs/1/state': mockState,
   })
 
   const confirmMock = vi.fn().mockReturnValue(false)
@@ -328,21 +345,22 @@ test('kill switch does not PUT if confirm is rejected', async () => {
 
   // No PUT should be made
   const putCall = fetchMock.mock.calls.find(
-    (call) => call[1]?.method === 'PUT' && call[0].includes('/api/settings')
+    (call) => call[1]?.method === 'PUT' && call[0].includes('/api/orgs/1/settings')
   )
   expect(putCall).toBeUndefined()
 })
 
-test('per-slave pause posts to /api/control/pause with account_id', async () => {
+test('per-slave pause posts to /api/orgs/1/control/pause with account_id', async () => {
+  setRole('owner')
   const routes: Record<string, unknown> = {
-    '/api/accounts': mockAccounts,
-    '/api/settings': mockSettings,
-    '/api/state': mockState,
+    '/api/orgs/1/accounts': mockAccounts,
+    '/api/orgs/1/settings': mockSettings,
+    '/api/orgs/1/state': mockState,
   }
 
   const fetchMock = vi.fn((path: string, init?: RequestInit) => {
     // Handle pause/resume endpoints
-    if (path.includes('/api/control/pause') || path.includes('/api/control/resume')) {
+    if (path.includes('/api/orgs/1/control/pause') || path.includes('/api/orgs/1/control/resume')) {
       return Promise.resolve(new Response(null, { status: 204 }))
     }
 
@@ -377,7 +395,7 @@ test('per-slave pause posts to /api/control/pause with account_id', async () => 
 
   await waitFor(() => {
     const pauseCall = fetchMock.mock.calls.find(
-      (call) => call[1]?.method === 'POST' && call[0].includes('/api/control/pause')
+      (call) => call[1]?.method === 'POST' && call[0].includes('/api/orgs/1/control/pause')
     )
     expect(pauseCall).toBeDefined()
     const body = JSON.parse(pauseCall![1]?.body as string)
@@ -386,16 +404,16 @@ test('per-slave pause posts to /api/control/pause with account_id', async () => 
 })
 
 test('shows dry-run badge when dry_run enabled', async () => {
+  setRole('owner')
   const dryRunSettings: Settings = {
     copying_enabled: true,
     dry_run: true,
-    shards: 4,
   }
 
   stubApi({
-    '/api/accounts': mockAccounts,
-    '/api/settings': dryRunSettings,
-    '/api/state': mockState,
+    '/api/orgs/1/accounts': mockAccounts,
+    '/api/orgs/1/settings': dryRunSettings,
+    '/api/orgs/1/state': mockState,
   })
 
   render(
@@ -410,6 +428,7 @@ test('shows dry-run badge when dry_run enabled', async () => {
 })
 
 test('does not show refresh-failed banner when all connections are active', async () => {
+  setRole('owner')
   const accounts: Account[] = [
     { ...mockAccounts[0], connection_status: 'active' },
     { ...mockAccounts[1], connection_status: 'active' },
@@ -417,9 +436,9 @@ test('does not show refresh-failed banner when all connections are active', asyn
   ]
 
   stubApi({
-    '/api/accounts': accounts,
-    '/api/settings': mockSettings,
-    '/api/state': mockState,
+    '/api/orgs/1/accounts': accounts,
+    '/api/orgs/1/settings': mockSettings,
+    '/api/orgs/1/state': mockState,
   })
 
   render(
@@ -436,6 +455,7 @@ test('does not show refresh-failed banner when all connections are active', asyn
 })
 
 test('shows prominent refresh-failed banner naming the affected account', async () => {
+  setRole('owner')
   const accounts: Account[] = [
     { ...mockAccounts[0], connection_status: 'active' },
     { ...mockAccounts[1], connection_status: 'refresh_failed' },
@@ -443,9 +463,9 @@ test('shows prominent refresh-failed banner naming the affected account', async 
   ]
 
   stubApi({
-    '/api/accounts': accounts,
-    '/api/settings': mockSettings,
-    '/api/state': mockState,
+    '/api/orgs/1/accounts': accounts,
+    '/api/orgs/1/settings': mockSettings,
+    '/api/orgs/1/state': mockState,
   })
 
   render(
@@ -469,6 +489,7 @@ test('shows prominent refresh-failed banner naming the affected account', async 
 })
 
 test('shows refresh-failed banner above the master card when the master itself has a failed refresh', async () => {
+  setRole('owner')
   const accounts: Account[] = [
     { ...mockAccounts[0], connection_status: 'refresh_failed' },
     { ...mockAccounts[1], connection_status: 'active' },
@@ -476,9 +497,9 @@ test('shows refresh-failed banner above the master card when the master itself h
   ]
 
   stubApi({
-    '/api/accounts': accounts,
-    '/api/settings': mockSettings,
-    '/api/state': mockState,
+    '/api/orgs/1/accounts': accounts,
+    '/api/orgs/1/settings': mockSettings,
+    '/api/orgs/1/state': mockState,
   })
 
   render(
@@ -501,6 +522,7 @@ test('shows refresh-failed banner above the master card when the master itself h
 })
 
 test('slave tile shows Degraded status from account.status, not connection_status', async () => {
+  setRole('owner')
   const accounts: Account[] = [
     { ...mockAccounts[0], connection_status: 'active' },
     { ...mockAccounts[1], status: 'degraded', connection_status: 'active' },
@@ -508,9 +530,9 @@ test('slave tile shows Degraded status from account.status, not connection_statu
   ]
 
   stubApi({
-    '/api/accounts': accounts,
-    '/api/settings': mockSettings,
-    '/api/state': mockState,
+    '/api/orgs/1/accounts': accounts,
+    '/api/orgs/1/settings': mockSettings,
+    '/api/orgs/1/state': mockState,
   })
 
   render(
@@ -529,6 +551,7 @@ test('slave tile shows Degraded status from account.status, not connection_statu
 })
 
 test('degraded slave tile shows the last_error reason', async () => {
+  setRole('owner')
   const accounts: Account[] = [
     { ...mockAccounts[0], connection_status: 'active' },
     {
@@ -541,9 +564,9 @@ test('degraded slave tile shows the last_error reason', async () => {
   ]
 
   stubApi({
-    '/api/accounts': accounts,
-    '/api/settings': mockSettings,
-    '/api/state': mockState,
+    '/api/orgs/1/accounts': accounts,
+    '/api/orgs/1/settings': mockSettings,
+    '/api/orgs/1/state': mockState,
   })
 
   render(
@@ -562,6 +585,7 @@ test('degraded slave tile shows the last_error reason', async () => {
 })
 
 test('non-degraded slave tile never shows a last_error message', async () => {
+  setRole('owner')
   const accounts: Account[] = [
     { ...mockAccounts[0], connection_status: 'active' },
     {
@@ -574,9 +598,9 @@ test('non-degraded slave tile never shows a last_error message', async () => {
   ]
 
   stubApi({
-    '/api/accounts': accounts,
-    '/api/settings': mockSettings,
-    '/api/state': mockState,
+    '/api/orgs/1/accounts': accounts,
+    '/api/orgs/1/settings': mockSettings,
+    '/api/orgs/1/state': mockState,
   })
 
   render(
@@ -593,6 +617,7 @@ test('non-degraded slave tile never shows a last_error message', async () => {
 })
 
 test('slave tile shows a refresh-failed marker distinct from degraded styling', async () => {
+  setRole('owner')
   const accounts: Account[] = [
     { ...mockAccounts[0], connection_status: 'active' },
     { ...mockAccounts[1], connection_status: 'refresh_failed' },
@@ -600,9 +625,9 @@ test('slave tile shows a refresh-failed marker distinct from degraded styling', 
   ]
 
   stubApi({
-    '/api/accounts': accounts,
-    '/api/settings': mockSettings,
-    '/api/state': mockState,
+    '/api/orgs/1/accounts': accounts,
+    '/api/orgs/1/settings': mockSettings,
+    '/api/orgs/1/state': mockState,
   })
 
   render(
@@ -620,15 +645,16 @@ test('slave tile shows a refresh-failed marker distinct from degraded styling', 
 })
 
 test(
-  'polls /api/state every 5 seconds',
+  'polls /api/orgs/1/state every 5 seconds',
   async () => {
+    setRole('owner')
     // Spy on setInterval to verify it's called with 5000ms
     const setIntervalSpy = vi.spyOn(global, 'setInterval')
 
     const fetchMock = stubApi({
-      '/api/accounts': mockAccounts,
-      '/api/settings': mockSettings,
-      '/api/state': mockState,
+      '/api/orgs/1/accounts': mockAccounts,
+      '/api/orgs/1/settings': mockSettings,
+      '/api/orgs/1/state': mockState,
     })
 
     render(
@@ -642,8 +668,8 @@ test(
       expect(screen.getByText(/Master Account \(1001\)/)).toBeInTheDocument()
     })
 
-    // Verify that /api/state was called during initial load
-    const initialStateCalls = fetchMock.mock.calls.filter((call) => call[0] === '/api/state').length
+    // Verify that /api/orgs/1/state was called during initial load
+    const initialStateCalls = fetchMock.mock.calls.filter((call) => call[0] === '/api/orgs/1/state').length
     expect(initialStateCalls).toBeGreaterThan(0)
 
     // Verify that setInterval was called with 5000ms interval for polling
@@ -659,10 +685,11 @@ test(
 // ---------- N1: the dry-run toggle ----------
 
 test('dry-run toggle PUTs dry_run: true when enabling', async () => {
+  setRole('owner')
   const fetchMock = stubApi({
-    '/api/accounts': mockAccounts,
-    '/api/settings': mockSettings, // dry_run: false
-    '/api/state': mockState,
+    '/api/orgs/1/accounts': mockAccounts,
+    '/api/orgs/1/settings': mockSettings, // dry_run: false
+    '/api/orgs/1/state': mockState,
   })
 
   render(
@@ -681,7 +708,7 @@ test('dry-run toggle PUTs dry_run: true when enabling', async () => {
 
   await waitFor(() => {
     const putCall = fetchMock.mock.calls.find(
-      (call) => call[1]?.method === 'PUT' && call[0].includes('/api/settings')
+      (call) => call[1]?.method === 'PUT' && call[0].includes('/api/orgs/1/settings')
     )
     expect(putCall).toBeDefined()
     // The real value must be in the body -- this is the dashboard half of
@@ -692,10 +719,11 @@ test('dry-run toggle PUTs dry_run: true when enabling', async () => {
 })
 
 test('enabling dry-run needs no confirmation (it is the safe direction)', async () => {
+  setRole('owner')
   const fetchMock = stubApi({
-    '/api/accounts': mockAccounts,
-    '/api/settings': mockSettings,
-    '/api/state': mockState,
+    '/api/orgs/1/accounts': mockAccounts,
+    '/api/orgs/1/settings': mockSettings,
+    '/api/orgs/1/state': mockState,
   })
   const confirmMock = vi.fn().mockReturnValue(false)
   vi.stubGlobal('confirm', confirmMock)
@@ -712,18 +740,19 @@ test('enabling dry-run needs no confirmation (it is the safe direction)', async 
   expect(confirmMock).not.toHaveBeenCalled()
   await waitFor(() => {
     const putCall = fetchMock.mock.calls.find(
-      (call) => call[1]?.method === 'PUT' && call[0].includes('/api/settings')
+      (call) => call[1]?.method === 'PUT' && call[0].includes('/api/orgs/1/settings')
     )
     expect(putCall).toBeDefined()
   })
 })
 
 test('disabling dry-run confirms first, then PUTs dry_run: false', async () => {
-  const dryRunSettings: Settings = { copying_enabled: true, dry_run: true, shards: 4 }
+  setRole('owner')
+  const dryRunSettings: Settings = { copying_enabled: true, dry_run: true }
   const fetchMock = stubApi({
-    '/api/accounts': mockAccounts,
-    '/api/settings': dryRunSettings,
-    '/api/state': mockState,
+    '/api/orgs/1/accounts': mockAccounts,
+    '/api/orgs/1/settings': dryRunSettings,
+    '/api/orgs/1/state': mockState,
   })
   const confirmMock = vi.fn().mockReturnValue(true)
   vi.stubGlobal('confirm', confirmMock)
@@ -742,7 +771,7 @@ test('disabling dry-run confirms first, then PUTs dry_run: false', async () => {
   expect(confirmMock).toHaveBeenCalled()
   await waitFor(() => {
     const putCall = fetchMock.mock.calls.find(
-      (call) => call[1]?.method === 'PUT' && call[0].includes('/api/settings')
+      (call) => call[1]?.method === 'PUT' && call[0].includes('/api/orgs/1/settings')
     )
     expect(putCall).toBeDefined()
     expect(JSON.parse(putCall![1]?.body as string)).toEqual({ dry_run: false })
@@ -750,11 +779,12 @@ test('disabling dry-run confirms first, then PUTs dry_run: false', async () => {
 })
 
 test('disabling dry-run does not PUT if confirm is rejected', async () => {
-  const dryRunSettings: Settings = { copying_enabled: true, dry_run: true, shards: 4 }
+  setRole('owner')
+  const dryRunSettings: Settings = { copying_enabled: true, dry_run: true }
   const fetchMock = stubApi({
-    '/api/accounts': mockAccounts,
-    '/api/settings': dryRunSettings,
-    '/api/state': mockState,
+    '/api/orgs/1/accounts': mockAccounts,
+    '/api/orgs/1/settings': dryRunSettings,
+    '/api/orgs/1/state': mockState,
   })
   vi.stubGlobal('confirm', vi.fn().mockReturnValue(false))
 
@@ -768,16 +798,17 @@ test('disabling dry-run does not PUT if confirm is rejected', async () => {
   await userEvent.click(screen.getByTestId('dry-run-toggle'))
 
   const putCall = fetchMock.mock.calls.find(
-    (call) => call[1]?.method === 'PUT' && call[0].includes('/api/settings')
+    (call) => call[1]?.method === 'PUT' && call[0].includes('/api/orgs/1/settings')
   )
   expect(putCall).toBeUndefined()
 })
 
 test('the dry-run badge reflects the toggled state without a reload', async () => {
+  setRole('owner')
   stubApi({
-    '/api/accounts': mockAccounts,
-    '/api/settings': mockSettings, // dry_run: false -> no badge initially
-    '/api/state': mockState,
+    '/api/orgs/1/accounts': mockAccounts,
+    '/api/orgs/1/settings': mockSettings, // dry_run: false -> no badge initially
+    '/api/orgs/1/state': mockState,
   })
 
   render(
@@ -794,4 +825,68 @@ test('the dry-run badge reflects the toggled state without a reload', async () =
   await waitFor(() => {
     expect(screen.getByText(/^DRY RUN$/)).toBeInTheDocument()
   })
+})
+
+// ---------- Task 17: KillSwitch role gating ----------
+
+test('kill switch is hidden for a viewer (below control)', async () => {
+  setRole('viewer')
+  stubApi({
+    '/api/orgs/1/accounts': mockAccounts,
+    '/api/orgs/1/settings': mockSettings,
+    '/api/orgs/1/state': mockState,
+  })
+
+  render(
+    <MemoryRouter>
+      <Overview />
+    </MemoryRouter>
+  )
+
+  await waitFor(() => {
+    expect(screen.getByText('Copying Status')).toBeInTheDocument()
+  })
+
+  expect(screen.queryByRole('button', { name: /stop copying|resume copying/i })).not.toBeInTheDocument()
+  expect(screen.queryByTestId('dry-run-toggle')).not.toBeInTheDocument()
+})
+
+test('kill switch is hidden for a trader (below control)', async () => {
+  setRole('trader')
+  stubApi({
+    '/api/orgs/1/accounts': mockAccounts,
+    '/api/orgs/1/settings': mockSettings,
+    '/api/orgs/1/state': mockState,
+  })
+
+  render(
+    <MemoryRouter>
+      <Overview />
+    </MemoryRouter>
+  )
+
+  await waitFor(() => {
+    expect(screen.getByText('Copying Status')).toBeInTheDocument()
+  })
+
+  expect(screen.queryByRole('button', { name: /stop copying|resume copying/i })).not.toBeInTheDocument()
+  expect(screen.queryByTestId('dry-run-toggle')).not.toBeInTheDocument()
+})
+
+test('kill switch is visible for an admin (control)', async () => {
+  setRole('admin')
+  stubApi({
+    '/api/orgs/1/accounts': mockAccounts,
+    '/api/orgs/1/settings': mockSettings,
+    '/api/orgs/1/state': mockState,
+  })
+
+  render(
+    <MemoryRouter>
+      <Overview />
+    </MemoryRouter>
+  )
+
+  expect(await screen.findByRole('button', { name: /stop copying/i })).toBeInTheDocument()
+  expect(screen.getByTestId('dry-run-toggle')).toBeInTheDocument()
 })

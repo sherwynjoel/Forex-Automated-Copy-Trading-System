@@ -1,8 +1,10 @@
 import { useState, useEffect, useRef } from 'react'
-import { api, eventsSocket } from '../lib/api'
+import { orgApi, eventsSocket } from '../lib/api'
+import { useOrg } from '../lib/org'
 import { EventResponse } from '../lib/types'
 
 export default function Logs() {
+  const { orgId } = useOrg()
   const [events, setEvents] = useState<EventResponse[]>([])
   const [loading, setLoading] = useState(false)
   const [isLive, setIsLive] = useState(true)
@@ -39,8 +41,8 @@ export default function Logs() {
         }
         params.append('limit', '100')
 
-        const url = `/api/events${params.toString() ? '?' + params.toString() : ''}`
-        const data = await api<EventResponse[]>(url)
+        const url = `events${params.toString() ? '?' + params.toString() : ''}`
+        const data = await orgApi<EventResponse[]>(orgId, url)
         setEvents(data || [])
       } catch (err) {
         console.error('Failed to fetch events:', err)
@@ -50,7 +52,7 @@ export default function Logs() {
     }
 
     fetchEvents()
-  }, [filters])
+  }, [orgId, filters])
 
   // Connect to WebSocket
   useEffect(() => {
@@ -67,7 +69,7 @@ export default function Logs() {
     }
 
     const connectWebSocket = () => {
-      const ws = eventsSocket()
+      const ws = eventsSocket(orgId)
 
       ws.onmessage = (event) => {
         try {
@@ -112,7 +114,7 @@ export default function Logs() {
         reconnectTimeoutRef.current = null
       }
     }
-  }, [isLive, filters])
+  }, [orgId, isLive, filters])
 
   const toggleRowExpand = (id: number) => {
     const newExpanded = new Set(expandedRows)

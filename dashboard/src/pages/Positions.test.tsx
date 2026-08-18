@@ -1,10 +1,19 @@
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
-import { expect, test, vi, afterEach, beforeEach } from 'vitest'
+import { expect, test, vi, afterEach } from 'vitest'
 import * as apiModule from '../lib/api'
 import Positions from './Positions'
 import { ApiState } from '../lib/types'
+import type { Role } from '../lib/roles'
+import { mockUseOrg } from '../test/orgMock'
+
+const { useOrgMock } = vi.hoisted(() => ({ useOrgMock: vi.fn() }))
+vi.mock('../lib/org', () => ({ useOrg: useOrgMock }))
+
+function setRole(role: Role) {
+  useOrgMock.mockReturnValue(mockUseOrg(role))
+}
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -73,7 +82,8 @@ const mockApiState: ApiState = {
 }
 
 test('renders master positions with lots and pnl', async () => {
-  vi.spyOn(apiModule, 'api').mockResolvedValue(mockApiState)
+  setRole('owner')
+  vi.spyOn(apiModule, 'orgApi').mockResolvedValue(mockApiState)
 
   render(
     <MemoryRouter>
@@ -93,7 +103,8 @@ test('renders master positions with lots and pnl', async () => {
 })
 
 test('expanding a row shows per-slave copy status with slippage', async () => {
-  vi.spyOn(apiModule, 'api').mockResolvedValue(mockApiState)
+  setRole('owner')
+  vi.spyOn(apiModule, 'orgApi').mockResolvedValue(mockApiState)
 
   render(
     <MemoryRouter>
@@ -119,7 +130,8 @@ test('expanding a row shows per-slave copy status with slippage', async () => {
 })
 
 test('failed copy shows error text', async () => {
-  vi.spyOn(apiModule, 'api').mockResolvedValue(mockApiState)
+  setRole('owner')
+  vi.spyOn(apiModule, 'orgApi').mockResolvedValue(mockApiState)
 
   render(
     <MemoryRouter>
@@ -140,7 +152,8 @@ test('failed copy shows error text', async () => {
 })
 
 test('drift item close-orphan confirms then POSTs', async () => {
-  const apiSpy = vi.spyOn(apiModule, 'api').mockResolvedValue(mockApiState)
+  setRole('trader')
+  const apiSpy = vi.spyOn(apiModule, 'orgApi').mockResolvedValue(mockApiState)
   const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
 
   render(
@@ -160,14 +173,15 @@ test('drift item close-orphan confirms then POSTs', async () => {
     expect(confirmSpy).toHaveBeenCalled()
 
     const postCalls = apiSpy.mock.calls.filter(
-      (call) => call[0]?.includes('/api/drift/close-orphan')
+      (call) => call[0] === 1 && call[1] === 'drift/close-orphan'
     )
     expect(postCalls.length).toBeGreaterThan(0)
   })
 })
 
 test('adopt posts master_position_id', async () => {
-  const apiSpy = vi.spyOn(apiModule, 'api').mockResolvedValue(mockApiState)
+  setRole('admin')
+  const apiSpy = vi.spyOn(apiModule, 'orgApi').mockResolvedValue(mockApiState)
 
   render(
     <MemoryRouter>
@@ -184,13 +198,13 @@ test('adopt posts master_position_id', async () => {
 
   await waitFor(() => {
     const adoptCalls = apiSpy.mock.calls.filter(
-      (call) => call[0]?.includes('/api/drift/adopt')
+      (call) => call[0] === 1 && call[1] === 'drift/adopt'
     )
     expect(adoptCalls.length).toBeGreaterThan(0)
 
     if (adoptCalls.length > 0) {
       const call = adoptCalls[0]
-      const body = call[1]?.body
+      const body = call[2]?.body
       if (typeof body === 'string') {
         const parsed = JSON.parse(body)
         expect(parsed).toHaveProperty('id')
@@ -200,4 +214,63 @@ test('adopt posts master_position_id', async () => {
       }
     }
   })
+})
+
+// ---------- Task 17: role gating ----------
+
+test('viewer sees no close-orphan, adopt, or dismiss buttons', async () => {
+  setRole('viewer')
+  vi.spyOn(apiModule, 'orgApi').mockResolvedValue(mockApiState)
+
+  render(
+    <MemoryRouter>
+      <Positions />
+    </MemoryRouter>
+  )
+
+  await waitFor(() => {
+    expect(screen.getByText(/Slave position 5003/)).toBeInTheDocument()
+  })
+
+  expect(screen.queryByRole('button', { name: /close orphan/i })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /adopt/i })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /dismiss/i })).not.toBeInTheDocument()
+})
+
+test('trader sees close-orphan (trade) but not adopt/dismiss (control)', async () => {
+  setRole('trader')
+  vi.spyOn(apiModule, 'orgApi').mockResolvedValue(mockApiState)
+
+  render(
+    <MemoryRouter>
+      <Positions />
+    </MemoryRouter>
+  )
+
+  await waitFor(() => {
+    expect(screen.getByText(/Slave position 5003/)).toBeInTheDocument()
+  })
+
+  expect(screen.getAllByRole('button', { name: /close orphan/i }).length).toBeGreaterThan(0)
+  expect(screen.queryByRole('button', { name: /adopt/i })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /dismiss/i })).not.toBeInTheDocument()
+})
+
+test('admin sees close-orphan, adopt, and dismiss buttons', async () => {
+  setRole('admin')
+  vi.spyOn(apiModule, 'orgApi').mockResolvedValue(mockApiState)
+
+  render(
+    <MemoryRouter>
+      <Positions />
+    </MemoryRouter>
+  )
+
+  await waitFor(() => {
+    expect(screen.getByText(/Slave position 5003/)).toBeInTheDocument()
+  })
+
+  expect(screen.getAllByRole('button', { name: /close orphan/i }).length).toBeGreaterThan(0)
+  expect(screen.getAllByRole('button', { name: /adopt/i }).length).toBeGreaterThan(0)
+  expect(screen.getAllByRole('button', { name: /dismiss/i }).length).toBeGreaterThan(0)
 })

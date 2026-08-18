@@ -4,6 +4,15 @@ import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi, afterEach, beforeEach } from 'vitest'
 import { act } from 'react'
 import Accounts from './Accounts'
+import type { Role } from '../lib/roles'
+import { mockUseOrg } from '../test/orgMock'
+
+const { useOrgMock } = vi.hoisted(() => ({ useOrgMock: vi.fn() }))
+vi.mock('../lib/org', () => ({ useOrg: useOrgMock }))
+
+function setRole(role: Role) {
+  useOrgMock.mockReturnValue(mockUseOrg(role))
+}
 
 let mockWindowOpen: ReturnType<typeof vi.fn>
 let focusListeners: Set<(event: Event) => void> = new Set()
@@ -95,7 +104,7 @@ function mockRoutes(overrides: Record<string, (init?: RequestInit) => Response> 
       }
     }
     if (url.includes('/details')) return jsonResponse(mockDetails)
-    if (url.includes('/api/accounts')) return jsonResponse(mockAccounts)
+    if (url.includes('/api/orgs/1/accounts')) return jsonResponse(mockAccounts)
     return jsonResponse({})
   })
   vi.stubGlobal('fetch', fetchMock)
@@ -111,6 +120,7 @@ function renderAccounts() {
 }
 
 test('loads and displays accounts with nicknames on mount', async () => {
+  setRole('admin')
   mockRoutes()
   renderAccounts()
 
@@ -121,7 +131,8 @@ test('loads and displays accounts with nicknames on mount', async () => {
   expect(screen.getByDisplayValue('Second desk')).toBeInTheDocument()
 })
 
-test('connect button opens oauth popup', async () => {
+test('connect button opens oauth popup at the org-scoped route', async () => {
+  setRole('admin')
   mockRoutes()
   renderAccounts()
 
@@ -129,13 +140,14 @@ test('connect button opens oauth popup', async () => {
   await userEvent.click(connectButton)
 
   expect(mockWindowOpen).toHaveBeenCalledWith(
-    '/api/oauth/connect',
+    '/api/orgs/1/oauth/connect',
     'ctrader-oauth',
     'width=520,height=680'
   )
 })
 
 test('window-focus refetch: refetches accounts after OAuth popup closes', async () => {
+  setRole('admin')
   const fetchMock = mockRoutes()
   renderAccounts()
 
@@ -150,12 +162,13 @@ test('window-focus refetch: refetches accounts after OAuth popup closes', async 
 
   await waitFor(() => {
     expect(fetchMock.mock.calls.length).toBeGreaterThan(callsBefore)
-    const accountCalls = fetchMock.mock.calls.filter(([u]) => String(u) === '/api/accounts')
+    const accountCalls = fetchMock.mock.calls.filter(([u]) => String(u) === '/api/orgs/1/accounts')
     expect(accountCalls.length).toBeGreaterThanOrEqual(2)
   })
 })
 
 test('role select PATCHes role', async () => {
+  setRole('admin')
   const fetchMock = mockRoutes()
   renderAccounts()
 
@@ -168,15 +181,16 @@ test('role select PATCHes role', async () => {
 
   await waitFor(() => {
     expect(fetchMock).toHaveBeenCalledWith(
-      '/api/accounts/1',
+      '/api/orgs/1/accounts/1',
       expect.objectContaining({ method: 'PATCH' })
     )
   })
 })
 
 test('409 on second master shows inline error', async () => {
+  setRole('admin')
   mockRoutes({
-    'PATCH /api/accounts/2': () => new Response('Conflict', { status: 409 }),
+    'PATCH /api/orgs/1/accounts/2': () => new Response('Conflict', { status: 409 }),
   })
   renderAccounts()
 
@@ -193,6 +207,7 @@ test('409 on second master shows inline error', async () => {
 })
 
 test('multiplier edit PATCHes multiplier', async () => {
+  setRole('admin')
   const fetchMock = mockRoutes()
   renderAccounts()
 
@@ -207,7 +222,7 @@ test('multiplier edit PATCHes multiplier', async () => {
 
   await waitFor(() => {
     expect(fetchMock).toHaveBeenCalledWith(
-      '/api/accounts/2',
+      '/api/orgs/1/accounts/2',
       expect.objectContaining({
         method: 'PATCH',
         body: JSON.stringify({ multiplier: 3.5 }),
@@ -217,6 +232,7 @@ test('multiplier edit PATCHes multiplier', async () => {
 })
 
 test('multiplier validation: rejects values <= 0', async () => {
+  setRole('admin')
   const fetchMock = mockRoutes()
   renderAccounts()
 
@@ -238,8 +254,9 @@ test('multiplier validation: rejects values <= 0', async () => {
 })
 
 test('multiplier 400 error shows inline error', async () => {
+  setRole('admin')
   mockRoutes({
-    'PATCH /api/accounts/2': () => new Response('Invalid multiplier', { status: 400 }),
+    'PATCH /api/orgs/1/accounts/2': () => new Response('Invalid multiplier', { status: 400 }),
   })
   renderAccounts()
 
@@ -258,6 +275,7 @@ test('multiplier 400 error shows inline error', async () => {
 })
 
 test('enabled toggle PATCHes enabled field (not role)', async () => {
+  setRole('admin')
   const fetchMock = mockRoutes()
   renderAccounts()
 
@@ -270,7 +288,7 @@ test('enabled toggle PATCHes enabled field (not role)', async () => {
 
   await waitFor(() => {
     expect(fetchMock).toHaveBeenCalledWith(
-      '/api/accounts/1',
+      '/api/orgs/1/accounts/1',
       expect.objectContaining({
         method: 'PATCH',
         body: JSON.stringify({ enabled: false }),
@@ -284,6 +302,7 @@ test('enabled toggle PATCHes enabled field (not role)', async () => {
 })
 
 test('nickname edit PATCHes nickname', async () => {
+  setRole('admin')
   const fetchMock = mockRoutes()
   renderAccounts()
 
@@ -297,7 +316,7 @@ test('nickname edit PATCHes nickname', async () => {
 
   await waitFor(() => {
     expect(fetchMock).toHaveBeenCalledWith(
-      '/api/accounts/1',
+      '/api/orgs/1/accounts/1',
       expect.objectContaining({
         method: 'PATCH',
         body: JSON.stringify({ nickname: 'Main live' }),
@@ -307,8 +326,9 @@ test('nickname edit PATCHes nickname', async () => {
 })
 
 test('disconnect confirms then DELETEs the ACCOUNT-scoped connection route', async () => {
+  setRole('admin')
   const fetchMock = mockRoutes({
-    'DELETE /api/accounts/2/connection': () =>
+    'DELETE /api/orgs/1/accounts/2/connection': () =>
       jsonResponse({ detail: 'ok', accounts_removed: 2, copier_reloaded: true }),
   })
   renderAccounts()
@@ -327,13 +347,14 @@ test('disconnect confirms then DELETEs the ACCOUNT-scoped connection route', asy
 
   await waitFor(() => {
     expect(fetchMock).toHaveBeenCalledWith(
-      '/api/accounts/2/connection',
+      '/api/orgs/1/accounts/2/connection',
       expect.objectContaining({ method: 'DELETE' })
     )
   })
 })
 
 test('details button opens the drawer with broker profile fields', async () => {
+  setRole('admin')
   mockRoutes()
   renderAccounts()
 
@@ -353,8 +374,9 @@ test('details button opens the drawer with broker profile fields', async () => {
 })
 
 test('flatten button confirms then POSTs the per-account kill switch', async () => {
+  setRole('admin')
   const fetchMock = mockRoutes({
-    'POST /api/control/close-all': () =>
+    'POST /api/orgs/1/control/close-all': () =>
       jsonResponse({
         status: 'flattened', paused: false,
         accounts: [{ account_id: 2, positions_closed: 3, orders_cancelled: 1, error: null }],
@@ -373,10 +395,66 @@ test('flatten button confirms then POSTs the per-account kill switch', async () 
   await userEvent.click(within(dialog).getByRole('button', { name: /close everything here/i }))
 
   await waitFor(() => {
-    const call = fetchMock.mock.calls.find(([u]) => String(u).includes('/api/control/close-all'))
+    const call = fetchMock.mock.calls.find(([u]) => String(u).includes('/api/orgs/1/control/close-all'))
     expect(call).toBeTruthy()
     expect(JSON.parse(String((call![1] as RequestInit).body))).toEqual({ account_id: 2 })
   })
   // Outcome notice
   expect(await screen.findByText(/closed 3 position/i)).toBeInTheDocument()
+})
+
+// ---------- Task 17: role gating ----------
+
+test('viewer (below control) gets read-only rows: no editors, no disconnect, no connect link', async () => {
+  setRole('viewer')
+  mockRoutes()
+  renderAccounts()
+
+  await waitFor(() => {
+    expect(screen.getByText('12345')).toBeInTheDocument()
+  })
+
+  // Role, multiplier, enabled and nickname editors are all gone.
+  expect(screen.queryByLabelText(/role for account/i)).not.toBeInTheDocument()
+  expect(screen.queryByLabelText(/multiplier for account/i)).not.toBeInTheDocument()
+  expect(screen.queryByLabelText(/copying enabled for account/i)).not.toBeInTheDocument()
+  expect(screen.queryByLabelText(/nickname for account/i)).not.toBeInTheDocument()
+  // ...but the read-only values are still shown.
+  expect(screen.getByText('master')).toBeInTheDocument()
+  expect(screen.getByText('slave')).toBeInTheDocument()
+  expect(screen.getByText('Second desk')).toBeInTheDocument()
+
+  expect(screen.queryByRole('button', { name: /disconnect/i })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /connect ctrader id/i })).not.toBeInTheDocument()
+})
+
+test('trader (below control) also gets read-only rows and no connect link', async () => {
+  setRole('trader')
+  mockRoutes()
+  renderAccounts()
+
+  await waitFor(() => {
+    expect(screen.getByText('12345')).toBeInTheDocument()
+  })
+
+  expect(screen.queryByLabelText(/role for account/i)).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /disconnect/i })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /connect ctrader id/i })).not.toBeInTheDocument()
+})
+
+test('admin (control) sees editors, disconnect, and the connect link', async () => {
+  setRole('admin')
+  mockRoutes()
+  renderAccounts()
+
+  await waitFor(() => {
+    expect(screen.getByText('12345')).toBeInTheDocument()
+  })
+
+  expect(screen.getByLabelText(/role for account 12345/i)).toBeInTheDocument()
+  expect(screen.getByLabelText(/multiplier for account 12346/i)).toBeInTheDocument()
+  expect(screen.getByLabelText(/copying enabled for account 12345/i)).toBeInTheDocument()
+  expect(screen.getByLabelText(/nickname for account 12345/i)).toBeInTheDocument()
+  expect(screen.getAllByRole('button', { name: /disconnect/i }).length).toBeGreaterThan(0)
+  expect(screen.getByRole('button', { name: /connect ctrader id/i })).toBeInTheDocument()
 })

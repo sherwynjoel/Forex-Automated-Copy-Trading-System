@@ -1,16 +1,18 @@
 import { useState, useEffect } from 'react'
-import { api } from '../lib/api'
+import { orgApi } from '../lib/api'
+import { useOrg } from '../lib/org'
 import type { Account, ApiState, Settings, StateSnapshot } from '../lib/types'
 import KillSwitch from '../components/KillSwitch'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
 
 /**
- * Fetch GET /api/state and return just its per-account block.
+ * Fetch GET orgs/{orgId}/state and return just its per-account block.
  *
- * `/api/state` is a verbatim pass-through of the copier's `get_state()`, so
- * its shape is `{accounts, master_positions, pending_orders, drift}` -- the
- * per-account balance/equity/positions live under `accounts`, keyed by
- * account id as a STRING (JSON has no integer keys).
+ * `orgs/{orgId}/state` is a verbatim pass-through of the copier's
+ * `get_state()`, so its shape is `{accounts, master_positions,
+ * pending_orders, drift}` -- the per-account balance/equity/positions live
+ * under `accounts`, keyed by account id as a STRING (JSON has no integer
+ * keys).
  *
  * This screen used to do `api<StateSnapshot>('/api/state')` and index the
  * result directly, i.e. it read the envelope as if it were the account map:
@@ -24,12 +26,13 @@ import { useLiveRefresh } from '../hooks/useLiveRefresh'
  * a future shape change a type error rather than a blank screen; the tests
  * now mock the real envelope and assert the numbers actually render.
  */
-async function loadAccountState(): Promise<StateSnapshot> {
-  const state = await api<ApiState>('/api/state')
+async function loadAccountState(orgId: number): Promise<StateSnapshot> {
+  const state = await orgApi<ApiState>(orgId, 'state')
   return state.accounts ?? {}
 }
 
 export default function Overview() {
+  const { orgId } = useOrg()
   const [accounts, setAccounts] = useState<Account[]>([])
   const [settings, setSettings] = useState<Settings | null>(null)
   const [state, setState] = useState<StateSnapshot>({})
@@ -43,8 +46,8 @@ export default function Overview() {
         setLoading(true)
         setError(null)
         const [accs, sett] = await Promise.all([
-          api<Account[]>('/api/accounts'),
-          api<Settings>('/api/settings'),
+          orgApi<Account[]>(orgId, 'accounts'),
+          orgApi<Settings>(orgId, 'settings'),
         ])
         setAccounts(accs)
         setSettings(sett)
@@ -55,13 +58,13 @@ export default function Overview() {
       }
     }
     loadData()
-  }, [])
+  }, [orgId])
 
   // Poll state every 5 seconds
   useEffect(() => {
     const loadState = async () => {
       try {
-        setState(await loadAccountState())
+        setState(await loadAccountState(orgId))
       } catch (err) {
         console.error('Failed to load state:', err)
       }
@@ -70,29 +73,25 @@ export default function Overview() {
     loadState()
     const interval = setInterval(loadState, 5000)
     return () => clearInterval(interval)
-  }, [])
+  }, [orgId])
 
   // Refetch immediately when a trade event streams in (5s poll is fallback)
-  // Task 17: this page still calls the unscoped /api/* endpoints above and
-  // isn't rendered under org route context in its tests, so useOrg() isn't
-  // trivially available here — orgId is a placeholder until the page is
-  // converted to orgApi/org-scoped routing.
   useLiveRefresh(async () => {
     try {
-      setState(await loadAccountState())
+      setState(await loadAccountState(orgId))
     } catch (err) {
       console.error('Failed to load state:', err)
     }
-  }, 0)
+  }, orgId)
 
   const handlePauseResume = async (accountId: number, isPaused: boolean) => {
     try {
-      const endpoint = isPaused ? '/api/control/resume' : '/api/control/pause'
-      await api(endpoint, {
+      const endpoint = isPaused ? 'control/resume' : 'control/pause'
+      await orgApi(orgId, endpoint, {
         method: 'POST',
         body: JSON.stringify({ account_id: accountId }),
       })
-      setState(await loadAccountState())
+      setState(await loadAccountState(orgId))
     } catch (err) {
       console.error('Failed to update account status:', err)
     }

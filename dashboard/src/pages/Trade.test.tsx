@@ -3,6 +3,15 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi, afterEach } from 'vitest'
 import Trade from './Trade'
+import type { Role } from '../lib/roles'
+import { mockUseOrg } from '../test/orgMock'
+
+const { useOrgMock } = vi.hoisted(() => ({ useOrgMock: vi.fn() }))
+vi.mock('../lib/org', () => ({ useOrg: useOrgMock }))
+
+function setRole(role: Role) {
+  useOrgMock.mockReturnValue(mockUseOrg(role))
+}
 
 afterEach(() => {
   vi.clearAllMocks()
@@ -54,10 +63,10 @@ function mockRoutes() {
       })
     if (url.includes('/symbols')) return respond(symbols)
     if (url.includes('/details')) return respond(details)
-    if (url.includes('/api/accounts')) return respond(accounts)
-    if (url.includes('/api/orders/cancel')) return respond({ status: 'submitted' })
-    if (url.includes('/api/orders')) return respond({ status: 'submitted', volume: 5000000 })
-    if (url.includes('/api/positions/close')) return respond({ status: 'submitted' })
+    if (url.includes('/api/orgs/1/accounts')) return respond(accounts)
+    if (url.includes('/api/orgs/1/orders/cancel')) return respond({ status: 'submitted' })
+    if (url.includes('/api/orgs/1/orders')) return respond({ status: 'submitted', volume: 5000000 })
+    if (url.includes('/api/orgs/1/positions/close')) return respond({ status: 'submitted' })
     return respond({})
   })
   vi.stubGlobal('fetch', fetchMock)
@@ -73,6 +82,7 @@ function renderTrade() {
 }
 
 test('defaults to the master account and loads its symbols', async () => {
+  setRole('trader')
   mockRoutes()
   renderTrade()
 
@@ -84,7 +94,8 @@ test('defaults to the master account and loads its symbols', async () => {
   expect(await screen.findByRole('option', { name: 'EURUSD' })).toBeInTheDocument()
 })
 
-test('placing a market order confirms then POSTs /api/orders', async () => {
+test('placing a market order confirms then POSTs /api/orgs/1/orders', async () => {
+  setRole('trader')
   const fetchMock = mockRoutes()
   renderTrade()
 
@@ -102,7 +113,7 @@ test('placing a market order confirms then POSTs /api/orders', async () => {
 
   await waitFor(() => {
     const call = fetchMock.mock.calls.find(([u, init]) =>
-      String(u) === '/api/orders' && (init as RequestInit)?.method === 'POST')
+      String(u) === '/api/orgs/1/orders' && (init as RequestInit)?.method === 'POST')
     expect(call).toBeTruthy()
     const body = JSON.parse((call![1] as RequestInit).body as string)
     expect(body).toMatchObject({
@@ -113,6 +124,7 @@ test('placing a market order confirms then POSTs /api/orders', async () => {
 })
 
 test('limit order includes the limit price', async () => {
+  setRole('trader')
   const fetchMock = mockRoutes()
   renderTrade()
 
@@ -128,7 +140,7 @@ test('limit order includes the limit price', async () => {
 
   await waitFor(() => {
     const call = fetchMock.mock.calls.find(([u, init]) =>
-      String(u) === '/api/orders' && (init as RequestInit)?.method === 'POST')
+      String(u) === '/api/orgs/1/orders' && (init as RequestInit)?.method === 'POST')
     const body = JSON.parse((call![1] as RequestInit).body as string)
     expect(body.order_type).toBe('LIMIT')
     expect(body.limit_price).toBe(1.095)
@@ -136,6 +148,7 @@ test('limit order includes the limit price', async () => {
 })
 
 test('shows a not-copied note when a slave account is selected', async () => {
+  setRole('trader')
   mockRoutes()
   renderTrade()
 
@@ -149,6 +162,7 @@ test('shows a not-copied note when a slave account is selected', async () => {
 })
 
 test('lists the account open positions and closes one on confirm', async () => {
+  setRole('trader')
   const fetchMock = mockRoutes()
   renderTrade()
 
@@ -161,7 +175,7 @@ test('lists the account open positions and closes one on confirm', async () => {
 
   await waitFor(() => {
     const call = fetchMock.mock.calls.find(([u]) =>
-      String(u).includes('/api/positions/close'))
+      String(u).includes('/api/orgs/1/positions/close'))
     expect(call).toBeTruthy()
     const body = JSON.parse((call![1] as RequestInit).body as string)
     expect(body).toMatchObject({ account_id: 100, position_id: 7001 })
@@ -169,6 +183,7 @@ test('lists the account open positions and closes one on confirm', async () => {
 })
 
 test('cancels a working order', async () => {
+  setRole('trader')
   const fetchMock = mockRoutes()
   renderTrade()
 
@@ -180,9 +195,33 @@ test('cancels a working order', async () => {
 
   await waitFor(() => {
     const call = fetchMock.mock.calls.find(([u]) =>
-      String(u).includes('/api/orders/cancel'))
+      String(u).includes('/api/orgs/1/orders/cancel'))
     expect(call).toBeTruthy()
     const body = JSON.parse((call![1] as RequestInit).body as string)
     expect(body).toMatchObject({ account_id: 100, order_id: 9001 })
   })
+})
+
+// ---------- Task 17: role gating ----------
+
+test('viewer (below trade) sees a notice instead of the order ticket', async () => {
+  setRole('viewer')
+  mockRoutes()
+  renderTrade()
+
+  expect(await screen.findByText(/your role does not allow placing orders/i)).toBeInTheDocument()
+  expect(screen.queryByLabelText(/account/i)).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /review order/i })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /^close$/i })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /cancel order/i })).not.toBeInTheDocument()
+})
+
+test('trader (trade+) sees the full order ticket', async () => {
+  setRole('trader')
+  mockRoutes()
+  renderTrade()
+
+  expect(await screen.findByLabelText(/account/i)).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: /review order/i })).toBeInTheDocument()
+  expect(screen.queryByText(/your role does not allow placing orders/i)).not.toBeInTheDocument()
 })

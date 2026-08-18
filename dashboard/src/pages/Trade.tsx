@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
-import { api } from '../lib/api'
+import { orgApi } from '../lib/api'
+import { useOrg } from '../lib/org'
+import { can } from '../lib/roles'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
 import type {
   Account, AccountDetails, OpenPosition, TradeSymbol, WorkingOrder,
@@ -32,6 +34,7 @@ function accountLabel(account: Account): string {
 }
 
 export default function Trade() {
+  const { orgId, role } = useOrg()
   const [accounts, setAccounts] = useState<Account[]>([])
   const [accountId, setAccountId] = useState<number | null>(null)
   const [symbols, setSymbols] = useState<TradeSymbol[]>([])
@@ -49,7 +52,7 @@ export default function Trade() {
   useEffect(() => {
     const load = async () => {
       try {
-        const accs = await api<Account[]>('/api/accounts')
+        const accs = await orgApi<Account[]>(orgId, 'accounts')
         setAccounts(accs)
         const master = accs.find((a) => a.role === 'master')
         setAccountId(master?.ctid_trader_account_id ?? accs[0]?.ctid_trader_account_id ?? null)
@@ -58,15 +61,15 @@ export default function Trade() {
       }
     }
     load()
-  }, [])
+  }, [orgId])
 
   // Symbols + live positions follow the selected account.
   const loadAccountData = useCallback(async () => {
     if (accountId == null) return
     try {
       const [syms, det] = await Promise.all([
-        api<TradeSymbol[]>(`/api/accounts/${accountId}/symbols`),
-        api<AccountDetails>(`/api/accounts/${accountId}/details`),
+        orgApi<TradeSymbol[]>(orgId, `accounts/${accountId}/symbols`),
+        orgApi<AccountDetails>(orgId, `accounts/${accountId}/details`),
       ])
       setSymbols(syms)
       setDetails(det)
@@ -76,17 +79,13 @@ export default function Trade() {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load account data')
     }
-  }, [accountId])
+  }, [orgId, accountId])
 
   useEffect(() => {
     loadAccountData()
   }, [loadAccountData])
 
-  // Task 17: this page still calls the unscoped /api/* endpoints above and
-  // isn't rendered under org route context in its tests, so useOrg() isn't
-  // trivially available here — orgId is a placeholder until the page is
-  // converted to orgApi/org-scoped routing.
-  useLiveRefresh(loadAccountData, 0)
+  useLiveRefresh(loadAccountData, orgId)
 
   const selected = accounts.find((a) => a.ctid_trader_account_id === accountId)
   const selectedSymbol = symbols.find((s) => s.name === ticket.symbol)
@@ -129,7 +128,7 @@ export default function Trade() {
       if (numOrNull(ticket.stopLoss) != null) body.stop_loss = numOrNull(ticket.stopLoss)
       if (numOrNull(ticket.takeProfit) != null) body.take_profit = numOrNull(ticket.takeProfit)
 
-      await api('/api/orders', { method: 'POST', body: JSON.stringify(body) })
+      await orgApi(orgId, 'orders', { method: 'POST', body: JSON.stringify(body) })
       setNotice(
         `Order sent: ${ticket.side} ${ticket.volumeLots} ${ticket.symbol} ` +
         `${ticket.orderType.toLowerCase()} on ${selected.nickname || selected.trader_login}. ` +
@@ -154,7 +153,7 @@ export default function Trade() {
       }
       const lots = parseFloat(partialLots)
       if (Number.isFinite(lots) && lots > 0) body.volume_lots = lots
-      await api('/api/positions/close', { method: 'POST', body: JSON.stringify(body) })
+      await orgApi(orgId, 'positions/close', { method: 'POST', body: JSON.stringify(body) })
       setNotice(`Close sent for position ${closing.position_id}.`)
       setClosing(null)
       setPartialLots('')
@@ -171,7 +170,7 @@ export default function Trade() {
     if (!cancelling || accountId == null) return
     try {
       setBusy(true)
-      await api('/api/orders/cancel', {
+      await orgApi(orgId, 'orders/cancel', {
         method: 'POST',
         body: JSON.stringify({ account_id: accountId, order_id: cancelling.order_id }),
       })
@@ -202,6 +201,22 @@ export default function Trade() {
       {side === 'BUY' ? 'Buy' : 'Sell'}
     </button>
   )
+
+  // The whole order ticket is a trade-level action; the nav link is already
+  // hidden below this role, but the page is still reachable by URL, so this
+  // gate is belt-and-braces against a direct visit.
+  if (!can(role, 'trade')) {
+    return (
+      <div className="space-y-6 max-w-5xl">
+        <header>
+          <h1 className="font-display text-2xl text-ink">Trade</h1>
+        </header>
+        <p className="text-sm text-ink-soft">
+          Your role does not allow placing orders.
+        </p>
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-6 max-w-5xl">

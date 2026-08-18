@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
-import { api } from '../lib/api'
+import { orgApi } from '../lib/api'
+import { useOrg } from '../lib/org'
 import type { Account, Deal, HistoricalOrder } from '../lib/types'
 
 const WEEK_MS = 7 * 24 * 3600 * 1000
@@ -42,6 +43,7 @@ function price(value: number | null | undefined, digits = 5): string {
  * at one week, so the desk pages by week.
  */
 export default function History() {
+  const { orgId } = useOrg()
   const [accounts, setAccounts] = useState<Account[]>([])
   const [accountId, setAccountId] = useState<number | null>(null)
   // End of the visible week (ms). Start is always end - 1 week.
@@ -56,7 +58,7 @@ export default function History() {
   useEffect(() => {
     const load = async () => {
       try {
-        const accs = await api<Account[]>('/api/accounts')
+        const accs = await orgApi<Account[]>(orgId, 'accounts')
         setAccounts(accs)
         const master = accs.find((a) => a.role === 'master')
         setAccountId(master?.ctid_trader_account_id ?? accs[0]?.ctid_trader_account_id ?? null)
@@ -65,7 +67,7 @@ export default function History() {
       }
     }
     load()
-  }, [])
+  }, [orgId])
 
   const loadHistory = useCallback(async () => {
     if (accountId == null) return
@@ -75,10 +77,10 @@ export default function History() {
       setLoading(true)
       setError(null)
       const [dealsRes, ordersRes] = await Promise.all([
-        api<{ deals: Deal[]; has_more: boolean }>(
-          `/api/accounts/${accountId}/history/deals?${query}`),
-        api<{ orders: HistoricalOrder[]; has_more: boolean }>(
-          `/api/accounts/${accountId}/history/orders?${query}`),
+        orgApi<{ deals: Deal[]; has_more: boolean }>(
+          orgId, `accounts/${accountId}/history/deals?${query}`),
+        orgApi<{ orders: HistoricalOrder[]; has_more: boolean }>(
+          orgId, `accounts/${accountId}/history/orders?${query}`),
       ])
       setDeals(dealsRes.deals)
       setOrders(ordersRes.orders)
@@ -88,7 +90,7 @@ export default function History() {
     } finally {
       setLoading(false)
     }
-  }, [accountId, windowEnd])
+  }, [orgId, accountId, windowEnd])
 
   useEffect(() => {
     loadHistory()
