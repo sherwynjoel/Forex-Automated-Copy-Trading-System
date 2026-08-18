@@ -189,7 +189,7 @@ class CopierApp:
 
         log.info("startup: complete")
 
-    def refresh_balances(self) -> defer.Deferred:
+    def refresh_balances(self, org_id: int | None = None) -> defer.Deferred:
         """Re-read every enabled account's balance/equity from the broker.
 
         N9: this used to happen exactly once, inline in startup(). Balance
@@ -199,17 +199,26 @@ class CopierApp:
         resync also refreshes what they are about to look at), and on a
         BALANCE_REFRESH_INTERVAL_S LoopingCall wired in boot().
 
+        `org_id=None` sweeps every org (startup, the periodic loop). An
+        operator-triggered resync passes ITS org, for the same reason
+        resync() itself is org-scoped: one tenant pressing Resync must not
+        put a ProtoOATraderReq on every other tenant's accounts. It also
+        keeps the call's latency proportional to the org, not to the whole
+        deployment -- the SDK paces the wire at 5 messages/second, so a
+        process-wide sweep on every single-org resync grows the operator's
+        (and the api proxy's) wait with every org added.
+
         Never raises or errbacks: it is a LoopingCall body, and a
         LoopingCall whose Deferred fails stops looping permanently -- a
         single transient broker hiccup would otherwise silently end balance
         refreshing for the life of the process.
         """
-        d = defer.maybeDeferred(self._refresh_balances_body)
+        d = defer.maybeDeferred(self._refresh_balances_body, org_id)
         d.addErrback(lambda f: log.error("refresh_balances: unexpected failure: %s", f))
         return d
 
     @defer.inlineCallbacks
-    def _refresh_balances_body(self):
+    def _refresh_balances_body(self, only_org_id: int | None = None):
         if not self.state_trackers:
             return
         try:
@@ -219,6 +228,8 @@ class CopierApp:
             return
         for org_id, tracker in self.state_trackers.items():
             if tracker is None:
+                continue
+            if only_org_id is not None and org_id != only_org_id:
                 continue
             # Each org's tracker only ever reads ITS OWN accounts: the
             # tracker's snapshot feeds that org's /state, so a foreign
@@ -451,8 +462,11 @@ class CopierApp:
                 except Exception:
                     log.exception("resync: ensure_spot_subscriptions failed (org %s)", oid)
         # N9: an operator running a resync is about to look at Overview;
-        # give them a current balance, not the one from process boot.
-        yield self.refresh_balances()
+        # give them a current balance, not the one from process boot. Scoped
+        # to the same org(s) this resync covered -- org A's operator pressing
+        # Resync must not send broker traffic on org B's accounts, and must
+        # not wait for it either.
+        yield self.refresh_balances(org_id)
         return all_items
 
     @defer.inlineCallbacks

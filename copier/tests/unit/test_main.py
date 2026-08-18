@@ -1057,6 +1057,35 @@ def test_resync_runs_one_org_or_every_org(db, fernet_key):
     assert set(trackers[org_b].positions) == {MASTER_B}
 
 
+@pytest_twisted.inlineCallbacks
+def test_org_scoped_resync_refreshes_only_that_orgs_balances(db, fernet_key):
+    """resync() ends with a balance refresh so the operator sees current
+    numbers -- but a resync in org A must not put a ProtoOATraderReq on org
+    B's accounts. Beyond the tenancy leak, the unscoped sweep made every
+    single-org resync cost broker round trips proportional to the WHOLE
+    deployment (the SDK paces the wire at 5 msg/s), which is what pushed a
+    two-org resync past the api proxy's own timeout."""
+    org_a, org_b = seed_two_orgs(db, fernet_key)
+    repo = Repo(db)
+    app = main.build_app(repo, TokenStore(db, fernet_key), make_stub_client_factory(), shards=1)
+
+    for org_id in (org_a, org_b):
+        app.reconcilers[org_id].run = lambda: defer.succeed([])
+    tracker_a, tracker_b = _RecordingStateTracker(), _RecordingStateTracker()
+    app.state_trackers = {org_a: tracker_a, org_b: tracker_b}
+
+    yield app.resync(org_a)
+
+    assert sorted(tracker_a.refresh_calls[0]) == [SLAVE_A1, SLAVE_A2, MASTER_A]
+    assert tracker_b.refresh_calls == [], "org B's accounts were queried by org A's resync"
+
+    # The process-wide sweep (startup, the periodic loop) still covers both.
+    yield app.resync()
+
+    assert len(tracker_a.refresh_calls) == 2
+    assert sorted(tracker_b.refresh_calls[0]) == [SLAVE_B1, MASTER_B]
+
+
 # ---------- reload ----------
 
 @pytest_twisted.inlineCallbacks
