@@ -703,6 +703,26 @@ def test_pause_and_resume_reject_an_account_from_another_org(db, fernet_key):
                 if a.account_id == SLAVE_A1).status == "ok"
 
 
+def test_pause_resume_set_dry_run_reject_unknown_org(repo, token_store):
+    """F3: same class of bug close_all was fixed for -- pause/resume/
+    set_dry_run must fail loudly for an org that doesn't exist rather than
+    silently no-op via a 0-row UPDATE."""
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+
+    with pytest.raises(RuntimeError):
+        app.pause(999999)
+    with pytest.raises(RuntimeError):
+        app.resume(999999)
+    with pytest.raises(RuntimeError):
+        app.set_dry_run(999999, True)
+
+    # Nothing was written anywhere: the real org is untouched and no event
+    # was logged for the unknown org.
+    assert repo.get_org(ORG_A).copying_enabled is True
+    assert repo.get_org(ORG_A).dry_run is False
+    assert not any(org_id == 999999 for _, org_id in _actions_by_org(repo.dsn))
+
+
 # ---------- kill switch ----------
 
 @pytest_twisted.inlineCallbacks

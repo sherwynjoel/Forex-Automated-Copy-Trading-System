@@ -343,6 +343,89 @@ def test_ws_nonmember_closed_4404(live_server, db, make_user, make_org):
         assert e.rcvd.code == 4404
 
 
+def _register_client(base_url, email):
+    """A persistent httpx.Client (cookie jar included) logged in as a fresh
+    user via the real, live server."""
+    client = httpx.Client(base_url=base_url)
+    r = client.post("/api/register", json={
+        "email": email, "password": "a-solid-password", "display_name": email})
+    assert r.status_code == 204
+    return client
+
+
+def _csrf(client):
+    return {"X-CSRF-Token": client.cookies.get("csrf")}
+
+
+def test_ws_closes_when_membership_revoked(live_server, db, make_org):
+    """F1: a member's open socket is closed the moment they're removed from
+    the org, instead of continuing to stream that org's live events until
+    their tab happens to close."""
+    from websockets.sync.client import connect as ws_connect
+    from websockets.exceptions import ConnectionClosed
+
+    base_url, ws_url = live_server
+    owner = _register_client(base_url, "owner-revoke-member@example.com")
+    member = _register_client(base_url, "member-revoke@example.com")
+
+    with psycopg.connect(db, autocommit=True) as conn:
+        (owner_id,) = conn.execute(
+            "SELECT id FROM users WHERE email = 'owner-revoke-member@example.com'"
+        ).fetchone()
+        (member_id,) = conn.execute(
+            "SELECT id FROM users WHERE email = 'member-revoke@example.com'"
+        ).fetchone()
+    org_id = make_org(name="RevokeMember", members=[
+        ({"id": owner_id}, "owner"), ({"id": member_id}, "viewer")])
+
+    with ws_connect(
+        f"{ws_url}?org_id={org_id}",
+        additional_headers={"Cookie": f"session={member.cookies.get('session')}"},
+    ) as ws:
+        r = owner.delete(f"/api/orgs/{org_id}/members/{member_id}",
+                          headers=_csrf(owner))
+        assert r.status_code == 204
+
+        try:
+            ws.recv(timeout=5)
+            raise AssertionError("socket should have been closed on removal")
+        except ConnectionClosed as e:
+            assert e.rcvd.code == 4404
+
+
+def test_ws_closes_when_org_deleted(live_server, db, make_org):
+    """F1: deleting the org closes every socket currently streaming it."""
+    from websockets.sync.client import connect as ws_connect
+    from websockets.exceptions import ConnectionClosed
+
+    base_url, ws_url = live_server
+    owner = _register_client(base_url, "owner-delete-org@example.com")
+    member = _register_client(base_url, "member-delete-org@example.com")
+
+    with psycopg.connect(db, autocommit=True) as conn:
+        (owner_id,) = conn.execute(
+            "SELECT id FROM users WHERE email = 'owner-delete-org@example.com'"
+        ).fetchone()
+        (member_id,) = conn.execute(
+            "SELECT id FROM users WHERE email = 'member-delete-org@example.com'"
+        ).fetchone()
+    org_id = make_org(name="RevokeOrg", members=[
+        ({"id": owner_id}, "owner"), ({"id": member_id}, "viewer")])
+
+    with ws_connect(
+        f"{ws_url}?org_id={org_id}",
+        additional_headers={"Cookie": f"session={member.cookies.get('session')}"},
+    ) as ws:
+        r = owner.delete(f"/api/orgs/{org_id}", headers=_csrf(owner))
+        assert r.status_code == 204
+
+        try:
+            ws.recv(timeout=5)
+            raise AssertionError("socket should have been closed on org deletion")
+        except ConnectionClosed as e:
+            assert e.rcvd.code == 4404
+
+
 class TestWebSocketLiveDelivery:
     """Delivery tests against a REAL uvicorn server + REAL TCP `websockets` client.
 

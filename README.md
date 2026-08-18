@@ -222,18 +222,18 @@ slave, confirm a few real trades copy correctly, then scale up.
 
 ## 5. Operations
 
-- **Copy pause** — a single global pause (Overview screen or `POST
-  /api/orgs/{org_id}/control/pause` with no account id). It stops all copying immediately;
-  resume with the matching resume control. It does not disconnect accounts
-  or lose state — mappings and settings are untouched.
+- **Copy pause** — a per-org pause (Overview screen or `POST
+  /api/orgs/{org_id}/control/pause` with no account id). It stops all copying for that org
+  immediately, without affecting any other org; resume with the matching resume control.
+  It does not disconnect accounts or lose state — mappings and settings are untouched.
 - **Kill switch (close-all)** — flattens actual positions, not just copying.
   The desk strip's "Close all positions" button (every page; requires typing
   `CLOSE ALL`) closes every open position and cancels every working order in
-  every enabled account from a fresh broker snapshot, and pauses copying
+  every enabled account of that org from a fresh broker snapshot, and pauses copying
   first so the master's closes can't race their own copy-closes. Per-account:
   the "Flatten" button on the Accounts screen (`POST
   /api/orgs/{org_id}/control/close-all` with `{"account_id": N}`) does the same for one account without touching
-  the global pause.
+  the org's pause.
 - **Manual orders** — the Trade screen places market/limit/stop orders (with
   optional SL/TP, volume in lots) on ANY connected account. Orders are
   labeled `manual`: a manual order on the **master** fills and replicates

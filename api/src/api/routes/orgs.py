@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from ..auth import require_user
 from ..db import get_conn
 from ..rbac import OrgContext, ROLE_RANK, require_org_role
+from ..ws import broadcaster
 
 INVITE_TTL_DAYS = 7
 
@@ -121,6 +122,10 @@ def create_orgs_router() -> APIRouter:
         # Cascades memberships, invites, connections, accounts, mappings.
         # Broker positions are NOT touched; the dashboard warns about that.
         conn.execute("DELETE FROM orgs WHERE id = %s", (ctx.org_id,))
+        # Sockets streaming this org's events would otherwise keep receiving
+        # nothing forever (silently, since the org no longer exists) instead
+        # of being told the org is gone.
+        await broadcaster.close_org(ctx.org_id)
 
     @router.get("/{org_id}/members")
     async def list_members(
@@ -208,6 +213,11 @@ def create_orgs_router() -> APIRouter:
                 "DELETE FROM org_memberships WHERE org_id = %s AND user_id = %s",
                 (ctx.org_id, member_user_id),
             )
+        # Covers both an owner removing someone else AND a member leaving on
+        # their own -- either way membership is gone, so any open socket of
+        # theirs on this org must stop streaming its live events now rather
+        # than whenever their tab happens to close.
+        await broadcaster.close_for(ctx.org_id, member_user_id)
 
     @router.post("/{org_id}/invites", status_code=201)
     async def create_invite(

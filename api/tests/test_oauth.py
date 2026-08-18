@@ -299,6 +299,49 @@ def test_callback_without_state_consumes_pending_session_nonce(org_client, db):
     assert response.status_code == 403
 
 
+def test_callback_without_state_rejects_multiple_pending_flows(org_client, make_org, db):
+    """F2: an admin who starts connect for org A then org B, then completes
+    consent, must not have the state-less fallback silently guess which
+    flow the callback belongs to (it used to consume the MOST RECENT
+    pending nonce, binding A's grant to B or vice versa). With two pending
+    flows for the same session, reject with 409 and consume neither.
+    """
+    client, org_a, seed = org_client
+
+    with psycopg.connect(db, autocommit=True) as conn:
+        (user_id,) = conn.execute(
+            "SELECT id FROM users WHERE email = 'admin@example.com'").fetchone()
+    org_b = make_org(name="Second Desk", members=[({"id": user_id}, "admin")])
+
+    state_a = _state_from_connect(client, org_a)
+    state_b = _state_from_connect(client, org_b)
+    assert state_a != state_b
+
+    response = client.get(
+        "/api/oauth/callback?code=test-auth-code", follow_redirects=False)
+    assert response.status_code == 409
+
+    # Neither pending state was touched by the rejected fallback.
+    with psycopg.connect(db, autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT consumed_at FROM oauth_states ORDER BY created_at").fetchall()
+    assert len(rows) == 2
+    assert all(consumed_at is None for (consumed_at,) in rows)
+
+    # The single-pending-flow path (existing behavior) is unaffected: once
+    # org B's callback resolves state_b directly (with state), only org A's
+    # nonce remains pending, so the state-less fallback now succeeds into A.
+    response = client.get(
+        f"/api/oauth/callback?code=test-auth-code&state={state_b}",
+        follow_redirects=False)
+    assert response.status_code == 307
+
+    response = client.get(
+        "/api/oauth/callback?code=test-auth-code", follow_redirects=False)
+    assert response.status_code == 307
+    assert response.headers["location"] == f"/org/{org_a}/accounts?connected=1"
+
+
 def test_callback_malformed_token_response(org_client, db):
     """Malformed token response (non-JSON) returns 400."""
     client, org_id, seed = org_client

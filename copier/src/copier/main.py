@@ -342,6 +342,7 @@ class CopierApp:
 
     def pause(self, org_id: int, account_id: int | None = None) -> defer.Deferred:
         """Pause copying for one org, or one of its slaves, then reload."""
+        self.repo.get_org(org_id)  # raises for a missing (or None) org
         if account_id is None:
             self.repo.set_org_setting(org_id, "copying_enabled", False)
             self.repo.log_event('control', 'info', {'action': 'pause_org'}, org_id=org_id)
@@ -358,6 +359,7 @@ class CopierApp:
 
     def resume(self, org_id: int, account_id: int | None = None) -> defer.Deferred:
         """Resume copying for one org, or one of its slaves, then reload."""
+        self.repo.get_org(org_id)  # raises for a missing (or None) org
         if account_id is None:
             self.repo.set_org_setting(org_id, "copying_enabled", True)
             self.repo.log_event('control', 'info', {'action': 'resume_org'}, org_id=org_id)
@@ -373,6 +375,7 @@ class CopierApp:
         return self.reload()
 
     def set_dry_run(self, org_id: int, enabled: bool) -> None:
+        self.repo.get_org(org_id)  # raises for a missing (or None) org
         self.repo.set_org_setting(org_id, "dry_run", enabled)
         self.repo.log_event(
             'control', 'info', {'action': 'set_dry_run', 'enabled': enabled},

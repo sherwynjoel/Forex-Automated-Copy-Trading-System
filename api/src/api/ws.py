@@ -23,7 +23,10 @@ class EventBroadcaster:
     """
 
     def __init__(self):
-        self.connections: dict[int, set[WebSocket]] = {}
+        # ws -> user_id, per org. Tracking the user per socket lets us close
+        # a specific member's sockets on membership revocation (see
+        # close_for) without touching the rest of the org's connections.
+        self.connections: dict[int, dict[WebSocket, int]] = {}
         self.listener_task = None
         self.listener_connection: AsyncConnection = None
         self.query_connection: AsyncConnection = None
@@ -34,7 +37,7 @@ class EventBroadcaster:
         # it does not wait for LISTEN to be issued).
         self.listening = False
 
-    async def connect(self, ws: WebSocket, org_id: int):
+    async def connect(self, ws: WebSocket, org_id: int, user_id: int):
         """Register a WebSocket connection under its org, accepting it first
         if the caller hasn't already done so (idempotent: the endpoint may
         need to accept early -- see websocket_endpoint -- so a real WS close
@@ -42,23 +45,47 @@ class EventBroadcaster:
         close code back to the client)."""
         if ws.application_state != WebSocketState.CONNECTED:
             await ws.accept()
-        self.connections.setdefault(org_id, set()).add(ws)
+        self.connections.setdefault(org_id, {})[ws] = user_id
 
     def disconnect(self, ws: WebSocket, org_id: int):
         """Remove a WebSocket connection from its org."""
-        self.connections.get(org_id, set()).discard(ws)
+        self.connections.get(org_id, {}).pop(ws, None)
 
     async def broadcast(self, org_id: int | None, message: dict):
         """Send to the org's sockets only. org_id None (infrastructure
         events) is delivered to no one."""
         if org_id is None:
             return
-        for ws in list(self.connections.get(org_id, set())):
+        for ws in list(self.connections.get(org_id, {}).keys()):
             try:
                 await ws.send_json(message)
             except Exception as e:
                 logger.warning(f"Failed to send to client: {e}")
                 self.disconnect(ws, org_id)
+
+    async def close_for(self, org_id: int, user_id: int):
+        """Close and discard every socket this user has open in this org
+        (e.g. their membership was just revoked). Other members' sockets in
+        the same org are untouched."""
+        targets = [ws for ws, uid in self.connections.get(org_id, {}).items()
+                   if uid == user_id]
+        for ws in targets:
+            try:
+                await ws.close(code=4404, reason="Membership revoked")
+            except Exception as e:
+                logger.warning(f"Failed to close socket for revoked member: {e}")
+            self.connections.get(org_id, {}).pop(ws, None)
+
+    async def close_org(self, org_id: int):
+        """Close and discard every socket open for this org (e.g. the org
+        was just deleted)."""
+        targets = list(self.connections.get(org_id, {}).keys())
+        for ws in targets:
+            try:
+                await ws.close(code=4404, reason="Organization deleted")
+            except Exception as e:
+                logger.warning(f"Failed to close socket for deleted org: {e}")
+        self.connections.pop(org_id, None)
 
     async def start_listener(self, dsn: str):
         """Start listening for Postgres events and broadcast them."""
@@ -187,7 +214,7 @@ def create_ws_router() -> APIRouter:
             await ws.close(code=4404, reason="Not found")
             return
 
-        await broadcaster.connect(ws, org_id)
+        await broadcaster.connect(ws, org_id, user_id)
         try:
             while True:
                 await ws.receive_text()

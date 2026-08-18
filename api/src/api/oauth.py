@@ -179,11 +179,38 @@ def create_oauth_callback_router() -> APIRouter:
                 ).fetchone()
             else:
                 # cTrader never echoes `state`, so the callback cannot present
-                # the nonce. Consume the most recent pending nonce bound to
-                # THIS session instead: still single-use, still
-                # TTL-bounded, still session-bound. The outer
-                # `consumed_at IS NULL` re-checks on the row the subquery
-                # picked, so concurrent callbacks cannot both consume it.
+                # the nonce. Consume the pending nonce bound to THIS session
+                # instead: still single-use, still TTL-bounded, still
+                # session-bound. The outer `consumed_at IS NULL` re-checks on
+                # the row the subquery picked, so concurrent callbacks cannot
+                # both consume it.
+                #
+                # BUT: if this session has started MORE THAN ONE connect flow
+                # that's still pending (e.g. an admin opened connect for org A,
+                # then org B, and only now completes consent), "most recent
+                # pending nonce" is a guess -- and a wrong one silently lands
+                # the grant in the wrong org. Count first, using the exact
+                # same predicate the consume below uses, and refuse to guess
+                # when there's more than one candidate.
+                (pending_count,) = conn.execute(
+                    """
+                    SELECT COUNT(*) FROM oauth_states
+                    WHERE consumed_at IS NULL
+                      AND session = %s
+                      AND created_at > %s - make_interval(secs => %s)
+                    """,
+                    (
+                        _digest(session or ""),
+                        now,
+                        STATE_TTL_SECONDS,
+                    ),
+                ).fetchone()
+                if pending_count > 1:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Multiple pending connect flows for this session; "
+                               "restart the connect flow for the organization you want",
+                    )
                 result = conn.execute(
                     """
                     UPDATE oauth_states SET consumed_at = %s
