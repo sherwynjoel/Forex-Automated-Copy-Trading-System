@@ -7,7 +7,7 @@ import pathlib
 import psycopg
 import pytest
 
-from .conftest import ADMIN_DSN
+from conftest import ADMIN_DSN
 
 MIGRATIONS_DIR = pathlib.Path(__file__).resolve().parents[2] / "db" / "migrations"
 BACKFILL_DB = "copytrader_mig005"
