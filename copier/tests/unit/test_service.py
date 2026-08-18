@@ -256,6 +256,45 @@ class TestCrossOrgIsolation:
         assert org_id_b == 2
         assert {i.slave_account_id for i in intents_b} == {201}
 
+    def test_pending_fill_check_never_reports_another_orgs_slaves(
+        self, two_org_service, two_org_db, clock
+    ):
+        """Master order/position ids are PER-ACCOUNT broker sequences, so two
+        orgs routinely hold mapping rows for the same master_order_id.
+        order_entries()/position_entries() are keyed on that id alone (they
+        are the MappingState protocol decide() consumes, and must stay that
+        way), so the 30s pending-fill check has to filter by org itself.
+
+        Without that filter org A's scheduled check walks org B's mapping
+        rows and writes a pending_fill_alert naming org B's slave account --
+        stamped with org A's org_id, i.e. another tenant's account number
+        surfacing in this tenant's Logs screen.
+        """
+        repo = Repo(two_org_db)
+        # Both orgs have a copy of "master order 42" -- colliding ids, different orgs.
+        repo.create_order_mapping(42, 101, "co42.101", org_id=1)
+        repo.activate_order_mapping(101, "co42.101", 9999)
+        repo.create_order_mapping(42, 201, "co42.201", org_id=2)
+        repo.activate_order_mapping(201, "co42.201", 8888)
+
+        # Org A's master pending order fills; neither slave has filled yet.
+        evt = base_event(account_id=100, execution_type=ProtoOAExecutionType.ORDER_FILLED,
+                         order_type=ProtoOAOrderType.LIMIT, order_id=42, position_id=11)
+        evt.deal.positionId = 11
+        evt.deal.filledVolume = 10_000_000
+
+        two_org_service.handle_execution(100, evt)
+        clock.advance(PENDING_FILL_ALERT_S)
+
+        with psycopg.connect(two_org_db, autocommit=True) as conn:
+            alerts = conn.execute(
+                "SELECT account_id, org_id FROM events "
+                "WHERE payload->>'action' = 'pending_fill_alert' ORDER BY account_id"
+            ).fetchall()
+        assert alerts == [(101, 1)], (
+            f"org A's pending-fill check reported outside org A: {alerts}"
+        )
+
     def test_slave_event_is_handled_under_its_own_org(
         self, two_org_service, recording_dispatcher, two_org_db
     ):
@@ -327,7 +366,7 @@ class TestSlaveEventHandling:
         # Setup: active position mapping
         repo.create_position_mapping(master_position_id=11, slave_account_id=100,
                                      client_order_id="cm11.100", org_id=ORG_ID)
-        repo.activate_position_mapping("cm11.100", 55, 10_000_000)
+        repo.activate_position_mapping(100, "cm11.100", 55, 10_000_000)
 
         # Process slave close (partial close of 4M out of 10M)
         evt = base_event(
@@ -408,7 +447,7 @@ class TestSlaveEventHandling:
         # Setup: active order mapping with slave order ID
         repo.create_order_mapping(master_order_id=42, slave_account_id=100,
                                   client_order_id="co42.100", org_id=ORG_ID)
-        repo.activate_order_mapping("co42.100", 9999)
+        repo.activate_order_mapping(100, "co42.100", 9999)
 
         # Process slave cancel
         evt = base_event(
@@ -468,10 +507,10 @@ class TestPendingFillAlert:
 
         repo.create_order_mapping(master_order_id=master_order_id, slave_account_id=100,
                                   client_order_id="co42.100", org_id=ORG_ID)
-        repo.activate_order_mapping("co42.100", 9999)  # slave order accepted for account 100
+        repo.activate_order_mapping(100, "co42.100", 9999)  # slave order accepted for account 100
         repo.create_order_mapping(master_order_id=master_order_id, slave_account_id=101,
                                   client_order_id="co42.101", org_id=ORG_ID)
-        repo.activate_order_mapping("co42.101", 8888)  # slave order accepted for account 101
+        repo.activate_order_mapping(101, "co42.101", 8888)  # slave order accepted for account 101
 
         # Master pending order fills (triggers check_pending_fills scheduling)
         evt = base_event(
@@ -513,6 +552,82 @@ class TestPendingFillAlert:
                 "AND account_id = 100 AND payload->>'action' = 'pending_fill_alert'"
             ).fetchone()
         assert warnings_100[0] == 0, "Should NOT alert for slave 100 which filled in time"
+
+
+class TestMappingMutationsArePinnedToTheReportingAccount:
+    """A fill/accept/rejection may only move the mapping row belonging to the
+    account that reported it.
+
+    client_order_id is derived and guessable
+    (`cm{master_position_id}.{slave_account_id}`), and master position ids are
+    per-account broker sequences, so the coid alone is not proof of ownership.
+    These paths write real-money sizing state, so the service passes the
+    reporting account and the repo pins the UPDATE to it.
+    """
+
+    def test_fill_reported_by_the_wrong_slave_does_not_activate_the_mapping(
+        self, service, repo
+    ):
+        """Slave 101 reports a fill carrying slave 100's client_order_id: 100's
+        mapping must stay pending, and 101 gets the unknown-fill warning."""
+        repo.create_position_mapping(master_position_id=11, slave_account_id=100,
+                                     client_order_id="cm11.100", org_id=ORG_ID)
+
+        evt = base_event(account_id=101, execution_type=ProtoOAExecutionType.ORDER_FILLED)
+        evt.order.clientOrderId = "cm11.100"  # not 101's coid
+        evt.deal.positionId = 55
+        evt.deal.filledVolume = 10_000_000
+
+        service.handle_execution(101, evt)
+
+        assert repo.position_entries(11) == [], (
+            "slave 101's fill activated slave 100's mapping"
+        )
+        row = next(r for r in repo.mapping_rows() if r['client_order_id'] == "cm11.100")
+        assert row['status'] == 'pending'
+        assert row['slave_position_id'] is None
+        assert row['slave_volume'] is None
+
+        with psycopg.connect(repo.dsn, autocommit=True) as conn:
+            actions = {
+                r[0] for r in conn.execute(
+                    "SELECT payload->>'action' FROM events WHERE account_id = 101"
+                ).fetchall()
+            }
+        assert 'unknown_fill' in actions
+
+    def test_rejection_from_the_wrong_slave_does_not_fail_the_mapping(self, service, repo):
+        """Slave 101's rejection must not mark slave 100's copy failed."""
+        repo.create_order_mapping(master_order_id=42, slave_account_id=100,
+                                  client_order_id="co42.100", org_id=ORG_ID)
+
+        evt = base_event(account_id=101, execution_type=ProtoOAExecutionType.ORDER_REJECTED)
+        evt.order.clientOrderId = "co42.100"
+        evt.errorCode = "123"
+
+        service.handle_execution(101, evt)   # must not raise
+
+        row = next(r for r in repo.mapping_rows() if r['client_order_id'] == "co42.100")
+        assert row['status'] == 'pending', "another slave's rejection failed this copy"
+
+    def test_order_accept_from_the_wrong_slave_does_not_stamp_the_mapping(
+        self, service, repo
+    ):
+        """Slave 101's ORDER_ACCEPTED must not write its slave_order_id onto
+        slave 100's row -- (slave_account_id, slave_order_id) lookups later
+        depend on that pairing being real."""
+        repo.create_order_mapping(master_order_id=42, slave_account_id=100,
+                                  client_order_id="co42.100", org_id=ORG_ID)
+
+        evt = base_event(account_id=101, execution_type=ProtoOAExecutionType.ORDER_ACCEPTED,
+                         order_type=ProtoOAOrderType.LIMIT, order_id=9999)
+        evt.order.clientOrderId = "co42.100"
+
+        service.handle_execution(101, evt)
+
+        assert repo.order_entries(42) == [], "another slave's accept activated this copy"
+        row = next(r for r in repo.mapping_rows() if r['client_order_id'] == "co42.100")
+        assert row['slave_order_id'] is None
 
 
 class TestMasterEventLogging:

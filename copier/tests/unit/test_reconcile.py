@@ -539,12 +539,12 @@ class TestReconciler:
         # Seed the missing_slave_copy mapping: master position 2 -> slave position
         # 5002, which never materializes on the slave broker.
         repo.create_position_mapping(master_position_id=2, slave_account_id=SLAVE_ID, client_order_id="cm2.2001")
-        repo.activate_position_mapping("cm2.2001", slave_position_id=5002, slave_volume=100_000)
+        repo.activate_position_mapping(2001, "cm2.2001", slave_position_id=5002, slave_volume=100_000)
 
         # Seed the unfilled_slave_order mapping: order placed & linked to a master
         # fill, but no corresponding slave position ever appeared.
         repo.create_order_mapping(master_order_id=100, slave_account_id=SLAVE_ID, client_order_id="co100.2001")
-        repo.activate_order_mapping("co100.2001", slave_order_id=9000)
+        repo.activate_order_mapping(2001, "co100.2001", slave_order_id=9000)
         repo.link_pending_fill(master_order_id=100, slave_account_id=SLAVE_ID, master_position_id=55)
 
         reconciler = Reconciler(

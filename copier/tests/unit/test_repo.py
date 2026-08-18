@@ -104,7 +104,7 @@ def test_position_mapping_lifecycle(db, org_id):
     assert entries == []
 
     # Step 2: Activate the mapping
-    repo.activate_position_mapping("cm11.101", 555, 10_000_000)
+    repo.activate_position_mapping(101, "cm11.101", 555, 10_000_000)
 
     entries = repo.position_entries(11)
     assert len(entries) == 1
@@ -129,7 +129,7 @@ def test_fail_mapping_records_error(db, org_id):
     repo = Repo(db)
 
     repo.create_position_mapping(20, 100, "cm20.100", org_id=org_id)
-    repo.fail_mapping("cm20.100", "Connection lost")
+    repo.fail_mapping(100, "cm20.100", "Connection lost")
 
     # Check the mapping status
     with psycopg.connect(db, autocommit=True) as conn:
@@ -150,7 +150,7 @@ def test_order_mapping_and_pending_fill_link(db, org_id):
     repo.create_order_mapping(42, 101, "co42.101", org_id=org_id)
 
     # Step 2: Activate the order mapping
-    repo.activate_order_mapping("co42.101", 900)
+    repo.activate_order_mapping(101, "co42.101", 900)
 
     # Should have one order entry
     entries = repo.order_entries(42)
@@ -238,10 +238,10 @@ def test_mapping_rows(db, org_id):
 
     # Create some mappings
     repo.create_position_mapping(10, 100, "cm10.100", org_id=org_id)
-    repo.activate_position_mapping("cm10.100", 111, 5_000_000)
+    repo.activate_position_mapping(100, "cm10.100", 111, 5_000_000)
 
     repo.create_order_mapping(20, 101, "co20.101", org_id=org_id)
-    repo.activate_order_mapping("co20.101", 222)
+    repo.activate_order_mapping(101, "co20.101", 222)
 
     # Get all mapping rows
     rows = repo.mapping_rows()
@@ -262,7 +262,7 @@ def test_close_order_mapping(db, org_id):
     repo = Repo(db)
 
     repo.create_order_mapping(50, 100, "co50.100", org_id=org_id)
-    repo.activate_order_mapping("co50.100", 555)
+    repo.activate_order_mapping(100, "co50.100", 555)
 
     # Close the order mapping
     repo.close_order_mapping(100, 555)
@@ -311,7 +311,7 @@ def test_concurrent_reduce_position_mapping_no_race(db, org_id):
 
     # Create a position mapping with 10M volume
     repo.create_position_mapping(30, 100, "cm30.100", org_id=org_id)
-    repo.activate_position_mapping("cm30.100", 666, 10_000_000)
+    repo.activate_position_mapping(100, "cm30.100", 666, 10_000_000)
 
     # Concurrent reduces: thread 1 reduces 3M, thread 2 reduces 2M
     # Expected final volume: 10M - 3M - 2M = 5M (not 7M or 8M due to race)
@@ -349,7 +349,7 @@ def test_activate_position_mapping_raises_on_unknown(db):
     repo = Repo(db)
 
     with pytest.raises(MappingNotFound):
-        repo.activate_position_mapping("unknown_order_id", 999, 1_000_000)
+        repo.activate_position_mapping(100, "unknown_order_id", 999, 1_000_000)
 
 
 def test_fail_mapping_raises_on_unknown(db):
@@ -357,7 +357,7 @@ def test_fail_mapping_raises_on_unknown(db):
     repo = Repo(db)
 
     with pytest.raises(MappingNotFound):
-        repo.fail_mapping("unknown_order_id", "Error message")
+        repo.fail_mapping(100, "unknown_order_id", "Error message")
 
 
 def test_activate_order_mapping_raises_on_unknown(db):
@@ -365,7 +365,63 @@ def test_activate_order_mapping_raises_on_unknown(db):
     repo = Repo(db)
 
     with pytest.raises(MappingNotFound):
-        repo.activate_order_mapping("unknown_order_id", 999)
+        repo.activate_order_mapping(100, "unknown_order_id", 999)
+
+
+class TestCoidMutationsRequireTheOwningAccount:
+    """The client_order_id-keyed mutations carry an account predicate.
+
+    `client_order_id` is derived, not secret -- `cm{master_position_id}.
+    {slave_account_id}` -- and master position/order ids are per-account
+    broker sequences that collide across orgs, so a coid is guessable and
+    NOT globally unique to a tenant by construction. These three statements
+    write real-money sizing state (slave_volume, status), so each pins the
+    row to the slave account that actually reported the execution rather
+    than trusting the coid alone.
+    """
+
+    def test_activate_position_mapping_rejects_a_foreign_account(self, db, org_id):
+        repo = Repo(db)
+        repo.create_position_mapping(11, 101, "cm11.101", org_id=org_id)
+
+        with pytest.raises(MappingNotFound):
+            repo.activate_position_mapping(100, "cm11.101", 555, 10_000_000)
+        assert repo.position_entries(11) == [], "a foreign account activated the mapping"
+
+        # The owning account still works, and the row is untouched by the reject.
+        repo.activate_position_mapping(101, "cm11.101", 555, 10_000_000)
+        assert repo.position_entries(11) == [PositionMappingEntry(101, 555, 10_000_000)]
+
+    def test_activate_order_mapping_rejects_a_foreign_account(self, db, org_id):
+        repo = Repo(db)
+        repo.create_order_mapping(42, 101, "co42.101", org_id=org_id)
+
+        with pytest.raises(MappingNotFound):
+            repo.activate_order_mapping(100, "co42.101", 900)
+        assert repo.order_entries(42) == [], "a foreign account activated the order mapping"
+
+        repo.activate_order_mapping(101, "co42.101", 900)
+        assert repo.order_entries(42) == [OrderMappingEntry(101, 900)]
+
+    def test_fail_mapping_rejects_a_foreign_account(self, db, org_id):
+        repo = Repo(db)
+        repo.create_position_mapping(20, 100, "cm20.100", org_id=org_id)
+
+        with pytest.raises(MappingNotFound):
+            repo.fail_mapping(101, "cm20.100", "Connection lost")
+
+        with psycopg.connect(db, autocommit=True) as conn:
+            status, error = conn.execute(
+                "SELECT status, error FROM mappings WHERE client_order_id = 'cm20.100'"
+            ).fetchone()
+        assert (status, error) == ("pending", None), "a foreign account failed the mapping"
+
+        repo.fail_mapping(100, "cm20.100", "Connection lost")
+        with psycopg.connect(db, autocommit=True) as conn:
+            status, _ = conn.execute(
+                "SELECT status, error FROM mappings WHERE client_order_id = 'cm20.100'"
+            ).fetchone()
+        assert status == "failed"
 
 
 def test_close_order_mapping_raises_on_unknown(db):
@@ -390,7 +446,7 @@ def test_link_pending_fill_does_not_touch_failed_rows(db, org_id):
 
     # Create an order mapping
     repo.create_order_mapping(60, 100, "co60.100", org_id=org_id)
-    repo.activate_order_mapping("co60.100", 777)
+    repo.activate_order_mapping(100, "co60.100", 777)
 
     # Simulate it failing (manually set status to failed)
     with psycopg.connect(db, autocommit=True) as conn:
@@ -485,9 +541,9 @@ def test_activate_position_mapping_accumulates_volume_across_fills(db, org_id):
     repo = Repo(db)
     repo.create_position_mapping(500, 100, "cm500.100", org_id=org_id)
 
-    repo.activate_position_mapping("cm500.100", 777, 10_000_000, fill_price=1.10500)
+    repo.activate_position_mapping(100, "cm500.100", 777, 10_000_000, fill_price=1.10500)
     repo.create_position_mapping(500, 100, "cm500.100", org_id=org_id)            # increase dispatched
-    repo.activate_position_mapping("cm500.100", 777, 5_000_000, fill_price=1.10900)
+    repo.activate_position_mapping(100, "cm500.100", 777, 5_000_000, fill_price=1.10900)
 
     (row,) = [r for r in repo.mapping_rows() if r["client_order_id"] == "cm500.100"]
     assert row["slave_volume"] == 15_000_000
@@ -509,9 +565,9 @@ def test_reduce_position_mapping_operates_on_the_aggregate(db, org_id):
     """
     repo = Repo(db)
     repo.create_position_mapping(500, 100, "cm500.100", org_id=org_id)
-    repo.activate_position_mapping("cm500.100", 777, 10_000_000)
+    repo.activate_position_mapping(100, "cm500.100", 777, 10_000_000)
     repo.create_position_mapping(500, 100, "cm500.100", org_id=org_id)
-    repo.activate_position_mapping("cm500.100", 777, 5_000_000)
+    repo.activate_position_mapping(100, "cm500.100", 777, 5_000_000)
 
     repo.reduce_position_mapping(100, 777, 6_000_000)
 
@@ -526,9 +582,9 @@ def test_position_entries_reports_one_aggregated_entry_per_slave(db, org_id):
     per slave, sized against the slave's real position."""
     repo = Repo(db)
     repo.create_position_mapping(500, 100, "cm500.100", org_id=org_id)
-    repo.activate_position_mapping("cm500.100", 777, 10_000_000)
+    repo.activate_position_mapping(100, "cm500.100", 777, 10_000_000)
     repo.create_position_mapping(500, 100, "cm500.100", org_id=org_id)
-    repo.activate_position_mapping("cm500.100", 777, 5_000_000)
+    repo.activate_position_mapping(100, "cm500.100", 777, 5_000_000)
 
     entries = repo.position_entries(500)
     assert len(entries) == 1
@@ -574,7 +630,7 @@ def test_clear_degraded_is_a_no_op_on_an_ok_account(db):
 def test_activate_pending_fill_stamps_fill_price(db, org_id):
     repo = Repo(db)
     repo.create_order_mapping(900, 100, "co900.100", org_id=org_id)
-    repo.activate_order_mapping("co900.100", 4242)
+    repo.activate_order_mapping(100, "co900.100", 4242)
 
     repo.activate_pending_fill(100, 4242, 888, 2_000_000, fill_price=1.23456)
 

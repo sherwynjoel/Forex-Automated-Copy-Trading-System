@@ -218,15 +218,28 @@ class CopierService:
 
         If any linked mapping still doesn't have slave_position_id, log warning.
 
+        Org scoping: master order and position ids are PER-ACCOUNT broker
+        sequences, so two orgs routinely hold mapping rows carrying the same
+        master_order_id. `order_entries`/`position_entries` are keyed on that
+        id alone -- deliberately, since they are the MappingState protocol
+        decide() consumes -- so this check filters foreign rows out itself
+        against the routing table, resolved at CHECK time (30s later the
+        fleet may have been reloaded). Without the filter, org A's check
+        would emit a pending_fill_alert naming ANOTHER org's slave account,
+        stamped with org A's org_id.
+
         Args:
             org_id: Org that owns the master this pending fill came from.
             pending_filled: The MasterPendingFilled event.
         """
         def check_pending_fills():
-            """Check if any slave fills are still pending."""
+            """Check if any of THIS ORG's slave fills are still pending."""
+            routing = self._routing_provider()
             # Get all order mappings for this master order
             order_entries = self._repo.order_entries(pending_filled.order_id)
             for entry in order_entries:
+                if routing.org_by_account.get(entry.slave_account_id) != org_id:
+                    continue  # another org's row that merely shares the master id
                 # Check if the position mapping exists with slave_position_id
                 position_entries = self._repo.position_entries(pending_filled.position_id)
                 mapped = any(
@@ -384,7 +397,8 @@ class CopierService:
         if client_order_id and client_order_id.startswith("cm"):
             try:
                 self._repo.activate_position_mapping(
-                    client_order_id, deal_position_id, filled_volume, fill_price=fill_price,
+                    account_id, client_order_id, deal_position_id, filled_volume,
+                    fill_price=fill_price,
                 )
                 self._repo.log_event(
                     'slave_action',
@@ -492,7 +506,7 @@ class CopierService:
 
         slave_order_id = evt.order.orderId
         try:
-            self._repo.activate_order_mapping(client_order_id, slave_order_id)
+            self._repo.activate_order_mapping(account_id, client_order_id, slave_order_id)
             self._repo.log_event(
                 'slave_action',
                 'info',
@@ -579,7 +593,7 @@ class CopierService:
         # Try to mark mapping as failed if clientOrderId exists
         if client_order_id:
             try:
-                self._repo.fail_mapping(client_order_id, error_msg)
+                self._repo.fail_mapping(account_id, client_order_id, error_msg)
             except MappingNotFound:
                 pass  # Mapping doesn't exist - no-op
 

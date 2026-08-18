@@ -379,7 +379,7 @@ class TestDispatcher:
 
         # Create an order mapping and activate it
         repo.create_order_mapping(50, 101, "co50.101", org_id=ORG_ID)
-        repo.activate_order_mapping("co50.101", 999)  # slave_order_id=999
+        repo.activate_order_mapping(101, "co50.101", 999)  # slave_order_id=999
 
         intent = LinkPendingFill(
             slave_account_id=101,
@@ -931,7 +931,7 @@ class TestPositionIncreaseSeam:
 
         dispatcher.dispatch([self._open_market(42, 10_000_000)], org_id=ORG_ID)
         # The first copy fills, exactly as a slave execution event would report it.
-        repo.activate_position_mapping("cm42.101", 777, 10_000_000, fill_price=1.1050)
+        repo.activate_position_mapping(101, "cm42.101", 777, 10_000_000, fill_price=1.1050)
 
         dispatcher.dispatch([self._open_market(42, 5_000_000)], org_id=ORG_ID)   # the increase
 
@@ -960,9 +960,9 @@ class TestPositionIncreaseSeam:
         dispatcher = Dispatcher(lambda a, m: defer.succeed(None), repo, bucket, clock=Clock())
 
         dispatcher.dispatch([self._open_market(42, 10_000_000)], org_id=ORG_ID)
-        repo.activate_position_mapping("cm42.101", 777, 10_000_000)
+        repo.activate_position_mapping(101, "cm42.101", 777, 10_000_000)
         dispatcher.dispatch([self._open_market(42, 5_000_000)], org_id=ORG_ID)
-        repo.activate_position_mapping("cm42.101", 777, 5_000_000)
+        repo.activate_position_mapping(101, "cm42.101", 777, 5_000_000)
 
         rows = [r for r in repo.mapping_rows() if r["master_position_id"] == 42]
         assert len(rows) == 1

@@ -497,7 +497,7 @@ def test_get_state_includes_master_positions_with_copies_pending_orders_and_drif
     assert app.state_tracker is not None  # master (999) exists
 
     repo.create_position_mapping(master_position_id=42, slave_account_id=100, client_order_id="cm42.100")
-    repo.activate_position_mapping("cm42.100", slave_position_id=5001, slave_volume=100_000)
+    repo.activate_position_mapping(100, "cm42.100", slave_position_id=5001, slave_volume=100_000)
 
     app.reconciler.master_positions = [
         PositionSnapshot(position_id=42, symbol_id=1, side=Side.BUY, volume=100_000, price=1.1, label="copy:m42")
@@ -987,7 +987,7 @@ def test_get_state_enriches_copies_and_master_rows_for_the_positions_screen(repo
 
     repo.create_position_mapping(master_position_id=42, slave_account_id=100,
                                  client_order_id="cm42.100")
-    repo.activate_position_mapping("cm42.100", slave_position_id=5001,
+    repo.activate_position_mapping(100, "cm42.100", slave_position_id=5001,
                                    slave_volume=5_000_000, fill_price=1.10537)
 
     app.reconciler.master_positions = [

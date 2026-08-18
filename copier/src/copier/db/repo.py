@@ -380,6 +380,7 @@ class Repo:
 
     def activate_position_mapping(
         self,
+        slave_account_id: int,
         client_order_id: str,
         slave_position_id: int,
         slave_volume: int,
@@ -416,7 +417,17 @@ class Repo:
         price for the slippage the Positions screen shows against the
         master's entry; a later increase's price would silently redefine it.
 
-        Raises MappingNotFound if no mapping exists with this client_order_id.
+        `slave_account_id` is an OWNERSHIP predicate, not a lookup key --
+        client_order_id is already unique. It is here because the coid is
+        derived and guessable (`cm{master_position_id}.{slave_account_id}`,
+        engine/dispatch.py:client_order_id_for) while master position ids are
+        per-account broker sequences that collide across orgs: this statement
+        writes real-money sizing state, so it accumulates volume onto a row
+        only when the account that reported the fill is the row's own slave.
+        The service has the account in hand from the execution event.
+
+        Raises MappingNotFound if no mapping exists with this client_order_id
+        FOR THAT SLAVE ACCOUNT.
         """
         with psycopg.connect(self.dsn, autocommit=True) as conn:
             cursor = conn.execute(
@@ -427,12 +438,15 @@ class Repo:
                     fill_price = COALESCE(fill_price, %s),
                     status = 'active',
                     updated_at = now()
-                WHERE client_order_id = %s
+                WHERE client_order_id = %s AND slave_account_id = %s
                 """,
-                (slave_position_id, slave_volume, fill_price, client_order_id),
+                (slave_position_id, slave_volume, fill_price, client_order_id,
+                 slave_account_id),
             )
             if cursor.rowcount == 0:
-                raise MappingNotFound(f"No mapping found with client_order_id={client_order_id}")
+                raise MappingNotFound(
+                    f"No mapping found with client_order_id={client_order_id} "
+                    f"for slave_account_id={slave_account_id}")
 
     def reduce_position_mapping(
         self,
@@ -460,22 +474,30 @@ class Repo:
                 (closed_volume, closed_volume, slave_account_id, slave_position_id),
             ).fetchone()
 
-    def fail_mapping(self, client_order_id: str, error: str) -> None:
+    def fail_mapping(self, slave_account_id: int, client_order_id: str, error: str) -> None:
         """Mark a mapping as failed with an error message.
 
-        Raises MappingNotFound if no mapping exists with this client_order_id.
+        `slave_account_id` is an ownership predicate (see
+        activate_position_mapping): one slave's rejection must not fail
+        another slave's copy, so the row is pinned to the account whose
+        broker actually reported the rejection.
+
+        Raises MappingNotFound if no mapping exists with this client_order_id
+        FOR THAT SLAVE ACCOUNT.
         """
         with psycopg.connect(self.dsn, autocommit=True) as conn:
             cursor = conn.execute(
                 """
                 UPDATE mappings
                 SET status = 'failed', error = %s, updated_at = now()
-                WHERE client_order_id = %s
+                WHERE client_order_id = %s AND slave_account_id = %s
                 """,
-                (error, client_order_id),
+                (error, client_order_id, slave_account_id),
             )
             if cursor.rowcount == 0:
-                raise MappingNotFound(f"No mapping found with client_order_id={client_order_id}")
+                raise MappingNotFound(
+                    f"No mapping found with client_order_id={client_order_id} "
+                    f"for slave_account_id={slave_account_id}")
 
     def create_order_mapping(
         self,
@@ -494,22 +516,34 @@ class Repo:
                 (master_order_id, slave_account_id, client_order_id, org_id),
             )
 
-    def activate_order_mapping(self, client_order_id: str, slave_order_id: int) -> None:
+    def activate_order_mapping(
+        self, slave_account_id: int, client_order_id: str, slave_order_id: int
+    ) -> None:
         """Activate an order mapping.
 
-        Raises MappingNotFound if no pending mapping exists with this client_order_id.
+        `slave_account_id` is an ownership predicate (see
+        activate_position_mapping): the slave_order_id being stamped is only
+        meaningful on the account that issued it, so writing it onto another
+        account's row would misdirect every later lookup keyed on
+        (slave_account_id, slave_order_id) -- close_order_mapping and
+        activate_pending_fill both are.
+
+        Raises MappingNotFound if no pending mapping exists with this
+        client_order_id FOR THAT SLAVE ACCOUNT.
         """
         with psycopg.connect(self.dsn, autocommit=True) as conn:
             cursor = conn.execute(
                 """
                 UPDATE mappings
                 SET slave_order_id = %s, status = 'active', updated_at = now()
-                WHERE client_order_id = %s
+                WHERE client_order_id = %s AND slave_account_id = %s
                 """,
-                (slave_order_id, client_order_id),
+                (slave_order_id, client_order_id, slave_account_id),
             )
             if cursor.rowcount == 0:
-                raise MappingNotFound(f"No mapping found with client_order_id={client_order_id}")
+                raise MappingNotFound(
+                    f"No mapping found with client_order_id={client_order_id} "
+                    f"for slave_account_id={slave_account_id}")
 
     def close_order_mapping(self, slave_account_id: int, slave_order_id: int) -> None:
         """Close an order mapping.
