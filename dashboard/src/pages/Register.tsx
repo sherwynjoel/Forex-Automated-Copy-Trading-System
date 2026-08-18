@@ -2,7 +2,8 @@ import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { api } from '../lib/api'
 
-export default function Login() {
+export default function Register() {
+  const [displayName, setDisplayName] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -15,14 +16,14 @@ export default function Login() {
     setIsLoading(true)
 
     try {
-      await api('/api/login', {
+      await api('/api/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ email, password, display_name: displayName }),
       })
-      navigate('/')
+      navigate('/welcome')
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Login failed')
+      setError(err instanceof Error ? err.message : 'Registration failed')
     } finally {
       setIsLoading(false)
     }
@@ -36,7 +37,7 @@ export default function Login() {
             Copy Desk
           </h2>
           <p className="mt-2 text-center text-sm text-ink-soft">
-            Sign in to open the desk
+            Create an account to open the desk
           </p>
         </div>
         <form className="mt-8 space-y-6" onSubmit={handleSubmit}>
@@ -47,6 +48,22 @@ export default function Login() {
           )}
           <div className="rounded-md shadow-sm -space-y-px">
             <div>
+              <label htmlFor="displayName" className="sr-only">
+                Display name
+              </label>
+              <input
+                id="displayName"
+                name="displayName"
+                type="text"
+                autoComplete="name"
+                required
+                className="appearance-none relative block w-full px-3 py-2 border border-line-strong placeholder-ink-faint text-ink rounded-t-md bg-card sm:text-sm"
+                placeholder="Display name"
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+              />
+            </div>
+            <div>
               <label htmlFor="email" className="sr-only">
                 Email
               </label>
@@ -56,7 +73,7 @@ export default function Login() {
                 type="email"
                 autoComplete="email"
                 required
-                className="appearance-none relative block w-full px-3 py-2 border border-line-strong placeholder-ink-faint text-ink rounded-t-md bg-card sm:text-sm"
+                className="appearance-none relative block w-full px-3 py-2 border border-line-strong placeholder-ink-faint text-ink sm:text-sm"
                 placeholder="Email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
@@ -70,10 +87,11 @@ export default function Login() {
                 id="password"
                 name="password"
                 type="password"
-                autoComplete="current-password"
+                autoComplete="new-password"
                 required
+                minLength={10}
                 className="appearance-none relative block w-full px-3 py-2 border border-line-strong placeholder-ink-faint text-ink rounded-b-md bg-card sm:text-sm"
-                placeholder="Password"
+                placeholder="Password (min. 10 characters)"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
               />
@@ -86,14 +104,14 @@ export default function Login() {
               disabled={isLoading}
               className="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-semibold rounded-md text-white bg-brand hover:bg-brand-deep transition-colors disabled:opacity-50"
             >
-              {isLoading ? 'Signing in...' : 'Sign in'}
+              {isLoading ? 'Creating account...' : 'Create account'}
             </button>
           </div>
 
           <p className="text-center text-sm text-ink-soft">
-            New here?{' '}
-            <Link to="/register" className="font-medium text-brand hover:text-brand-deep">
-              Create an account
+            Already have an account?{' '}
+            <Link to="/login" className="font-medium text-brand hover:text-brand-deep">
+              Sign in
             </Link>
           </p>
         </form>

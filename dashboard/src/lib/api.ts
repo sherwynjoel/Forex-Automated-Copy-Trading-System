@@ -68,10 +68,21 @@ export async function api<T>(
 }
 
 /**
- * Create a WebSocket connection to the events stream
+ * Make an org-scoped API request: GET/POST/etc. against
+ * /api/orgs/{orgId}/{tail}.
  */
-export function eventsSocket(): WebSocket {
+export function orgApi<T>(orgId: number, tail: string, init?: RequestInit): Promise<T> {
+  return api<T>(`/api/orgs/${orgId}/${tail}`, init)
+}
+
+/**
+ * Create a WebSocket connection to the events stream, scoped to an org when
+ * one is given. `orgId` is optional so pages not yet converted to org-scoped
+ * routing (Task 17) keep connecting to the unscoped stream unchanged.
+ */
+export function eventsSocket(orgId?: number): WebSocket {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const url = `${protocol}//${window.location.host}/api/ws`
+  const query = orgId != null ? `?org_id=${orgId}` : ''
+  const url = `${protocol}//${window.location.host}/api/ws${query}`
   return new WebSocket(url)
 }

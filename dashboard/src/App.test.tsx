@@ -1,45 +1,22 @@
 import { render, screen, waitFor } from '@testing-library/react'
-import { expect, test, vi, afterEach } from 'vitest'
-import { MemoryRouter, Routes, Route } from 'react-router-dom'
-import { useEffect, useState } from 'react'
-import { api } from './lib/api'
+import { MemoryRouter } from 'react-router-dom'
+import { expect, test, vi, afterEach, beforeEach } from 'vitest'
 import Layout from './components/Layout'
-import Login from './pages/Login'
+import App from './App'
+
+beforeEach(() => {
+  window.localStorage.clear()
+  window.history.pushState({}, '', '/')
+})
 
 afterEach(() => vi.unstubAllGlobals())
 
-// Test component that mimics ProtectedLayout from App.tsx
-function ProtectedLayout() {
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null)
-
-  useEffect(() => {
-    const checkAuth = async () => {
-      try {
-        const result = await api<{ authenticated: boolean }>('/api/me')
-        setIsAuthenticated(result.authenticated)
-      } catch (err) {
-        setIsAuthenticated(false)
-      }
-    }
-    checkAuth()
-  }, [])
-
-  if (isAuthenticated === null) {
-    return <div>Loading...</div>
-  }
-
-  if (!isAuthenticated) {
-    return <div>Not authenticated</div>
-  }
-
-  return <Layout />
+function meResponse(orgs: Array<{ id: number; name: string; role: string }>) {
+  return new Response(
+    JSON.stringify({ user: { id: 1, email: 'a@example.com', display_name: 'A' }, orgs }),
+    { status: 200, headers: { 'content-type': 'application/json' } }
+  )
 }
-
-// Placeholder screen content
-const Overview = () => <div>Overview - Coming soon</div>
-const Accounts = () => <div>Accounts - Coming soon</div>
-const Positions = () => <div>Positions - Coming soon</div>
-const Logs = () => <div>Logs - Coming soon</div>
 
 test('Layout renders sidebar navigation', async () => {
   render(
@@ -65,43 +42,36 @@ test('Layout renders sidebar navigation', async () => {
   expect(screen.getByRole('button', { name: /log out/i })).toBeInTheDocument()
 })
 
-test('protected screen content renders through Outlet after auth', async () => {
-  // Mock /api/me to return authenticated
-  const fetchMock = vi.fn((url: string) => {
-    if (url === '/api/me') {
-      return Promise.resolve(
-        new Response(JSON.stringify({ authenticated: true }), {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        })
-      )
-    }
+test('/ redirects to /welcome when the user has no orgs', async () => {
+  const fetchMock = vi.fn((input: RequestInfo | URL) => {
+    const url = String(input)
+    if (url === '/api/me') return Promise.resolve(meResponse([]))
     throw new Error(`Unexpected fetch: ${url}`)
   })
   vi.stubGlobal('fetch', fetchMock)
 
-  // Render full app at root path
-  render(
-    <MemoryRouter initialEntries={['/']}>
-      <Routes>
-        <Route path="/login" element={<Login />} />
-        <Route element={<ProtectedLayout />}>
-          <Route index element={<Overview />} />
-          <Route path="accounts" element={<Accounts />} />
-          <Route path="positions" element={<Positions />} />
-          <Route path="logs" element={<Logs />} />
-        </Route>
-      </Routes>
-    </MemoryRouter>
-  )
+  render(<App />)
 
-  // Initially loading
-  expect(screen.getByText(/Loading/i)).toBeInTheDocument()
-
-  // After auth check, should render Layout with Outlet content
-  // This REQUIRES <Outlet/> in Layout to work — will FAIL if Outlet is removed
   await waitFor(() => {
-    expect(screen.getByText(/Copy Desk/i)).toBeInTheDocument()
-    expect(screen.getByText(/Overview - Coming soon/i)).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/welcome')
+  })
+  expect(await screen.findByText(/create an organization/i)).toBeInTheDocument()
+})
+
+test('an /org/:orgId route redirects to /welcome when the user is not a member of that org', async () => {
+  const fetchMock = vi.fn((input: RequestInfo | URL) => {
+    const url = String(input)
+    if (url === '/api/me') {
+      return Promise.resolve(meResponse([{ id: 5, name: 'Acme', role: 'admin' }]))
+    }
+    throw new Error(`Unexpected fetch: ${url}`)
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  window.history.pushState({}, '', '/org/999')
+
+  render(<App />)
+
+  await waitFor(() => {
+    expect(window.location.pathname).toBe('/welcome')
   })
 })

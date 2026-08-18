@@ -1,3 +1,32 @@
+import type { Role } from './roles'
+
+export interface OrgSummary {
+  id: number
+  name: string
+  role: Role
+}
+
+export interface Me {
+  user: { id: number; email: string; display_name: string }
+  orgs: OrgSummary[]
+}
+
+export interface Member {
+  user_id: number
+  email: string
+  display_name: string
+  role: Role
+  joined_at: string
+}
+
+export interface Invite {
+  id: number
+  role: Role
+  created_at: string
+  expires_at: string
+  consumed: boolean
+}
+
 export interface Account {
   ctid_trader_account_id: number
   trader_login: number
@@ -143,7 +172,6 @@ export interface CloseAllResult {
 export interface Settings {
   copying_enabled: boolean
   dry_run: boolean
-  shards: number
 }
 
 export interface EventResponse {
