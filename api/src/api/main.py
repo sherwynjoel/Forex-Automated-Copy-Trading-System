@@ -15,7 +15,7 @@ from .auth import (
     CSRFMiddleware,
     create_auth_router,
 )
-from .oauth import create_oauth_router
+from .oauth import create_oauth_router, create_oauth_callback_router
 from .routes.orgs import create_orgs_router
 from .routes.accounts import create_accounts_router
 from .routes.events import create_events_router
@@ -74,9 +74,11 @@ def create_app(http_transport: Optional[httpx.BaseTransport] = None) -> FastAPI:
     # Include orgs router (lifecycle, members, invites, join)
     app.include_router(create_orgs_router())
 
-    # Include OAuth router
+    # Include OAuth routers: org-scoped connect + global callback
     oauth_router = create_oauth_router()
     app.include_router(oauth_router)
+    oauth_callback_router = create_oauth_callback_router()
+    app.include_router(oauth_callback_router)
 
     # Include accounts router
     accounts_router = create_accounts_router()

@@ -6,8 +6,8 @@ import psycopg
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from ..auth import require_admin
 from ..db import get_conn
+from ..rbac import OrgContext, require_org_role
 
 
 class EventResponse(BaseModel):
@@ -23,7 +23,7 @@ class EventResponse(BaseModel):
 
 def create_events_router() -> APIRouter:
     """Create router for events REST endpoint."""
-    router = APIRouter(prefix="/api", tags=["events"])
+    router = APIRouter(prefix="/api/orgs/{org_id}", tags=["events"])
 
     @router.get("/events", response_model=List[EventResponse])
     async def list_events(
@@ -32,7 +32,7 @@ def create_events_router() -> APIRouter:
         category: Optional[str] = None,
         since: Optional[str] = None,
         limit: int = 200,
-        _: bool = Depends(require_admin),
+        ctx: OrgContext = Depends(require_org_role("viewer")),
         conn: psycopg.Connection = Depends(get_conn),
     ) -> List[EventResponse]:
         """Get audit log events with optional filtering.
@@ -61,10 +61,12 @@ def create_events_router() -> APIRouter:
             except (ValueError, AttributeError):
                 raise HTTPException(status_code=400, detail="since must be a valid ISO 8601 timestamp")
 
-        # Build query with optional filters
+        # Build query. org_id is a mandatory clause -- every request is
+        # scoped to the path's org, and NULL-org (infrastructure) events
+        # are never visible through this endpoint.
         query_parts = ["SELECT id, ts, account_id, category, severity, latency_ms, payload FROM events"]
-        params = []
-        where_clauses = []
+        where_clauses = ["org_id = %s"]
+        params = [ctx.org_id]
 
         if account_id is not None:
             where_clauses.append("account_id = %s")
@@ -82,8 +84,7 @@ def create_events_router() -> APIRouter:
             where_clauses.append("ts > %s")
             params.append(since)
 
-        if where_clauses:
-            query_parts.append("WHERE " + " AND ".join(where_clauses))
+        query_parts.append("WHERE " + " AND ".join(where_clauses))
 
         # Always order by ts DESC (newest first)
         query_parts.append("ORDER BY ts DESC")

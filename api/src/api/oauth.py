@@ -12,8 +12,9 @@ from itsdangerous import BadData
 import httpx
 
 from .config import ApiConfig
-from .auth import require_admin, get_session_serializer
+from .auth import require_user, get_session_serializer
 from .db import get_conn
+from .rbac import OrgContext, require_org_role
 
 logger = logging.getLogger(__name__)
 
@@ -47,12 +48,12 @@ def _digest(value: str) -> str:
 
 
 def create_oauth_router() -> APIRouter:
-    """Create router with OAuth endpoints."""
-    router = APIRouter(prefix="/api/oauth", tags=["oauth"])
+    """Create router with the org-scoped OAuth connect endpoint."""
+    router = APIRouter(prefix="/api/orgs/{org_id}/oauth", tags=["oauth"])
 
     @router.get("/connect")
     async def connect(
-        _: bool = Depends(require_admin),
+        ctx: OrgContext = Depends(require_org_role("admin")),
         cfg: ApiConfig = Depends(ApiConfig.from_env),
         session: Optional[str] = Cookie(None),
         conn: psycopg.Connection = Depends(get_conn),
@@ -62,7 +63,7 @@ def create_oauth_router() -> APIRouter:
         if not session:
             raise HTTPException(status_code=401, detail="Not authenticated")
 
-        # Extract session value (already validated by require_admin)
+        # Extract session value (already validated by require_org_role/require_user)
         session_serializer = get_session_serializer(cfg)
         try:
             session_serializer.loads(session, max_age=43200)
@@ -82,11 +83,11 @@ def create_oauth_router() -> APIRouter:
         try:
             conn.execute(
                 """
-                INSERT INTO oauth_states (state_hash, session, consumed_at)
-                VALUES (%s, %s, NULL)
+                INSERT INTO oauth_states (state_hash, session, org_id, consumed_at)
+                VALUES (%s, %s, %s, NULL)
                 ON CONFLICT (state_hash) DO NOTHING
                 """,
-                (_digest(state), _digest(session)),
+                (_digest(state), _digest(session), ctx.org_id),
             )
         except Exception as e:
             logger.error(f"Failed to store OAuth state: {e}")
@@ -104,11 +105,23 @@ def create_oauth_router() -> APIRouter:
 
         return RedirectResponse(url=authorize_url, status_code=307)
 
+    return router
+
+
+def create_oauth_callback_router() -> APIRouter:
+    """Create router with the global OAuth callback endpoint.
+
+    This path is NOT org-scoped: it must match the redirect URI registered
+    with cTrader exactly (`/api/oauth/callback`), so the org is resolved
+    from the consumed `oauth_states` row rather than from the path.
+    """
+    router = APIRouter(prefix="/api/oauth", tags=["oauth"])
+
     @router.get("/callback")
     async def callback(
         code: Optional[str] = None,
         state: Optional[str] = None,
-        _: bool = Depends(require_admin),
+        user_id: int = Depends(require_user),
         cfg: ApiConfig = Depends(ApiConfig.from_env),
         conn: psycopg.Connection = Depends(get_conn),
         session: Optional[str] = Cookie(None),
@@ -122,7 +135,7 @@ def create_oauth_router() -> APIRouter:
         # on redirect -- the callback arrives as `?code=...` and nothing else
         # (their docs describe only `code` being appended). When state IS
         # present it is validated strictly; when absent, the consume below
-        # falls back to the pending nonce bound to this admin session.
+        # falls back to the pending nonce bound to this session.
         if not code:
             logger.warning("OAuth callback missing authorization code")
             raise HTTPException(status_code=400, detail="Missing authorization code")
@@ -137,10 +150,13 @@ def create_oauth_router() -> APIRouter:
         # legitimate flow's state:
         #   - the nonce was issued by us and is not forged  (state_hash match)
         #   - it has not already been used                  (consumed_at IS NULL)
-        #   - it belongs to THIS admin session              (session digest match)
+        #   - it belongs to THIS session                    (session digest match)
         #   - it has not expired                            (created_at within TTL)
-        # `session` is guaranteed non-empty here: require_admin already
-        # rejected the request otherwise.
+        # `session` is guaranteed non-empty here: require_user already
+        # rejected the request otherwise. The org is resolved from the
+        # consumed row, not the caller's membership: a logged-in user can
+        # only complete a callback for a state bound to their own session
+        # cookie, which in practice means they initiated the connect flow.
         try:
             now = datetime.now(timezone.utc)
             if state:
@@ -151,7 +167,7 @@ def create_oauth_router() -> APIRouter:
                       AND consumed_at IS NULL
                       AND session = %s
                       AND created_at > %s - make_interval(secs => %s)
-                    RETURNING state_hash
+                    RETURNING state_hash, org_id
                     """,
                     (
                         now,
@@ -164,7 +180,7 @@ def create_oauth_router() -> APIRouter:
             else:
                 # cTrader never echoes `state`, so the callback cannot present
                 # the nonce. Consume the most recent pending nonce bound to
-                # THIS admin session instead: still single-use, still
+                # THIS session instead: still single-use, still
                 # TTL-bounded, still session-bound. The outer
                 # `consumed_at IS NULL` re-checks on the row the subquery
                 # picked, so concurrent callbacks cannot both consume it.
@@ -180,7 +196,7 @@ def create_oauth_router() -> APIRouter:
                         ORDER BY created_at DESC
                         LIMIT 1
                       )
-                    RETURNING state_hash
+                    RETURNING state_hash, org_id
                     """,
                     (
                         now,
@@ -199,6 +215,8 @@ def create_oauth_router() -> APIRouter:
                     "bound to a different session) - possible replay/forgery"
                 )
                 raise HTTPException(status_code=403, detail="Invalid or already-used state")
+
+            org_id = result[1]
         except HTTPException:
             raise
         except Exception as e:
@@ -286,11 +304,11 @@ def create_oauth_router() -> APIRouter:
 
             result = conn.execute(
                 """
-                INSERT INTO ctid_connections (access_token_enc, refresh_token_enc, granted_at, expires_at, scope, status)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                INSERT INTO ctid_connections (org_id, access_token_enc, refresh_token_enc, granted_at, expires_at, scope, status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
-                (access_token_enc, refresh_token_enc, now, expires_at, "trading", "active"),
+                (org_id, access_token_enc, refresh_token_enc, now, expires_at, "trading", "active"),
             ).fetchone()
 
             connection_id = result[0] if result else None
@@ -315,8 +333,8 @@ def create_oauth_router() -> APIRouter:
                 logger.warning(f"Discovery request failed: {e}")
                 discover_failed = True
 
-        # Redirect to accounts page
-        redirect_url = "/accounts?connected=1"
+        # Redirect to the starting org's accounts page
+        redirect_url = f"/org/{org_id}/accounts?connected=1"
         if discover_failed:
             redirect_url += "&warning=discover_failed"
 
