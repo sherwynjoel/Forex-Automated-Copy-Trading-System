@@ -275,6 +275,10 @@ class TestBuildRequest:
         req.SerializeToString()
 
 
+ORG_ID = 1
+OTHER_ORG_ID = 2
+
+
 @pytest.fixture
 def repo(db):
     """Create a Repo instance."""
@@ -284,24 +288,52 @@ def repo(db):
 
 @pytest.fixture
 def seed_accounts(db):
-    """Seed test accounts."""
+    """Seed one org with its connection and two slave accounts.
+
+    Every dispatch in this module is made on behalf of ORG_ID; the copy
+    gates dispatch reads live on that org's row, not on global settings.
+    """
     with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute("INSERT INTO orgs (id, name) VALUES (%s, 'Org A')", (ORG_ID,))
         conn.execute(
             """
-            INSERT INTO ctid_connections (access_token_enc, refresh_token_enc, granted_at, expires_at)
-            VALUES (%s, %s, now(), now() + interval '1 hour')
+            INSERT INTO ctid_connections (org_id, access_token_enc, refresh_token_enc, granted_at, expires_at)
+            VALUES (%s, %s, %s, now(), now() + interval '1 hour')
             """,
-            ("token_access", "token_refresh"),
+            (ORG_ID, "token_access", "token_refresh"),
         )
         conn.execute(
             """
-            INSERT INTO accounts (ctid_trader_account_id, ctid_connection_id, trader_login, is_live, role, enabled, multiplier)
+            INSERT INTO accounts (ctid_trader_account_id, org_id, ctid_connection_id, trader_login, is_live, role, enabled, multiplier)
             VALUES
-                (101, 1, 10001, false, 'slave', true, 1.5),
-                (102, 1, 10002, false, 'slave', true, 2.0)
-            """
+                (101, %(org)s, 1, 10001, false, 'slave', true, 1.5),
+                (102, %(org)s, 1, 10002, false, 'slave', true, 2.0)
+            """,
+            {"org": ORG_ID},
         )
     return db
+
+
+@pytest.fixture
+def seed_two_orgs(seed_accounts):
+    """Add a SECOND org (OTHER_ORG_ID) with its own connection and slave 201."""
+    with psycopg.connect(seed_accounts, autocommit=True) as conn:
+        conn.execute("INSERT INTO orgs (id, name) VALUES (%s, 'Org B')", (OTHER_ORG_ID,))
+        conn.execute(
+            """
+            INSERT INTO ctid_connections (org_id, access_token_enc, refresh_token_enc, granted_at, expires_at)
+            VALUES (%s, %s, %s, now(), now() + interval '1 hour')
+            """,
+            (OTHER_ORG_ID, "token_access_b", "token_refresh_b"),
+        )
+        conn.execute(
+            """
+            INSERT INTO accounts (ctid_trader_account_id, org_id, ctid_connection_id, trader_login, is_live, role, enabled, multiplier)
+            VALUES (201, %s, 2, 20001, false, 'slave', true, 1.0)
+            """,
+            (OTHER_ORG_ID,),
+        )
+    return seed_accounts
 
 
 class TestDispatcher:
@@ -320,7 +352,7 @@ class TestDispatcher:
         dispatcher = Dispatcher(mock_send, repo, bucket, clock=clock)
 
         intent = Alert(slave_account_id=101, message="Test alert message")
-        dispatcher.dispatch([intent])
+        dispatcher.dispatch([intent], org_id=ORG_ID)
 
         # Verify no messages sent
         assert len(sent_messages) == 0
@@ -346,7 +378,7 @@ class TestDispatcher:
         dispatcher = Dispatcher(mock_send, repo, bucket, clock=clock)
 
         # Create an order mapping and activate it
-        repo.create_order_mapping(50, 101, "co50.101")
+        repo.create_order_mapping(50, 101, "co50.101", org_id=ORG_ID)
         repo.activate_order_mapping("co50.101", 999)  # slave_order_id=999
 
         intent = LinkPendingFill(
@@ -354,7 +386,7 @@ class TestDispatcher:
             master_order_id=50,
             master_position_id=100
         )
-        dispatcher.dispatch([intent])
+        dispatcher.dispatch([intent], org_id=ORG_ID)
 
         # Verify no messages sent
         assert len(sent_messages) == 0
@@ -376,7 +408,7 @@ class TestDispatcher:
             sent_messages.append((account_id, msg))
             return defer.succeed(None)
 
-        repo.set_setting("copying_enabled", False)
+        repo.set_org_setting(ORG_ID, "copying_enabled", False)
 
         clock = Clock()
         bucket = Mock()
@@ -392,7 +424,7 @@ class TestDispatcher:
             take_profit=None,
             label="copy:m42"
         )
-        dispatcher.dispatch([intent])
+        dispatcher.dispatch([intent], org_id=ORG_ID)
 
         # Verify nothing was sent
         assert len(sent_messages) == 0
@@ -413,7 +445,7 @@ class TestDispatcher:
             sent_messages.append((account_id, msg))
             return defer.succeed(None)
 
-        repo.set_setting("dry_run", True)
+        repo.set_org_setting(ORG_ID, "dry_run", True)
 
         clock = Clock()
         bucket = Mock()
@@ -429,7 +461,7 @@ class TestDispatcher:
             take_profit=1.15,
             label="copy:m42"
         )
-        dispatcher.dispatch([intent])
+        dispatcher.dispatch([intent], org_id=ORG_ID)
 
         # Verify nothing was sent
         assert len(sent_messages) == 0
@@ -484,7 +516,7 @@ class TestDispatcher:
             take_profit=None,
             label="copy:m42"
         )
-        dispatcher.dispatch([intent])
+        dispatcher.dispatch([intent], org_id=ORG_ID)
 
         # Verify message was sent
         assert len(sent_messages) == 1
@@ -528,7 +560,7 @@ class TestDispatcher:
             expiry_ts_ms=None,
             label="copy:o99"
         )
-        dispatcher.dispatch([intent])
+        dispatcher.dispatch([intent], org_id=ORG_ID)
 
         # Verify message was sent
         assert len(sent_messages) == 1
@@ -571,7 +603,7 @@ class TestDispatcher:
             take_profit=None,
             label="copy:m42"
         )
-        dispatcher.dispatch([intent])
+        dispatcher.dispatch([intent], org_id=ORG_ID)
 
         # Verify first attempt was made
         assert attempt_count[0] == 1
@@ -641,7 +673,7 @@ class TestDispatcher:
             position_id=500,
             volume=40000
         )
-        dispatcher.dispatch([intent1, intent2])
+        dispatcher.dispatch([intent1, intent2], org_id=ORG_ID)
 
         # Both should have been attempted
         assert attempt_count['slave101'] >= 1
@@ -684,7 +716,7 @@ class TestDispatcher:
         intent2 = _UnprocessableIntent(slave_account_id=102)
         intent3 = ClosePosition(slave_account_id=101, position_id=501, volume=20000)
 
-        dispatcher.dispatch([intent1, intent2, intent3])
+        dispatcher.dispatch([intent1, intent2, intent3], org_id=ORG_ID)
 
         # Verify #1 and #3 were sent (slave 101), #2 failed but not blocking
         close_messages = [msg for msg in sent_messages if msg[0] == 101]
@@ -738,7 +770,7 @@ class TestDispatcher:
             take_profit=None,
             label="copy:m42"
         )
-        dispatcher.dispatch([intent])
+        dispatcher.dispatch([intent], org_id=ORG_ID)
 
         # First attempt made immediately
         assert attempt_count[0] == 1
@@ -785,7 +817,7 @@ class TestDispatcher:
             take_profit=None,
             label="copy:m42"
         )
-        dispatcher.dispatch([intent])
+        dispatcher.dispatch([intent], org_id=ORG_ID)
 
         assert attempt_count[0] == 1
         clock.advance(1.0)
@@ -830,7 +862,7 @@ class TestDispatcher:
             take_profit=None,
             label="copy:m42"
         )
-        dispatcher.dispatch([intent])
+        dispatcher.dispatch([intent], org_id=ORG_ID)
 
         # Exactly ONE attempt (no retry for ambiguous failures)
         assert attempt_count[0] == 1
@@ -897,11 +929,11 @@ class TestPositionIncreaseSeam:
         bucket.acquire.return_value = defer.succeed(None)
         dispatcher = Dispatcher(mock_send, repo, bucket, clock=Clock())
 
-        dispatcher.dispatch([self._open_market(42, 10_000_000)])
+        dispatcher.dispatch([self._open_market(42, 10_000_000)], org_id=ORG_ID)
         # The first copy fills, exactly as a slave execution event would report it.
         repo.activate_position_mapping("cm42.101", 777, 10_000_000, fill_price=1.1050)
 
-        dispatcher.dispatch([self._open_market(42, 5_000_000)])   # the increase
+        dispatcher.dispatch([self._open_market(42, 5_000_000)], org_id=ORG_ID)   # the increase
 
         assert len(sent_messages) == 2, (
             "the increase never reached the wire: "
@@ -927,9 +959,9 @@ class TestPositionIncreaseSeam:
         bucket.acquire.return_value = defer.succeed(None)
         dispatcher = Dispatcher(lambda a, m: defer.succeed(None), repo, bucket, clock=Clock())
 
-        dispatcher.dispatch([self._open_market(42, 10_000_000)])
+        dispatcher.dispatch([self._open_market(42, 10_000_000)], org_id=ORG_ID)
         repo.activate_position_mapping("cm42.101", 777, 10_000_000)
-        dispatcher.dispatch([self._open_market(42, 5_000_000)])
+        dispatcher.dispatch([self._open_market(42, 5_000_000)], org_id=ORG_ID)
         repo.activate_position_mapping("cm42.101", 777, 5_000_000)
 
         rows = [r for r in repo.mapping_rows() if r["master_position_id"] == 42]
@@ -956,7 +988,7 @@ class TestDegradedAutoClear:
         dispatcher.dispatch([OpenMarket(
             slave_account_id=101, master_position_id=77, symbol_id=100, side=Side.BUY,
             volume=10_000, stop_loss=None, take_profit=None, label="copy:m77",
-        )])
+        )], org_id=ORG_ID)
 
         account = next(a for a in repo.load_accounts() if a.account_id == 101)
         assert account.status == 'ok'
@@ -980,7 +1012,7 @@ class TestDegradedAutoClear:
         dispatcher.dispatch([OpenMarket(
             slave_account_id=101, master_position_id=78, symbol_id=100, side=Side.BUY,
             volume=10_000, stop_loss=None, take_profit=None, label="copy:m78",
-        )])
+        )], org_id=ORG_ID)
 
         account = next(a for a in repo.load_accounts() if a.account_id == 101)
         assert account.status == 'paused'
@@ -998,10 +1030,101 @@ class TestDegradedAutoClear:
         dispatcher.dispatch([OpenMarket(
             slave_account_id=101, master_position_id=79, symbol_id=100, side=Side.BUY,
             volume=10_000, stop_loss=None, take_profit=None, label="copy:m79",
-        )])
+        )], org_id=ORG_ID)
         for delay in RETRY_DELAYS:
             clock.advance(delay)
 
         account = next(a for a in repo.load_accounts() if a.account_id == 101)
         assert account.status == 'degraded'
         assert account.last_error
+
+
+class TestPerOrgGates:
+    """The copy gates are per-org state, read from the dispatching org's row.
+
+    Before multi-org they were a single global settings row, so ANY tenant
+    pausing copying or switching to dry-run silently froze every other
+    tenant's replication -- and one tenant flipping copying back on
+    un-paused everybody.
+    """
+
+    def _open_market(self, slave_account_id: int, master_position_id: int) -> OpenMarket:
+        return OpenMarket(
+            slave_account_id=slave_account_id,
+            master_position_id=master_position_id,
+            symbol_id=100,
+            side=Side.BUY,
+            volume=50_000,
+            stop_loss=None,
+            take_profit=None,
+            label=f"copy:m{master_position_id}",
+        )
+
+    def test_another_orgs_kill_switch_does_not_suppress_this_orgs_copying(
+        self, seed_two_orgs, repo
+    ):
+        """Org B pausing copying must leave org A trading normally."""
+        repo.set_org_setting(OTHER_ORG_ID, "copying_enabled", False)
+
+        sent = []
+        bucket = Mock()
+        bucket.acquire.return_value = defer.succeed(None)
+        dispatcher = Dispatcher(
+            lambda a, m: (sent.append((a, m)), defer.succeed(None))[1],
+            repo, bucket, clock=Clock(),
+        )
+
+        dispatcher.dispatch([self._open_market(101, 42)], org_id=ORG_ID)
+
+        assert [a for a, _m in sent] == [101]
+        assert repo.get_org(ORG_ID).copying_enabled is True
+
+    def test_this_orgs_kill_switch_suppresses_only_this_org(self, seed_two_orgs, repo):
+        """Org A paused: org A's intent is suppressed, org B's still sends."""
+        repo.set_org_setting(ORG_ID, "copying_enabled", False)
+
+        sent = []
+        bucket = Mock()
+        bucket.acquire.return_value = defer.succeed(None)
+        dispatcher = Dispatcher(
+            lambda a, m: (sent.append((a, m)), defer.succeed(None))[1],
+            repo, bucket, clock=Clock(),
+        )
+
+        dispatcher.dispatch([self._open_market(101, 42)], org_id=ORG_ID)
+        dispatcher.dispatch([self._open_market(201, 43)], org_id=OTHER_ORG_ID)
+
+        assert [a for a, _m in sent] == [201], "org A was paused, org B was not"
+
+    def test_mappings_and_events_are_stamped_with_the_dispatching_org(
+        self, seed_two_orgs, repo
+    ):
+        """Every row this batch writes carries the org it was dispatched for,
+        so /state and the audit log can never leak across tenants."""
+        bucket = Mock()
+        bucket.acquire.return_value = defer.succeed(None)
+        dispatcher = Dispatcher(lambda a, m: defer.succeed(None), repo, bucket, clock=Clock())
+
+        dispatcher.dispatch([self._open_market(101, 42)], org_id=ORG_ID)
+        dispatcher.dispatch([self._open_market(201, 43)], org_id=OTHER_ORG_ID)
+
+        orgs_by_coid = {m["client_order_id"]: m["org_id"] for m in repo.mapping_rows()}
+        assert orgs_by_coid == {"cm42.101": ORG_ID, "cm43.201": OTHER_ORG_ID}
+        assert [m["client_order_id"] for m in repo.mapping_rows(org_id=ORG_ID)] == ["cm42.101"]
+
+    def test_dry_run_is_per_org(self, seed_two_orgs, repo):
+        """Org B in dry-run must not stop org A from putting orders on the wire."""
+        repo.set_org_setting(OTHER_ORG_ID, "dry_run", True)
+
+        sent = []
+        bucket = Mock()
+        bucket.acquire.return_value = defer.succeed(None)
+        dispatcher = Dispatcher(
+            lambda a, m: (sent.append((a, m)), defer.succeed(None))[1],
+            repo, bucket, clock=Clock(),
+        )
+
+        dispatcher.dispatch([self._open_market(101, 42)], org_id=ORG_ID)
+        dispatcher.dispatch([self._open_market(201, 43)], org_id=OTHER_ORG_ID)
+
+        assert [a for a, _m in sent] == [101], "only org B was in dry-run"

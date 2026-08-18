@@ -14,10 +14,13 @@ from twisted.internet.task import Clock
 
 from copier.db.repo import Repo, MappingNotFound
 from copier.domain.models import SymbolInfo, SlaveConfig, Side, PendingType, OpenMarket, Alert
+from copier.engine.routing import OrgRouting
 from copier.engine.service import CopierService, PENDING_FILL_ALERT_S
 
 
 # Test fixtures and helpers
+
+ORG_ID = 1
 
 EURUSD = SymbolInfo(
     symbol_id=1, name="EURUSD", digits=5,
@@ -54,25 +57,27 @@ def base_event(
 
 
 def seed_db(db):
-    """Seed test database with accounts and connections."""
+    """Seed test database with one org, its connection, and its accounts."""
     with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute("INSERT INTO orgs (id, name) VALUES (%s, 'Org A')", (ORG_ID,))
         # Create connection
         conn.execute(
             """
-            INSERT INTO ctid_connections (access_token_enc, refresh_token_enc, granted_at, expires_at)
-            VALUES (%s, %s, now(), now() + interval '1 hour')
+            INSERT INTO ctid_connections (org_id, access_token_enc, refresh_token_enc, granted_at, expires_at)
+            VALUES (%s, %s, %s, now(), now() + interval '1 hour')
             """,
-            ("token_access", "token_refresh"),
+            (ORG_ID, "token_access", "token_refresh"),
         )
         # Create master account (999) and slave accounts (100, 101)
         conn.execute(
             """
-            INSERT INTO accounts (ctid_trader_account_id, ctid_connection_id, trader_login, is_live, role, enabled, multiplier)
+            INSERT INTO accounts (ctid_trader_account_id, org_id, ctid_connection_id, trader_login, is_live, role, enabled, multiplier)
             VALUES
-                (999, 1, 99900, false, 'master', true, 1.0),
-                (100, 1, 10000, false, 'slave', true, 1.0),
-                (101, 1, 10001, false, 'slave', true, 1.5)
-            """
+                (999, %(org)s, 1, 99900, false, 'master', true, 1.0),
+                (100, %(org)s, 1, 10000, false, 'slave', true, 1.0),
+                (101, %(org)s, 1, 10001, false, 'slave', true, 1.5)
+            """,
+            {"org": ORG_ID},
         )
 
 
@@ -97,36 +102,45 @@ def clock():
 
 @pytest.fixture
 def recording_dispatcher():
-    """Mock dispatcher that records all dispatched intents."""
+    """Mock dispatcher that records every dispatch call's intents AND org."""
     dispatcher = Mock()
     dispatcher.dispatch = Mock()
     dispatcher.intents = []
+    dispatcher.calls = []  # [(intents, org_id)] -- one entry per dispatch call
 
-    def record_dispatch(intents):
+    def record_dispatch(intents, org_id):
         dispatcher.intents.extend(intents)
+        dispatcher.calls.append((list(intents), org_id))
 
     dispatcher.dispatch.side_effect = record_dispatch
     return dispatcher
 
 
 @pytest.fixture
-def service(repo, recording_dispatcher, clock):
-    """Create a CopierService instance for testing."""
-    master_symbols = {"EURUSD": EURUSD, "GBPUSD": GBPUSD}
-    slave_configs = [
-        SlaveConfig(account_id=100, enabled=True, multiplier=Decimal("1.0"),
-                   symbols={"EURUSD": EURUSD, "GBPUSD": GBPUSD}),
-        SlaveConfig(account_id=101, enabled=True, multiplier=Decimal("1.5"),
-                   symbols={"EURUSD": EURUSD, "GBPUSD": GBPUSD}),
-    ]
-    slaves_provider = lambda: slave_configs
+def routing_box(make_routing):
+    """Mutable holder for the routing the service sees.
 
+    The service reads its routing through a provider on every event, exactly
+    as it does in production (CopierApp.reload() swaps the table), so a test
+    can change the fleet mid-test by assigning to routing_box['routing'].
+    """
+    slaves = [
+        SlaveConfig(account_id=100, enabled=True, multiplier=Decimal("1.0"),
+                    symbols={"EURUSD": EURUSD, "GBPUSD": GBPUSD}),
+        SlaveConfig(account_id=101, enabled=True, multiplier=Decimal("1.5"),
+                    symbols={"EURUSD": EURUSD, "GBPUSD": GBPUSD}),
+    ]
+    return {"routing": make_routing(master=999, slaves=slaves, org_id=ORG_ID)}
+
+
+@pytest.fixture
+def service(repo, recording_dispatcher, clock, routing_box):
+    """Create a CopierService instance for testing."""
     return CopierService(
         repo=repo,
         dispatcher=recording_dispatcher,
-        master_account_id=999,
-        master_symbols_by_id={1: EURUSD, 2: GBPUSD},
-        slaves_provider=slaves_provider,
+        routing_provider=lambda: routing_box["routing"],
+        master_symbols_by_org={ORG_ID: {1: EURUSD, 2: GBPUSD}},
         clock=clock
     )
 
@@ -149,6 +163,117 @@ class TestMasterEventHandling:
         open_intents = [i for i in recording_dispatcher.intents if isinstance(i, OpenMarket)]
         assert len(open_intents) == 2
         assert all(i.master_position_id == 11 for i in open_intents)
+        # and dispatched on behalf of exactly the org that owns the master
+        assert [org_id for _intents, org_id in recording_dispatcher.calls] == [ORG_ID]
+
+
+class TestCrossOrgIsolation:
+    """THE invariant of the multi-org engine: one org's master events can
+    never produce trades on another org's accounts.
+
+    Before partitioning, the service held a single master_account_id and a
+    single flat slaves_provider(), so the moment a second tenant's accounts
+    existed in the same process every master fill fanned out across ALL of
+    them -- real orders, on other people's money.
+    """
+
+    @pytest.fixture
+    def two_org_db(self, db):
+        """Two orgs, each with its own connection, master, and slave."""
+        with psycopg.connect(db, autocommit=True) as conn:
+            conn.execute("INSERT INTO orgs (id, name) VALUES (1, 'Org A'), (2, 'Org B')")
+            conn.execute(
+                """
+                INSERT INTO ctid_connections (id, org_id, access_token_enc, refresh_token_enc,
+                                              granted_at, expires_at)
+                VALUES (1, 1, 'a', 'a', now(), now() + interval '1 hour'),
+                       (2, 2, 'b', 'b', now(), now() + interval '1 hour')
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO accounts (ctid_trader_account_id, org_id, ctid_connection_id,
+                                      trader_login, is_live, role, enabled, multiplier)
+                VALUES (100, 1, 1, 1000, false, 'master', true, 1.0),
+                       (101, 1, 1, 1001, false, 'slave',  true, 1.0),
+                       (200, 2, 2, 2000, false, 'master', true, 1.0),
+                       (201, 2, 2, 2001, false, 'slave',  true, 1.0)
+                """
+            )
+        return db
+
+    @pytest.fixture
+    def two_org_service(self, two_org_db, recording_dispatcher, clock):
+        symbols = {"EURUSD": EURUSD, "GBPUSD": GBPUSD}
+        routing = OrgRouting(
+            org_by_account={100: 1, 101: 1, 200: 2, 201: 2},
+            master_by_org={1: 100, 2: 200},
+            slaves_by_org={
+                1: [SlaveConfig(account_id=101, enabled=True,
+                                multiplier=Decimal("1.0"), symbols=symbols)],
+                2: [SlaveConfig(account_id=201, enabled=True,
+                                multiplier=Decimal("1.0"), symbols=symbols)],
+            },
+        )
+        return CopierService(
+            repo=Repo(two_org_db),
+            dispatcher=recording_dispatcher,
+            routing_provider=lambda: routing,
+            master_symbols_by_org={1: {1: EURUSD, 2: GBPUSD}, 2: {1: EURUSD, 2: GBPUSD}},
+            clock=clock,
+        )
+
+    def test_master_event_from_org_a_never_reaches_org_b_slaves(
+        self, two_org_service, recording_dispatcher
+    ):
+        """Two orgs in one routing table; a fill on org A's master produces
+        intents only for org A's slaves and dispatch is called with org A's id."""
+        evt = base_event(account_id=100, execution_type=ProtoOAExecutionType.ORDER_FILLED)
+        evt.deal.positionId = 11
+        evt.deal.filledVolume = 10_000_000
+
+        two_org_service.handle_execution(100, evt)
+
+        assert len(recording_dispatcher.calls) == 1, "org A's master fill must dispatch exactly once"
+        intents, org_id = recording_dispatcher.calls[0]
+        assert org_id == 1, f"dispatched under org {org_id}, not org A"
+        assert intents, "org A's master fill produced no intents at all"
+        assert {i.slave_account_id for i in intents} == {101}, (
+            f"an org A master event targeted accounts outside org A: "
+            f"{sorted({i.slave_account_id for i in intents})}"
+        )
+
+        # The mirror case: org B's master reaches only org B, under org B's id.
+        evt_b = base_event(account_id=200, execution_type=ProtoOAExecutionType.ORDER_FILLED,
+                           order_id=6, position_id=22)
+        evt_b.deal.positionId = 22
+        evt_b.deal.filledVolume = 10_000_000
+
+        two_org_service.handle_execution(200, evt_b)
+
+        assert len(recording_dispatcher.calls) == 2
+        intents_b, org_id_b = recording_dispatcher.calls[1]
+        assert org_id_b == 2
+        assert {i.slave_account_id for i in intents_b} == {201}
+
+    def test_slave_event_is_handled_under_its_own_org(
+        self, two_org_service, recording_dispatcher, two_org_db
+    ):
+        """A slave event never crosses orgs either: it is processed for the
+        org that owns the account, and its audit trail is stamped with it."""
+        evt = base_event(account_id=201, execution_type=ProtoOAExecutionType.ORDER_FILLED)
+        evt.order.clientOrderId = "cm11.201"  # matches nothing -> warning, no mutation
+        evt.deal.positionId = 55
+        evt.deal.filledVolume = 10_000_000
+
+        two_org_service.handle_execution(201, evt)
+
+        assert recording_dispatcher.calls == [], "slave events must never dispatch"
+        with psycopg.connect(two_org_db, autocommit=True) as conn:
+            orgs = conn.execute(
+                "SELECT DISTINCT org_id FROM events WHERE account_id = 201"
+            ).fetchall()
+        assert orgs == [(2,)], f"org B's slave event was stamped {orgs}"
 
 
 class TestSlaveEventHandling:
@@ -157,7 +282,8 @@ class TestSlaveEventHandling:
     def test_slave_events_never_dispatch(self, service, recording_dispatcher, repo):
         """Slave fill should update mapping but never call decide/dispatch."""
         # Create pending position mapping (as if master OpenMarket was already sent)
-        repo.create_position_mapping(master_position_id=11, slave_account_id=100, client_order_id="cm11.100")
+        repo.create_position_mapping(master_position_id=11, slave_account_id=100,
+                                     client_order_id="cm11.100", org_id=ORG_ID)
 
         # Now process a slave fill with matching clientOrderId
         evt = base_event(account_id=100, execution_type=ProtoOAExecutionType.ORDER_FILLED)
@@ -178,7 +304,8 @@ class TestSlaveEventHandling:
     def test_slave_fill_activates_mapping(self, service, repo):
         """Slave fill with clientOrderId 'cm' prefix should activate position mapping."""
         # Setup: pending mapping
-        repo.create_position_mapping(master_position_id=11, slave_account_id=100, client_order_id="cm11.100")
+        repo.create_position_mapping(master_position_id=11, slave_account_id=100,
+                                     client_order_id="cm11.100", org_id=ORG_ID)
 
         # Process slave fill
         evt = base_event(account_id=100, execution_type=ProtoOAExecutionType.ORDER_FILLED)
@@ -198,7 +325,8 @@ class TestSlaveEventHandling:
     def test_slave_close_reduces_mapping(self, service, repo):
         """Slave close with closePositionDetail should reduce position mapping."""
         # Setup: active position mapping
-        repo.create_position_mapping(master_position_id=11, slave_account_id=100, client_order_id="cm11.100")
+        repo.create_position_mapping(master_position_id=11, slave_account_id=100,
+                                     client_order_id="cm11.100", org_id=ORG_ID)
         repo.activate_position_mapping("cm11.100", 55, 10_000_000)
 
         # Process slave close (partial close of 4M out of 10M)
@@ -223,7 +351,8 @@ class TestSlaveEventHandling:
     def test_slave_pending_accept_then_fill_links_position(self, service, repo):
         """Slave ORDER_ACCEPTED 'co' order creates mapping; later fill links position."""
         # Setup: pending order mapping for master order 42
-        repo.create_order_mapping(master_order_id=42, slave_account_id=100, client_order_id="co42.100")
+        repo.create_order_mapping(master_order_id=42, slave_account_id=100,
+                                  client_order_id="co42.100", org_id=ORG_ID)
 
         # Step 1: ORDER_ACCEPTED activates order mapping
         evt_accept = base_event(
@@ -277,7 +406,8 @@ class TestSlaveEventHandling:
     def test_slave_order_cancelled_closes_mapping(self, service, repo):
         """Slave ORDER_CANCELLED on mapped order closes order mapping."""
         # Setup: active order mapping with slave order ID
-        repo.create_order_mapping(master_order_id=42, slave_account_id=100, client_order_id="co42.100")
+        repo.create_order_mapping(master_order_id=42, slave_account_id=100,
+                                  client_order_id="co42.100", org_id=ORG_ID)
         repo.activate_order_mapping("co42.100", 9999)
 
         # Process slave cancel
@@ -303,7 +433,8 @@ class TestSlaveEventHandling:
     def test_slave_rejection_fails_mapping_and_alerts(self, service, repo):
         """Slave ORDER_REJECTED should fail mapping and log alert."""
         # Setup: pending order mapping
-        repo.create_order_mapping(master_order_id=42, slave_account_id=100, client_order_id="co42.100")
+        repo.create_order_mapping(master_order_id=42, slave_account_id=100,
+                                  client_order_id="co42.100", org_id=ORG_ID)
 
         # Process slave rejection
         evt = base_event(account_id=100, execution_type=ProtoOAExecutionType.ORDER_REJECTED)
@@ -335,9 +466,11 @@ class TestPendingFillAlert:
         master_order_id = 42
         master_position_id = 11
 
-        repo.create_order_mapping(master_order_id=master_order_id, slave_account_id=100, client_order_id="co42.100")
+        repo.create_order_mapping(master_order_id=master_order_id, slave_account_id=100,
+                                  client_order_id="co42.100", org_id=ORG_ID)
         repo.activate_order_mapping("co42.100", 9999)  # slave order accepted for account 100
-        repo.create_order_mapping(master_order_id=master_order_id, slave_account_id=101, client_order_id="co42.101")
+        repo.create_order_mapping(master_order_id=master_order_id, slave_account_id=101,
+                                  client_order_id="co42.101", org_id=ORG_ID)
         repo.activate_order_mapping("co42.101", 8888)  # slave order accepted for account 101
 
         # Master pending order fills (triggers check_pending_fills scheduling)
@@ -412,15 +545,20 @@ class TestMasterEventLogging:
 class TestDisabledAndIgnoredAccounts:
     """Test handling of disabled and non-master/non-slave accounts."""
 
-    def test_disabled_slave_event_is_logged_and_ignored(self, service, repo):
+    def test_disabled_slave_event_is_logged_and_ignored(self, service, repo,
+                                                        routing_box, make_routing):
         """Event from disabled slave or unknown account should be logged but NOT mutate mappings."""
-        # Create a slave with 'enabled=False' to test gating
-        service._slaves_provider = lambda: [
-            SlaveConfig(account_id=100, enabled=True, multiplier=Decimal("1.0"),
-                       symbols={"EURUSD": EURUSD, "GBPUSD": GBPUSD}),
-            SlaveConfig(account_id=101, enabled=False, multiplier=Decimal("1.5"),  # DISABLED
-                       symbols={"EURUSD": EURUSD, "GBPUSD": GBPUSD}),
-        ]
+        # Swap in a routing table where slave 101 is disabled, to test gating
+        routing_box["routing"] = make_routing(
+            master=999,
+            slaves=[
+                SlaveConfig(account_id=100, enabled=True, multiplier=Decimal("1.0"),
+                            symbols={"EURUSD": EURUSD, "GBPUSD": GBPUSD}),
+                SlaveConfig(account_id=101, enabled=False, multiplier=Decimal("1.5"),  # DISABLED
+                            symbols={"EURUSD": EURUSD, "GBPUSD": GBPUSD}),
+            ],
+            org_id=ORG_ID,
+        )
 
         # Test 1: disabled slave 101 with a guessed clientOrderId
         evt = base_event(account_id=101, execution_type=ProtoOAExecutionType.ORDER_FILLED)
@@ -443,7 +581,7 @@ class TestDisabledAndIgnoredAccounts:
         assert len(cm11_mappings) == 0, "Disabled slave should not create mappings"
 
         # Test 2: completely unknown account (not 999 which is master, not 100/101 which are configured)
-        # Use account_id=777 which is neither master nor in slaves_provider
+        # Use account_id=777, which belongs to no org in the routing table
         evt_unknown = base_event(account_id=777, execution_type=ProtoOAExecutionType.ORDER_FILLED)
         evt_unknown.order.clientOrderId = "cm22.777"  # Attempt to activate mapping
         evt_unknown.deal.positionId = 77

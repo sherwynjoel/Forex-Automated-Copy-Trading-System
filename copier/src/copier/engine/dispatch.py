@@ -175,8 +175,15 @@ class Dispatcher:
             from twisted.internet import reactor as clock
         self._clock = clock
 
-    def dispatch(self, intents: Sequence[SlaveIntent]) -> None:
-        """Dispatch a sequence of intents.
+    def dispatch(self, intents: Sequence[SlaveIntent], org_id: int) -> None:
+        """Dispatch a sequence of intents on behalf of exactly one org.
+
+        `org_id` is the org that owns the master whose event produced these
+        intents; the caller (CopierService) resolves it from the routing
+        table. Every copy gate below reads THAT org's row, so one org's kill
+        switch or dry-run can never suppress -- or fail to suppress --
+        another org's copying, and every mapping and event this batch writes
+        is stamped with the same org.
 
         Per-intent exception isolation ensures one intent's failure (e.g., duplicate
         client_order_id, build_request ValueError) never blocks remaining intents.
@@ -189,20 +196,20 @@ class Dispatcher:
         - Otherwise: create mapping if needed, dry-run logs but sends nothing,
           live sends with retry on SendNotAttempted only
         """
-        settings = self._repo.get_settings()
+        org = self._repo.get_org(org_id)
 
         for intent in intents:
             try:
                 if isinstance(intent, Alert):
-                    self._handle_alert(intent)
+                    self._handle_alert(intent, org_id)
                 elif isinstance(intent, LinkPendingFill):
-                    self._handle_link_pending_fill(intent)
-                elif not settings.copying_enabled:
-                    self._handle_kill_switch(intent)
-                elif settings.dry_run:
-                    self._handle_dry_run(intent)
+                    self._handle_link_pending_fill(intent, org_id)
+                elif not org.copying_enabled:
+                    self._handle_kill_switch(intent, org_id)
+                elif org.dry_run:
+                    self._handle_dry_run(intent, org_id)
                 else:
-                    self._handle_live_send(intent)
+                    self._handle_live_send(intent, org_id)
             except Exception as e:
                 # Catch any exception during intent processing (build_request ValueError,
                 # repo mapping constraint violations, etc.) and log it per intent without
@@ -217,21 +224,23 @@ class Dispatcher:
                         'intent_type': type(intent).__name__,
                         'error': error_msg
                     },
-                    account_id=account_id
+                    account_id=account_id,
+                    org_id=org_id
                 )
                 if account_id is not None:
                     self._repo.set_account_status(account_id, 'degraded', error_msg)
 
-    def _handle_alert(self, intent: Alert) -> None:
+    def _handle_alert(self, intent: Alert, org_id: int) -> None:
         """Log alert and don't send."""
         self._repo.log_event(
             'slave_action',
             'warning',
             {'message': intent.message},
-            account_id=intent.slave_account_id
+            account_id=intent.slave_account_id,
+            org_id=org_id
         )
 
-    def _handle_link_pending_fill(self, intent: LinkPendingFill) -> None:
+    def _handle_link_pending_fill(self, intent: LinkPendingFill, org_id: int) -> None:
         """Link pending fill by updating order mapping."""
         try:
             self._repo.link_pending_fill(
@@ -247,17 +256,19 @@ class Dispatcher:
                     'master_order_id': intent.master_order_id,
                     'master_position_id': intent.master_position_id
                 },
-                account_id=intent.slave_account_id
+                account_id=intent.slave_account_id,
+                org_id=org_id
             )
         except MappingNotFound as e:
             self._repo.log_event(
                 'slave_action',
                 'error',
                 {'action': 'link_pending_fill', 'error': str(e)},
-                account_id=intent.slave_account_id
+                account_id=intent.slave_account_id,
+                org_id=org_id
             )
 
-    def _create_mapping(self, intent: SlaveIntent, account_id: int) -> None:
+    def _create_mapping(self, intent: SlaveIntent, account_id: int, org_id: int) -> None:
         """Create a pending position or order mapping for mapping-aware intents.
 
         For OpenMarket: creates position mapping.
@@ -266,27 +277,30 @@ class Dispatcher:
         """
         if isinstance(intent, OpenMarket):
             coid = client_order_id_for(intent)
-            self._repo.create_position_mapping(intent.master_position_id, account_id, coid)
+            self._repo.create_position_mapping(
+                intent.master_position_id, account_id, coid, org_id=org_id)
         elif isinstance(intent, PlacePending):
             coid = client_order_id_for(intent)
-            self._repo.create_order_mapping(intent.master_order_id, account_id, coid)
+            self._repo.create_order_mapping(
+                intent.master_order_id, account_id, coid, org_id=org_id)
 
-    def _handle_kill_switch(self, intent: SlaveIntent) -> None:
-        """Log suppressed intent when kill switch is on."""
+    def _handle_kill_switch(self, intent: SlaveIntent, org_id: int) -> None:
+        """Log suppressed intent when this org's kill switch is on."""
         account_id = getattr(intent, 'slave_account_id', None)
         self._repo.log_event(
             'slave_action',
             'info',
             {'skipped': 'kill_switch', 'intent_type': type(intent).__name__},
-            account_id=account_id
+            account_id=account_id,
+            org_id=org_id
         )
 
-    def _handle_dry_run(self, intent: SlaveIntent) -> None:
+    def _handle_dry_run(self, intent: SlaveIntent, org_id: int) -> None:
         """Log would-be request without sending; create mappings (stay pending)."""
         account_id, req = build_request(intent)
 
         # Create mapping if needed (but stays pending)
-        self._create_mapping(intent, account_id)
+        self._create_mapping(intent, account_id, org_id)
 
         # Log dry-run event with exact request summary (all fields)
         summary = self._request_summary(req)
@@ -298,15 +312,16 @@ class Dispatcher:
                 'would_send': summary,
                 'note': 'mapping stays pending, cleaned by resync'
             },
-            account_id=account_id
+            account_id=account_id,
+            org_id=org_id
         )
 
-    def _handle_live_send(self, intent: SlaveIntent) -> None:
+    def _handle_live_send(self, intent: SlaveIntent, org_id: int) -> None:
         """Send request with retry logic."""
         account_id, req = build_request(intent)
 
         # Create mapping if needed
-        self._create_mapping(intent, account_id)
+        self._create_mapping(intent, account_id, org_id)
 
         # Send with retries
         self._send_with_retries(account_id, req, attempt=0)
