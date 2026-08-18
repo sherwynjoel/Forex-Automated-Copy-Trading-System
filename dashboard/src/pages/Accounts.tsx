@@ -403,20 +403,24 @@ export default function Accounts() {
                         >
                           Details
                         </button>
-                        <button
-                          onClick={handleConnectOAuth}
-                          disabled={isPending}
-                          className="px-2.5 py-1 text-xs font-medium rounded border border-line-strong text-ink-soft hover:text-ink hover:border-ink transition-colors disabled:opacity-50"
-                        >
-                          Re-grant access
-                        </button>
-                        <button
-                          onClick={() => setFlattening(account)}
-                          disabled={isPending}
-                          className="px-2.5 py-1 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-white transition-colors disabled:opacity-50"
-                        >
-                          Flatten
-                        </button>
+                        {can(role, 'control') && (
+                          <button
+                            onClick={handleConnectOAuth}
+                            disabled={isPending}
+                            className="px-2.5 py-1 text-xs font-medium rounded border border-line-strong text-ink-soft hover:text-ink hover:border-ink transition-colors disabled:opacity-50"
+                          >
+                            Re-grant access
+                          </button>
+                        )}
+                        {can(role, 'control') && (
+                          <button
+                            onClick={() => setFlattening(account)}
+                            disabled={isPending}
+                            className="px-2.5 py-1 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-white transition-colors disabled:opacity-50"
+                          >
+                            Flatten
+                          </button>
+                        )}
                         {can(role, 'control') && (
                           <button
                             onClick={() => setDisconnecting(account)}

@@ -426,6 +426,10 @@ test('viewer (below control) gets read-only rows: no editors, no disconnect, no 
 
   expect(screen.queryByRole('button', { name: /disconnect/i })).not.toBeInTheDocument()
   expect(screen.queryByRole('button', { name: /connect ctrader id/i })).not.toBeInTheDocument()
+  // Flatten and Re-grant access are the same destructive/OAuth class as the
+  // gated controls above and must be hidden below control too.
+  expect(screen.queryByRole('button', { name: /^flatten$/i })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /re-grant access/i })).not.toBeInTheDocument()
 })
 
 test('trader (below control) also gets read-only rows and no connect link', async () => {
@@ -440,9 +444,11 @@ test('trader (below control) also gets read-only rows and no connect link', asyn
   expect(screen.queryByLabelText(/role for account/i)).not.toBeInTheDocument()
   expect(screen.queryByRole('button', { name: /disconnect/i })).not.toBeInTheDocument()
   expect(screen.queryByRole('button', { name: /connect ctrader id/i })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /^flatten$/i })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /re-grant access/i })).not.toBeInTheDocument()
 })
 
-test('admin (control) sees editors, disconnect, and the connect link', async () => {
+test('admin (control) sees editors, disconnect, the connect link, flatten, and re-grant access', async () => {
   setRole('admin')
   mockRoutes()
   renderAccounts()
@@ -457,4 +463,6 @@ test('admin (control) sees editors, disconnect, and the connect link', async () 
   expect(screen.getByLabelText(/nickname for account 12345/i)).toBeInTheDocument()
   expect(screen.getAllByRole('button', { name: /disconnect/i }).length).toBeGreaterThan(0)
   expect(screen.getByRole('button', { name: /connect ctrader id/i })).toBeInTheDocument()
+  expect(screen.getAllByRole('button', { name: /^flatten$/i }).length).toBeGreaterThan(0)
+  expect(screen.getAllByRole('button', { name: /re-grant access/i }).length).toBeGreaterThan(0)
 })
