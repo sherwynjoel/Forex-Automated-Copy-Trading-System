@@ -115,7 +115,7 @@ class CopierApp:
         shards: int,
         master_symbols_by_org: dict[int, dict],
         routing_provider: Callable[[], OrgRouting],
-        clients_by_account: Callable[[int], CTraderClient] | None = None,
+        clients_by_account: Callable[[int], CTraderClient],
         clock=None,
     ):
         self.repo = repo
@@ -129,9 +129,11 @@ class CopierApp:
         self.shards = shards
         self.master_symbols_by_org = master_symbols_by_org
         self.routing_provider = routing_provider
-        # Needed by reload() to build an engine for an org that acquires a
-        # master after boot. Same callable the pre-existing reconcilers were
-        # built with (it closes over repo/clients, not over this app -- see
+        # Required, not optional: reload() builds an engine with it the
+        # moment an org acquires a master after boot, and a None here would
+        # produce a Reconciler that cannot reach any client at all. Same
+        # callable the pre-existing reconcilers were built with (it closes
+        # over repo/clients, not over this app -- see
         # _build_clients_by_account), so it is a real ctor dependency rather
         # than something patched on afterwards.
         self._clients_by_account = clients_by_account
@@ -868,7 +870,16 @@ class CopierApp:
         close would otherwise race its own copy). No other org's settings or
         accounts are ever touched, and a single-account kill switch pauses
         nothing at all -- but still only accepts an account of its own org.
+
+        The org is resolved FIRST, before anything is written or sent, so a
+        caller that mis-binds its arguments (a positional account_id landing
+        in org_id, or no org at all) fails loudly. Without this guard an
+        unknown/None org would write no setting, match no target, and still
+        return {"status": "flattened", "paused": true, "accounts": []} -- a
+        kill switch reporting success having closed NOTHING.
         """
+        self.repo.get_org(org_id)  # raises for a missing (or None) org
+
         if account_id is not None:
             self._require_account_in_org(org_id, int(account_id))
             summary = yield self._flatten_account(int(account_id))

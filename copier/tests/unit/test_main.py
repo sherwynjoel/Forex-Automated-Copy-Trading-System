@@ -617,6 +617,11 @@ def test_pause_and_dry_run_are_org_scoped(db, fernet_key):
     assert repo.get_org(org_b).dry_run is True
     assert repo.get_org(org_a).dry_run is False             # untouched
 
+    app.set_dry_run(org_b, False)                           # ... and back off again
+
+    assert repo.get_org(org_b).dry_run is False
+    assert repo.get_org(org_a).dry_run is False             # still untouched
+
     yield app.resume(org_a)
 
     assert repo.get_org(org_a).copying_enabled is True
@@ -754,6 +759,38 @@ def test_close_all_flattens_only_the_org(db, fernet_key):
         for client in created:
             client.stop()
         server.shutdown()
+
+
+@pytest_twisted.inlineCallbacks
+def test_close_all_rejects_a_missing_or_null_org_before_touching_anything(db, fernet_key):
+    """A kill switch must never report success having closed nothing.
+
+    An unknown -- or None, which is what a mis-bound positional caller
+    produces -- org would otherwise write no setting, match no target, and
+    still answer {"status": "flattened", "paused": true, "accounts": []}.
+    The org is resolved first, so any such call raises and NOTHING is
+    written or sent.
+    """
+    org_a = seed_db(db, fernet_key)
+    repo = Repo(db)
+    app = main.build_app(repo, TokenStore(db, fernet_key), make_stub_client_factory(), shards=1)
+
+    def _never(account_id):
+        raise AssertionError(
+            "close_all must validate the org before reaching any account")
+
+    app._flatten_account = _never
+
+    for bad_org in (None, 999999):
+        with pytest.raises(RuntimeError):
+            yield app.close_all(bad_org)
+        with pytest.raises(RuntimeError):
+            yield app.close_all(bad_org, account_id=SLAVE_A1)
+
+    # No setting written, no kill-switch event, no broker traffic attempted.
+    assert repo.get_org(org_a).copying_enabled is True
+    assert _events(repo.dsn, action="kill_switch") == []
+    assert _events(repo.dsn, action="kill_switch_flatten") == []
 
 
 @pytest_twisted.inlineCallbacks

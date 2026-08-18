@@ -31,6 +31,15 @@ def _post(resource, path_segments, body: dict):
 
 
 class _ActionApp:
+    """Fake app whose method signatures MIRROR CopierApp's exactly.
+
+    A stub that keeps an outdated signature certifies a dead contract: while
+    close_all() here still took (account_id=None), the route's positional
+    call bound account_id to CopierApp's org_id and the tests stayed green
+    over a kill switch that would have flattened nothing (or the wrong org).
+    Any signature drift in CopierApp must show up here as a TypeError.
+    """
+
     def __init__(self):
         self.calls = []
 
@@ -48,8 +57,8 @@ class _ActionApp:
         self.calls.append(("cancel_order", account_id, order_id))
         return defer.succeed({"status": "submitted", "order_id": order_id})
 
-    def close_all(self, account_id=None):
-        self.calls.append(("close_all", account_id))
+    def close_all(self, org_id, account_id=None):
+        self.calls.append(("close_all", org_id, account_id))
         return defer.succeed({"status": "flattened", "paused": account_id is None,
                               "accounts": []})
 
@@ -100,16 +109,23 @@ def test_cancel_order_route_parses_body():
 
 
 def test_close_all_route_single_account():
+    """The kill switch is org-scoped: the route must pass the org through
+    and the account as the SECOND argument. (Red until Task 14 converts
+    CloseAllResource -- today's positional call binds the account id to
+    CopierApp.close_all's org_id.)"""
     app = _ActionApp()
-    request = _post(CloseAllResource(app), [b"close-all"], {"account_id": 100})
+    request = _post(CloseAllResource(app), [b"close-all"],
+                    {"org_id": 7, "account_id": 100})
 
-    assert app.calls == [("close_all", 100)]
+    assert app.calls == [("close_all", 7, 100)]
     assert _written_json(request)["status"] == "flattened"
 
 
-def test_close_all_route_global_when_no_account():
+def test_close_all_route_org_wide_when_no_account():
+    """No account_id means "every account in THIS org" -- never "every
+    account everywhere", and never an org-less call. (Red until Task 14.)"""
     app = _ActionApp()
-    request = _post(CloseAllResource(app), [b"close-all"], {})
+    request = _post(CloseAllResource(app), [b"close-all"], {"org_id": 7})
 
-    assert app.calls == [("close_all", None)]
+    assert app.calls == [("close_all", 7, None)]
     assert _written_json(request)["paused"] is True
