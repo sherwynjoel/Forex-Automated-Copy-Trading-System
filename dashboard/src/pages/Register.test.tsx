@@ -58,8 +58,9 @@ test('shows the server detail on 409 without navigating', async () => {
   await userEvent.click(screen.getByRole('button', { name: /create account/i }))
 
   await waitFor(() => {
-    expect(screen.getByText(/409/)).toBeInTheDocument()
+    expect(screen.getByText('Email already registered')).toBeInTheDocument()
   })
+  expect(screen.queryByText(/409/)).not.toBeInTheDocument()
   expect(screen.queryByText('welcome')).not.toBeInTheDocument()
 })
 

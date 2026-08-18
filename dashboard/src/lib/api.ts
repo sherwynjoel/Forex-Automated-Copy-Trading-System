@@ -49,9 +49,18 @@ export async function api<T>(
     throw new Error('Unauthorized')
   }
 
-  // Throw on non-2xx
+  // Throw on non-2xx, surfacing the server's `detail` when the body has one
+  // (status prefix kept so callers that pattern-match on the status code —
+  // e.g. Join.tsx's `.includes('410')` — keep working).
   if (!response.ok) {
-    throw new Error(`${response.status}`)
+    let detail: string | undefined
+    try {
+      const body = (await response.json()) as { detail?: unknown }
+      if (typeof body.detail === 'string') detail = body.detail
+    } catch {
+      // Body wasn't JSON (or was empty) — fall back to the bare status.
+    }
+    throw new Error(detail ? `${response.status}: ${detail}` : `${response.status}`)
   }
 
   // Parse JSON if there's content

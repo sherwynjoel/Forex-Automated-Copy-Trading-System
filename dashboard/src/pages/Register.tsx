@@ -23,7 +23,10 @@ export default function Register() {
       })
       navigate('/welcome')
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Registration failed')
+      const message = err instanceof Error ? err.message : 'Registration failed'
+      // api() prefixes the HTTP status (e.g. "409: Email already registered")
+      // so callers can pattern-match on the code; strip it for display.
+      setError(message.replace(/^\d+:\s*/, ''))
     } finally {
       setIsLoading(false)
     }

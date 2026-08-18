@@ -41,13 +41,17 @@ export function OrgProvider({ children }: { children: React.ReactNode }) {
     refreshMe()
   }, [refreshMe])
 
+  const org = me?.orgs.find((o) => o.id === orgId)
+
+  useEffect(() => {
+    if (org) localStorage.setItem(LAST_ORG_KEY, String(org.id))
+  }, [org?.id])
+
   if (failed) return <Navigate to="/login" replace />
   if (!me) {
     return <div className="flex items-center justify-center h-screen">Loading...</div>
   }
-  const org = me.orgs.find((o) => o.id === orgId)
   if (!org) return <Navigate to="/welcome" replace />
-  localStorage.setItem(LAST_ORG_KEY, String(org.id))
   return (
     <OrgContext.Provider
       value={{ orgId: org.id, role: org.role, org, me, refreshMe }}
