@@ -16,6 +16,7 @@ from .auth import (
     create_auth_router,
 )
 from .oauth import create_oauth_router
+from .routes.orgs import create_orgs_router
 from .routes.accounts import create_accounts_router
 from .routes.events import create_events_router
 from .routes.settings_control import create_settings_control_router, create_state_router
@@ -69,6 +70,9 @@ def create_app(http_transport: Optional[httpx.BaseTransport] = None) -> FastAPI:
     # Include auth router
     auth_router = create_auth_router(rate_limiter)
     app.include_router(auth_router)
+
+    # Include orgs router (lifecycle, members, invites, join)
+    app.include_router(create_orgs_router())
 
     # Include OAuth router
     oauth_router = create_oauth_router()
