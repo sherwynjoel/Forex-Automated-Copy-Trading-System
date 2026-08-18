@@ -52,6 +52,16 @@ function mockRoutes() {
       new Response(JSON.stringify(payload), {
         status: 200, headers: { 'Content-Type': 'application/json' },
       })
+    if (url.includes('/margin-estimate')) {
+      return respond({ symbol: 'EURUSD', volume: 5000000, volume_lots: '0.50',
+                       buy_margin: 13.75, sell_margin: 13.75 })
+    }
+    if (url.includes('/trendbars')) {
+      return respond({ symbol: 'EURUSD', period: 'H1', bars: [
+        { timestamp: 1700000000000, open: 1.1, high: 1.11, low: 1.095, close: 1.105, volume: 10 },
+        { timestamp: 1700003600000, open: 1.105, high: 1.12, low: 1.1, close: 1.11, volume: 12 },
+      ] })
+    }
     if (url.includes('/symbols')) return respond(symbols)
     if (url.includes('/details')) return respond(details)
     if (url.includes('/api/accounts')) return respond(accounts)
@@ -80,15 +90,58 @@ test('defaults to the master account and loads its symbols', async () => {
   await waitFor(() => {
     expect((select as HTMLSelectElement).value).toBe('100')
   })
-  // Symbol picker filled from /symbols
-  expect(await screen.findByRole('option', { name: 'EURUSD' })).toBeInTheDocument()
+  // Symbol picker defaults to the first cached symbol
+  const symbolBox = await screen.findByLabelText(/symbol/i)
+  await waitFor(() => {
+    expect((symbolBox as HTMLInputElement).value).toBe('EURUSD')
+  })
+})
+
+test('symbol picker searches and selects manually', async () => {
+  mockRoutes()
+  renderTrade()
+
+  const symbolBox = await screen.findByLabelText(/symbol/i)
+  await waitFor(() => {
+    expect((symbolBox as HTMLInputElement).value).toBe('EURUSD')
+  })
+
+  // Type to search: GBP narrows the list; picking it selects it.
+  await userEvent.clear(symbolBox)
+  await userEvent.type(symbolBox, 'gbp')
+  const option = await screen.findByRole('option', { name: 'GBPUSD' })
+  await userEvent.click(option)
+
+  expect((symbolBox as HTMLInputElement).value).toBe('GBPUSD')
+})
+
+test('shows the margin estimate for the ticket', async () => {
+  mockRoutes()
+  renderTrade()
+
+  await screen.findByLabelText(/symbol/i)
+  expect(await screen.findByText(/margin required/i)).toBeInTheDocument()
+  const values = await screen.findAllByText('13.75')
+  expect(values.length).toBe(2)  // buy and sell
+})
+
+test('renders the price chart for the selected symbol', async () => {
+  mockRoutes()
+  const { container } = renderTrade()
+
+  await screen.findByLabelText(/symbol/i)
+  await waitFor(() => {
+    expect(container.querySelector('[data-chart="candles"] svg')).toBeTruthy()
+  })
 })
 
 test('placing a market order confirms then POSTs /api/orders', async () => {
   const fetchMock = mockRoutes()
   renderTrade()
 
-  await screen.findByRole('option', { name: 'EURUSD' })
+  await waitFor(() => {
+    expect((screen.getByLabelText(/symbol/i) as HTMLInputElement).value).toBe('EURUSD')
+  })
 
   await userEvent.clear(screen.getByLabelText(/volume/i))
   await userEvent.type(screen.getByLabelText(/volume/i), '0.5')
@@ -116,7 +169,9 @@ test('limit order includes the limit price', async () => {
   const fetchMock = mockRoutes()
   renderTrade()
 
-  await screen.findByRole('option', { name: 'EURUSD' })
+  await waitFor(() => {
+    expect((screen.getByLabelText(/symbol/i) as HTMLInputElement).value).toBe('EURUSD')
+  })
 
   await userEvent.selectOptions(screen.getByLabelText(/order type/i), 'LIMIT')
   await userEvent.type(screen.getByLabelText(/limit price/i), '1.0950')
@@ -140,7 +195,9 @@ test('shows a not-copied note when a slave account is selected', async () => {
   renderTrade()
 
   const select = await screen.findByLabelText(/account/i)
-  await screen.findByRole('option', { name: 'EURUSD' })
+  await waitFor(() => {
+    expect((screen.getByLabelText(/symbol/i) as HTMLInputElement).value).toBe('EURUSD')
+  })
   await userEvent.selectOptions(select, '101')
 
   expect(

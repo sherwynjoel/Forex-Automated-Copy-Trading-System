@@ -31,6 +31,7 @@ function mockRoutes(overrides: Record<string, unknown> = {}) {
       new Response(JSON.stringify(payload), {
         status: 200, headers: { 'Content-Type': 'application/json' },
       })
+    if (url.includes('/api/events')) return respond(overrides['events'] ?? [])
     if (url.includes('/api/settings')) return respond(overrides['settings'] ?? settings)
     if (url.includes('/api/state')) return respond(overrides['state'] ?? apiState)
     if (url.includes('/api/accounts')) return respond(overrides['accounts'] ?? accounts)
@@ -114,4 +115,28 @@ test('cancelling the close-all dialog sends nothing', async () => {
   expect(
     fetchMock.mock.calls.some(([u]) => String(u).includes('/api/control/close-all'))
   ).toBe(false)
+})
+
+
+test('recent margin-call risk event raises a banner', async () => {
+  mockRoutes({
+    events: [{
+      id: 9, ts: new Date().toISOString(), account_id: 12345,
+      category: 'risk', severity: 'error', latency_ms: null,
+      payload: { action: 'margin_call', margin_call_type: 'MARGIN_LEVEL_THRESHOLD_1',
+                 margin_level_threshold: 50 },
+    }],
+  })
+  renderLayout()
+
+  expect(await screen.findByText(/margin call/i)).toBeInTheDocument()
+  expect(screen.getByText(/12345/)).toBeInTheDocument()
+})
+
+test('no banner without recent risk events', async () => {
+  mockRoutes()
+  renderLayout()
+
+  await screen.findByText(/copying live/i)
+  expect(screen.queryByText(/margin call/i)).not.toBeInTheDocument()
 })

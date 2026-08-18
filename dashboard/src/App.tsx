@@ -8,6 +8,7 @@ import Accounts from './pages/Accounts'
 import Positions from './pages/Positions'
 import Trade from './pages/Trade'
 import History from './pages/History'
+import Performance from './pages/Performance'
 import Logs from './pages/Logs'
 
 function ProtectedLayout() {
@@ -49,6 +50,7 @@ export default function App() {
           <Route path="positions" element={<Positions />} />
           <Route path="trade" element={<Trade />} />
           <Route path="history" element={<History />} />
+          <Route path="performance" element={<Performance />} />
           <Route path="logs" element={<Logs />} />
         </Route>
       </Routes>

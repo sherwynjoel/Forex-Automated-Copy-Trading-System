@@ -1,38 +1,65 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { api } from '../lib/api'
-import type { Account, ApiState, Settings, StateSnapshot } from '../lib/types'
+import type {
+  Account, Analytics, ApiState, OverviewStats, Settings, StateSnapshot,
+} from '../lib/types'
 import KillSwitch from '../components/KillSwitch'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
 
 /**
- * Fetch GET /api/state and return just its per-account block.
- *
- * `/api/state` is a verbatim pass-through of the copier's `get_state()`, so
- * its shape is `{accounts, master_positions, pending_orders, drift}` -- the
- * per-account balance/equity/positions live under `accounts`, keyed by
- * account id as a STRING (JSON has no integer keys).
- *
- * This screen used to do `api<StateSnapshot>('/api/state')` and index the
- * result directly, i.e. it read the envelope as if it were the account map:
- * every `state[String(accountId)]` was `undefined`, so the master card never
- * rendered at all and every slave tile silently omitted its equity, balance
- * and position count. `api<T>()` is an unchecked cast, so the wrong type
- * argument cost nothing at compile time, and Overview.test.tsx mocked a bare
- * `StateSnapshot` -- the wrong shape -- so the suite agreed with the bug.
- *
- * Typing the fetch as `ApiState` and projecting explicitly here is what makes
- * a future shape change a type error rather than a blank screen; the tests
- * now mock the real envelope and assert the numbers actually render.
+ * Fetch GET /api/state once and hand back both the envelope and its
+ * per-account block. `/api/state` is a verbatim pass-through of the
+ * copier's `get_state()` -- `{accounts, master_positions, pending_orders,
+ * drift}` -- with per-account balance/equity/positions under `accounts`,
+ * keyed by account id as a STRING (JSON has no integer keys). See the
+ * history of this file for the shape bug that motivates typing the fetch
+ * as ApiState and projecting explicitly.
  */
-async function loadAccountState(): Promise<StateSnapshot> {
-  const state = await api<ApiState>('/api/state')
-  return state.accounts ?? {}
+async function loadState(): Promise<{ accounts: StateSnapshot; envelope: ApiState }> {
+  const envelope = await api<ApiState>('/api/state')
+  return { accounts: envelope.accounts ?? {}, envelope }
+}
+
+function money(value: number | null | undefined): string {
+  if (value == null) return '—'
+  return value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+
+function signed(value: number | null | undefined): string {
+  if (value == null) return '—'
+  const formatted = Math.abs(value).toLocaleString('en-US', {
+    minimumFractionDigits: 2, maximumFractionDigits: 2,
+  })
+  return `${value < 0 ? '-' : '+'}${formatted}`
+}
+
+function Tile({ label, value, tone, sub }: {
+  label: string
+  value: string
+  tone?: 'profit' | 'loss' | 'brand'
+  sub?: React.ReactNode
+}) {
+  const toneClass =
+    tone === 'profit' ? 'text-profit'
+    : tone === 'loss' ? 'text-loss'
+    : tone === 'brand' ? 'text-brand'
+    : 'text-ink'
+  return (
+    <div className="rounded-lg border border-line bg-card p-4">
+      <div className="desk-label">{label}</div>
+      <div className={`num text-2xl mt-1 ${toneClass}`}>{value}</div>
+      {sub != null && <div className="text-xs text-ink-faint mt-0.5">{sub}</div>}
+    </div>
+  )
 }
 
 export default function Overview() {
   const [accounts, setAccounts] = useState<Account[]>([])
   const [settings, setSettings] = useState<Settings | null>(null)
   const [state, setState] = useState<StateSnapshot>({})
+  const [envelope, setEnvelope] = useState<ApiState | null>(null)
+  const [stats, setStats] = useState<OverviewStats | null>(null)
+  const [copierPerf, setCopierPerf] = useState<Analytics | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -57,29 +84,43 @@ export default function Overview() {
     loadData()
   }, [])
 
-  // Poll state every 5 seconds
-  useEffect(() => {
-    const loadState = async () => {
-      try {
-        setState(await loadAccountState())
-      } catch (err) {
-        console.error('Failed to load state:', err)
-      }
-    }
-
-    loadState()
-    const interval = setInterval(loadState, 5000)
-    return () => clearInterval(interval)
-  }, [])
-
-  // Refetch immediately when a trade event streams in (5s poll is fallback)
-  useLiveRefresh(async () => {
+  const refreshState = useCallback(async () => {
     try {
-      setState(await loadAccountState())
+      const { accounts: snapshot, envelope: env } = await loadState()
+      setState(snapshot)
+      setEnvelope(env)
     } catch (err) {
       console.error('Failed to load state:', err)
     }
-  })
+    // The DB-side stats and copier performance are passengers: if they
+    // fail (older api, copier offline) the live sections still render.
+    try {
+      setStats(await api<OverviewStats>('/api/overview'))
+    } catch {
+      /* stats sections show placeholders */
+    }
+  }, [])
+
+  useEffect(() => {
+    refreshState()
+    const interval = setInterval(refreshState, 5000)
+    return () => clearInterval(interval)
+  }, [refreshState])
+
+  // Refetch immediately when a trade event streams in (5s poll is fallback)
+  useLiveRefresh(refreshState)
+
+  // Copier-wide performance = the master's realized results (that is what
+  // every slave mirrors). Fetched once per mount; heavier than /state.
+  useEffect(() => {
+    const master = accounts.find((a) => a.role === 'master')
+    if (!master) return
+    let cancelled = false
+    api<Analytics>(`/api/accounts/${master.ctid_trader_account_id}/analytics?weeks=4`)
+      .then((a) => { if (!cancelled) setCopierPerf(a) })
+      .catch(() => { /* strip shows placeholders */ })
+    return () => { cancelled = true }
+  }, [accounts])
 
   const handlePauseResume = async (accountId: number, isPaused: boolean) => {
     try {
@@ -88,7 +129,7 @@ export default function Overview() {
         method: 'POST',
         body: JSON.stringify({ account_id: accountId }),
       })
-      setState(await loadAccountState())
+      await refreshState()
     } catch (err) {
       console.error('Failed to update account status:', err)
     }
@@ -108,13 +149,32 @@ export default function Overview() {
 
   const masterAccount = accounts.find((a) => a.role === 'master')
   const slaveAccounts = accounts.filter((a) => a.role === 'slave')
-
   const masterState = masterAccount ? state[String(masterAccount.ctid_trader_account_id)] : undefined
+
+  // Portfolio aggregates across every account the copier tracks.
+  const accountStates = Object.values(state)
+  const equityValues = accountStates.map((s) => s.equity).filter((v): v is number => v != null)
+  const portfolioValue = equityValues.length
+    ? equityValues.reduce((a, b) => a + b, 0)
+    : null
+  const totalOpenPnl = accountStates.reduce((a, s) => a + (s.open_pnl ?? 0), 0)
+  const openTrades = accountStates.reduce((a, s) => a + (s.positions?.length ?? 0), 0)
+
+  const yesterdayEquity = stats?.yesterday?.total_equity ?? null
+  const vsYesterday = (portfolioValue != null && yesterdayEquity)
+    ? (portfolioValue - yesterdayEquity) / yesterdayEquity
+    : null
 
   // Accounts (master or slave) whose cTrader-ID token refresh has failed. Once the
   // token expires, copying for these accounts silently stops, so this must be
   // impossible to miss on the dashboard - not just a row in the Logs table.
   const refreshFailedAccounts = accounts.filter((a) => a.connection_status === 'refresh_failed')
+
+  // Live P&L per master position, for estimating each active copy's P&L.
+  const masterPnlByPosition = new Map<number, { pnl: number | null; volume: number }>()
+  for (const pos of envelope?.master_positions ?? []) {
+    masterPnlByPosition.set(pos.position_id, { pnl: pos.pnl_quote ?? null, volume: pos.volume })
+  }
 
   return (
     <div className="space-y-6 max-w-6xl">
@@ -139,6 +199,78 @@ export default function Overview() {
         </div>
       )}
 
+      {/* Portfolio stat row */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <Tile
+          label="Portfolio value"
+          value={money(portfolioValue)}
+          tone="brand"
+          sub={vsYesterday != null ? (
+            <span className={vsYesterday < 0 ? 'text-loss' : 'text-profit'}>
+              {signed(vsYesterday * 100)}% vs yesterday
+            </span>
+          ) : 'vs yesterday: no snapshot yet'}
+        />
+        <Tile
+          label="Accounts connected"
+          value={String(stats?.accounts_connected ?? accounts.length)}
+          sub={`${stats?.masters ?? (masterAccount ? 1 : 0)} master · ${stats?.active_slaves ?? slaveAccounts.length} active slaves`}
+        />
+        <Tile
+          label="Open P&L"
+          value={signed(totalOpenPnl)}
+          tone={totalOpenPnl < 0 ? 'loss' : 'profit'}
+          sub={`${openTrades} open trade${openTrades === 1 ? '' : 's'}`}
+        />
+        <Tile
+          label="Copied today"
+          value={String(stats?.copied_today ?? '—')}
+          sub={stats && stats.degraded > 0
+            ? <span className="text-loss">{stats.degraded} degraded</span>
+            : 'copy fills since midnight'}
+        />
+      </div>
+
+      {/* Copier performance strip (master's realized results, last 4 weeks) */}
+      <section className="rounded-lg border border-line bg-card p-4">
+        <div className="flex items-baseline justify-between mb-3">
+          <h2 className="desk-label">Copier performance · last 4 weeks</h2>
+          {copierPerf && (
+            <span className="text-xs text-ink-faint">
+              {copierPerf.closed_trades} trades taken · {copierPerf.wins} won · {copierPerf.losses} lost
+            </span>
+          )}
+        </div>
+        {!copierPerf ? (
+          <p className="text-sm text-ink-faint">
+            Performance loads once the copier has served deal history.
+          </p>
+        ) : (
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div>
+              <div className="desk-label">Net P&L</div>
+              <div className={`num text-xl mt-0.5 ${copierPerf.net_pnl < 0 ? 'text-loss' : 'text-profit'}`}>
+                {signed(copierPerf.net_pnl)}
+              </div>
+            </div>
+            <div>
+              <div className="desk-label">Win rate</div>
+              <div className="num text-xl mt-0.5 text-ink">
+                {copierPerf.win_rate != null ? `${(copierPerf.win_rate * 100).toFixed(1)}%` : '—'}
+              </div>
+            </div>
+            <div>
+              <div className="desk-label">Best trade</div>
+              <div className="num text-xl mt-0.5 text-profit">{signed(copierPerf.best_trade)}</div>
+            </div>
+            <div>
+              <div className="desk-label">Worst trade</div>
+              <div className="num text-xl mt-0.5 text-loss">{signed(copierPerf.worst_trade)}</div>
+            </div>
+          </div>
+        )}
+      </section>
+
       {/* Kill Switch and Status Bar */}
       <div className="bg-card p-6 rounded-lg border border-line flex items-center justify-between flex-wrap gap-4">
         <div>
@@ -149,6 +281,78 @@ export default function Overview() {
         </div>
         {settings && <KillSwitch settings={settings} onUpdate={handleSettingsUpdate} />}
       </div>
+
+      {/* Copy log */}
+      <section className="rounded-lg border border-line bg-card">
+        <h2 className="desk-label px-5 pt-4 pb-3">Copy log</h2>
+        {!stats || stats.recent_copies.length === 0 ? (
+          <p className="px-5 pb-5 text-sm text-ink-faint">
+            No copies yet. They appear here the moment the master trades.
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left border-b border-line">
+                  <th className="desk-label px-5 py-2 font-semibold">Status</th>
+                  <th className="desk-label px-3 py-2 font-semibold">Master</th>
+                  <th className="desk-label px-3 py-2 font-semibold">Slave</th>
+                  <th className="desk-label px-3 py-2 font-semibold">Symbol</th>
+                  <th className="desk-label px-5 py-2 font-semibold text-right">P&L</th>
+                </tr>
+              </thead>
+              <tbody>
+                {stats.recent_copies.map((copy, i) => {
+                  const master = copy.master_position_id != null
+                    ? masterPnlByPosition.get(copy.master_position_id)
+                    : undefined
+                  // Estimate the copy's live P&L from the master position's,
+                  // scaled by the volume ratio. Only possible while both
+                  // sides are open; otherwise show the failure or a dash.
+                  let pnl: number | null = null
+                  if (copy.status === 'active' && master?.pnl != null && master.volume > 0
+                      && copy.slave_volume != null) {
+                    pnl = master.pnl * (copy.slave_volume / master.volume)
+                  }
+                  return (
+                    <tr key={`${copy.slave_account_id}-${copy.master_position_id}-${copy.master_order_id}-${i}`}
+                        className="border-b border-line last:border-0">
+                      <td className="px-5 py-2.5">
+                        <span className={`text-xs font-medium px-2 py-0.5 rounded ${
+                          copy.status === 'active' ? 'bg-profit-wash text-profit'
+                          : copy.status === 'failed' ? 'bg-loss-wash text-loss'
+                          : copy.status === 'closed' ? 'bg-paper text-ink-soft'
+                          : 'bg-warn-wash text-warn'
+                        }`}>
+                          {copy.status}
+                        </span>
+                      </td>
+                      <td className="num px-3 py-2.5 text-ink-soft">
+                        {copy.master_position_id ?? copy.master_order_id ?? '—'}
+                      </td>
+                      <td className="px-3 py-2.5">
+                        {copy.slave_nickname || <span className="num">{copy.slave_login}</span>}
+                      </td>
+                      <td className="num px-3 py-2.5">{copy.symbol ?? '—'}</td>
+                      <td className="num px-5 py-2.5 text-right">
+                        {copy.status === 'failed' && copy.error ? (
+                          <span className="text-xs text-loss" title={copy.error}>
+                            {copy.error.length > 24 ? copy.error.slice(0, 24) + '…' : copy.error}
+                          </span>
+                        ) : pnl != null ? (
+                          <span className={pnl < 0 ? 'text-loss' : 'text-profit'}>{signed(pnl)}</span>
+                        ) : (
+                          '—'
+                        )}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
 
       {/* Master Card */}
       {masterAccount && masterState && (

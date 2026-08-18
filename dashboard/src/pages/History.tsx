@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from '../lib/api'
-import type { Account, Deal, HistoricalOrder } from '../lib/types'
+import type { Account, CashFlowEntry, Deal, HistoricalOrder } from '../lib/types'
 
 const WEEK_MS = 7 * 24 * 3600 * 1000
 
-type Tab = 'closed' | 'deals' | 'orders'
+type Tab = 'closed' | 'deals' | 'orders' | 'cashflow'
 
 function accountLabel(account: Account): string {
   const name = account.nickname || `Account ${account.trader_login}`
@@ -49,6 +49,9 @@ export default function History() {
   const [tab, setTab] = useState<Tab>('closed')
   const [deals, setDeals] = useState<Deal[]>([])
   const [orders, setOrders] = useState<HistoricalOrder[]>([])
+  const [cashFlow, setCashFlow] = useState<CashFlowEntry[]>([])
+  const [drillPosition, setDrillPosition] = useState<number | null>(null)
+  const [drillDeals, setDrillDeals] = useState<Deal[] | null>(null)
   const [hasMore, setHasMore] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -74,14 +77,17 @@ export default function History() {
     try {
       setLoading(true)
       setError(null)
-      const [dealsRes, ordersRes] = await Promise.all([
+      const [dealsRes, ordersRes, cashRes] = await Promise.all([
         api<{ deals: Deal[]; has_more: boolean }>(
           `/api/accounts/${accountId}/history/deals?${query}`),
         api<{ orders: HistoricalOrder[]; has_more: boolean }>(
           `/api/accounts/${accountId}/history/orders?${query}`),
+        api<{ entries: CashFlowEntry[] }>(
+          `/api/accounts/${accountId}/history/cashflow?${query}`).catch(() => ({ entries: [] })),
       ])
       setDeals(dealsRes.deals)
       setOrders(ordersRes.orders)
+      setCashFlow(cashRes.entries)
       setHasMore(dealsRes.has_more || ordersRes.has_more)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load history')
@@ -96,6 +102,19 @@ export default function History() {
 
   const closingDeals = deals.filter((d) => d.close != null)
   const from = windowEnd - WEEK_MS
+
+  const openDrill = async (positionId: number) => {
+    setDrillPosition(positionId)
+    setDrillDeals(null)
+    if (accountId == null) return
+    try {
+      const result = await api<{ deals: Deal[] }>(
+        `/api/accounts/${accountId}/positions/${positionId}/deals?from=0&to=${Date.now()}`)
+      setDrillDeals(result.deals)
+    } catch {
+      setDrillDeals([])
+    }
+  }
 
   const tabButton = (key: Tab, label: string, count: number) => (
     <button
@@ -178,22 +197,157 @@ export default function History() {
         {tabButton('closed', 'Closed positions', closingDeals.length)}
         {tabButton('deals', 'Deals', deals.length)}
         {tabButton('orders', 'Orders', orders.length)}
+        {tabButton('cashflow', 'Cash flow', cashFlow.length)}
       </div>
 
       {loading ? (
         <p className="text-sm text-ink-faint py-8">Loading history…</p>
       ) : tab === 'closed' ? (
-        <ClosedPositionsTable deals={closingDeals} />
+        <ClosedPositionsTable deals={closingDeals} onDrill={openDrill} />
       ) : tab === 'deals' ? (
         <DealsTable deals={deals} />
-      ) : (
+      ) : tab === 'orders' ? (
         <OrdersTable orders={orders} />
+      ) : (
+        <CashFlowTable entries={cashFlow} />
+      )}
+
+      {/* Position drill-down drawer */}
+      {drillPosition != null && (
+        <div
+          className="fixed inset-0 z-40 flex justify-end bg-ink/30"
+          onClick={() => setDrillPosition(null)}
+        >
+          <aside
+            className="w-full max-w-lg h-full bg-card border-l border-line overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+            role="complementary"
+            aria-label={`Deals for position ${drillPosition}`}
+          >
+            <div className="px-6 py-5 border-b border-line flex items-start justify-between">
+              <div>
+                <h2 className="font-display text-xl text-ink">Position {drillPosition}</h2>
+                <p className="text-sm text-ink-soft mt-0.5">
+                  Every fill, partial close, and close of this position.
+                </p>
+              </div>
+              <button
+                onClick={() => setDrillPosition(null)}
+                aria-label="Close position details"
+                className="text-ink-soft hover:text-ink text-xl leading-none"
+              >
+                ×
+              </button>
+            </div>
+            {drillDeals == null ? (
+              <p className="px-6 py-4 text-sm text-ink-faint">Fetching from the broker…</p>
+            ) : drillDeals.length === 0 ? (
+              <p className="px-6 py-4 text-sm text-ink-faint">
+                The broker returned no deals for this position.
+              </p>
+            ) : (
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left border-b border-line">
+                    <th className="desk-label px-6 py-2 font-semibold">When</th>
+                    <th className="desk-label px-3 py-2 font-semibold">Side</th>
+                    <th className="desk-label px-3 py-2 font-semibold text-right">Lots</th>
+                    <th className="desk-label px-3 py-2 font-semibold text-right">Price</th>
+                    <th className="desk-label px-6 py-2 font-semibold text-right">P&L</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {drillDeals.map((deal) => (
+                    <tr key={deal.deal_id} className="border-b border-line last:border-0">
+                      <td className="num px-6 py-2.5 text-ink-soft whitespace-nowrap">
+                        {formatWhen(deal.execution_timestamp)}
+                      </td>
+                      <td className={`px-3 py-2.5 font-medium ${deal.side === 'BUY' ? 'text-profit' : 'text-loss'}`}>
+                        {deal.side}
+                        <span className="text-xs text-ink-faint ml-1">
+                          {deal.close ? 'close' : 'open'}
+                        </span>
+                      </td>
+                      <td className="num px-3 py-2.5 text-right">
+                        {deal.volume_lots ?? deal.filled_volume}
+                      </td>
+                      <td className="num px-3 py-2.5 text-right">{price(deal.execution_price)}</td>
+                      <td className={`num px-6 py-2.5 text-right ${
+                        deal.close
+                          ? deal.close.gross_profit < 0 ? 'text-loss' : 'text-profit'
+                          : 'text-ink-faint'
+                      }`}>
+                        {deal.close ? signed(deal.close.gross_profit) : '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </aside>
+        </div>
       )}
     </div>
   )
 }
 
-function ClosedPositionsTable({ deals }: { deals: Deal[] }) {
+function CashFlowTable({ entries }: { entries: CashFlowEntry[] }) {
+  if (entries.length === 0) {
+    return (
+      <p className="text-sm text-ink-faint py-8">
+        No deposits or withdrawals in this week.
+      </p>
+    )
+  }
+  return (
+    <div className="bg-card rounded-lg border border-line overflow-x-auto">
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="text-left border-b border-line">
+            <th className="desk-label px-5 py-2.5 font-semibold">When</th>
+            <th className="desk-label px-3 py-2.5 font-semibold">Type</th>
+            <th className="desk-label px-3 py-2.5 font-semibold text-right">Amount</th>
+            <th className="desk-label px-3 py-2.5 font-semibold text-right">Balance after</th>
+            <th className="desk-label px-5 py-2.5 font-semibold">Note</th>
+          </tr>
+        </thead>
+        <tbody>
+          {entries.map((entry) => {
+            const isDeposit = entry.type.startsWith('DEPOSIT')
+            return (
+              <tr key={entry.id} className="border-b border-line last:border-0">
+                <td className="num px-5 py-2.5 text-ink-soft whitespace-nowrap">
+                  {formatWhen(entry.timestamp)}
+                </td>
+                <td className="px-3 py-2.5">
+                  <span className={`text-xs font-medium px-2 py-0.5 rounded ${
+                    isDeposit ? 'bg-profit-wash text-profit' : 'bg-loss-wash text-loss'
+                  }`}>
+                    {entry.type}
+                  </span>
+                </td>
+                <td className={`num px-3 py-2.5 text-right font-medium ${
+                  isDeposit ? 'text-profit' : 'text-loss'
+                }`}>
+                  {isDeposit ? '+' : '-'}{Math.abs(entry.amount).toLocaleString('en-US', {
+                    minimumFractionDigits: 2, maximumFractionDigits: 2,
+                  })}
+                </td>
+                <td className="num px-3 py-2.5 text-right">{formatMoney(entry.balance_after)}</td>
+                <td className="px-5 py-2.5 text-ink-soft">{entry.note || '—'}</td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function ClosedPositionsTable({ deals, onDrill }: {
+  deals: Deal[]
+  onDrill: (positionId: number) => void
+}) {
   if (deals.length === 0) {
     return (
       <p className="text-sm text-ink-faint py-8">
@@ -228,7 +382,15 @@ function ClosedPositionsTable({ deals }: { deals: Deal[] }) {
                 <td className="num px-5 py-2.5 text-ink-soft whitespace-nowrap">
                   {formatWhen(deal.execution_timestamp)}
                 </td>
-                <td className="num px-3 py-2.5 text-ink-soft">{deal.position_id}</td>
+                <td className="num px-3 py-2.5">
+                  <button
+                    onClick={() => onDrill(deal.position_id)}
+                    aria-label={`View position ${deal.position_id}`}
+                    className="text-brand hover:text-brand-deep underline decoration-dotted underline-offset-2"
+                  >
+                    {deal.position_id}
+                  </button>
+                </td>
                 <td className="num px-3 py-2.5">{deal.symbol ?? deal.symbol_id}</td>
                 <td className={`px-3 py-2.5 font-medium ${positionSide === 'BUY' ? 'text-profit' : 'text-loss'}`}>
                   {positionSide}

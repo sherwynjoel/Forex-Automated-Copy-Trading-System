@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom'
 import { api } from '../lib/api'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
-import type { Account, ApiState, CloseAllResult, Settings } from '../lib/types'
+import type { Account, ApiState, CloseAllResult, EventResponse, Settings } from '../lib/types'
 import ConfirmDialog from './ConfirmDialog'
 
 const navItems = [
@@ -11,6 +11,7 @@ const navItems = [
   { path: '/positions', label: 'Positions' },
   { path: '/trade', label: 'Trade' },
   { path: '/history', label: 'History' },
+  { path: '/performance', label: 'Performance' },
   { path: '/logs', label: 'Logs' },
 ]
 
@@ -39,6 +40,8 @@ function DeskStrip() {
   const [dialogOpen, setDialogOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
+  const [marginCall, setMarginCall] = useState<EventResponse | null>(null)
+  const [dismissedRiskId, setDismissedRiskId] = useState<number | null>(null)
 
   const refresh = useCallback(async () => {
     try {
@@ -53,6 +56,16 @@ function DeskStrip() {
         master ? state.accounts?.[String(master.ctid_trader_account_id)] ?? null : null)
     } catch {
       // The strip is a passenger; pages surface their own errors.
+    }
+    try {
+      // A margin call in the last 30 minutes is a right-now problem; show
+      // it on every page until dismissed or aged out.
+      const risk = await api<EventResponse[]>('/api/events?category=risk&limit=5')
+      const recent = (risk ?? []).find((event) =>
+        Date.now() - new Date(event.ts).getTime() < 30 * 60_000)
+      setMarginCall(recent ?? null)
+    } catch {
+      // Older api without the risk category: no banner.
     }
   }, [])
 
@@ -134,6 +147,28 @@ function DeskStrip() {
         </div>
       </div>
 
+      {marginCall && marginCall.id !== dismissedRiskId && (
+        <div
+          role="alert"
+          className="px-6 py-2.5 bg-loss text-white text-sm flex items-center justify-between"
+        >
+          <span>
+            <strong>Margin call</strong>
+            {marginCall.account_id != null && (
+              <> on account <span className="num">{marginCall.account_id}</span></>
+            )}
+            {' — '}the broker may start force-closing positions. Reduce
+            exposure or add funds now.
+          </span>
+          <button
+            onClick={() => setDismissedRiskId(marginCall.id)}
+            className="text-white/80 hover:text-white text-xs font-medium ml-4"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {notice && (
         <div className="px-6 py-2 bg-brand-wash border-b border-line text-sm text-ink flex items-center justify-between">
           <span>{notice}</span>
@@ -186,7 +221,7 @@ export default function Layout() {
       <div className="w-56 border-r border-line bg-card flex flex-col">
         <div className="px-6 pt-6 pb-5 border-b border-line">
           <h1 className="font-display text-xl text-brand">Copy Desk</h1>
-          <p className="desk-label mt-1">FP Markets · cTrader</p>
+          <p className="desk-label mt-1">cTrader</p>
         </div>
 
         <nav className="mt-4 flex-1">
