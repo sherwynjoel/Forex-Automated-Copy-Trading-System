@@ -20,8 +20,8 @@ from copier.engine import queries
 from copier.engine.control import (
     DealHistoryResource, DetailsResource, OrderHistoryResource)
 
-from test_control import make_stub_client_factory
-from test_control import repo, token_store, db_seeded, fernet_key  # noqa: F401  (fixtures)
+from test_main import make_stub_client_factory
+from test_main import repo, token_store, db_seeded, fernet_key  # noqa: F401  (fixtures)
 
 
 def _written_json(request):

@@ -4,19 +4,28 @@ Wires together all components:
 - CTraderClient per environment (demo/live), sharded across N connections
 - TokenStore for OAuth token management + daily refresh loop
 - Repo for database access
-- CopierService for event orchestration
-- Reconciler for drift detection
-- AccountStateTracker for balance/equity tracking
+- CopierService for event orchestration (org-routed)
+- Reconciler for drift detection -- ONE PER ORG
+- AccountStateTracker for balance/equity tracking -- ONE PER ORG
 - Dispatcher with rate limiting
 - Control endpoint for operational commands (control.py)
 
+Multi-org: the process is shared, the ENGINE is not. Every org with a master
+gets its own Reconciler, AccountStateTracker and master symbol map, keyed by
+org_id in `reconcilers` / `state_trackers` / `master_symbols_by_org`; the
+clients, dispatcher and token store stay process-wide (they are transport,
+not tenancy). Every control operation therefore takes the org it acts on, and
+none of them may read or write another org's accounts or settings --
+`close_all` in particular is the kill switch, so its org boundary is a
+correctness requirement, not a convenience.
+
 `build_app()` is the single place that wires the dependency graph together, in
 the correct order (repo -> token_store -> clients -> dispatcher(send_for_account)
--> service -> reconciler(dispatcher) -> state_tracker -> CopierApp). No
-component is ever constructed with a placeholder/None dependency and patched
-afterward: `send_for_account`/`clients_by_account` close over the `repo` and
-the (fully-built-before-use) `clients` dict directly, so they can be handed to
-Dispatcher/Reconciler before CopierApp itself exists.
+-> service -> per-org reconcilers(dispatcher) -> per-org state_trackers ->
+CopierApp). No component is ever constructed with a placeholder/None dependency
+and patched afterward: `send_for_account`/`clients_by_account` close over the
+`repo` and the (fully-built-before-use) `clients` dict directly, so they can be
+handed to Dispatcher/Reconciler before CopierApp itself exists.
 
 `boot()` wires that app into a (possibly fake, for tests) reactor: it never
 calls `reactor.run()` itself, which keeps it unit-testable. `main()` is the
@@ -45,9 +54,10 @@ from copier.ctrader.client import CTraderClient, make_sdk_client
 from copier.ctrader.tokens import TokenStore
 from copier.ctrader.symbols import fetch_symbol_map, by_id as symbols_by_id
 from copier.db.repo import Repo
-from copier.domain.models import MANUAL_ORDER_LABEL, SlaveConfig
+from copier.domain.models import MANUAL_ORDER_LABEL
 from copier.engine.service import CopierService
 from copier.engine.reconcile import Reconciler
+from copier.engine.routing import OrgRouting, build_routing
 from copier.engine.state import AccountStateTracker, PositionSnapshot as StatePositionSnapshot
 from copier.engine.dispatch import Dispatcher, SendNotAttempted
 from copier.engine.throttle import TokenBucket
@@ -84,7 +94,13 @@ CONTROL_BIND_INTERFACE = "0.0.0.0"
 
 
 class CopierApp:
-    """Composition root: wires all copier components together."""
+    """Composition root: wires all copier components together.
+
+    One process, many tenants: `reconcilers`, `state_trackers` and
+    `master_symbols_by_org` are keyed by org_id and hold an entry for exactly
+    the orgs that currently have a master account. Orgs without a master have
+    no engine at all (they can still be read: get_state() answers empty).
+    """
 
     def __init__(
         self,
@@ -92,29 +108,55 @@ class CopierApp:
         token_store: TokenStore,
         clients: dict[bool, dict[int, CTraderClient]],
         service: CopierService,
-        reconciler: Reconciler,
-        state_tracker: AccountStateTracker | None,
+        reconcilers: dict[int, Reconciler],
+        state_trackers: dict[int, "AccountStateTracker | None"],
         dispatcher: Dispatcher,
         client_factory: Callable[[bool], CTraderClient],
         shards: int,
-        master_symbols_by_id: dict,
-        master_account_id: int | None,
+        master_symbols_by_org: dict[int, dict],
+        routing_provider: Callable[[], OrgRouting],
+        clients_by_account: Callable[[int], CTraderClient] | None = None,
         clock=None,
     ):
         self.repo = repo
         self.token_store = token_store
         self.clients = clients
         self.service = service
-        self.reconciler = reconciler
-        self.state_tracker = state_tracker
+        self.reconcilers = reconcilers
+        self.state_trackers = state_trackers
         self.dispatcher = dispatcher
         self.client_factory = client_factory
         self.shards = shards
-        self.master_symbols_by_id = master_symbols_by_id
-        self.master_account_id = master_account_id
+        self.master_symbols_by_org = master_symbols_by_org
+        self.routing_provider = routing_provider
+        # Needed by reload() to build an engine for an org that acquires a
+        # master after boot. Same callable the pre-existing reconcilers were
+        # built with (it closes over repo/clients, not over this app -- see
+        # _build_clients_by_account), so it is a real ctor dependency rather
+        # than something patched on afterwards.
+        self._clients_by_account = clients_by_account
         self.clock = clock
         self._resync_in_flight = False
         self._resync_requested = False
+
+    def reconciler_for(self, org_id: int) -> Reconciler:
+        """The org's engine, or ValueError if it has none (no master)."""
+        reconciler = self.reconcilers.get(org_id)
+        if reconciler is None:
+            raise ValueError(f"org {org_id} has no active engine (no master?)")
+        return reconciler
+
+    def _require_account_in_org(self, org_id: int, account_id: int) -> None:
+        """Guard every account-scoped control action with its tenancy check.
+
+        The copier is the last line of defence for the kill switch: an
+        account id that does not belong to `org_id` must fail loudly here,
+        never be acted on, whatever the caller believed.
+        """
+        account = next(
+            (a for a in self.repo.load_accounts() if a.account_id == account_id), None)
+        if account is None or account.org_id != org_id:
+            raise ValueError(f"account {account_id} not in org {org_id}")
 
     # ---------- lifecycle ----------
 
@@ -166,21 +208,30 @@ class CopierApp:
 
     @defer.inlineCallbacks
     def _refresh_balances_body(self):
-        if self.state_tracker is None:
+        if not self.state_trackers:
             return
         try:
-            enabled_ids = [a.account_id for a in self.repo.load_accounts() if a.enabled]
+            accounts = self.repo.load_accounts()
         except Exception:
             log.exception("refresh_balances: failed to load accounts")
             return
-        if not enabled_ids:
-            return
-        try:
-            # refresh_balances() fans out one ProtoOATraderReq per account and
-            # DeferredLists them; the SDK's own 5 msg/s queue paces the wire.
-            yield self.state_tracker.refresh_balances(enabled_ids)
-        except Exception:
-            log.exception("refresh_balances: broker request failed")
+        for org_id, tracker in self.state_trackers.items():
+            if tracker is None:
+                continue
+            # Each org's tracker only ever reads ITS OWN accounts: the
+            # tracker's snapshot feeds that org's /state, so a foreign
+            # account id here would leak one tenant's balance into another's
+            # Overview.
+            enabled_ids = [a.account_id for a in accounts
+                           if a.org_id == org_id and a.enabled]
+            if not enabled_ids:
+                continue
+            try:
+                # refresh_balances() fans out one ProtoOATraderReq per account and
+                # DeferredLists them; the SDK's own 5 msg/s queue paces the wire.
+                yield tracker.refresh_balances(enabled_ids)
+            except Exception:
+                log.exception("refresh_balances: broker request failed (org %s)", org_id)
 
     @defer.inlineCallbacks
     def _connect_and_authorize(self, accounts):
@@ -248,8 +299,13 @@ class CopierApp:
                 symbol_map = yield fetch_symbol_map(client, account.account_id)
                 self.repo.save_symbol_cache(account.account_id, symbol_map)
                 if account.role == 'master':
-                    self.master_symbols_by_id.clear()
-                    self.master_symbols_by_id.update(symbols_by_id(symbol_map))
+                    # Mutated in place: the same inner dict object is held by
+                    # this org's AccountStateTracker and read through
+                    # CopierService's master_symbols_by_org, so rebinding it
+                    # would strand both on a stale map.
+                    org_symbols = self.master_symbols_by_org.setdefault(account.org_id, {})
+                    org_symbols.clear()
+                    org_symbols.update(symbols_by_id(symbol_map))
             except Exception as e:
                 log.error("failed to fetch symbol map for account %s: %s", account.account_id, e)
                 self.repo.log_event(
@@ -271,40 +327,44 @@ class CopierApp:
 
     # ---------- control operations ----------
 
-    def pause(self, account_id: int | None = None) -> defer.Deferred:
-        """Pause copying globally or for a single slave, then reload."""
+    def pause(self, org_id: int, account_id: int | None = None) -> defer.Deferred:
+        """Pause copying for one org, or one of its slaves, then reload."""
         if account_id is None:
-            self.repo.set_setting("copying_enabled", False)
-            self.repo.log_event('control', 'info', {'action': 'pause_global'})
-            log.info("copying paused globally")
+            self.repo.set_org_setting(org_id, "copying_enabled", False)
+            self.repo.log_event('control', 'info', {'action': 'pause_org'}, org_id=org_id)
+            log.info("copying paused for org %s", org_id)
         else:
+            self._require_account_in_org(org_id, account_id)
             self.repo.set_account_status(account_id, 'paused')
             self.repo.log_event(
                 'control', 'info', {'action': 'pause_slave', 'account_id': account_id},
-                account_id=account_id,
+                account_id=account_id, org_id=org_id,
             )
             log.info("slave %s paused", account_id)
         return self.reload()
 
-    def resume(self, account_id: int | None = None) -> defer.Deferred:
-        """Resume copying globally or for a single slave, then reload."""
+    def resume(self, org_id: int, account_id: int | None = None) -> defer.Deferred:
+        """Resume copying for one org, or one of its slaves, then reload."""
         if account_id is None:
-            self.repo.set_setting("copying_enabled", True)
-            self.repo.log_event('control', 'info', {'action': 'resume_global'})
-            log.info("copying resumed globally")
+            self.repo.set_org_setting(org_id, "copying_enabled", True)
+            self.repo.log_event('control', 'info', {'action': 'resume_org'}, org_id=org_id)
+            log.info("copying resumed for org %s", org_id)
         else:
+            self._require_account_in_org(org_id, account_id)
             self.repo.set_account_status(account_id, 'ok')
             self.repo.log_event(
                 'control', 'info', {'action': 'resume_slave', 'account_id': account_id},
-                account_id=account_id,
+                account_id=account_id, org_id=org_id,
             )
             log.info("slave %s resumed", account_id)
         return self.reload()
 
-    def set_dry_run(self, enabled: bool) -> None:
-        self.repo.set_setting("dry_run", enabled)
-        self.repo.log_event('control', 'info', {'action': 'set_dry_run', 'enabled': enabled})
-        log.info("dry-run mode: %s", "enabled" if enabled else "disabled")
+    def set_dry_run(self, org_id: int, enabled: bool) -> None:
+        self.repo.set_org_setting(org_id, "dry_run", enabled)
+        self.repo.log_event(
+            'control', 'info', {'action': 'set_dry_run', 'enabled': enabled},
+            org_id=org_id)
+        log.info("dry-run for org %s: %s", org_id, "enabled" if enabled else "disabled")
 
     def request_resync(self) -> None:
         """Schedule a near-immediate resync in response to a position-
@@ -340,7 +400,7 @@ class CopierApp:
         answer must not stack a second fan-out on top. Never raises or
         errbacks, same contract as refresh_balances().
         """
-        if self._resync_in_flight or self.master_account_id is None:
+        if self._resync_in_flight or not self.reconcilers:
             return defer.succeed(None)
         self._resync_in_flight = True
         d = defer.maybeDeferred(self.resync)
@@ -357,26 +417,41 @@ class CopierApp:
         return d
 
     @defer.inlineCallbacks
-    def resync(self):
-        """Run reconciliation and feed the master's open positions into state_tracker."""
-        items = yield self.reconciler.run()
-        if self.state_tracker is not None and self.master_account_id is not None:
-            positions = [
-                StatePositionSnapshot(
-                    position_id=p.position_id, symbol_id=p.symbol_id, side=p.side,
-                    volume=p.volume, price=p.price, label=p.label,
-                )
-                for p in self.reconciler.master_positions
-            ]
-            self.state_tracker.set_positions(self.master_account_id, positions)
-            try:
-                yield self.state_tracker.ensure_spot_subscriptions()
-            except Exception:
-                log.exception("resync: ensure_spot_subscriptions failed")
-            # N9: an operator running a resync is about to look at Overview;
-            # give them a current balance, not the one from process boot.
-            yield self.refresh_balances()
-        return items
+    def resync(self, org_id: int | None = None):
+        """Run reconciliation for one org (or all) and feed each org's master
+        positions into its own state tracker.
+
+        org_id=None is the process-wide sweep (startup, the periodic loop);
+        an operator-triggered resync passes exactly the org it belongs to, so
+        one tenant's resync never fans ProtoOAReconcileReq out across
+        another's accounts.
+        """
+        org_ids = [org_id] if org_id is not None else list(self.reconcilers.keys())
+        all_items = []
+        for oid in org_ids:
+            reconciler = self.reconcilers.get(oid)
+            if reconciler is None:
+                continue
+            items = yield reconciler.run()
+            all_items.extend(items or [])
+            tracker = self.state_trackers.get(oid)
+            if tracker is not None:
+                positions = [
+                    StatePositionSnapshot(
+                        position_id=p.position_id, symbol_id=p.symbol_id, side=p.side,
+                        volume=p.volume, price=p.price, label=p.label,
+                    )
+                    for p in reconciler.master_positions
+                ]
+                tracker.set_positions(reconciler.master_account_id, positions)
+                try:
+                    yield tracker.ensure_spot_subscriptions()
+                except Exception:
+                    log.exception("resync: ensure_spot_subscriptions failed (org %s)", oid)
+        # N9: an operator running a resync is about to look at Overview;
+        # give them a current balance, not the one from process boot.
+        yield self.refresh_balances()
+        return all_items
 
     @defer.inlineCallbacks
     def reload(self):
@@ -417,8 +492,8 @@ class CopierApp:
         # added (via discover()/direct insert) and enabled AFTER the process
         # already booted only ever go through reload(), never startup()
         # again -- without this, their symbol_cache (needed by every slave's
-        # mirror_volume sizing) and, for a newly (re)designated master,
-        # master_symbols_by_id (needed by normalize()'s unknown-symbol gate)
+        # mirror_volume sizing) and, for a newly (re)designated master, their
+        # org's master symbol map (needed by normalize()'s unknown-symbol gate)
         # would stay empty for the lifetime of the process, silently
         # dropping every master event / mis-sizing every slave copy with no
         # error surfaced anywhere. Caught by the compose-level e2e test
@@ -439,41 +514,70 @@ class CopierApp:
         ]
         yield self._fetch_and_cache_symbols(accounts_needing_symbols)
 
-        master_account = next((a for a in accounts if a.role == 'master'), None)
-        new_master_id = master_account.account_id if master_account else None
+        # Rebuild each org's engine wiring from the accounts table. The
+        # in-memory per-org symbol dicts are refreshed unconditionally from
+        # the DB cache -- decoupled from whether _fetch_and_cache_symbols
+        # actually hit the broker this cycle. Without that, a former SLAVE
+        # (already cached from being a slave) promoted to master would hit
+        # the cache-miss skip above and never populate its org's master
+        # symbol map at all, since only a successful FETCH (not a cache hit)
+        # updates it in _fetch_and_cache_symbols. This is a plain local DB
+        # read, not a broker round trip, so doing it every reload is free.
+        routing = self.routing_provider()
+        live_orgs = set(routing.master_by_org.keys())
 
-        # Refresh the IN-MEMORY master_symbols_by_id from whatever is
-        # currently cached in the DB for the master, unconditionally --
-        # decoupled from whether _fetch_and_cache_symbols actually hit the
-        # broker this cycle. Without this, a former SLAVE (already cached
-        # from being a slave) promoted to master would hit the cache-miss
-        # skip above and never populate master_symbols_by_id at all, since
-        # only a successful FETCH (not a cache hit) updates it in
-        # _fetch_and_cache_symbols. This is a plain local DB read, not a
-        # broker round trip, so doing it every reload is free.
-        if master_account is not None:
-            master_symbol_cache = self.repo.load_symbol_cache(master_account.account_id)
-            self.master_symbols_by_id.clear()
-            self.master_symbols_by_id.update(symbols_by_id(master_symbol_cache))
+        for org_id, master_id in routing.master_by_org.items():
+            master_account = next(
+                (a for a in accounts if a.account_id == master_id), None)
+            if master_account is None:
+                continue
+            org_symbols = self.master_symbols_by_org.setdefault(org_id, {})
+            org_symbols.clear()
+            org_symbols.update(symbols_by_id(
+                self.repo.load_symbol_cache(master_id)))
 
-        if new_master_id != self.master_account_id:
-            self.master_account_id = new_master_id
-            self.service._master_account_id = new_master_id
-            self.reconciler.master_account_id = new_master_id
-            if master_account is not None:
-                master_client = self._client_for_account(master_account)
-                self.state_tracker = AccountStateTracker(
-                    master_client=master_client, repo=self.repo,
-                    master_account_id=new_master_id, symbols_by_id=self.master_symbols_by_id,
+            reconciler = self.reconcilers.get(org_id)
+            if reconciler is None:
+                self.reconcilers[org_id] = Reconciler(
+                    clients_by_account=self._clients_by_account, repo=self.repo,
+                    dispatcher=self.dispatcher, master_account_id=master_id,
+                    org_id=org_id,
                 )
-            else:
-                self.state_tracker = None
+            elif reconciler.master_account_id != master_id:
+                reconciler.master_account_id = master_id
+
+            tracker = self.state_trackers.get(org_id)
+            if tracker is None or tracker._master_account_id != master_id:
+                master_client = self._client_for_account(master_account)
+                self.state_trackers[org_id] = AccountStateTracker(
+                    master_client=master_client, repo=self.repo,
+                    master_account_id=master_id, symbols_by_id=org_symbols,
+                )
+
+        # Orgs that lost their master (or were deleted) lose their engines:
+        # leaving a reconciler behind would keep reconciling -- and keep
+        # answering /state for -- accounts the org no longer routes, and a
+        # left-behind symbol map is still read by CopierService.
+        for org_id in (set(self.reconcilers) | set(self.state_trackers)
+                       | set(self.master_symbols_by_org)):
+            if org_id not in live_orgs:
+                self.reconcilers.pop(org_id, None)
+                self.state_trackers.pop(org_id, None)
+                self.master_symbols_by_org.pop(org_id, None)
 
         self.repo.log_event('control', 'info', {'action': 'reload', 'account_count': len(accounts)})
 
     @defer.inlineCallbacks
     def discover(self, connection_id: int):
-        """Discover accounts reachable with a connection's access token and upsert them."""
+        """Discover accounts reachable with a connection's access token and
+        upsert them into the org that owns THAT connection.
+
+        A broker account already claimed by another org is never rewritten
+        (repo.upsert_account's ownership guard makes that atomic): it is
+        skipped, counted as a conflict, and surfaced as an 'error' event on
+        the discovering org, so an operator sees why the account they expected
+        never appeared instead of silently stealing it from its owner.
+        """
         client = self._any_ready_client()
         built_new = False
         if client is None:
@@ -487,14 +591,26 @@ class CopierApp:
         req.accessToken = pair.access_token
         res = Protobuf.extract((yield client.send(req)))
 
+        org_id = self.repo.connection_org(connection_id)
         discovered = list(res.ctidTraderAccount)
+        conflicts = []
         for acc in discovered:
-            self.repo.upsert_account(
+            applied = self.repo.upsert_account(
                 account_id=acc.ctidTraderAccountId,
                 connection_id=connection_id,
+                org_id=org_id,
                 trader_login=acc.traderLogin,
                 is_live=acc.isLive,
             )
+            if not applied:
+                conflicts.append(acc.ctidTraderAccountId)
+                self.repo.log_event(
+                    'control', 'error',
+                    {'action': 'discover_conflict',
+                     'account_id': acc.ctidTraderAccountId,
+                     'detail': 'account already connected to another organization'},
+                    account_id=acc.ctidTraderAccountId, org_id=org_id,
+                )
 
         if built_new:
             client.on_execution(self.service.handle_execution)
@@ -503,7 +619,9 @@ class CopierApp:
 
         self.repo.log_event(
             'control', 'info',
-            {'action': 'discover', 'connection_id': connection_id, 'account_count': len(discovered)},
+            {'action': 'discover', 'connection_id': connection_id,
+             'account_count': len(discovered), 'conflicts': conflicts},
+            org_id=org_id,
         )
         return discovered
 
@@ -739,26 +857,29 @@ class CopierApp:
         return d
 
     @defer.inlineCallbacks
-    def close_all(self, account_id: int | None = None):
-        """Kill switch: flatten one account, or (account_id=None) every
-        enabled, non-paused account -- master included.
+    def close_all(self, org_id: int, account_id: int | None = None):
+        """Kill switch for ONE org: flatten one of its accounts, or
+        (account_id=None) every enabled, non-paused account in the org --
+        master included.
 
-        The GLOBAL kill switch pauses copying FIRST, so the master closes it
-        is about to send cannot fan out as copy-closes while the slaves'
-        positions are simultaneously being closed directly (each close would
-        otherwise race its own copy).  A single-account kill switch never
-        touches the global pause.
+        The org-wide kill switch pauses THAT ORG's copying FIRST, so the
+        master closes it is about to send cannot fan out as copy-closes while
+        the slaves' positions are simultaneously being closed directly (each
+        close would otherwise race its own copy). No other org's settings or
+        accounts are ever touched, and a single-account kill switch pauses
+        nothing at all -- but still only accepts an account of its own org.
         """
         if account_id is not None:
+            self._require_account_in_org(org_id, int(account_id))
             summary = yield self._flatten_account(int(account_id))
             results = [summary]
             paused = False
         else:
-            self.repo.set_setting("copying_enabled", False)
+            self.repo.set_org_setting(org_id, "copying_enabled", False)
             paused = True
             targets = [
                 a for a in self.repo.load_accounts()
-                if a.enabled and a.status != 'paused'
+                if a.org_id == org_id and a.enabled and a.status != 'paused'
             ]
             results = []
             for account in targets:
@@ -773,9 +894,9 @@ class CopierApp:
 
         self.repo.log_event(
             'control', 'warning',
-            {'action': 'kill_switch', 'global': account_id is None,
+            {'action': 'kill_switch', 'org_wide': account_id is None,
              'accounts': results},
-            account_id=account_id,
+            account_id=account_id, org_id=org_id,
         )
         return {"status": "flattened", "paused": paused, "accounts": results}
 
@@ -818,17 +939,20 @@ class CopierApp:
     # ---------- read models ----------
 
     def get_health(self) -> dict:
-        settings = self.repo.get_settings()
-        accounts = self.repo.load_accounts()
-        master_account = next((a for a in accounts if a.role == 'master'), None)
-        return {
-            "status": "ok",
-            "master": master_account.account_id if master_account else None,
-            "copying_enabled": settings.copying_enabled,
-            "dry_run": settings.dry_run,
-        }
+        """Process status plus one row per org: its master (or None) and its
+        own copying_enabled/dry_run. There is no global pair to report."""
+        routing = self.routing_provider()
+        orgs = []
+        for org in self.repo.load_orgs():
+            orgs.append({
+                "org_id": org.org_id,
+                "master": routing.master_by_org.get(org.org_id),
+                "copying_enabled": org.copying_enabled,
+                "dry_run": org.dry_run,
+            })
+        return {"status": "ok", "orgs": orgs}
 
-    def get_state(self) -> dict:
+    def get_state(self, org_id: int) -> dict:
         """Read model behind GET /state (and, proxied, GET /api/state).
 
         T9c -- the copies and master rows carry the fields the dashboard's
@@ -846,9 +970,17 @@ class CopierApp:
         Everything here is a local read (mapping rows, the symbol cache, the
         in-memory tracker snapshot) -- no broker round trips -- so it stays
         cheap enough for the dashboard's 5 s poll.
+
+        Strictly org-scoped: every source it reads (the org's tracker, the
+        org's reconciler, mapping_rows(org_id=...), the org's master symbol
+        map) belongs to `org_id` alone. An org with no engine (no master)
+        answers with empty lists rather than raising or borrowing another
+        org's state.
         """
-        accounts_snapshot = self.state_tracker.snapshot() if self.state_tracker is not None else {}
-        mappings = self.repo.mapping_rows()
+        state_tracker = self.state_trackers.get(org_id)
+        reconciler = self.reconcilers.get(org_id)
+        accounts_snapshot = state_tracker.snapshot() if state_tracker is not None else {}
+        mappings = self.repo.mapping_rows(org_id=org_id)
 
         # Per-call memo: several copies usually belong to the same slave, and
         # load_symbol_cache() is a database round trip each time.
@@ -865,7 +997,7 @@ class CopierApp:
             return f"{volume / lot_size:.2f}"
 
         def master_symbol(symbol_id: int):
-            return self.master_symbols_by_id.get(symbol_id)
+            return self.master_symbols_by_org.get(org_id, {}).get(symbol_id)
 
         def copies_for(key: str, value: int, symbol_name: str | None) -> list[dict]:
             out = []
@@ -891,16 +1023,16 @@ class CopierApp:
 
         master_positions = []
         pending_orders = []
-        if self.state_tracker is not None:
+        if state_tracker is not None and reconciler is not None:
             # Live per-position P&L, keyed by position id, from the same
             # snapshot the accounts block is built from -- so the Positions
             # screen and the Overview never disagree about a position.
             master_pnl_by_position: dict[int, float | None] = {}
-            if self.master_account_id is not None:
-                for tracked in accounts_snapshot.get(self.master_account_id, {}).get('positions', []):
-                    master_pnl_by_position[tracked['position_id']] = tracked.get('pnl_quote')
+            for tracked in accounts_snapshot.get(
+                    reconciler.master_account_id, {}).get('positions', []):
+                master_pnl_by_position[tracked['position_id']] = tracked.get('pnl_quote')
 
-            for pos in self.reconciler.master_positions:
+            for pos in reconciler.master_positions:
                 sym = master_symbol(pos.symbol_id)
                 symbol_name = sym.name if sym is not None else None
                 master_positions.append({
@@ -915,7 +1047,7 @@ class CopierApp:
                     'label': pos.label,
                     'copies': copies_for('master_position_id', pos.position_id, symbol_name),
                 })
-            for order in self.reconciler.master_orders:
+            for order in reconciler.master_orders:
                 sym = master_symbol(order.symbol_id)
                 symbol_name = sym.name if sym is not None else None
                 pending_orders.append({
@@ -937,7 +1069,7 @@ class CopierApp:
                     'id': item.id, 'kind': item.kind, 'account_id': item.account_id,
                     'position_id': item.position_id, 'order_id': item.order_id, 'detail': item.detail,
                 }
-                for item in self.reconciler.current
+                for item in (reconciler.current if reconciler is not None else [])
             ],
         }
 
@@ -1042,12 +1174,12 @@ def build_app(
     shards: int = DEFAULT_SHARDS,
     clock=None,
 ) -> CopierApp:
-    """Build a fully-wired CopierApp.
+    """Build a fully-wired CopierApp, with one engine per org that has a master.
 
     Construction order matters: repo -> token_store -> clients -> dispatcher
     (with a real send_for_account from the very first line, never a
-    None/placeholder patched in afterward) -> service -> reconciler (with a
-    real dispatcher) -> state_tracker -> CopierApp.
+    None/placeholder patched in afterward) -> service -> per-org reconcilers
+    (with a real dispatcher) -> per-org state_trackers -> CopierApp.
     """
     accounts = repo.load_accounts()
     envs_needed = sorted({a.is_live for a in accounts})
@@ -1062,45 +1194,44 @@ def build_app(
     bucket = TokenBucket(clock=clock)
     dispatcher = Dispatcher(send_for_account=send_for_account, repo=repo, bucket=bucket, clock=clock)
 
-    master_account = next((a for a in accounts if a.role == 'master'), None)
-    master_account_id = master_account.account_id if master_account else None
-    master_symbols_by_id: dict = {}
+    master_symbols_by_org: dict[int, dict] = {}
 
-    def slaves_provider() -> list[SlaveConfig]:
-        return [
-            SlaveConfig(
-                account_id=a.account_id,
-                enabled=a.enabled and a.status != 'paused',
-                multiplier=a.multiplier,
-                symbols=repo.load_symbol_cache(a.account_id),
-            )
-            for a in repo.load_accounts()
-            if a.role == 'slave'
-        ]
+    def routing_provider() -> OrgRouting:
+        # Fresh DB-backed snapshot per call -- the same freshness contract the
+        # old slaves_provider had (enabled/multiplier edits apply on the next
+        # event without waiting for a reload).
+        return build_routing(repo.load_accounts(), repo.load_symbol_cache)
 
     service = CopierService(
-        repo=repo, dispatcher=dispatcher, master_account_id=master_account_id,
-        master_symbols_by_id=master_symbols_by_id, slaves_provider=slaves_provider, clock=clock,
+        repo=repo, dispatcher=dispatcher, routing_provider=routing_provider,
+        master_symbols_by_org=master_symbols_by_org, clock=clock,
     )
 
-    reconciler = Reconciler(
-        clients_by_account=clients_by_account, repo=repo, dispatcher=dispatcher,
-        master_account_id=master_account_id,
-    )
-
-    state_tracker = None
-    if master_account is not None:
-        master_client = clients[master_account.is_live][master_account.account_id % shards]
-        state_tracker = AccountStateTracker(
+    initial_routing = build_routing(accounts, repo.load_symbol_cache)
+    reconcilers: dict[int, Reconciler] = {}
+    state_trackers: dict[int, AccountStateTracker] = {}
+    for org_id, master_id in initial_routing.master_by_org.items():
+        master_account = next(a for a in accounts if a.account_id == master_id)
+        reconcilers[org_id] = Reconciler(
+            clients_by_account=clients_by_account, repo=repo,
+            dispatcher=dispatcher, master_account_id=master_id, org_id=org_id,
+        )
+        # The inner dict is created here and mutated in place from then on, so
+        # the tracker and the service keep seeing this org's current symbols.
+        org_symbols = master_symbols_by_org.setdefault(org_id, {})
+        master_client = clients[master_account.is_live][master_id % shards]
+        state_trackers[org_id] = AccountStateTracker(
             master_client=master_client, repo=repo,
-            master_account_id=master_account_id, symbols_by_id=master_symbols_by_id,
+            master_account_id=master_id, symbols_by_id=org_symbols,
         )
 
     app = CopierApp(
         repo=repo, token_store=token_store, clients=clients, service=service,
-        reconciler=reconciler, state_tracker=state_tracker, dispatcher=dispatcher,
-        client_factory=client_factory, shards=shards, master_symbols_by_id=master_symbols_by_id,
-        master_account_id=master_account_id, clock=clock,
+        reconcilers=reconcilers, state_trackers=state_trackers,
+        dispatcher=dispatcher, client_factory=client_factory, shards=shards,
+        master_symbols_by_org=master_symbols_by_org,
+        routing_provider=routing_provider, clients_by_account=clients_by_account,
+        clock=clock,
     )
 
     # Service is constructed before the app (see module docstring on wiring
