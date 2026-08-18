@@ -1223,6 +1223,13 @@ def boot(config: BootConfig, reactor_) -> CopierApp:
 
 def main():
     """Boot the copier service and run forever."""
+    # Without this the process has no root handler at all, so every log.info/
+    # log.error in the package is silently dropped and `docker compose logs
+    # copier` -- the README's own operational guidance -- shows nothing.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     config = read_env()
     log.info("copier boot: client_id=%s demo=%s live=%s shards=%d", config.client_id,
               config.demo_host, config.live_host, config.shards)
