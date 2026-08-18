@@ -46,6 +46,13 @@ services:
     environment:
       POSTGRES_DSN: postgresql://copytrader:${POSTGRES_PASSWORD:-copytrader}@postgres:5432/copytrader
       COPIER_CONTROL_URL: http://copier:8080
+      # Optional bootstrap pair (spec §3). BOTH empty on a fresh install --
+      # the first operator registers through the UI. Setting both claims a
+      # legacy 'Default' org migrated by db/migrations/005_multi_org.sql,
+      # which has no members and is otherwise unreachable. Never required,
+      # and never a login path of its own: it just creates a normal user.
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
     depends_on:
       migrate: { condition: service_completed_successfully }
 

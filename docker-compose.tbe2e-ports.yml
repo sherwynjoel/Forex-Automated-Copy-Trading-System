@@ -1,0 +1,51 @@
+# Port remap for running the compose-level e2e suite in its OWN compose
+# project, side by side with a running dev stack.
+#
+# WHY THIS FILE EXISTS
+#
+# The e2e overlay (docker-compose.test.yml) and the base compose file publish
+# 127.0.0.1:5433 (postgres), :8000 (api), :8081 (copier control) and :9000
+# (fake-ctrader). Every one of those either collides with the developer's own
+# dev stack or with whatever else is on the machine, and -- far worse -- the
+# default compose project name makes the e2e run share the dev stack's
+# `pgdata` VOLUME, so the e2e teardown (`down -v`, mandatory, see README)
+# deletes the developer's real OAuth grants, accounts and audit log.
+#
+# HOW TO USE IT (the -p is not optional)
+#
+#     docker compose -p tbe2e \
+#       -f docker-compose.yml -f docker-compose.test.yml -f docker-compose.tbe2e-ports.yml \
+#       up -d --build
+#     E2E_API_BASE=http://127.0.0.1:8010 \
+#     E2E_COPIER_CONTROL_BASE=http://127.0.0.1:8091 \
+#     E2E_FAKE_CTRADER_BASE=http://127.0.0.1:9010 \
+#     E2E_POSTGRES_PORT=5436 \
+#       api/.venv/bin/pytest e2e -v
+#     docker compose -p tbe2e down -v
+#
+# `-p tbe2e` gives the run its own project: its own network, its own
+# containers and -- the point -- its own `pgdata` volume, so `down -v` can
+# only ever delete data this run created. Deliberately NOT combined with
+# docker-compose.override.yml (git-ignored, the dev stack's own port choices).
+#
+# `!override` is required on every `ports` entry: compose CONCATENATES the
+# multi-value `ports` option across -f files rather than replacing it, so
+# without the tag each service would try to bind BOTH the base port and the
+# remapped one, and the collision this file exists to avoid would happen
+# anyway.
+services:
+  postgres:
+    ports: !override
+      - "127.0.0.1:5436:5432"
+
+  copier:
+    ports: !override
+      - "127.0.0.1:8091:8080"
+
+  api:
+    ports: !override
+      - "127.0.0.1:8010:8000"
+
+  fake-ctrader:
+    ports: !override
+      - "127.0.0.1:9010:9000"

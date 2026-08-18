@@ -13,8 +13,8 @@ Runs two things in one reactor, inside the `fake-ctrader` compose service
    seeded tokens into this separate container's process.
 
 2. A tiny HTTP "scenario-control" site on port 9000 (published to the host
-   by docker-compose.test.yml) that e2e/test_full_stack.py drives directly:
-   POST /fill, /close, /place-limit. These do NOT go through
+   by docker-compose.test.yml) that the e2e tests drive directly:
+   POST /fill, /close, /place-limit, /reset. These do NOT go through
    FakeCTraderServer's normal request handlers (_handle_new_order_req etc,
    which react to a ProtoOA*Req arriving FROM a connected client) -- a
    trade on the MASTER account is never actually requested by the copier
@@ -325,6 +325,24 @@ class PlaceLimitResource(_ScenarioResource):
         return {"status": "placed", **result}
 
 
+class ResetResource(_ScenarioResource):
+    """POST /reset {} -> flattens the fake broker's whole book (every
+    account's open positions and working orders).
+
+    This container outlives any single e2e test, and the fake MERGES a
+    same-side market fill into an account's existing position
+    (FakeCTraderServer.register_market_fill), so without this a second run --
+    or the second of two tests that share account ids -- inherits the first
+    one's volumes. Truncating the database does not help: this state lives
+    here, not in Postgres. Connections, account-auth state and the symbol
+    table are untouched, so a copier already connected stays connected.
+    """
+
+    def _handle(self, body: dict) -> dict:
+        self.fake.reset_book()
+        return {"status": "reset"}
+
+
 class HealthResource(resource.Resource):
     """GET /health: trivial liveness probe for compose-level polling."""
 
@@ -341,6 +359,7 @@ def make_scenario_site(fake: FakeCTraderServer) -> server.Site:
     root.putChild(b"fill", FillResource(fake))
     root.putChild(b"close", CloseResource(fake))
     root.putChild(b"place-limit", PlaceLimitResource(fake))
+    root.putChild(b"reset", ResetResource(fake))
     return server.Site(root)
 
 

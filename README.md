@@ -3,26 +3,61 @@
 Replicates every trade action from one **master** cTrader account to any number
 of **slave** accounts at the same broker (FP Markets), in real time, over the
 cTrader Open API. A web dashboard provides monitoring, control, account
-onboarding, and a full audit log.
+onboarding, and a full audit log. One deployment serves **many organizations**
+side by side, each with its own book and its own team.
 
 ## 1. What this is
 
-The system watches a single master trading account and mirrors its market
+The system watches a master trading account and mirrors its market
 opens/closes (including partial closes), SL/TP changes, and pending order
 lifecycle to a configurable list of slave accounts, each with its own
 lot-size multiplier. It runs as four Docker Compose services: a Python/Twisted
 **copier** that owns the cTrader connections and does the actual trade
 replication, a **FastAPI** backend that serves the dashboard and proxies
 control commands to the copier, **Postgres** as the single source of truth
-for accounts, mappings, and the audit log, and a one-shot **migrate** job
-that applies the schema on startup before `copier`/`api` start.
+for users, orgs, accounts, mappings, and the audit log, and a one-shot
+**migrate** job that applies the schema on startup before `copier`/`api`
+start.
+
+### Multi-user, multi-org
+
+Anyone can **register** an account on the instance; registering by itself
+grants access to **nothing**. Access is always to a specific **organization**
+(org), and it comes from a membership row: you either create an org (which
+makes you its Owner) or you join one through an **invite link** an existing
+Admin or Owner generated for you. A user can belong to any number of orgs and
+switches between them in the dashboard.
+
+An org is the unit of isolation and the unit of trading: one master account,
+its slaves, its cTrader ID grants, its mappings, its audit log, its
+copying/dry-run switches. **Nothing crosses an org boundary** — every
+tenant-facing route lives under `/api/orgs/{org_id}/…`, and a request for an
+org you are not a member of returns `404`, not `403`, so the existence of
+other orgs never leaks. `e2e/test_multi_org.py` runs two orgs on one stack and
+asserts exactly that, including that one org's kill switch leaves the other's
+positions open.
+
+Within an org, four roles nest — `viewer < trader < admin < owner`:
+
+| Action | Viewer | Trader | Admin | Owner |
+|---|---|---|---|---|
+| Overview, accounts list, positions, history, events, symbols, state, live feed | ✓ | ✓ | ✓ | ✓ |
+| Members list | ✓ | ✓ | ✓ | ✓ |
+| Manual orders, close position, cancel order | | ✓ | ✓ | ✓ |
+| Pause / resume / resync, copying toggle, dry-run, **close-all** | | | ✓ | ✓ |
+| Account role / multiplier / enable / nickname, OAuth connect & disconnect, drift remedies, symbol refresh | | | ✓ | ✓ |
+| Create / revoke invites (roles ≤ admin) | | | ✓ | ✓ |
+| Change member roles, remove members, rename org, delete org | | | | ✓ |
+
+An org always has at least one Owner: demoting or removing the last one is
+rejected. Any member may leave an org themselves, except a last Owner.
 
 ```mermaid
 flowchart LR
     subgraph dockerCompose["Docker Compose"]
         copier["copier\n(Python + Twisted / OpenApiPy)\ntrading engine, internal control port 8080"]
         api["api\n(FastAPI + uvicorn)\nserves dashboard, REST + WebSocket, OAuth"]
-        postgres[("postgres\naccounts · mappings · events\nLISTEN/NOTIFY")]
+        postgres[("postgres\nusers · orgs · accounts\nmappings · events\nLISTEN/NOTIFY")]
     end
 
     ctrader["cTrader Open API servers\ndemo.ctraderapi.com / live.ctraderapi.com\nTCP + TLS, protobuf"]
@@ -44,12 +79,15 @@ flowchart LR
   drift-fix commands.
 - **api** — FastAPI + uvicorn. Serves the dashboard's static build, the REST
   API, a WebSocket live feed (fed by Postgres `LISTEN/NOTIFY`), the OAuth
-  redirect/callback for connecting cTrader IDs, and admin session auth.
-  Forwards control commands to the copier's internal endpoint. The api being
-  down never affects copying — the copier keeps trading independently.
-- **postgres** — single source of truth: connected cTrader IDs (encrypted
-  tokens), accounts and roles, symbol cache, position/order mappings, the
-  append-only event log, global settings, and the admin user.
+  redirect/callback for connecting cTrader IDs, and session auth. Owns
+  authorization: it resolves the caller's role in the org named by the URL
+  before anything is read, written, or proxied. Forwards control commands to
+  the copier's internal endpoint. The api being down never affects copying —
+  the copier keeps trading independently.
+- **postgres** — single source of truth: users, orgs, memberships and
+  invites, connected cTrader IDs (encrypted tokens), accounts and roles,
+  symbol cache, position/order mappings, the append-only event log, and each
+  org's copying/dry-run switches.
 
 ## 2. Prerequisite: register an Open API app
 
@@ -93,10 +131,14 @@ Edit `.env` and fill in:
   ```
 
 - `SESSION_SECRET` — any long random string (e.g. `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`).
-- `ADMIN_BOOTSTRAP_PASSWORD` — the password for the single dashboard admin
-  user, set on first boot.
 - `POSTGRES_PASSWORD` — the local default (`copytrader`) is fine for local
   use; change it before running on a VPS.
+- `BOOTSTRAP_ADMIN_EMAIL` / `BOOTSTRAP_ADMIN_PASSWORD` — **leave both empty on
+  a fresh install.** They exist only for upgrades: a deployment that predates
+  multi-org has its accounts gathered into a member-less `Default` org by the
+  migration, and setting both here creates that user on boot and makes them
+  its Owner — the only way to claim it. On a new install you register through
+  the UI instead.
 
 Then bring the stack up:
 
@@ -109,17 +151,31 @@ schema, then starts `copier` and `api`. With no `CTRADER_CLIENT_ID`/`SECRET`
 configured yet (or with placeholder values), the copier idles safely — it
 only errors if you try to actually connect accounts.
 
-Open **http://localhost:8000**, log in with the `ADMIN_BOOTSTRAP_PASSWORD`
-you set, then:
+Open **http://localhost:8000** and **register the first user** — email,
+password (10 characters minimum), display name. There is no preset admin
+login; the first person to register is simply the first user, and registering
+gives them no access to anything that already exists.
 
-1. Go to **Accounts → Connect cTrader ID**. This opens the cTrader OAuth
+Then:
+
+1. **Create an organization.** Whoever creates it is its Owner. Everything
+   below happens inside that org, and you can create more later (one per
+   customer, per desk, per master account — an org holds exactly one master).
+2. **Invite your team** from the org's Members screen: generate an invite
+   link for the role you want them to have (`viewer`, `trader`, or `admin` —
+   an invite can never grant Owner), and send it to them. They register (or
+   log in) and open the link to join. Roles are per org, so the same person
+   can be an Admin in one org and a Viewer in another. Change or revoke
+   anyone's role from the same screen.
+3. Go to **Accounts → Connect cTrader ID**. This opens the cTrader OAuth
    consent popup — no broker username or password is ever entered into this
    system. One OAuth grant covers **every trading account under that cTrader
    ID at the time you grant it**; if you add accounts to that cTID later,
-   you'll need to re-grant (see Operations below).
-2. You can revoke access at any time from your account settings at
+   you'll need to re-grant (see Operations below). The grant, and every
+   account under it, belongs to the org you connected it from.
+4. You can revoke access at any time from your account settings at
    ctrader.com, independent of this system.
-3. Once accounts are discovered, assign roles: exactly **one master**
+5. Once accounts are discovered, assign roles: exactly **one master per org**
    (enforced — the UI/API rejects a second), and any number of **slaves**,
    each with its own **multiplier** (slave lots = master lots × multiplier,
    default `1.0`).
@@ -167,7 +223,7 @@ slave, confirm a few real trades copy correctly, then scale up.
 ## 5. Operations
 
 - **Copy pause** — a single global pause (Overview screen or `POST
-  /api/control/pause` with no account id). It stops all copying immediately;
+  /api/orgs/{org_id}/control/pause` with no account id). It stops all copying immediately;
   resume with the matching resume control. It does not disconnect accounts
   or lose state — mappings and settings are untouched.
 - **Kill switch (close-all)** — flattens actual positions, not just copying.
@@ -175,8 +231,8 @@ slave, confirm a few real trades copy correctly, then scale up.
   `CLOSE ALL`) closes every open position and cancels every working order in
   every enabled account from a fresh broker snapshot, and pauses copying
   first so the master's closes can't race their own copy-closes. Per-account:
-  the "Flatten" button on the Accounts screen (`POST /api/control/close-all`
-  with `{"account_id": N}`) does the same for one account without touching
+  the "Flatten" button on the Accounts screen (`POST
+  /api/orgs/{org_id}/control/close-all` with `{"account_id": N}`) does the same for one account without touching
   the global pause.
 - **Manual orders** — the Trade screen places market/limit/stop orders (with
   optional SL/TP, volume in lots) on ANY connected account. Orders are
@@ -197,15 +253,15 @@ slave, confirm a few real trades copy correctly, then scale up.
 - **Trade history** — the History screen serves account-wise closed
   positions (realized P&L reconstructed from closing deals), every fill,
   and the order log, straight from the broker
-  (`GET /api/accounts/{id}/history/{deals,orders}?from&to`). cTrader caps
+  (`GET /api/orgs/{org_id}/accounts/{id}/history/{deals,orders}?from&to`). cTrader caps
   each request at a one-week window, so the screen pages by week.
 - **Disconnect** — the Accounts screen's Disconnect button removes the
   cTrader ID grant behind an account (`DELETE
-  /api/accounts/{id}/connection`), which cascades to every account under
+  /api/orgs/{org_id}/accounts/{id}/connection`), which cascades to every account under
   that same grant and triggers a copier reload so they de-authorize
   immediately. Open positions are not touched.
 - **Per-slave pause** — pauses one slave account without affecting the
-  master subscription or other slaves (`POST /api/control/pause` /
+  master subscription or other slaves (`POST /api/orgs/{org_id}/control/pause` /
   `/resume` with an `account_id`).
 - **Degraded slaves** — `degraded` is purely a transport/send problem, never
   a trading one. A slave is marked `degraded` only when a *send* to it
@@ -274,9 +330,15 @@ slave, confirm a few real trades copy correctly, then scale up.
 
 Everything the stack publishes is bound to **loopback only** — `api` on
 `127.0.0.1:8000` and `postgres` on `127.0.0.1:5433` — and the copier's
-control port is never published at all. That is deliberate: the dashboard's
-only authentication is a single admin password over a session cookie, so it
-must never be reachable directly from the internet. When you move to a VPS:
+control port is never published at all. Keep it that way, and note what
+"reachable" means here: **registration is open.** Anyone who can reach the
+instance can create a user. That is by design — self-signup grants access to
+no org, no account and no data, and a new user sees nothing until an existing
+member invites them — but it does mean an internet-facing instance will
+accumulate unknown accounts, and it makes the session cookie carrying a real
+member's identity the thing worth protecting. So the instance should still
+sit behind TLS and, ideally, not be publicly reachable at all. When you move
+to a VPS:
 
 - **Put a TLS reverse proxy in front of it** (Caddy, nginx + certbot,
   Traefik) terminating HTTPS on 443 and proxying to `127.0.0.1:8000`. The
@@ -292,8 +354,14 @@ must never be reachable directly from the internet. When you move to a VPS:
   https://openapi.ctrader.com — to the VPS's public HTTPS URL
   (`https://your-host/api/oauth/callback`). They must match exactly or the
   cTrader consent flow will refuse the callback.
-- **Rotate the secrets** you used locally before going live:
-  `ADMIN_BOOTSTRAP_PASSWORD`, `SESSION_SECRET`, and `POSTGRES_PASSWORD`.
+- **Rotate the secrets** you used locally before going live: `SESSION_SECRET`
+  and `POSTGRES_PASSWORD` (and `FERNET_KEY` if the local one ever encrypted a
+  real grant). Rotating `SESSION_SECRET` invalidates every existing session,
+  which is what you want on a move.
+- **Clear `BOOTSTRAP_ADMIN_EMAIL` / `BOOTSTRAP_ADMIN_PASSWORD`** once the
+  legacy org they were set for has been claimed. The bootstrap is idempotent
+  (an existing user is never re-hashed or re-passworded), so keeping them set
+  changes nothing except leaving a working login password sitting in `.env`.
 - Do **not** widen the published ports to `0.0.0.0` to "make it reachable" —
   proxy to loopback instead.
 
@@ -308,16 +376,19 @@ copier/           Python/Twisted trading engine
   tests/integration/  fake cTrader server (TLS) + real Postgres
   .venv/          local virtualenv (not committed)
 api/              FastAPI backend
-  src/api/        routes (accounts, events, settings/control), auth, oauth, websocket feed
+  src/api/        routes (orgs, accounts, events, settings/control), auth, rbac, oauth, websocket feed
   tests/          route + auth + oauth tests against a real Postgres
   .venv/          local virtualenv (not committed)
 dashboard/        React + Vite + TypeScript frontend
-  src/pages/      Overview, Accounts, Positions, Trade, History, Logs, Login
+  src/pages/      Overview, Accounts, Positions, Trade, History, Logs, Login, Register, Welcome, Members, Join
   src/components/ shared UI (kill switch, layout + desk strip, confirm dialog)
 db/
   migrations/     ordered .sql files, applied by the compose `migrate` service
   migrate.py      migration runner
+e2e/              compose-level end-to-end tests (single-org and two-org)
 docker-compose.yml
+docker-compose.test.yml        e2e overlay: fake-ctrader, isolated database
+docker-compose.tbe2e-ports.yml e2e port remap, for the `-p tbe2e` project
 .env.example
 ```
 
@@ -350,15 +421,16 @@ Two consequences worth knowing before you lose half an hour to them:
 - **The two suites share `copytrader_test`, so never run them concurrently.**
   Each drops and recreates that database at session start; running both at
   once has one suite delete the other's database mid-run.
-- **The `pgdata` volume is shared with the e2e overlay — after an e2e run,
-  a plain `docker compose up -d postgres` serves a cluster with no
-  `copytrader` database, and BOTH suites fail on connect until you
-  `docker compose down -v`.** The overlay sets `POSTGRES_DB=copytrader_e2e`
-  (see below), and Postgres only creates the `POSTGRES_DB`-named database on
-  a *fresh* data volume — so once the volume was initialized by the overlay,
-  it permanently contains `copytrader_e2e` and not `copytrader`, no matter
-  which compose files you bring it up with afterwards. `down -v` (which
-  deletes the volume), then `up -d postgres`, restores it.
+- **Run the compose e2e as its own project, or it eats this `pgdata`
+  volume.** Compose names the volume after the project, so an e2e run with no
+  `-p` shares the dev stack's — and the e2e's mandatory `down -v` then deletes
+  the dev database along with it. Worse, the overlay sets
+  `POSTGRES_DB=copytrader_e2e` and Postgres only creates the
+  `POSTGRES_DB`-named database on a *fresh* volume, so a shared volume that
+  survives comes back with `copytrader_e2e` and no `copytrader`, and both
+  suites above fail on connect. `docker compose -p tbe2e …` (see the
+  compose-level e2e section below) gives that run its own volume, network and
+  ports, and keeps `down -v` pointed only at data it created.
 
 **copier** (Python 3.12+; create the venv once with `python3 -m venv .venv
 && .venv/bin/pip install -e ".[dev]"` from inside `copier/`):
@@ -367,7 +439,7 @@ Two consequences worth knowing before you lose half an hour to them:
 cd copier && .venv/bin/pytest tests --timeout=60
 ```
 
-321 tests (unit + integration), takes roughly nine minutes — most of that is
+368 tests (unit + integration), takes roughly ten minutes — most of that is
 the integration suite, which spins up a real, self-signed-TLS, in-process
 fake cTrader server (`copier/src/copier/testing/fake_server.py`) speaking
 the same protobuf messages as the real API (auth, heartbeats, order
@@ -381,7 +453,7 @@ against it. Nothing here talks to the real cTrader network.
 cd api && .venv/bin/pytest tests
 ```
 
-98 tests. Uses the same Postgres instance (a fresh `copytrader_test`
+152 tests. Uses the same Postgres instance (a fresh `copytrader_test`
 database, dropped and recreated per session) and a mocked HTTP transport for
 any outbound calls to cTrader's OAuth token endpoint — no real network calls.
 
@@ -391,7 +463,7 @@ any outbound calls to cTrader's OAuth token endpoint — no real network calls.
 cd dashboard && npm test
 ```
 
-Runs `tsc --noEmit` (typecheck) followed by `vitest run`. 11 test files, 71
+Runs `tsc --noEmit` (typecheck) followed by `vitest run`. 17 test files, 113
 tests, all component/page tests with mocked `fetch`/WebSocket — no backend
 required.
 
@@ -413,36 +485,55 @@ directly, so the test still exercises the real wire protocol.
 
 ### Compose-level end-to-end test
 
-`e2e/test_full_stack.py` drives the **whole stack** — postgres, migrate,
-copier, api, plus a `fake-ctrader` service running the same
-`FakeCTraderServer` over TLS on the real cTrader port — exactly as an
-operator would: it seeds one OAuth grant and three accounts, tells the
-copier to pick them up, logs in to the dashboard API, pushes master fills
-through the fake broker's scenario-control API on port 9000, and asserts the
-fan-out, the position-increase path, the drift remedies, dry-run, and the
-kill switch end to end.
+Two tests drive the **whole stack** — postgres, migrate, copier, api, plus a
+`fake-ctrader` service running the same `FakeCTraderServer` over TLS on the
+real cTrader port — exactly as an operator would:
+
+- `e2e/test_full_stack.py` seeds one org, one OAuth grant and three accounts,
+  tells the copier to pick them up, registers a user and makes them the org's
+  Owner, pushes master fills through the fake broker's scenario-control API,
+  and asserts the fan-out, the position-increase path, the drift remedies,
+  dry-run, and the kill switch end to end.
+- `e2e/test_multi_org.py` seeds **two** orgs (each with its own grant, master
+  and slaves), fills both masters, and asserts that every copy lands inside
+  its own org, that each owner gets a `404` for the other's org, and that one
+  org's `close-all` leaves the other org's positions open and its copying on.
 
 ```bash
-cp <main-checkout>/.env .env          # the test reads FERNET_KEY/ADMIN_BOOTSTRAP_PASSWORD from it
-docker compose -f docker-compose.yml -f docker-compose.test.yml up -d --build
-cd api && .venv/bin/pytest ../e2e/test_full_stack.py -v
-cd .. && docker compose -f docker-compose.yml -f docker-compose.test.yml down -v
+cp <main-checkout>/.env .env          # the tests read FERNET_KEY/POSTGRES_PASSWORD from it
+docker compose -p tbe2e \
+  -f docker-compose.yml -f docker-compose.test.yml -f docker-compose.tbe2e-ports.yml \
+  up -d --build
+E2E_API_BASE=http://127.0.0.1:8010 \
+E2E_COPIER_CONTROL_BASE=http://127.0.0.1:8091 \
+E2E_FAKE_CTRADER_BASE=http://127.0.0.1:9010 \
+E2E_POSTGRES_PORT=5436 \
+  api/.venv/bin/pytest e2e -v
+docker compose -p tbe2e down -v
 ```
 
 Notes:
 
-- The overlay isolates the test's data in a **different database name**
-  (`copytrader_e2e`), so pointing this test at an ordinary dev stack fails
+- **Run it as its own compose project (`-p tbe2e`).** Without a project name
+  the e2e stack shares the dev stack's `pgdata` volume, and the mandatory
+  `down -v` at the end then deletes your real OAuth grants, accounts and audit
+  log. `docker-compose.tbe2e-ports.yml` moves every published port off the
+  dev stack's (postgres 5436, api 8010, copier control 8091, fake-ctrader
+  9010) so both stacks can be up at once; the four `E2E_*` variables point the
+  tests at them. Drop the third `-f` and the variables to run the old
+  single-stack way, with the dev stack down.
+- The test overlay isolates the test's data in a **different database name**
+  (`copytrader_e2e`), so pointing these tests at an ordinary dev stack fails
   loudly on connect instead of `TRUNCATE`-ing your real accounts. It also
-  publishes the copier's control port on `127.0.0.1:8081` (the base compose
-  never does) because the test needs `POST /reload` directly.
+  publishes the copier's control port (the base compose never does) because
+  the tests need `POST /reload` directly.
 - The overlay is also the only place `CTRADER_TLS_INSECURE=1` is set. The
   copier verifies cTrader's certificate chain and hostname by default
   (`copier/src/copier/ctrader/client.py`), which no self-signed fake can
   satisfy; the copier logs a WARNING whenever that variable is honoured.
 - **`down -v`, not `down`** — see the shared-`pgdata` trap above. Skipping
-  `-v` leaves the volume initialized for `copytrader_e2e`, and the copier and
-  api unit suites will then fail until you remove it.
+  `-v` leaves the volume initialized for `copytrader_e2e`, and re-running the
+  e2e against a stale volume starts from another run's data.
 
 For a true end-to-end check against Spotware's infrastructure, there's no
 substitute for the demo-account rollout stages in section 4 above — that's

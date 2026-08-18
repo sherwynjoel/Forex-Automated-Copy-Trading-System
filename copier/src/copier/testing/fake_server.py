@@ -215,6 +215,30 @@ class FakeCTraderServer:
         spot.ask = ask
         self.broadcast(spot)
 
+    def reset_book(self) -> None:
+        """Flatten this fake broker's whole book: every account's open
+        positions, working orders, and per-position volume tracking.
+
+        Exists for the compose-level e2e tests, whose fake-ctrader container
+        outlives any one test: they truncate the DATABASE to start clean, but
+        that says nothing about the broker's memory, and
+        register_market_fill() above merges a same-side fill into whatever
+        position that account already had -- from a previous test, or a
+        previous run of the same test. Without this the second run of
+        e2e/test_full_stack.py sees its "1.00 lot then +0.50" master position
+        report a total carried over from before, and the two e2e tests (which
+        share account ids) are order-dependent.
+
+        Deliberately leaves everything that is NOT the book alone: live
+        connections and their account-auth state, the symbol table,
+        scriptable balances/history/details, and the id counters -- ids stay
+        monotonic so a new run's positions can never be confused with an
+        earlier one's.
+        """
+        self.open_positions.clear()
+        self.pending_orders.clear()
+        self._position_volumes.clear()
+
     def register_market_fill(self, account_id: int, symbol_id: int, trade_side: int,
                              volume: int, label: str = "") -> tuple[int, int]:
         """Book a MARKET fill against this account, MERGING same-side adds.
