@@ -148,6 +148,17 @@ class AccountStateTracker:
         self._balances[account_id] = balance_scaled
         self._balance_known[account_id] = True
 
+    def on_trader_updated(self, evt: Any) -> None:
+        """Apply a pushed ProtoOATraderUpdatedEvent immediately.
+
+        The broker pushes this on every balance change (realized close,
+        deposit, withdrawal); consuming it makes Overview's balance current
+        the instant it happens instead of on the next 60s poll. The event
+        carries a full ProtoOATrader, the same shape ProtoOATraderRes wraps,
+        so the poll path's processor applies unchanged.
+        """
+        self._process_trader_response(evt, evt.ctidTraderAccountId)
+
     def _handle_trader_error(self, failure: Any, account_id: int) -> None:
         """Handle error during trader request.
 

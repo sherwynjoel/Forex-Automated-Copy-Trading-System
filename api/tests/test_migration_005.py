@@ -12,6 +12,8 @@ from conftest import ADMIN_DSN
 MIGRATIONS_DIR = pathlib.Path(__file__).resolve().parents[2] / "db" / "migrations"
 BACKFILL_DB = "copytrader_mig005"
 BACKFILL_DSN = ADMIN_DSN.rsplit("/", 1)[0] + f"/{BACKFILL_DB}"
+UPGRADE_DB = "copytrader_mig006"
+UPGRADE_DSN = ADMIN_DSN.rsplit("/", 1)[0] + f"/{UPGRADE_DB}"
 
 
 def test_new_tables_exist(db):
@@ -33,8 +35,9 @@ def test_org_id_columns_and_master_index(db):
                    WHERE column_name = 'org_id'"""
             )
         }
+        # portfolio_snapshots gains org_id in 006, on top of 005's set.
         assert {"ctid_connections", "accounts", "mappings", "events",
-                "oauth_states"} <= {t for t, _ in cols}
+                "oauth_states", "portfolio_snapshots"} <= {t for t, _ in cols}
         # settings keeps only process config
         settings_cols = {
             r[0] for r in conn.execute(
@@ -123,3 +126,62 @@ def test_fresh_db_has_no_orgs(db):
     with psycopg.connect(db, autocommit=True) as conn:
         (count,) = conn.execute("SELECT COUNT(*) FROM orgs").fetchone()
     assert count == 0
+
+
+def test_live_upgrade_path_backfills_snapshot_orgs(database):
+    """The REAL deployment's ordering: the single-tenant analytics batch's
+    005_risk_snapshots_symbol.sql already ran (portfolio_snapshots exists
+    and has rows, mappings has `symbol`, events allows 'risk'), and the
+    multi-org migrations arrive afterwards.
+
+    The migration runner tracks by filename, so 005_multi_org.sql and
+    006_snapshot_org.sql apply on top of that -- and 006 has to hand every
+    existing snapshot row to the org its account landed in, or the first
+    Overview after the upgrade shows an empty portfolio history.
+    """
+    with psycopg.connect(ADMIN_DSN, autocommit=True) as admin:
+        admin.execute(f"DROP DATABASE IF EXISTS {UPGRADE_DB} WITH (FORCE)")
+        admin.execute(f"CREATE DATABASE {UPGRADE_DB}")
+    try:
+        with psycopg.connect(UPGRADE_DSN) as conn:
+            for name in ("001_initial.sql", "002_oauth_states.sql",
+                         "003_mapping_fill_price.sql", "004_account_nickname.sql",
+                         # what the live DB has already applied:
+                         "005_risk_snapshots_symbol.sql"):
+                conn.execute((MIGRATIONS_DIR / name).read_text())
+            conn.execute(
+                """INSERT INTO ctid_connections
+                   (access_token_enc, refresh_token_enc, granted_at, expires_at)
+                   VALUES ('x', 'x', now(), now() + interval '30 days')""")
+            conn.execute(
+                """INSERT INTO accounts (ctid_trader_account_id, ctid_connection_id,
+                                         trader_login, is_live, role)
+                   VALUES (100, 1, 100, false, 'master')""")
+            # One snapshot for a live account, one for an account that has
+            # since been disconnected (no accounts row to join to).
+            conn.execute(
+                """INSERT INTO portfolio_snapshots
+                       (snapshot_date, account_id, balance, equity)
+                   VALUES (CURRENT_DATE - 1, 100, 1000, 1010),
+                          (CURRENT_DATE - 1, 999, 50, 50)""")
+            conn.execute((MIGRATIONS_DIR / "005_multi_org.sql").read_text())
+            conn.execute((MIGRATIONS_DIR / "006_snapshot_org.sql").read_text())
+            conn.commit()
+
+        with psycopg.connect(UPGRADE_DSN, autocommit=True) as conn:
+            (default_org,) = conn.execute("SELECT id FROM orgs").fetchone()
+            rows = dict(conn.execute(
+                "SELECT account_id, org_id FROM portfolio_snapshots").fetchall())
+            assert rows[100] == default_org        # backfilled from its account
+            assert rows[999] is None               # orphan history, no org
+
+            # 005_multi_org must not have narrowed the category check the
+            # risk migration widened.
+            conn.execute(
+                "INSERT INTO events (category, severity, payload) "
+                "VALUES ('risk', 'error', '{\"action\": \"margin_call\"}')")
+            # ...nor dropped mappings.symbol.
+            conn.execute("SELECT symbol FROM mappings")
+    finally:
+        with psycopg.connect(ADMIN_DSN, autocommit=True) as admin:
+            admin.execute(f"DROP DATABASE IF EXISTS {UPGRADE_DB} WITH (FORCE)")

@@ -337,6 +337,7 @@ class Repo:
         slave_account_id: int,
         client_order_id: str,
         org_id: int,
+        symbol: str | None = None,
     ) -> None:
         """Create a pending position mapping, or leave the existing one alone.
 
@@ -371,11 +372,13 @@ class Repo:
         with psycopg.connect(self.dsn, autocommit=True) as conn:
             conn.execute(
                 """
-                INSERT INTO mappings (master_position_id, slave_account_id, client_order_id, org_id, status)
-                VALUES (%s, %s, %s, %s, 'pending')
+                INSERT INTO mappings (master_position_id, slave_account_id,
+                                      client_order_id, org_id, status, symbol)
+                VALUES (%s, %s, %s, %s, 'pending', %s)
                 ON CONFLICT (client_order_id) DO NOTHING
                 """,
-                (master_position_id, slave_account_id, client_order_id, org_id),
+                (master_position_id, slave_account_id, client_order_id, org_id,
+                 symbol),
             )
 
     def activate_position_mapping(
@@ -505,15 +508,18 @@ class Repo:
         slave_account_id: int,
         client_order_id: str,
         org_id: int,
+        symbol: str | None = None,
     ) -> None:
         """Create a pending order mapping."""
         with psycopg.connect(self.dsn, autocommit=True) as conn:
             conn.execute(
                 """
-                INSERT INTO mappings (master_order_id, slave_account_id, client_order_id, org_id, status)
-                VALUES (%s, %s, %s, %s, 'pending')
+                INSERT INTO mappings (master_order_id, slave_account_id,
+                                      client_order_id, org_id, status, symbol)
+                VALUES (%s, %s, %s, %s, 'pending', %s)
                 """,
-                (master_order_id, slave_account_id, client_order_id, org_id),
+                (master_order_id, slave_account_id, client_order_id, org_id,
+                 symbol),
             )
 
     def activate_order_mapping(
@@ -640,12 +646,39 @@ class Repo:
                 (master_position_id, slave_account_id, slave_position_id, slave_volume, org_id),
             )
 
+    def save_portfolio_snapshot(
+        self, snapshot_date, account_id: int,
+        balance: float | None, equity: float | None,
+        org_id: int | None = None,
+    ) -> None:
+        """Upsert one account's daily snapshot; the last write of a day wins,
+        so a day's row converges on that day's closing value.
+
+        `org_id` is stamped from the account row the caller is already
+        iterating so the api's per-org overview can sum only its own desk's
+        snapshots. It is a plain nullable column with no FK (migration
+        006): like events.org_id, the history has to survive the account
+        (and its org) going away."""
+        with psycopg.connect(self.dsn, autocommit=True) as conn:
+            conn.execute(
+                """
+                INSERT INTO portfolio_snapshots (snapshot_date, account_id, balance,
+                                                 equity, org_id)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (snapshot_date, account_id)
+                DO UPDATE SET balance = EXCLUDED.balance, equity = EXCLUDED.equity,
+                              org_id = COALESCE(EXCLUDED.org_id, portfolio_snapshots.org_id),
+                              updated_at = now()
+                """,
+                (snapshot_date, account_id, balance, equity, org_id),
+            )
+
     def mapping_rows(self, org_id: int | None = None) -> list[dict]:
         """Get mapping rows as dictionaries, optionally filtered to one org."""
         query = """
             SELECT id, master_position_id, master_order_id, slave_account_id,
                    slave_position_id, slave_order_id, slave_volume, client_order_id,
-                   org_id, status, error, fill_price, created_at, updated_at
+                   org_id, status, error, fill_price, symbol, created_at, updated_at
             FROM mappings
             """
         params: tuple = ()

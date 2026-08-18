@@ -8,10 +8,38 @@ def test_all_tables_exist(db):
                       "events", "settings", "schema_migrations",
                       # multi-org (migration 005): the single-row `admin`
                       # table is gone, replaced by real users and orgs.
-                      "users", "orgs", "org_memberships", "org_invites"]:
+                      "users", "orgs", "org_memberships", "org_invites",
+                      # daily portfolio history (005_risk_snapshots_symbol)
+                      "portfolio_snapshots"]:
             row = conn.execute("SELECT to_regclass(%s)", (table,)).fetchone()
             assert row[0] is not None, f"missing table {table}"
         assert conn.execute("SELECT to_regclass('admin')").fetchone()[0] is None
+
+
+def test_risk_is_an_allowed_event_category(db):
+    """005_risk_snapshots_symbol widened events.category for margin calls;
+    005_multi_org must not have narrowed it back on a DB where the risk
+    migration ran first (the live deployment's ordering)."""
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO events (category, severity, payload) "
+            "VALUES ('risk', 'error', '{\"action\": \"margin_call\"}')")
+
+
+def test_portfolio_snapshots_carry_a_nullable_unconstrained_org(db):
+    """006: org_id is nullable and FK-less, exactly like events.org_id --
+    a snapshot's history must outlive its account and its org."""
+    with psycopg.connect(db, autocommit=True) as conn:
+        row = conn.execute(
+            """SELECT is_nullable FROM information_schema.columns
+               WHERE table_name = 'portfolio_snapshots' AND column_name = 'org_id'"""
+        ).fetchone()
+        assert row == ("YES",)
+
+        # An org id nobody owns is still insertable: no FK, so no cascade.
+        conn.execute(
+            "INSERT INTO portfolio_snapshots (snapshot_date, account_id, balance,"
+            " equity, org_id) VALUES (CURRENT_DATE, 12345, 1.0, 1.0, 987654321)")
 
 
 def test_settings_has_single_seed_row(db):

@@ -32,7 +32,8 @@ def test_pending_place_mirrors_type_price_sltp_with_label():
     assert out == [m.PlacePending(slave_account_id=101, master_order_id=42, symbol_id=1,
                                   side=m.Side.SELL, order_type=m.PendingType.LIMIT,
                                   volume=1_000_000, price=1.1150, stop_loss=1.1200,
-                                  take_profit=1.1000, expiry_ts_ms=None, label="copy:o42")]
+                                  take_profit=1.1000, expiry_ts_ms=None, label="copy:o42",
+                                  symbol_name="EURUSD")]
 
 
 def test_pending_place_applies_multiplier():

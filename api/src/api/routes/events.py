@@ -40,7 +40,8 @@ def create_events_router() -> APIRouter:
         Args:
             account_id: Filter by account ID.
             severity: Filter by severity (info, warning, error).
-            category: Filter by category (master_event, slave_action, connection, auth, drift, control).
+            category: Filter by category (master_event, slave_action, connection,
+                auth, drift, control, risk).
             since: Filter events after this timestamp (ISO format).
             limit: Maximum number of events to return (default 200, max 1000).
 

@@ -637,3 +637,95 @@ def test_activate_pending_fill_stamps_fill_price(db, org_id):
     (row,) = [r for r in repo.mapping_rows() if r["client_order_id"] == "co900.100"]
     assert row["fill_price"] == pytest.approx(1.23456)
     assert row["slave_position_id"] == 888
+
+
+def test_mappings_store_symbol(db, org_id):
+    """Mappings stamp the traded symbol at creation so copy feeds can show
+    it without a broker lookup -- alongside the org that owns the copy."""
+    repo = Repo(db)
+    repo.create_position_mapping(11, 100, "cm11.100", org_id=org_id, symbol="EURUSD")
+    repo.create_order_mapping(7, 101, "co7.101", org_id=org_id, symbol="GBPUSD")
+
+    rows = {r["client_order_id"]: r for r in repo.mapping_rows()}
+    assert rows["cm11.100"]["symbol"] == "EURUSD"
+    assert rows["cm11.100"]["org_id"] == org_id
+    assert rows["co7.101"]["symbol"] == "GBPUSD"
+    assert rows["co7.101"]["org_id"] == org_id
+
+
+def test_mapping_symbol_is_optional(db, org_id):
+    """An adopted orphan (or any mapping created without a resolved symbol)
+    keeps a NULL symbol rather than failing."""
+    repo = Repo(db)
+    repo.create_position_mapping(12, 100, "cm12.100", org_id=org_id)
+
+    (row,) = [r for r in repo.mapping_rows() if r["client_order_id"] == "cm12.100"]
+    assert row["symbol"] is None
+
+
+def test_portfolio_snapshot_upserts_per_day(db, org_id):
+    """One row per (day, account); repeated saves keep the LAST value, so
+    yesterday's row is yesterday's closing value."""
+    from datetime import date
+
+    repo = Repo(db)
+    repo.save_portfolio_snapshot(date(2026, 8, 18), 100, balance=1000.0,
+                                 equity=1010.0, org_id=org_id)
+    repo.save_portfolio_snapshot(date(2026, 8, 18), 100, balance=1000.0,
+                                 equity=1020.0, org_id=org_id)
+    repo.save_portfolio_snapshot(date(2026, 8, 18), 101, balance=500.0,
+                                 equity=505.0, org_id=org_id)
+
+    with psycopg.connect(db, autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT account_id, balance, equity, org_id FROM portfolio_snapshots "
+            "WHERE snapshot_date = %s ORDER BY account_id",
+            (date(2026, 8, 18),),
+        ).fetchall()
+    assert [(r[0], float(r[1]), float(r[2]), r[3]) for r in rows] == [
+        (100, 1000.0, 1020.0, org_id), (101, 500.0, 505.0, org_id)]
+
+
+def test_portfolio_snapshot_stamps_org_per_account(db, org_id):
+    """Two orgs' accounts writing on the same day keep their own org stamp:
+    the api sums snapshots per org, so a shared/overwritten stamp would put
+    one desk's portfolio value on another desk's Overview."""
+    from datetime import date
+
+    with psycopg.connect(db, autocommit=True) as conn:
+        (other_org,) = conn.execute(
+            "INSERT INTO orgs (name) VALUES ('Other') RETURNING id").fetchone()
+
+    repo = Repo(db)
+    repo.save_portfolio_snapshot(date(2026, 8, 18), 100, 1000.0, 1010.0, org_id=org_id)
+    repo.save_portfolio_snapshot(date(2026, 8, 18), 900, 7.0, 7.0, org_id=other_org)
+
+    with psycopg.connect(db, autocommit=True) as conn:
+        rows = dict(conn.execute(
+            "SELECT account_id, org_id FROM portfolio_snapshots "
+            "WHERE snapshot_date = %s", (date(2026, 8, 18),)).fetchall())
+    assert rows == {100: org_id, 900: other_org}
+
+
+def test_portfolio_snapshot_upsert_keeps_an_existing_org_stamp(db, org_id):
+    """A later write that cannot resolve an org (org_id=None) must not blank
+    out a stamp an earlier write established."""
+    from datetime import date
+
+    repo = Repo(db)
+    repo.save_portfolio_snapshot(date(2026, 8, 18), 100, 1000.0, 1010.0, org_id=org_id)
+    repo.save_portfolio_snapshot(date(2026, 8, 18), 100, 1100.0, 1110.0, org_id=None)
+
+    with psycopg.connect(db, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT balance, org_id FROM portfolio_snapshots "
+            "WHERE snapshot_date = %s AND account_id = 100",
+            (date(2026, 8, 18),)).fetchone()
+    assert float(row[0]) == 1100.0
+    assert row[1] == org_id
+
+
+def test_log_event_accepts_risk_category(db):
+    repo = Repo(db)
+    event_id = repo.log_event("risk", "error", {"action": "margin_call"}, account_id=100)
+    assert event_id

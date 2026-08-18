@@ -148,6 +148,9 @@ class OpenMarket:
     stop_loss: float | None
     take_profit: float | None
     label: str
+    # Slave-resolved symbol NAME, stamped onto the mapping row for copy
+    # feeds. Defaulted so pre-existing positional constructions stay valid.
+    symbol_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -178,6 +181,7 @@ class PlacePending:
     take_profit: float | None
     expiry_ts_ms: int | None
     label: str
+    symbol_name: str = ""
 
 
 @dataclass(frozen=True)

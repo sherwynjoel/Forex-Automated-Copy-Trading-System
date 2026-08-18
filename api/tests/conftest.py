@@ -29,6 +29,10 @@ TEST_DB_NAME = TEST_DSN.rsplit("/", 1)[1]
 def database():
     from db.migrate import apply_migrations
 
+    # The scratch database NAME comes from TEST_POSTGRES_DSN (TEST_DB_NAME)
+    # rather than being hardcoded: parallel sessions (e.g. two agents on
+    # different branches) can then isolate by exporting DSNs with distinct
+    # names instead of silently dropping each other's scratch DB mid-run.
     with psycopg.connect(ADMIN_DSN, autocommit=True) as conn:
         conn.execute(f'DROP DATABASE IF EXISTS "{TEST_DB_NAME}" WITH (FORCE)')
         conn.execute(f'CREATE DATABASE "{TEST_DB_NAME}"')
@@ -40,7 +44,8 @@ def database():
 def db(database):
     with psycopg.connect(database, autocommit=True) as conn:
         conn.execute(
-            "TRUNCATE events, mappings, symbol_cache, accounts, ctid_connections, "
+            "TRUNCATE events, portfolio_snapshots, mappings, symbol_cache, "
+            "accounts, ctid_connections, "
             "oauth_states, org_invites, org_memberships, orgs, users "
             "RESTART IDENTITY CASCADE"
         )

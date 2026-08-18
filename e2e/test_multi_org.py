@@ -248,6 +248,40 @@ def test_two_orgs_never_touch_each_others_books():
     })
     assert cross_org_order.status_code == 404, cross_org_order.text
 
+    # ---------- 4b: the insight surface is org-scoped too ----------
+    # /overview is computed in the API from accounts/events/mappings/
+    # portfolio_snapshots; every one of those queries has to be filtered by
+    # org or this page shows one desk another desk's fleet and copy volume.
+    overview_a = client_a.get(f"{a}/overview")
+    assert overview_a.status_code == 200, overview_a.text
+    stats_a = overview_a.json()
+    assert stats_a["accounts_connected"] == 3, stats_a   # 100/101/102 only
+    assert stats_a["masters"] == 1, stats_a
+    assert {c["slave_account_id"] for c in stats_a["recent_copies"]} <= {
+        ORG_A_SLAVE1, ORG_A_SLAVE2}, stats_a
+
+    overview_b = client_b.get(f"{b}/overview")
+    assert overview_b.status_code == 200, overview_b.text
+    stats_b = overview_b.json()
+    assert stats_b["accounts_connected"] == 2, stats_b   # 200/201 only
+    assert {c["slave_account_id"] for c in stats_b["recent_copies"]} <= {
+        ORG_B_SLAVE}, stats_b
+
+    # A non-member never sees the other desk's overview at all.
+    assert client_a.get(f"{b}/overview").status_code == 404
+
+    # The four broker proxies check the ACCOUNT's tenancy before proxying,
+    # so org A cannot read org B's account through org A's own path -- and
+    # the copier (whose query routes take no org at all) is never reached.
+    for tail in (
+        f"accounts/{ORG_B_SLAVE}/analytics?weeks=1",
+        f"accounts/{ORG_B_SLAVE}/margin-estimate?symbol=EURUSD&volume_lots=0.1",
+        f"accounts/{ORG_B_SLAVE}/trendbars?symbol=EURUSD&period=H1&from=0&to=1",
+        f"accounts/{ORG_B_SLAVE}/positions/1/deals?from=0&to=1",
+    ):
+        resp = client_a.get(f"{a}/{tail}")
+        assert resp.status_code == 404, f"{tail}: {resp.status_code} {resp.text}"
+
     # ---------- 5: org B's kill switch leaves org A entirely alone ----------
     # Establish org B's book is NOT empty first, or the "flat afterwards"
     # assertion below passes vacuously -- master_positions is also empty for

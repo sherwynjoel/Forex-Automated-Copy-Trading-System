@@ -18,7 +18,9 @@ from twisted.web.test.requesthelper import DummyRequest
 import copier.main as main
 from copier.engine import queries
 from copier.engine.control import (
-    DealHistoryResource, DetailsResource, OrderHistoryResource)
+    AnalyticsResource, CashFlowHistoryResource, DealHistoryResource,
+    DetailsResource, MarginEstimateResource, OrderHistoryResource,
+    PositionDealsResource, TrendbarsResource)
 
 from test_main import make_stub_client_factory
 from test_main import repo, token_store, db_seeded, fernet_key  # noqa: F401  (fixtures)
@@ -45,6 +47,26 @@ class _QueryApp:
     def get_order_history(self, account_id, from_ms, to_ms):
         self.calls.append(("orders", account_id, from_ms, to_ms))
         return defer.succeed({"orders": [], "has_more": False})
+
+    def get_expected_margin(self, account_id, symbol, volume_lots):
+        self.calls.append(("margin", account_id, symbol, volume_lots))
+        return defer.succeed({"buy_margin": 20.0, "sell_margin": 20.0})
+
+    def get_trendbars(self, account_id, symbol, period, from_ms, to_ms):
+        self.calls.append(("trendbars", account_id, symbol, period, from_ms, to_ms))
+        return defer.succeed({"bars": [], "period": period})
+
+    def get_cash_flow(self, account_id, from_ms, to_ms):
+        self.calls.append(("cashflow", account_id, from_ms, to_ms))
+        return defer.succeed({"entries": []})
+
+    def get_position_deals(self, account_id, position_id, from_ms, to_ms):
+        self.calls.append(("position_deals", account_id, position_id, from_ms, to_ms))
+        return defer.succeed({"deals": [], "has_more": False})
+
+    def get_analytics(self, account_id, weeks):
+        self.calls.append(("analytics", account_id, weeks))
+        return defer.succeed({"closed_trades": 0, "weeks": weeks})
 
 
 # ---------- route wiring ----------
@@ -174,3 +196,84 @@ def test_app_get_deal_history_passes_window_through(repo, token_store, monkeypat
 
     assert result == {"deals": [], "has_more": False}
     assert seen == {"account_id": 100, "from_ms": 1_000, "to_ms": 2_000}
+
+
+def test_margin_estimate_route_parses_args():
+    app = _QueryApp()
+    request = DummyRequest([b"margin-estimate"])
+    request.method = b"GET"
+    request.addArg(b"account_id", b"100")
+    request.addArg(b"symbol", b"EURUSD")
+    request.addArg(b"volume_lots", b"0.5")
+
+    MarginEstimateResource(app).render_GET(request)
+
+    assert app.calls == [("margin", 100, "EURUSD", 0.5)]
+    assert _written_json(request)["buy_margin"] == 20.0
+
+
+def test_trendbars_route_parses_args():
+    app = _QueryApp()
+    request = DummyRequest([b"trendbars"])
+    request.method = b"GET"
+    request.addArg(b"account_id", b"100")
+    request.addArg(b"symbol", b"EURUSD")
+    request.addArg(b"period", b"H1")
+    request.addArg(b"from", b"1000")
+    request.addArg(b"to", b"2000")
+
+    TrendbarsResource(app).render_GET(request)
+
+    assert app.calls == [("trendbars", 100, "EURUSD", "H1", 1000, 2000)]
+    assert _written_json(request)["period"] == "H1"
+
+
+def test_cashflow_route_parses_window():
+    app = _QueryApp()
+    request = DummyRequest([b"history", b"cashflow"])
+    request.method = b"GET"
+    request.addArg(b"account_id", b"100")
+    request.addArg(b"from", b"1")
+    request.addArg(b"to", b"2")
+
+    CashFlowHistoryResource(app).render_GET(request)
+
+    assert app.calls == [("cashflow", 100, 1, 2)]
+
+
+def test_position_deals_route_parses_args():
+    app = _QueryApp()
+    request = DummyRequest([b"position-deals"])
+    request.method = b"GET"
+    request.addArg(b"account_id", b"100")
+    request.addArg(b"position_id", b"7001")
+    request.addArg(b"from", b"0")
+    request.addArg(b"to", b"9")
+
+    PositionDealsResource(app).render_GET(request)
+
+    assert app.calls == [("position_deals", 100, 7001, 0, 9)]
+
+
+def test_analytics_route_defaults_weeks_to_4():
+    app = _QueryApp()
+    request = DummyRequest([b"analytics"])
+    request.method = b"GET"
+    request.addArg(b"account_id", b"100")
+
+    AnalyticsResource(app).render_GET(request)
+
+    assert app.calls == [("analytics", 100, 4)]
+    assert _written_json(request)["weeks"] == 4
+
+
+def test_analytics_route_accepts_weeks():
+    app = _QueryApp()
+    request = DummyRequest([b"analytics"])
+    request.method = b"GET"
+    request.addArg(b"account_id", b"100")
+    request.addArg(b"weeks", b"12")
+
+    AnalyticsResource(app).render_GET(request)
+
+    assert app.calls == [("analytics", 100, 12)]

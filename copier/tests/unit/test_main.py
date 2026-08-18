@@ -208,6 +208,12 @@ class _FailingClient:
     def on_spot(self, cb):
         pass
 
+    def on_trader_updated(self, cb):
+        pass
+
+    def on_margin_call(self, cb):
+        pass
+
     def authorize_account(self, account_id, token):
         self._accounts[account_id] = token
         return defer.succeed(None)

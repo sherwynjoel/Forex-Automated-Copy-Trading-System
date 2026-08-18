@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi, afterEach } from 'vitest'
@@ -71,6 +71,17 @@ function mockRoutes() {
       })
     if (url.includes('/history/deals')) return respond(deals)
     if (url.includes('/history/orders')) return respond(orders)
+    if (url.includes('/history/cashflow')) {
+      return respond({ entries: [
+        { id: 1, type: 'DEPOSIT', amount: 10000, balance_after: 10000,
+          timestamp: 1700000000000, note: 'initial funding' },
+        { id: 2, type: 'WITHDRAW', amount: 1000, balance_after: 9000,
+          timestamp: 1700100000000, note: null },
+      ] })
+    }
+    if (url.includes('/positions/21/deals')) {
+      return respond({ deals: deals.deals, has_more: false })
+    }
     if (url.includes('/api/orgs/1/accounts')) return respond(accounts)
     return respond({})
   })
@@ -166,4 +177,37 @@ test('previous week button pages the window back', async () => {
       new URLSearchParams(String(calls[calls.length - 1][0]).split('?')[1]).get('from'))
     expect(lastFrom).toBe(firstFrom - 7 * 24 * 3600 * 1000)
   })
+})
+
+
+test('cash flow tab lists deposits and withdrawals', async () => {
+  mockRoutes()
+  renderHistory()
+
+  await screen.findByText('+20.00')
+  await userEvent.click(screen.getByRole('button', { name: /cash flow/i }))
+
+  expect(await screen.findByText('DEPOSIT')).toBeInTheDocument()
+  expect(screen.getByText('WITHDRAW')).toBeInTheDocument()
+  expect(screen.getByText('initial funding')).toBeInTheDocument()
+  expect(screen.getByText('+10,000.00')).toBeInTheDocument()
+  expect(screen.getByText('-1,000.00')).toBeInTheDocument()
+})
+
+test('clicking a closed position opens its deal lifecycle', async () => {
+  const fetchMock = mockRoutes()
+  renderHistory()
+
+  await screen.findByText('+20.00')
+  await userEvent.click(screen.getByRole('button', { name: /view position 21/i }))
+
+  await waitFor(() => {
+    expect(fetchMock.mock.calls.some(([u]) =>
+      String(u).includes('/api/orgs/1/accounts/100/positions/21/deals'))).toBe(true)
+  })
+  // Drawer shows both legs of the position
+  expect(await screen.findByText(/position 21/i)).toBeInTheDocument()
+  const drawer = screen.getByRole('complementary')
+  expect(within(drawer).getByText('1.10000')).toBeInTheDocument()
+  expect(within(drawer).getByText('1.12000')).toBeInTheDocument()
 })

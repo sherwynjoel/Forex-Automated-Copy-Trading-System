@@ -264,3 +264,97 @@ export interface ApiState {
   pending_orders: PendingOrder[]
   drift: DriftItem[]
 }
+
+export interface EquityCurvePoint {
+  timestamp: number
+  balance: number
+}
+
+export interface SymbolPerformance {
+  symbol: string
+  trades: number
+  gross_pnl: number
+}
+
+export interface WeeklyPerformance {
+  week_start: number
+  trades: number
+  gross_pnl: number
+}
+
+export interface Analytics {
+  closed_trades: number
+  wins: number
+  losses: number
+  win_rate: number | null
+  profit_factor: number | null
+  best_trade: number | null
+  worst_trade: number | null
+  avg_win: number | null
+  avg_loss: number | null
+  net_pnl: number
+  gross_wins: number
+  gross_losses: number
+  max_drawdown: number
+  max_drawdown_pct: number
+  equity_curve: EquityCurvePoint[]
+  per_symbol: SymbolPerformance[]
+  weekly: WeeklyPerformance[]
+  weeks: number
+  truncated: boolean
+}
+
+export interface Trendbars {
+  symbol: string
+  period: string
+  bars: {
+    timestamp: number
+    open: number
+    high: number
+    low: number
+    close: number | null
+    volume: number
+  }[]
+}
+
+export interface MarginEstimate {
+  symbol: string
+  volume: number
+  volume_lots?: string | null
+  buy_margin: number
+  sell_margin: number
+}
+
+export interface CashFlowEntry {
+  id: number
+  type: string
+  amount: number
+  balance_after: number
+  timestamp: number
+  note?: string | null
+}
+
+export interface RecentCopy {
+  status: string
+  master_position_id?: number | null
+  master_order_id?: number | null
+  slave_account_id: number
+  slave_login: number
+  slave_nickname?: string | null
+  symbol?: string | null
+  slave_volume?: number | null
+  fill_price?: number | null
+  error?: string | null
+  updated_at: string
+}
+
+export interface OverviewStats {
+  accounts_connected: number
+  masters: number
+  active_slaves: number
+  disabled_or_paused: number
+  degraded: number
+  copied_today: number
+  yesterday: { total_balance: number; total_equity: number | null } | null
+  recent_copies: RecentCopy[]
+}

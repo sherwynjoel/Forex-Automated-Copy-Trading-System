@@ -165,6 +165,7 @@ leaks); members below the required role get 403.
 | Action | Viewer | Trader | Admin | Owner |
 |---|---|---|---|---|
 | Overview, accounts list, positions, history, events, symbols, state, WS | ✓ | ✓ | ✓ | ✓ |
+| Overview stats block, margin estimate, candles, position deals, analytics | ✓ | ✓ | ✓ | ✓ |
 | Members list | ✓ | ✓ | ✓ | ✓ |
 | Manual orders, close position, cancel order | | ✓ | ✓ | ✓ |
 | Pause / resume / resync, copying toggle, dry-run, **close-all** | | | ✓ | ✓ |
@@ -185,6 +186,15 @@ current tails: `accounts`, `accounts/{id}` (PATCH), `accounts/{id}/details
 `dry_run`), `control/pause|resume|resync`, `control/close-all`, `state`,
 `drift/close-orphan|adopt|dismiss`, `orders`, `positions/close`,
 `orders/cancel`, `events`, `oauth/connect`.
+
+The single-tenant analytics batch merged in afterwards adds five more
+org-scoped read tails, all `viewer`: `overview` (DB-computed stats block),
+`accounts/{id}/margin-estimate`, `accounts/{id}/trendbars`,
+`accounts/{id}/positions/{pid}/deals`, `accounts/{id}/analytics`, and a
+third `history` kind, `history/cashflow`. The four account-taking ones call
+`require_account_in_org` before proxying; the copier's corresponding query
+routes stay account-scoped with no org parameter, exactly like `/details`
+and `/history` (tenancy is enforced at the api).
 
 New unscoped routes: `POST /api/orgs` (create org; creator becomes Owner),
 `POST /api/orgs/join` (`{token}`, authenticated; consumes invite, creates

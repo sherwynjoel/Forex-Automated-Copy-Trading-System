@@ -278,11 +278,13 @@ class Dispatcher:
         if isinstance(intent, OpenMarket):
             coid = client_order_id_for(intent)
             self._repo.create_position_mapping(
-                intent.master_position_id, account_id, coid, org_id=org_id)
+                intent.master_position_id, account_id, coid, org_id=org_id,
+                symbol=intent.symbol_name or None)
         elif isinstance(intent, PlacePending):
             coid = client_order_id_for(intent)
             self._repo.create_order_mapping(
-                intent.master_order_id, account_id, coid, org_id=org_id)
+                intent.master_order_id, account_id, coid, org_id=org_id,
+                symbol=intent.symbol_name or None)
 
     def _handle_kill_switch(self, intent: SlaveIntent, org_id: int) -> None:
         """Log suppressed intent when this org's kill switch is on."""

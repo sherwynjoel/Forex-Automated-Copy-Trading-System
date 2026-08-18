@@ -4,9 +4,18 @@ import { useOrg } from '../lib/org'
 import { can } from '../lib/roles'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
 import type {
-  Account, AccountDetails, OpenPosition, TradeSymbol, WorkingOrder,
+  Account, AccountDetails, MarginEstimate, OpenPosition, TradeSymbol,
+  Trendbars, WorkingOrder,
 } from '../lib/types'
 import ConfirmDialog from '../components/ConfirmDialog'
+import { CandleChart, PriceLine } from '../components/charts'
+
+const CHART_PERIODS = ['M5', 'M15', 'H1', 'H4', 'D1'] as const
+const PERIOD_MS: Record<string, number> = {
+  M5: 5 * 60_000, M15: 15 * 60_000, H1: 3_600_000,
+  H4: 4 * 3_600_000, D1: 24 * 3_600_000,
+}
+const CHART_BARS = 120
 
 type Side = 'BUY' | 'SELL'
 type OrderType = 'MARKET' | 'LIMIT' | 'STOP'
@@ -47,6 +56,11 @@ export default function Trade() {
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [symbolQuery, setSymbolQuery] = useState('')
+  const [symbolOpen, setSymbolOpen] = useState(false)
+  const [margin, setMargin] = useState<MarginEstimate | null>(null)
+  const [chartPeriod, setChartPeriod] = useState<string>('H1')
+  const [chart, setChart] = useState<Trendbars | null>(null)
 
   // Load accounts once; default the ticket to the master.
   useEffect(() => {
@@ -88,6 +102,53 @@ export default function Trade() {
   useLiveRefresh(loadAccountData, orgId)
 
   const selected = accounts.find((a) => a.ctid_trader_account_id === accountId)
+
+  // Pre-trade margin estimate, debounced against typing in the volume box.
+  useEffect(() => {
+    if (accountId == null || !ticket.symbol) {
+      setMargin(null)
+      return
+    }
+    const lots = parseFloat(ticket.volumeLots)
+    if (!Number.isFinite(lots) || lots <= 0) {
+      setMargin(null)
+      return
+    }
+    const timer = setTimeout(async () => {
+      try {
+        setMargin(await orgApi<MarginEstimate>(
+          orgId,
+          `accounts/${accountId}/margin-estimate` +
+          `?symbol=${encodeURIComponent(ticket.symbol)}&volume_lots=${lots}`))
+      } catch {
+        setMargin(null)
+      }
+    }, 350)
+    return () => clearTimeout(timer)
+  }, [orgId, accountId, ticket.symbol, ticket.volumeLots])
+
+  // Price chart for the ticket's symbol; refreshed on a slow poll.
+  const loadChart = useCallback(async () => {
+    if (accountId == null || !ticket.symbol) return
+    const periodMs = PERIOD_MS[chartPeriod] ?? 3_600_000
+    const to = Date.now()
+    const from = to - CHART_BARS * periodMs
+    try {
+      setChart(await orgApi<Trendbars>(
+        orgId,
+        `accounts/${accountId}/trendbars` +
+        `?symbol=${encodeURIComponent(ticket.symbol)}&period=${chartPeriod}` +
+        `&from=${from}&to=${to}`))
+    } catch {
+      setChart(null)
+    }
+  }, [orgId, accountId, ticket.symbol, chartPeriod])
+
+  useEffect(() => {
+    loadChart()
+    const interval = setInterval(loadChart, 15000)
+    return () => clearInterval(interval)
+  }, [loadChart])
   const selectedSymbol = symbols.find((s) => s.name === ticket.symbol)
 
   const numOrNull = (raw: string): number | null => {
@@ -274,18 +335,56 @@ export default function Trade() {
             )}
           </div>
 
-          <div>
+          <div className="relative">
             <label htmlFor="ticket-symbol" className="desk-label block mb-1">Symbol</label>
-            <select
+            <input
               id="ticket-symbol"
-              value={ticket.symbol}
-              onChange={(e) => setTicket({ ...ticket, symbol: e.target.value })}
+              type="text"
+              role="combobox"
+              aria-expanded={symbolOpen}
+              aria-controls="ticket-symbol-list"
+              autoComplete="off"
+              placeholder="Search symbols…"
+              value={symbolOpen ? symbolQuery : ticket.symbol}
+              onFocus={() => { setSymbolOpen(true); setSymbolQuery('') }}
+              onChange={(e) => setSymbolQuery(e.target.value)}
+              onBlur={() => setTimeout(() => setSymbolOpen(false), 150)}
               className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card"
-            >
-              {symbols.map((s) => (
-                <option key={s.symbol_id} value={s.name}>{s.name}</option>
-              ))}
-            </select>
+            />
+            {symbolOpen && (
+              <ul
+                id="ticket-symbol-list"
+                role="listbox"
+                className="absolute z-20 mt-1 w-full max-h-56 overflow-y-auto rounded border border-line bg-card shadow-lg"
+              >
+                {symbols
+                  .filter((s) => s.name.toLowerCase().includes(symbolQuery.toLowerCase()))
+                  .slice(0, 60)
+                  .map((s) => (
+                    <li key={s.symbol_id}>
+                      <button
+                        type="button"
+                        role="option"
+                        aria-selected={s.name === ticket.symbol}
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => {
+                          setTicket((t) => ({ ...t, symbol: s.name }))
+                          setSymbolOpen(false)
+                        }}
+                        className={`num w-full text-left px-3 py-1.5 text-sm hover:bg-paper ${
+                          s.name === ticket.symbol ? 'text-brand font-semibold' : 'text-ink'
+                        }`}
+                      >
+                        {s.name}
+                      </button>
+                    </li>
+                  ))}
+                {symbols.filter((s) =>
+                  s.name.toLowerCase().includes(symbolQuery.toLowerCase())).length === 0 && (
+                  <li className="px-3 py-2 text-sm text-ink-faint">No symbols match.</li>
+                )}
+              </ul>
+            )}
           </div>
 
           <div className="flex gap-2">{sideButton('BUY')}{sideButton('SELL')}</div>
@@ -360,6 +459,18 @@ export default function Trade() {
             </div>
           </div>
 
+          {margin && (
+            <p className="text-xs text-ink-soft bg-paper rounded px-2 py-1.5">
+              Margin required ≈{' '}
+              <span className="num text-ink">{margin.buy_margin.toFixed(2)}</span> buy ·{' '}
+              <span className="num text-ink">{margin.sell_margin.toFixed(2)}</span> sell
+              {details?.balance != null && (
+                <> · balance <span className="num text-ink">
+                  {details.balance.toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                </span></>
+              )}
+            </p>
+          )}
           {ticketProblem && (
             <p className="text-xs text-ink-faint">{ticketProblem}</p>
           )}
@@ -372,8 +483,52 @@ export default function Trade() {
           </button>
         </section>
 
-        {/* Live positions + working orders for the selected account */}
+        {/* Chart + live positions + working orders for the selected account */}
         <section className="lg:col-span-3 space-y-6">
+          <div className="bg-card rounded-lg border border-line p-5">
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="desk-label">
+                {ticket.symbol || 'Price'} · {chartPeriod}
+              </h2>
+              <div className="flex gap-1">
+                {CHART_PERIODS.map((p) => (
+                  <button
+                    key={p}
+                    onClick={() => setChartPeriod(p)}
+                    className={`px-2 py-1 text-xs rounded transition-colors ${
+                      chartPeriod === p
+                        ? 'bg-brand text-white font-semibold'
+                        : 'text-ink-soft hover:text-ink'
+                    }`}
+                  >
+                    {p}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {chart && chart.bars.length > 0 ? (
+              <CandleChart
+                bars={chart.bars}
+                lines={(details?.open_positions ?? [])
+                  .filter((pos) => pos.symbol === ticket.symbol)
+                  .flatMap((pos): PriceLine[] => {
+                    const lines: PriceLine[] = [
+                      { price: pos.price, label: `entry ${pos.position_id}`, kind: 'entry' },
+                    ]
+                    if (pos.stop_loss != null) lines.push({ price: pos.stop_loss, label: 'SL', kind: 'sl' })
+                    if (pos.take_profit != null) lines.push({ price: pos.take_profit, label: 'TP', kind: 'tp' })
+                    return lines
+                  })}
+                digits={symbols.find((s) => s.name === ticket.symbol)?.digits ?? 5}
+              />
+            ) : (
+              <p className="text-sm text-ink-faint py-10 text-center">
+                No candles for this symbol yet — the copier may still be
+                connecting, or the market has no bars in this range.
+              </p>
+            )}
+          </div>
+
           <div className="bg-card rounded-lg border border-line">
             <div className="px-5 py-3 border-b border-line flex items-baseline justify-between">
               <h2 className="desk-label">Open positions</h2>

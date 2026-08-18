@@ -890,3 +890,139 @@ test('kill switch is visible for an admin (control)', async () => {
   expect(await screen.findByRole('button', { name: /stop copying/i })).toBeInTheDocument()
   expect(screen.getByTestId('dry-run-toggle')).toBeInTheDocument()
 })
+
+// ---------- redesigned stat sections (org-scoped) ----------
+
+const overviewStats = {
+  accounts_connected: 3,
+  masters: 1,
+  active_slaves: 2,
+  disabled_or_paused: 0,
+  degraded: 0,
+  copied_today: 5,
+  yesterday: { total_balance: 20000, total_equity: 20000 },
+  recent_copies: [
+    {
+      status: 'active', master_position_id: 42, master_order_id: null,
+      slave_account_id: 2, slave_login: 1002, slave_nickname: null,
+      symbol: 'EURUSD', slave_volume: 50000, fill_price: 1.105,
+      error: null, updated_at: '2026-08-18T10:00:00+00:00',
+    },
+    {
+      status: 'failed', master_position_id: 43, master_order_id: null,
+      slave_account_id: 2, slave_login: 1002, slave_nickname: null,
+      symbol: 'GBPUSD', slave_volume: null, fill_price: null,
+      error: 'MARKET_CLOSED', updated_at: '2026-08-18T09:00:00+00:00',
+    },
+  ],
+}
+
+const copierAnalytics = {
+  closed_trades: 10, wins: 7, losses: 3, win_rate: 0.7,
+  profit_factor: 2.5, best_trade: 300.0, worst_trade: -120.0,
+  avg_win: 100, avg_loss: -50, net_pnl: 512.5,
+  gross_wins: 700, gross_losses: -280, max_drawdown: 150, max_drawdown_pct: 0.01,
+  equity_curve: [], per_symbol: [], weekly: [], weeks: 4, truncated: false,
+}
+
+const stateWithMasterPosition = {
+  ...mockState,
+  master_positions: [
+    {
+      position_id: 42, symbol_id: 1, symbol: 'EURUSD', side: 'BUY',
+      volume: 100000, volume_lots: '0.01', price: 1.1, label: '',
+      pnl_quote: 40.0, copies: [],
+    },
+  ],
+}
+
+/** Every read this screen makes, under THIS org's prefix. */
+function statsRoutes(state: unknown = mockState) {
+  return {
+    '/api/orgs/1/accounts': mockAccounts,
+    '/api/orgs/1/settings': mockSettings,
+    '/api/orgs/1/state': state,
+    '/api/orgs/1/overview': overviewStats,
+    '/api/orgs/1/accounts/1/analytics?weeks=4': copierAnalytics,
+  }
+}
+
+test('portfolio row aggregates equity and compares to yesterday', async () => {
+  setRole('owner')
+  stubApi(statsRoutes(stateWithMasterPosition))
+
+  render(
+    <MemoryRouter>
+      <Overview />
+    </MemoryRouter>
+  )
+
+  // Portfolio value = sum of every account equity in mockState
+  const totalEquity = Object.values(mockState.accounts as Record<string, { equity: number | null }>)
+    .reduce((a, s) => a + (s.equity ?? 0), 0)
+  const formatted = totalEquity.toLocaleString('en-US', {
+    minimumFractionDigits: 2, maximumFractionDigits: 2,
+  })
+  expect(await screen.findByText(formatted)).toBeInTheDocument()
+  // vs yesterday: (total - 20000) / 20000, shown as a signed percentage
+  expect(screen.getByText(/% vs yesterday/)).toBeInTheDocument()
+  expect(screen.getByText('Accounts connected')).toBeInTheDocument()
+  expect(screen.getByText('3')).toBeInTheDocument()
+})
+
+test('copier performance strip shows P&L, win rate, best and worst trades', async () => {
+  setRole('owner')
+  stubApi(statsRoutes())
+
+  render(
+    <MemoryRouter>
+      <Overview />
+    </MemoryRouter>
+  )
+
+  expect(await screen.findByText('+512.50')).toBeInTheDocument()
+  expect(screen.getByText('70.0%')).toBeInTheDocument()
+  expect(screen.getByText('+300.00')).toBeInTheDocument()
+  expect(screen.getByText('-120.00')).toBeInTheDocument()
+  expect(screen.getByText(/10 trades taken · 7 won · 3 lost/)).toBeInTheDocument()
+})
+
+test('copy log lists copies with estimated P&L and failure reasons', async () => {
+  setRole('owner')
+  stubApi(statsRoutes(stateWithMasterPosition))
+
+  render(
+    <MemoryRouter>
+      <Overview />
+    </MemoryRouter>
+  )
+
+  expect(await screen.findByText('Copy log')).toBeInTheDocument()
+  expect(screen.getByText('EURUSD')).toBeInTheDocument()
+  // Active copy P&L estimate: master pnl 40 * (slave 50000 / master 100000) = +20.00
+  expect(screen.getByText('+20.00')).toBeInTheDocument()
+  // Failed copy shows the broker reason instead of a number
+  expect(screen.getByText('MARKET_CLOSED')).toBeInTheDocument()
+})
+
+test('the new stats reads are org-scoped', async () => {
+  // The overview stats block and the master-analytics fetch must both go
+  // through THIS org's prefix -- an unscoped read would put another desk's
+  // fleet size, copy volume and performance on this desk's front page.
+  setRole('owner')
+  const fetchMock = stubApi(statsRoutes())
+
+  render(
+    <MemoryRouter>
+      <Overview />
+    </MemoryRouter>
+  )
+
+  await waitFor(() => {
+    const urls = fetchMock.mock.calls.map(([u]) => String(u))
+    expect(urls).toContain('/api/orgs/1/overview')
+    expect(urls).toContain('/api/orgs/1/accounts/1/analytics?weeks=4')
+    expect(urls.some((u) => u === '/api/overview')).toBe(false)
+  })
+})
+

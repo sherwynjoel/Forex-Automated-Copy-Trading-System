@@ -18,8 +18,8 @@ from ctrader_open_api.messages.OpenApiCommonMessages_pb2 import (
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOAAccountAuthReq, ProtoOAAccountDisconnectEvent,
     ProtoOAAccountsTokenInvalidatedEvent, ProtoOAApplicationAuthReq,
-    ProtoOAErrorRes, ProtoOAExecutionEvent, ProtoOAOrderErrorEvent,
-    ProtoOASpotEvent)
+    ProtoOAErrorRes, ProtoOAExecutionEvent, ProtoOAMarginCallTriggerEvent,
+    ProtoOAOrderErrorEvent, ProtoOASpotEvent, ProtoOATraderUpdatedEvent)
 from twisted.application.internet import ClientService, backoffPolicy
 from twisted.internet import defer, ssl, task
 from twisted.internet.endpoints import HostnameEndpoint, wrapClientTLS
@@ -198,6 +198,8 @@ class CTraderClient:
         self._disc_cbs: list[Callable] = []
         self._invalid_cbs: list[Callable] = []
         self._spot_cbs: list[Callable] = []
+        self._trader_updated_cbs: list[Callable] = []
+        self._margin_call_cbs: list[Callable] = []
         self.ready: defer.Deferred = defer.Deferred()
         self._hb = task.LoopingCall(self._heartbeat)
         self._hb.clock = clock
@@ -361,6 +363,8 @@ class CTraderClient:
     def on_account_disconnect(self, cb) -> None: self._disc_cbs.append(cb)
     def on_tokens_invalidated(self, cb) -> None: self._invalid_cbs.append(cb)
     def on_spot(self, cb) -> None: self._spot_cbs.append(cb)
+    def on_trader_updated(self, cb) -> None: self._trader_updated_cbs.append(cb)
+    def on_margin_call(self, cb) -> None: self._margin_call_cbs.append(cb)
 
     # ---- internals ----
 
@@ -487,7 +491,9 @@ class CTraderClient:
         payload = message
         if not isinstance(message, (ProtoOAExecutionEvent, ProtoOASpotEvent,
                                     ProtoOAAccountsTokenInvalidatedEvent,
-                                    ProtoOAAccountDisconnectEvent)):
+                                    ProtoOAAccountDisconnectEvent,
+                                    ProtoOATraderUpdatedEvent,
+                                    ProtoOAMarginCallTriggerEvent)):
             try:
                 payload = Protobuf.extract(message)
             except Exception:
@@ -516,6 +522,18 @@ class CTraderClient:
                     cb(list(payload.ctidTraderAccountIds))
                 except Exception:
                     log.exception("tokens invalidated callback raised")
+        elif isinstance(payload, ProtoOATraderUpdatedEvent):
+            for cb in self._trader_updated_cbs:
+                try:
+                    cb(payload)
+                except Exception:
+                    log.exception("trader updated callback raised")
+        elif isinstance(payload, ProtoOAMarginCallTriggerEvent):
+            for cb in self._margin_call_cbs:
+                try:
+                    cb(payload)
+                except Exception:
+                    log.exception("margin call callback raised")
         elif isinstance(payload, (ProtoOAErrorRes, ProtoOAOrderErrorEvent)):
             # An untagged rejection of something send_no_reply already
             # wrote to the wire (no clientMsgId round trip exists for

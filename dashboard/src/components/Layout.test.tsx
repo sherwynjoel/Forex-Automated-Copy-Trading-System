@@ -58,6 +58,7 @@ function mockRoutes(overrides: Record<string, unknown> = {}) {
       new Response(JSON.stringify(payload), {
         status: 200, headers: { 'Content-Type': 'application/json' },
       })
+    if (url.includes('/events')) return respond(overrides['events'] ?? [])
     if (url.includes('/settings')) return respond(overrides['settings'] ?? settings)
     if (url.includes('/state')) return respond(overrides['state'] ?? apiState)
     if (url.includes('/accounts')) return respond(overrides['accounts'] ?? accounts)
@@ -148,6 +149,43 @@ test('cancelling the close-all dialog sends nothing', async () => {
   ).toBe(false)
 })
 
+test('recent margin-call risk event raises a banner', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  mockRoutes({
+    events: [{
+      id: 9, ts: new Date().toISOString(), account_id: 12345,
+      category: 'risk', severity: 'error', latency_ms: null,
+      payload: { action: 'margin_call', margin_call_type: 'MARGIN_LEVEL_THRESHOLD_1',
+                 margin_level_threshold: 50 },
+    }],
+  })
+  renderLayout()
+
+  expect(await screen.findByText(/margin call/i)).toBeInTheDocument()
+  expect(screen.getByText(/12345/)).toBeInTheDocument()
+})
+
+test('the risk-event poll behind the banner is org-scoped', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  const fetchMock = mockRoutes()
+  renderLayout()
+
+  await waitFor(() => {
+    const call = fetchMock.mock.calls.find(([u]) => String(u).includes('/events'))
+    expect(call).toBeTruthy()
+    expect(String(call![0])).toBe('/api/orgs/1/events?category=risk&limit=5')
+  })
+})
+
+test('no banner without recent risk events', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  mockRoutes()
+  renderLayout()
+
+  await screen.findByText(/copying live/i)
+  expect(screen.queryByText(/margin call/i)).not.toBeInTheDocument()
+})
+
 test('hides the close-all kill switch below admin', async () => {
   useOrgMock.mockReturnValue(makeOrgValue('trader'))
   mockRoutes()
@@ -197,4 +235,13 @@ test('the Members nav link is always present, regardless of role', async () => {
   renderLayout()
 
   expect(await screen.findByRole('link', { name: 'Members' })).toBeInTheDocument()
+})
+
+test('the Performance nav link points at the org-scoped route', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('viewer'))
+  mockRoutes()
+  renderLayout()
+
+  const link = await screen.findByRole('link', { name: 'Performance' })
+  expect(link).toHaveAttribute('href', '/org/1/performance')
 })

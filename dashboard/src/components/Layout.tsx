@@ -4,7 +4,7 @@ import { api, orgApi } from '../lib/api'
 import { useOrg } from '../lib/org'
 import { can, type Role } from '../lib/roles'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
-import type { Account, ApiState, CloseAllResult, Settings } from '../lib/types'
+import type { Account, ApiState, CloseAllResult, EventResponse, Settings } from '../lib/types'
 import ConfirmDialog from './ConfirmDialog'
 
 const navItems = (orgId: number, role: Role) => [
@@ -13,6 +13,7 @@ const navItems = (orgId: number, role: Role) => [
   { path: `/org/${orgId}/positions`, label: 'Positions' },
   ...(can(role, 'trade') ? [{ path: `/org/${orgId}/trade`, label: 'Trade' }] : []),
   { path: `/org/${orgId}/history`, label: 'History' },
+  { path: `/org/${orgId}/performance`, label: 'Performance' },
   { path: `/org/${orgId}/logs`, label: 'Logs' },
   { path: `/org/${orgId}/members`, label: 'Members' },
 ]
@@ -43,6 +44,8 @@ function DeskStrip() {
   const [dialogOpen, setDialogOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
+  const [marginCall, setMarginCall] = useState<EventResponse | null>(null)
+  const [dismissedRiskId, setDismissedRiskId] = useState<number | null>(null)
 
   const refresh = useCallback(async () => {
     try {
@@ -57,6 +60,20 @@ function DeskStrip() {
         master ? state.accounts?.[String(master.ctid_trader_account_id)] ?? null : null)
     } catch {
       // The strip is a passenger; pages surface their own errors.
+    }
+    try {
+      // A margin call in the last 30 minutes is a right-now problem; show
+      // it on every page until dismissed or aged out. Org-scoped like every
+      // other read here: the copier stamps risk events with the owning org
+      // (see CopierApp._on_margin_call), and the events feed hides NULL-org
+      // rows, so this only ever surfaces THIS desk's margin calls.
+      const risk = await orgApi<EventResponse[]>(
+        orgId, 'events?category=risk&limit=5')
+      const recent = (risk ?? []).find((event) =>
+        Date.now() - new Date(event.ts).getTime() < 30 * 60_000)
+      setMarginCall(recent ?? null)
+    } catch {
+      // Older api without the risk category: no banner.
     }
   }, [orgId])
 
@@ -139,6 +156,28 @@ function DeskStrip() {
           )}
         </div>
       </div>
+
+      {marginCall && marginCall.id !== dismissedRiskId && (
+        <div
+          role="alert"
+          className="px-6 py-2.5 bg-loss text-white text-sm flex items-center justify-between"
+        >
+          <span>
+            <strong>Margin call</strong>
+            {marginCall.account_id != null && (
+              <> on account <span className="num">{marginCall.account_id}</span></>
+            )}
+            {' — '}the broker may start force-closing positions. Reduce
+            exposure or add funds now.
+          </span>
+          <button
+            onClick={() => setDismissedRiskId(marginCall.id)}
+            className="text-white/80 hover:text-white text-xs font-medium ml-4"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {notice && (
         <div className="px-6 py-2 bg-brand-wash border-b border-line text-sm text-ink flex items-center justify-between">
