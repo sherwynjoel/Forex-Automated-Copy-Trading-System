@@ -66,6 +66,22 @@ class FakeCTraderServer:
         self.open_positions: dict[int, list] = {}
         self.pending_orders: dict[int, list] = {}
         self.next_tokens: tuple[str, str] | None = None
+        # Scriptable history/details data for the read-model handlers
+        # (queries.py): account_id -> list of deal/order dicts, plus the
+        # broker-level asset table and per-account ProtoOATrader field
+        # overrides. See _handle_deal_list_req/_handle_order_list_req/
+        # _handle_trader_req for the recognized keys.
+        self.deals: dict[int, list[dict]] = {}
+        self.historical_orders: dict[int, list[dict]] = {}
+        self.assets: list[dict] = [
+            {"asset_id": 1, "name": "USD", "display_name": "US Dollar"},
+        ]
+        self.trader_details: dict[int, dict] = {}
+        # When set, the NEXT tagged read-model request (trader, asset list,
+        # deal list, order list) answers with a ProtoOAErrorRes carrying
+        # this errorCode instead of data, then clears -- so tests can prove
+        # the query layer maps broker errors to failures.
+        self.fail_next_query_error_code: str | None = None
         self.reject_next_order: bool = False  # Scriptable rejection
         self.reject_error_code: str = "CH_TRADING_DISABLED"  # Scriptable reject errorCode
         # Opt-in (off by default -- most tests don't care about auth
@@ -132,6 +148,15 @@ class FakeCTraderServer:
             self._handle_subscribe_spots_req
         )
         self._handlers[oa.ProtoOATraderReq().payloadType] = self._handle_trader_req
+        self._handlers[oa.ProtoOAAssetListReq().payloadType] = (
+            self._handle_asset_list_req
+        )
+        self._handlers[oa.ProtoOADealListReq().payloadType] = (
+            self._handle_deal_list_req
+        )
+        self._handlers[oa.ProtoOAOrderListReq().payloadType] = (
+            self._handle_order_list_req
+        )
         self._handlers[oa.ProtoOANewOrderReq().payloadType] = (
             self._handle_new_order_req
         )
@@ -404,10 +429,24 @@ class FakeCTraderServer:
 
         proto.send_payload(res, msg.clientMsgId)
 
+    def _maybe_fail_query(self, proto, msg) -> bool:
+        """One-shot scripted failure for tagged read-model requests."""
+        if not self.fail_next_query_error_code:
+            return False
+        code = self.fail_next_query_error_code
+        self.fail_next_query_error_code = None
+        err = oa.ProtoOAErrorRes()
+        err.errorCode = code
+        proto.send_payload(err, msg.clientMsgId)
+        return True
+
     def _handle_trader_req(self, proto, msg):
         """Handle trader request."""
         req = oa.ProtoOATraderReq()
         req.ParseFromString(msg.payload)
+
+        if self._maybe_fail_query(proto, msg):
+            return
 
         res = oa.ProtoOATraderRes()
         res.ctidTraderAccountId = req.ctidTraderAccountId
@@ -418,7 +457,128 @@ class FakeCTraderServer:
         else:
             res.trader.balance = 100000
 
-        res.trader.depositAssetId = 1
+        details = self.trader_details.get(req.ctidTraderAccountId, {})
+        res.trader.depositAssetId = details.get("deposit_asset_id", 1)
+        if "leverage_in_cents" in details:
+            res.trader.leverageInCents = details["leverage_in_cents"]
+        if "max_leverage" in details:
+            res.trader.maxLeverage = details["max_leverage"]
+        if "broker_name" in details:
+            res.trader.brokerName = details["broker_name"]
+        if "registration_timestamp" in details:
+            res.trader.registrationTimestamp = details["registration_timestamp"]
+        if "account_type" in details:
+            res.trader.accountType = details["account_type"]
+        if "trader_login" in details:
+            res.trader.traderLogin = details["trader_login"]
+        if "money_digits" in details:
+            res.trader.moneyDigits = details["money_digits"]
+        if "swap_free" in details:
+            res.trader.swapFree = details["swap_free"]
+        if "access_rights" in details:
+            res.trader.accessRights = details["access_rights"]
+        if "is_limited_risk" in details:
+            res.trader.isLimitedRisk = details["is_limited_risk"]
+
+        proto.send_payload(res, msg.clientMsgId)
+
+    def _handle_asset_list_req(self, proto, msg):
+        """Handle asset list request."""
+        req = oa.ProtoOAAssetListReq()
+        req.ParseFromString(msg.payload)
+
+        if self._maybe_fail_query(proto, msg):
+            return
+
+        res = oa.ProtoOAAssetListRes()
+        res.ctidTraderAccountId = req.ctidTraderAccountId
+        for a in self.assets:
+            asset = res.asset.add()
+            asset.assetId = a["asset_id"]
+            asset.name = a["name"]
+            if a.get("display_name"):
+                asset.displayName = a["display_name"]
+
+        proto.send_payload(res, msg.clientMsgId)
+
+    def _handle_deal_list_req(self, proto, msg):
+        """Handle deal list (history) request, filtered by the requested
+        [fromTimestamp, toTimestamp] window on executionTimestamp."""
+        req = oa.ProtoOADealListReq()
+        req.ParseFromString(msg.payload)
+
+        if self._maybe_fail_query(proto, msg):
+            return
+
+        res = oa.ProtoOADealListRes()
+        res.ctidTraderAccountId = req.ctidTraderAccountId
+        res.hasMore = False
+        for d in self.deals.get(req.ctidTraderAccountId, []):
+            if not (req.fromTimestamp <= d["execution_timestamp"] <= req.toTimestamp):
+                continue
+            deal = res.deal.add()
+            deal.dealId = d["deal_id"]
+            deal.orderId = d["order_id"]
+            deal.positionId = d["position_id"]
+            deal.volume = d["volume"]
+            deal.filledVolume = d["filled_volume"]
+            deal.symbolId = d["symbol_id"]
+            deal.createTimestamp = d["create_timestamp"]
+            deal.executionTimestamp = d["execution_timestamp"]
+            deal.executionPrice = d["execution_price"]
+            deal.tradeSide = d["trade_side"]
+            deal.dealStatus = d["status"]
+            if "commission" in d:
+                deal.commission = d["commission"]
+            deal.moneyDigits = d.get("money_digits", 2)
+            cpd = d.get("close_position_detail")
+            if cpd:
+                deal.closePositionDetail.entryPrice = cpd["entry_price"]
+                deal.closePositionDetail.grossProfit = cpd["gross_profit"]
+                deal.closePositionDetail.swap = cpd["swap"]
+                deal.closePositionDetail.commission = cpd["commission"]
+                deal.closePositionDetail.balance = cpd["balance"]
+                deal.closePositionDetail.closedVolume = cpd["closed_volume"]
+                deal.closePositionDetail.moneyDigits = cpd.get("money_digits", 2)
+
+        proto.send_payload(res, msg.clientMsgId)
+
+    def _handle_order_list_req(self, proto, msg):
+        """Handle order list (history) request, filtered by the requested
+        window on utcLastUpdateTimestamp."""
+        req = oa.ProtoOAOrderListReq()
+        req.ParseFromString(msg.payload)
+
+        if self._maybe_fail_query(proto, msg):
+            return
+
+        res = oa.ProtoOAOrderListRes()
+        res.ctidTraderAccountId = req.ctidTraderAccountId
+        res.hasMore = False
+        for o in self.historical_orders.get(req.ctidTraderAccountId, []):
+            if not (req.fromTimestamp <= o["utc_last_update_timestamp"] <= req.toTimestamp):
+                continue
+            order = res.order.add()
+            order.orderId = o["order_id"]
+            order.tradeData.symbolId = o["symbol_id"]
+            order.tradeData.volume = o["volume"]
+            order.tradeData.tradeSide = o["trade_side"]
+            if "open_timestamp" in o:
+                order.tradeData.openTimestamp = o["open_timestamp"]
+            order.tradeData.label = o.get("label", "")
+            order.orderType = o["order_type"]
+            order.orderStatus = o["order_status"]
+            order.utcLastUpdateTimestamp = o["utc_last_update_timestamp"]
+            if "limit_price" in o:
+                order.limitPrice = o["limit_price"]
+            if "stop_price" in o:
+                order.stopPrice = o["stop_price"]
+            if "execution_price" in o:
+                order.executionPrice = o["execution_price"]
+            if "executed_volume" in o:
+                order.executedVolume = o["executed_volume"]
+            if "position_id" in o:
+                order.positionId = o["position_id"]
 
         proto.send_payload(res, msg.clientMsgId)
 

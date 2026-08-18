@@ -33,11 +33,6 @@ class AccountResponse(BaseModel):
     connection_status: str = "active"
 
 
-class DeleteConnectionResponse(BaseModel):
-    """Response for deleting a connection."""
-    detail: str
-
-
 def create_accounts_router() -> APIRouter:
     """Create router for accounts management."""
     router = APIRouter(prefix="/api", tags=["accounts"])
@@ -183,21 +178,47 @@ def create_accounts_router() -> APIRouter:
 
         return result
 
-    @router.delete("/accounts/connections/{connection_id}")
-    async def delete_connection(
-        connection_id: int,
+    @router.delete("/accounts/{account_id}/connection")
+    async def disconnect_account(
+        account_id: int,
+        http_request: Request,
         _: bool = Depends(require_admin),
         conn: psycopg.Connection = Depends(get_conn),
+        cfg: ApiConfig = Depends(ApiConfig.from_env),
     ):
-        """Delete a connection (cascades to accounts)."""
-        # Delete the connection (cascades to accounts due to ON DELETE CASCADE)
-        conn.execute(
-            "DELETE FROM ctid_connections WHERE id = %s",
-            (connection_id,)
-        )
+        """Disconnect the cTrader ID grant behind an account.
 
-        return {
-            "detail": "Connection deleted. Note: tokens remain revocable at ctrader.com"
+        Resolves the account's connection server-side (the dashboard never
+        sees raw connection ids), deletes it -- cascading to every account
+        discovered under that grant -- and asks the copier to reload so the
+        accounts are de-authorized immediately rather than on next restart.
+        """
+        row = conn.execute(
+            "SELECT ctid_connection_id FROM accounts WHERE ctid_trader_account_id = %s",
+            (account_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Account not found")
+        connection_id = row[0]
+
+        count_row = conn.execute(
+            "SELECT COUNT(*) FROM accounts WHERE ctid_connection_id = %s",
+            (connection_id,),
+        ).fetchone()
+
+        conn.execute("DELETE FROM ctid_connections WHERE id = %s", (connection_id,))
+
+        result = {
+            "detail": "Connection deleted. Note: tokens remain revocable at ctrader.com",
+            "accounts_removed": count_row[0],
+            "copier_reloaded": False,
         }
+        try:
+            client = http_request.app.state.http
+            response = await client.post(f"{cfg.copier_control_url}/reload")
+            result["copier_reloaded"] = response.status_code == 200
+        except Exception:
+            pass
+        return result
 
     return router

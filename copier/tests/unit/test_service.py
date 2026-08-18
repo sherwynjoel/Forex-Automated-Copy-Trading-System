@@ -486,6 +486,27 @@ class TestSlaveEventEdgeCases:
         assert warnings[0] >= 1
 
 
+    def test_manual_slave_fill_logs_info_not_warning(self, service, repo):
+        """A fill for an operator-placed manual order (label 'manual') on a
+        slave is expected -- it logs an info 'manual_fill', never the
+        unmatched_slave_fill warning that flags genuinely unexplained fills."""
+        evt = base_event(account_id=100, execution_type=ProtoOAExecutionType.ORDER_FILLED)
+        evt.order.tradeData.label = "manual"
+        evt.deal.positionId = 888
+        evt.deal.filledVolume = 10_000_000
+
+        service.handle_execution(100, evt)
+
+        with psycopg.connect(repo.dsn, autocommit=True) as conn:
+            rows = conn.execute(
+                "SELECT severity, payload->>'action' FROM events WHERE account_id = 100"
+            ).fetchall()
+        actions = {r[1] for r in rows}
+        assert 'manual_fill' in actions
+        assert 'unmatched_slave_fill' not in actions
+        assert all(r[0] != 'warning' for r in rows)
+
+
 class TestExceptionBoundary:
     """Test exception handling in handle_execution."""
 

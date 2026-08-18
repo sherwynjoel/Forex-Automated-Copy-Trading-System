@@ -221,8 +221,8 @@ def test_multiplier_change_does_not_trigger_reload(app_client, db):
     # This is just an update response, not a reload response
 
 
-def test_delete_connection_cascades(app_client, db):
-    """DELETE /api/accounts/connections/{id} deletes connection and cascades to accounts."""
+def test_disconnect_account_cascades(app_client, db):
+    """DELETE /api/accounts/{account_id}/connection deletes the account's grant, cascading to every account under it."""
     response = app_client.post("/api/login", json={"password": "hunter2!"})
     assert response.status_code == 204
     csrf_token = response.cookies.get("csrf")
@@ -231,14 +231,16 @@ def test_delete_connection_cascades(app_client, db):
     _seed_account(db, 12345, conn_id, 111111, True)
     _seed_account(db, 12346, conn_id, 222222, False)
 
-    # Delete the connection
+    # Disconnect by ACCOUNT id -- the account's connection is resolved server-side
     response = app_client.delete(
-        f"/api/accounts/connections/{conn_id}",
+        "/api/accounts/12345/connection",
         headers={"X-CSRF-Token": csrf_token}
     )
     assert response.status_code == 200
+    data = response.json()
+    assert data["accounts_removed"] == 2
 
-    # Verify connection and accounts are deleted
+    # Verify connection and both sibling accounts are deleted
     with psycopg.connect(db, autocommit=True) as conn:
         result = conn.execute("SELECT COUNT(*) FROM ctid_connections WHERE id = %s", (conn_id,)).fetchone()
         assert result[0] == 0
@@ -247,10 +249,52 @@ def test_delete_connection_cascades(app_client, db):
         assert result[0] == 0
 
 
-def test_delete_connection_requires_csrf(app_client, db):
+def test_disconnect_account_triggers_copier_reload(app_client, db):
+    """Disconnecting an account POSTs /reload to the copier so it de-authorizes immediately."""
+    response = app_client.post("/api/login", json={"password": "hunter2!"})
+    assert response.status_code == 204
+    csrf_token = response.cookies.get("csrf")
+
+    conn_id = _seed_connection(db)
+    _seed_account(db, 12345, conn_id, 111111, True)
+
+    from conftest import default_mock_callback
+    copier_calls = []
+
+    def recording_callback(request):
+        if "copier.test" in str(request.url):
+            copier_calls.append(str(request.url))
+        return default_mock_callback(request)
+
+    app_client.app.state.mock_transport.set_callback(recording_callback)
+
+    response = app_client.delete(
+        "/api/accounts/12345/connection",
+        headers={"X-CSRF-Token": csrf_token}
+    )
+    assert response.status_code == 200
+    assert response.json()["copier_reloaded"] is True
+    assert any("/reload" in url for url in copier_calls)
+
+
+def test_disconnect_unknown_account_404(app_client, db):
+    """DELETE /api/accounts/{account_id}/connection for an unknown account returns 404."""
+    response = app_client.post("/api/login", json={"password": "hunter2!"})
+    assert response.status_code == 204
+    csrf_token = response.cookies.get("csrf")
+
+    response = app_client.delete(
+        "/api/accounts/99999/connection",
+        headers={"X-CSRF-Token": csrf_token}
+    )
+    assert response.status_code == 404
+
+
+def test_disconnect_account_requires_csrf(app_client, db):
     """DELETE without CSRF token returns 403."""
     conn_id = _seed_connection(db)
-    response = app_client.delete(f"/api/accounts/connections/{conn_id}")
+    _seed_account(db, 12345, conn_id, 111111, True)
+    response = app_client.delete("/api/accounts/12345/connection")
     assert response.status_code == 403
 
 

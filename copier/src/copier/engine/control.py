@@ -22,6 +22,14 @@ Routes:
 - POST /discover: discover accounts from a connection, body {"connection_id": int}
 - POST /drift/close-orphan, /drift/adopt, /drift/dismiss: drift remedies,
   body {"id": str, "master_position_id": int?}
+- GET /details?account_id: full broker-side account profile
+- GET /history/deals, /history/orders (?account_id&from&to): trade history
+- POST /order: place a manual order, body {account_id, symbol, side,
+  order_type, volume_lots, limit_price?, stop_price?, stop_loss?, take_profit?}
+- POST /positions/close: close a position, body {account_id, position_id, volume_lots?}
+- POST /orders/cancel: cancel a working order, body {account_id, order_id}
+- POST /close-all: kill switch, body {"account_id": int|null} (null = every
+  enabled account, pausing copying first)
 """
 
 import json
@@ -29,6 +37,8 @@ import logging
 from typing import Any
 
 from twisted.web import resource, server
+
+from copier.engine.queries import QueryFailed
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +54,17 @@ def _write_json(request, payload: dict, code: int | None = None) -> None:
 def _read_json_body(request) -> dict:
     body = request.content.read()
     return json.loads(body) if body else {}
+
+
+def _int_arg(request, name: bytes) -> int:
+    """Parse a required integer query-string argument or raise ValueError."""
+    values = request.args.get(name)
+    if not values:
+        raise ValueError(f"{name.decode()} query parameter required")
+    try:
+        return int(values[0])
+    except (TypeError, ValueError):
+        raise ValueError(f"{name.decode()} must be an integer")
 
 
 class _JsonResource(resource.Resource):
@@ -76,11 +97,19 @@ class _JsonResource(resource.Resource):
     def _on_error(self, failure, request):
         log.error("%s failed: %s", type(self).__name__, failure)
         error_msg = str(failure.value) if hasattr(failure, "value") else str(failure)
-        _write_json(request, {"error": error_msg}, code=500)
+        # Validation problems and broker error RESPONSES are the caller's
+        # 4xx, not a copier failure: the api proxy forwards 4xx detail
+        # faithfully but collapses any copier 5xx into an opaque
+        # "copier unreachable" 502 (see api routes/settings_control.py).
+        code = 400 if failure.check(ValueError, QueryFailed) else 500
+        _write_json(request, {"error": error_msg}, code=code)
 
     def render_GET(self, request):
         try:
             return self._render(request)
+        except ValueError as e:
+            _write_json(request, {"error": str(e)}, code=400)
+            return server.NOT_DONE_YET
         except Exception as e:
             log.exception("%s failed", type(self).__name__)
             _write_json(request, {"error": str(e)}, code=500)
@@ -89,6 +118,9 @@ class _JsonResource(resource.Resource):
     def render_POST(self, request):
         try:
             return self._render(request)
+        except ValueError as e:
+            _write_json(request, {"error": str(e)}, code=400)
+            return server.NOT_DONE_YET
         except Exception as e:
             log.exception("%s failed", type(self).__name__)
             _write_json(request, {"error": str(e)}, code=500)
@@ -210,6 +242,117 @@ class DriftDismissResource(_JsonResource):
         return d
 
 
+class PlaceOrderResource(_JsonResource):
+    """POST /order: place a manual order on any connected account.
+
+    Body: {account_id, symbol, side, order_type, volume_lots,
+           limit_price?, stop_price?, stop_loss?, take_profit?}
+    Validation lives in CopierApp.place_order; its ValueErrors map to 400.
+    """
+
+    def _handle(self, request, body):
+        return self.app.place_order(body)
+
+
+class ClosePositionResource(_JsonResource):
+    """POST /positions/close: close (or partially close) one position.
+
+    Body: {account_id, position_id, volume_lots?} -- omitting volume_lots
+    closes the position's full live volume.
+    """
+
+    def _handle(self, request, body):
+        account_id = body.get("account_id")
+        position_id = body.get("position_id")
+        if account_id is None or position_id is None:
+            raise ValueError("account_id and position_id required")
+        return self.app.close_position(
+            int(account_id), int(position_id), body.get("volume_lots"))
+
+
+class CancelOrderResource(_JsonResource):
+    """POST /orders/cancel: cancel one working order.
+
+    Body: {account_id, order_id}
+    """
+
+    def _handle(self, request, body):
+        account_id = body.get("account_id")
+        order_id = body.get("order_id")
+        if account_id is None or order_id is None:
+            raise ValueError("account_id and order_id required")
+        return self.app.cancel_order(int(account_id), int(order_id))
+
+
+class CloseAllResource(_JsonResource):
+    """POST /close-all: the kill switch.
+
+    Body {account_id} flattens one account; an empty body (or null
+    account_id) flattens EVERY enabled account and pauses copying first.
+    """
+
+    def _handle(self, request, body):
+        account_id = body.get("account_id")
+        return self.app.close_all(
+            int(account_id) if account_id is not None else None)
+
+
+class PositionsResource(resource.Resource):
+    """Parent resource for /positions/close."""
+
+    def __init__(self, app):
+        super().__init__()
+        self.app = app
+        self.putChild(b"close", ClosePositionResource(app))
+
+
+class OrdersResource(resource.Resource):
+    """Parent resource for /orders/cancel."""
+
+    def __init__(self, app):
+        super().__init__()
+        self.app = app
+        self.putChild(b"cancel", CancelOrderResource(app))
+
+
+class DetailsResource(_JsonResource):
+    """GET /details?account_id=N: full broker-side account profile."""
+
+    def _handle(self, request, body):
+        account_id = _int_arg(request, b"account_id")
+        return self.app.get_account_details(account_id)
+
+
+class DealHistoryResource(_JsonResource):
+    """GET /history/deals?account_id=N&from=ms&to=ms: deal (fill) history."""
+
+    def _handle(self, request, body):
+        account_id = _int_arg(request, b"account_id")
+        from_ms = _int_arg(request, b"from")
+        to_ms = _int_arg(request, b"to")
+        return self.app.get_deal_history(account_id, from_ms, to_ms)
+
+
+class OrderHistoryResource(_JsonResource):
+    """GET /history/orders?account_id=N&from=ms&to=ms: order history."""
+
+    def _handle(self, request, body):
+        account_id = _int_arg(request, b"account_id")
+        from_ms = _int_arg(request, b"from")
+        to_ms = _int_arg(request, b"to")
+        return self.app.get_order_history(account_id, from_ms, to_ms)
+
+
+class HistoryResource(resource.Resource):
+    """Parent resource for /history/{deals,orders}."""
+
+    def __init__(self, app):
+        super().__init__()
+        self.app = app
+        self.putChild(b"deals", DealHistoryResource(app))
+        self.putChild(b"orders", OrderHistoryResource(app))
+
+
 class DriftResource(resource.Resource):
     """Parent resource for /drift/{close-orphan,adopt,dismiss}."""
 
@@ -236,6 +379,12 @@ class RootResource(resource.Resource):
         self.putChild(b"dry-run", DryRunResource(app))
         self.putChild(b"discover", DiscoverResource(app))
         self.putChild(b"drift", DriftResource(app))
+        self.putChild(b"details", DetailsResource(app))
+        self.putChild(b"history", HistoryResource(app))
+        self.putChild(b"order", PlaceOrderResource(app))
+        self.putChild(b"positions", PositionsResource(app))
+        self.putChild(b"orders", OrdersResource(app))
+        self.putChild(b"close-all", CloseAllResource(app))
 
 
 def make_control_site(app: Any) -> server.Site:

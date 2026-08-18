@@ -11,6 +11,13 @@ class Side(Enum):
     SELL = "SELL"
 
 
+# Label stamped on operator-placed orders (dashboard order ticket).  Fills
+# carrying it are expected, not drift: the copier logs them as info instead
+# of unmatched-fill warnings, and reconcile's orphan check (which only ever
+# flags copy:* labels) never picks them up.
+MANUAL_ORDER_LABEL = "manual"
+
+
 class PendingType(Enum):
     LIMIT = "LIMIT"
     STOP = "STOP"

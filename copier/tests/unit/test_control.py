@@ -544,7 +544,10 @@ def test_drift_close_orphan_on_unknown_id_reports_error_not_fake_success(repo, t
     request.content = BytesIO(json.dumps({"id": "does-not-exist"}).encode())
     DriftCloseOrphanResource(app).render_POST(request)
 
-    assert request.responseCode == 500
+    # Unknown id is the caller's error: ValueError now maps to 400 (see
+    # _JsonResource._on_error) so the api proxy can forward the detail
+    # instead of collapsing it into an opaque 502.
+    assert request.responseCode == 400
     body = _written_json(request)
     assert "error" in body
     assert body.get("status") != "closed"

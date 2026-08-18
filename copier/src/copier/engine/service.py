@@ -15,7 +15,8 @@ from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
     ProtoOAExecutionType, ProtoOAOrderType)
 
 from copier.db.repo import Repo, MappingNotFound
-from copier.domain.models import SymbolInfo, SlaveConfig, MasterPendingFilled
+from copier.domain.models import (
+    MANUAL_ORDER_LABEL, SymbolInfo, SlaveConfig, MasterPendingFilled)
 from copier.domain.decision import decide
 from copier.engine.normalize import normalize
 from copier.engine.dispatch import Dispatcher
@@ -386,6 +387,24 @@ class CopierService:
         except MappingNotFound:
             # slave_order_id didn't match; no order mapping found
             pass
+
+        # An operator-placed manual order's fill matches no mapping BY
+        # DESIGN -- it is expected, so it must not raise the unexplained-
+        # fill warning below.
+        if evt.order.tradeData.label == MANUAL_ORDER_LABEL:
+            self._repo.log_event(
+                'slave_action',
+                'info',
+                {
+                    'action': 'manual_fill',
+                    'slave_order_id': slave_order_id,
+                    'slave_position_id': deal_position_id,
+                    'filled_volume': filled_volume,
+                    'fill_price': fill_price,
+                },
+                account_id=account_id,
+            )
+            return
 
         # Fallthrough: fill matched nothing (neither position "cm" nor pending by order_id)
         self._repo.log_event(

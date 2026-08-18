@@ -33,20 +33,26 @@ from typing import Callable
 from twisted.internet import defer, task
 from ctrader_open_api import Protobuf
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
-    ProtoOAErrorRes, ProtoOAGetAccountListByAccessTokenReq, ProtoOARefreshTokenReq,
+    ProtoOACancelOrderReq, ProtoOAClosePositionReq, ProtoOAErrorRes,
+    ProtoOAGetAccountListByAccessTokenReq, ProtoOANewOrderReq,
+    ProtoOARefreshTokenReq, ProtoOAReconcileReq,
+)
+from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
+    ProtoOAOrderType, ProtoOATradeSide,
 )
 
 from copier.ctrader.client import CTraderClient, make_sdk_client
 from copier.ctrader.tokens import TokenStore
 from copier.ctrader.symbols import fetch_symbol_map, by_id as symbols_by_id
 from copier.db.repo import Repo
-from copier.domain.models import SlaveConfig
+from copier.domain.models import MANUAL_ORDER_LABEL, SlaveConfig
 from copier.engine.service import CopierService
 from copier.engine.reconcile import Reconciler
 from copier.engine.state import AccountStateTracker, PositionSnapshot as StatePositionSnapshot
 from copier.engine.dispatch import Dispatcher, SendNotAttempted
 from copier.engine.throttle import TokenBucket
 from copier.engine.control import make_control_site
+from copier.engine import queries
 
 log = logging.getLogger(__name__)
 
@@ -65,6 +71,12 @@ BALANCE_REFRESH_INTERVAL_S = 60.0
 RESYNC_INTERVAL_S = 60.0
 RESYNC_DEBOUNCE_S = 0.5
 CONTROL_PORT = 8080
+_SIDE_BY_NAME = {"BUY": ProtoOATradeSide.BUY, "SELL": ProtoOATradeSide.SELL}
+_ORDER_TYPE_BY_NAME = {
+    "MARKET": ProtoOAOrderType.MARKET,
+    "LIMIT": ProtoOAOrderType.LIMIT,
+    "STOP": ProtoOAOrderType.STOP,
+}
 # Docker-internal only: host isolation comes from compose NOT publishing this
 # port, not from binding loopback. Binding 127.0.0.1 would make the endpoint
 # unreachable from other containers on the bridge network (e.g. api -> copier).
@@ -543,6 +555,265 @@ class CopierApp:
                 )
             except Exception:
                 log.exception("failed to log token_refresh_failed event")
+
+    # ---------- on-demand broker queries ----------
+
+    def _query_context(self, account_id: int):
+        """Resolve (client, symbols_by_id) for one account or raise ValueError."""
+        account = next(
+            (a for a in self.repo.load_accounts() if a.account_id == account_id), None)
+        if account is None:
+            raise ValueError(f"account {account_id} not found")
+        client = self._client_for_account(account)
+        if client is None:
+            raise ValueError(f"no client for account {account_id}")
+        return client, symbols_by_id(self.repo.load_symbol_cache(account_id))
+
+    def get_account_details(self, account_id: int) -> defer.Deferred:
+        """Full broker-side profile for one account (see engine/queries.py)."""
+        d = defer.maybeDeferred(self._query_context, account_id)
+        d.addCallback(lambda ctx: queries.account_details(ctx[0], account_id, ctx[1]))
+        return d
+
+    def get_deal_history(self, account_id: int, from_ms: int, to_ms: int) -> defer.Deferred:
+        """Deal (fill) history for one account in [from_ms, to_ms]."""
+        d = defer.maybeDeferred(self._query_context, account_id)
+        d.addCallback(lambda ctx: queries.deal_history(
+            ctx[0], account_id, ctx[1], from_ms, to_ms))
+        return d
+
+    def get_order_history(self, account_id: int, from_ms: int, to_ms: int) -> defer.Deferred:
+        """Order history for one account in [from_ms, to_ms]."""
+        d = defer.maybeDeferred(self._query_context, account_id)
+        d.addCallback(lambda ctx: queries.order_history(
+            ctx[0], account_id, ctx[1], from_ms, to_ms))
+        return d
+
+    # ---------- operator trade actions ----------
+
+    def place_order(self, params: dict) -> dict:
+        """Place a manual order on ANY connected account from the dashboard.
+
+        Validates against the account's symbol cache (symbol name, minimum
+        and step volume), converts lots to protocol units, and sends through
+        Dispatcher.send_direct -- the gate-free operator path with the same
+        throttle/retry/degraded semantics as copy sends.  The order is
+        labeled MANUAL_ORDER_LABEL: on the master it replicates through the
+        normal copy pipeline like any master trade; on a slave the label
+        keeps reconcile from flagging the resulting position as orphan
+        drift.
+
+        Like every trade request, the broker sends no synchronous reply --
+        this returns "submitted", and the outcome arrives as an execution
+        event (visible in Positions/Logs within ~1-2s).
+        """
+        account_id = params.get("account_id")
+        if account_id is None:
+            raise ValueError("account_id required")
+        account_id = int(account_id)
+
+        side_name = str(params.get("side", "")).upper()
+        if side_name not in _SIDE_BY_NAME:
+            raise ValueError("side must be BUY or SELL")
+
+        type_name = str(params.get("order_type", "")).upper()
+        if type_name not in _ORDER_TYPE_BY_NAME:
+            raise ValueError("order_type must be MARKET, LIMIT or STOP")
+
+        try:
+            volume_lots = float(params.get("volume_lots"))
+        except (TypeError, ValueError):
+            raise ValueError("volume_lots must be a number")
+        if volume_lots <= 0:
+            raise ValueError("volume_lots must be greater than 0")
+
+        limit_price = params.get("limit_price")
+        stop_price = params.get("stop_price")
+        if type_name == "LIMIT" and limit_price is None:
+            raise ValueError("limit_price required for LIMIT orders")
+        if type_name == "STOP" and stop_price is None:
+            raise ValueError("stop_price required for STOP orders")
+
+        # Resolves the client too, so an unknown account fails here.
+        self._query_context(account_id)
+
+        symbol_name = params.get("symbol")
+        sym = self.repo.load_symbol_cache(account_id).get(symbol_name)
+        if sym is None:
+            raise ValueError(f"unknown symbol {symbol_name!r} for account {account_id}")
+
+        volume = int(volume_lots * sym.lot_size)
+        if sym.step_volume:
+            volume -= volume % sym.step_volume
+        if volume < sym.min_volume:
+            raise ValueError(
+                f"volume {volume_lots} lots is below the minimum for {symbol_name}")
+
+        req = ProtoOANewOrderReq()
+        req.ctidTraderAccountId = account_id
+        req.symbolId = sym.symbol_id
+        req.orderType = _ORDER_TYPE_BY_NAME[type_name]
+        req.tradeSide = _SIDE_BY_NAME[side_name]
+        req.volume = volume
+        req.label = MANUAL_ORDER_LABEL
+        if limit_price is not None:
+            req.limitPrice = float(limit_price)
+        if stop_price is not None:
+            req.stopPrice = float(stop_price)
+        if params.get("stop_loss") is not None:
+            req.stopLoss = float(params["stop_loss"])
+        if params.get("take_profit") is not None:
+            req.takeProfit = float(params["take_profit"])
+
+        self.dispatcher.send_direct(account_id, req)
+        summary = {
+            "status": "submitted", "account_id": account_id,
+            "symbol": symbol_name, "side": side_name, "order_type": type_name,
+            "volume": volume, "volume_lots": f"{volume / sym.lot_size:.2f}",
+        }
+        self.repo.log_event(
+            'control', 'info',
+            {'action': 'manual_order', **{k: v for k, v in summary.items() if k != 'status'}},
+            account_id=account_id,
+        )
+        return summary
+
+    @defer.inlineCallbacks
+    def close_position(self, account_id: int, position_id: int, volume_lots=None):
+        """Close (or partially close) one position on any account.
+
+        Reads the position's CURRENT volume fresh from the broker
+        (ProtoOAReconcileReq) rather than trusting the caller: a full close
+        sends exactly the live volume, and a partial close is clamped to it.
+        """
+        client, symbols = self._query_context(account_id)
+        req = ProtoOAReconcileReq()
+        req.ctidTraderAccountId = account_id
+        rec = queries.extract_or_raise((yield client.send(req)), "reconcile")
+
+        pos = next((p for p in rec.position if p.positionId == position_id), None)
+        if pos is None:
+            raise ValueError(
+                f"position {position_id} not found on account {account_id}")
+
+        volume = pos.tradeData.volume
+        if volume_lots is not None:
+            sym = symbols.get(pos.tradeData.symbolId)
+            if sym is None:
+                raise ValueError(
+                    f"no symbol info for symbol id {pos.tradeData.symbolId}")
+            volume = min(int(float(volume_lots) * sym.lot_size), volume)
+            if volume <= 0:
+                raise ValueError("volume_lots must be greater than 0")
+
+        close_req = ProtoOAClosePositionReq()
+        close_req.ctidTraderAccountId = account_id
+        close_req.positionId = position_id
+        close_req.volume = volume
+        self.dispatcher.send_direct(account_id, close_req)
+        self.repo.log_event(
+            'control', 'info',
+            {'action': 'manual_close', 'position_id': position_id, 'volume': volume},
+            account_id=account_id,
+        )
+        return {"status": "submitted", "account_id": account_id,
+                "position_id": position_id, "volume": volume}
+
+    def cancel_order(self, account_id: int, order_id: int) -> defer.Deferred:
+        """Cancel one working order on any account."""
+        def _send(_ctx):
+            req = ProtoOACancelOrderReq()
+            req.ctidTraderAccountId = account_id
+            req.orderId = order_id
+            self.dispatcher.send_direct(account_id, req)
+            self.repo.log_event(
+                'control', 'info',
+                {'action': 'manual_cancel', 'order_id': order_id},
+                account_id=account_id,
+            )
+            return {"status": "submitted", "account_id": account_id,
+                    "order_id": order_id}
+
+        d = defer.maybeDeferred(self._query_context, account_id)
+        d.addCallback(_send)
+        return d
+
+    @defer.inlineCallbacks
+    def close_all(self, account_id: int | None = None):
+        """Kill switch: flatten one account, or (account_id=None) every
+        enabled, non-paused account -- master included.
+
+        The GLOBAL kill switch pauses copying FIRST, so the master closes it
+        is about to send cannot fan out as copy-closes while the slaves'
+        positions are simultaneously being closed directly (each close would
+        otherwise race its own copy).  A single-account kill switch never
+        touches the global pause.
+        """
+        if account_id is not None:
+            summary = yield self._flatten_account(int(account_id))
+            results = [summary]
+            paused = False
+        else:
+            self.repo.set_setting("copying_enabled", False)
+            paused = True
+            targets = [
+                a for a in self.repo.load_accounts()
+                if a.enabled and a.status != 'paused'
+            ]
+            results = []
+            for account in targets:
+                try:
+                    summary = yield self._flatten_account(account.account_id)
+                except Exception as e:
+                    log.error("close_all: flatten %s failed: %s", account.account_id, e)
+                    summary = {"account_id": account.account_id,
+                               "positions_closed": 0, "orders_cancelled": 0,
+                               "error": str(e)}
+                results.append(summary)
+
+        self.repo.log_event(
+            'control', 'warning',
+            {'action': 'kill_switch', 'global': account_id is None,
+             'accounts': results},
+            account_id=account_id,
+        )
+        return {"status": "flattened", "paused": paused, "accounts": results}
+
+    @defer.inlineCallbacks
+    def _flatten_account(self, account_id: int):
+        """Close every open position and cancel every working order in one
+        account, from a FRESH broker snapshot (never this process's
+        mappings -- orphans and manual positions must die too)."""
+        client, _symbols = self._query_context(account_id)
+        req = ProtoOAReconcileReq()
+        req.ctidTraderAccountId = account_id
+        rec = queries.extract_or_raise((yield client.send(req)), "reconcile")
+
+        positions_closed = 0
+        for p in rec.position:
+            close_req = ProtoOAClosePositionReq()
+            close_req.ctidTraderAccountId = account_id
+            close_req.positionId = p.positionId
+            close_req.volume = p.tradeData.volume
+            self.dispatcher.send_direct(account_id, close_req)
+            positions_closed += 1
+
+        orders_cancelled = 0
+        for o in rec.order:
+            cancel_req = ProtoOACancelOrderReq()
+            cancel_req.ctidTraderAccountId = account_id
+            cancel_req.orderId = o.orderId
+            self.dispatcher.send_direct(account_id, cancel_req)
+            orders_cancelled += 1
+
+        self.repo.log_event(
+            'control', 'warning',
+            {'action': 'kill_switch_flatten', 'positions_closed': positions_closed,
+             'orders_cancelled': orders_cancelled},
+            account_id=account_id,
+        )
+        return {"account_id": account_id, "positions_closed": positions_closed,
+                "orders_cancelled": orders_cancelled, "error": None}
 
     # ---------- read models ----------
 
