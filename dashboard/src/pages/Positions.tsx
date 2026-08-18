@@ -29,7 +29,11 @@ export default function Positions() {
   }, [])
 
   // Refetch immediately when a trade event streams in (5s poll is fallback)
-  useLiveRefresh(fetchState)
+  // Task 17: this page still calls the unscoped /api/* endpoints above and
+  // isn't rendered under org route context in its tests, so useOrg() isn't
+  // trivially available here — orgId is a placeholder until the page is
+  // converted to orgApi/org-scoped routing.
+  useLiveRefresh(fetchState, 0)
 
   const handleCloseOrphan = async (driftId: string) => {
     if (!window.confirm('Close this orphan position?')) return

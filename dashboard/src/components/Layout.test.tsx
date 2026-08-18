@@ -3,11 +3,38 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
 import { expect, test, vi, afterEach } from 'vitest'
 import Layout from './Layout'
+import type { Role } from '../lib/roles'
+
+const { useOrgMock, navigateMock } = vi.hoisted(() => ({
+  useOrgMock: vi.fn(),
+  navigateMock: vi.fn(),
+}))
+
+vi.mock('../lib/org', () => ({ useOrg: useOrgMock }))
+
+vi.mock('react-router-dom', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('react-router-dom')>()
+  return { ...actual, useNavigate: () => navigateMock }
+})
 
 afterEach(() => {
   vi.clearAllMocks()
   vi.unstubAllGlobals()
 })
+
+function makeOrgValue(role: Role, orgsOverride?: Array<{ id: number; name: string; role: Role }>) {
+  const orgs = orgsOverride ?? [{ id: 1, name: 'Acme', role }]
+  return {
+    orgId: 1,
+    role,
+    org: { id: 1, name: 'Acme', role },
+    me: {
+      user: { id: 1, email: 'ada@example.com', display_name: 'Ada' },
+      orgs,
+    },
+    refreshMe: vi.fn(),
+  }
+}
 
 const settings = { copying_enabled: true, dry_run: false, shards: 1 }
 const apiState = {
@@ -31,10 +58,10 @@ function mockRoutes(overrides: Record<string, unknown> = {}) {
       new Response(JSON.stringify(payload), {
         status: 200, headers: { 'Content-Type': 'application/json' },
       })
-    if (url.includes('/api/settings')) return respond(overrides['settings'] ?? settings)
-    if (url.includes('/api/state')) return respond(overrides['state'] ?? apiState)
-    if (url.includes('/api/accounts')) return respond(overrides['accounts'] ?? accounts)
-    if (url.includes('/api/control/close-all')) {
+    if (url.includes('/settings')) return respond(overrides['settings'] ?? settings)
+    if (url.includes('/state')) return respond(overrides['state'] ?? apiState)
+    if (url.includes('/accounts')) return respond(overrides['accounts'] ?? accounts)
+    if (url.includes('/control/close-all')) {
       return respond({ status: 'flattened', paused: true, accounts: [] })
     }
     return respond({})
@@ -56,6 +83,7 @@ function renderLayout() {
 }
 
 test('desk strip shows copying state and master numbers', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('owner'))
   mockRoutes()
   renderLayout()
 
@@ -68,6 +96,7 @@ test('desk strip shows copying state and master numbers', async () => {
 })
 
 test('desk strip shows paused state when copying is disabled', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('owner'))
   mockRoutes({ settings: { copying_enabled: false, dry_run: false, shards: 1 } })
   renderLayout()
 
@@ -77,6 +106,7 @@ test('desk strip shows paused state when copying is disabled', async () => {
 })
 
 test('close-all requires typing CLOSE ALL before the request is sent', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('owner'))
   const fetchMock = mockRoutes()
   renderLayout()
 
@@ -87,7 +117,7 @@ test('close-all requires typing CLOSE ALL before the request is sent', async () 
   const confirmButton = screen.getByRole('button', { name: /^close every position$/i })
   expect(confirmButton).toBeDisabled()
   expect(
-    fetchMock.mock.calls.some(([u]) => String(u).includes('/api/control/close-all'))
+    fetchMock.mock.calls.some(([u]) => String(u).includes('/control/close-all'))
   ).toBe(false)
 
   await userEvent.type(screen.getByRole('textbox'), 'CLOSE ALL')
@@ -96,14 +126,16 @@ test('close-all requires typing CLOSE ALL before the request is sent', async () 
 
   await waitFor(() => {
     const call = fetchMock.mock.calls.find(([u]) =>
-      String(u).includes('/api/control/close-all'))
+      String(u).includes('/control/close-all'))
     expect(call).toBeTruthy()
+    expect(String(call![0])).toBe('/api/orgs/1/control/close-all')
     expect((call![1] as RequestInit).method).toBe('POST')
     expect((call![1] as RequestInit).body).toBe('{}')
   })
 })
 
 test('cancelling the close-all dialog sends nothing', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('owner'))
   const fetchMock = mockRoutes()
   renderLayout()
 
@@ -112,6 +144,57 @@ test('cancelling the close-all dialog sends nothing', async () => {
   await userEvent.click(screen.getByRole('button', { name: /cancel/i }))
 
   expect(
-    fetchMock.mock.calls.some(([u]) => String(u).includes('/api/control/close-all'))
+    fetchMock.mock.calls.some(([u]) => String(u).includes('/control/close-all'))
   ).toBe(false)
+})
+
+test('hides the close-all kill switch below admin', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('trader'))
+  mockRoutes()
+  renderLayout()
+
+  await screen.findByText(/copying live/i)
+  expect(screen.queryByRole('button', { name: /close all positions/i })).not.toBeInTheDocument()
+})
+
+test('shows the kill switch for admin', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
+  mockRoutes()
+  renderLayout()
+
+  expect(await screen.findByRole('button', { name: /close all positions/i })).toBeInTheDocument()
+})
+
+test('hides the Trade nav item for viewers', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('viewer'))
+  mockRoutes()
+  renderLayout()
+
+  await screen.findByText(/copying/i)
+  expect(screen.queryByRole('link', { name: 'Trade' })).not.toBeInTheDocument()
+})
+
+test('org switcher lists my orgs and navigates on change', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('owner', [
+    { id: 1, name: 'Acme', role: 'owner' },
+    { id: 2, name: 'Widgets', role: 'admin' },
+  ]))
+  mockRoutes()
+  renderLayout()
+
+  const select = await screen.findByLabelText('Organization')
+  expect(screen.getByRole('option', { name: 'Acme' })).toBeInTheDocument()
+  expect(screen.getByRole('option', { name: 'Widgets' })).toBeInTheDocument()
+
+  await userEvent.selectOptions(select, '2')
+
+  expect(navigateMock).toHaveBeenCalledWith('/org/2')
+})
+
+test('the Members nav link is always present, regardless of role', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('viewer'))
+  mockRoutes()
+  renderLayout()
+
+  expect(await screen.findByRole('link', { name: 'Members' })).toBeInTheDocument()
 })

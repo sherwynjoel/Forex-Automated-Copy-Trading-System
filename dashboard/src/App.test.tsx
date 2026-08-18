@@ -1,7 +1,5 @@
 import { render, screen, waitFor } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi, afterEach, beforeEach } from 'vitest'
-import Layout from './components/Layout'
 import App from './App'
 
 beforeEach(() => {
@@ -19,14 +17,24 @@ function meResponse(orgs: Array<{ id: number; name: string; role: string }>) {
 }
 
 test('Layout renders sidebar navigation', async () => {
-  render(
-    <MemoryRouter>
-      <Layout />
-    </MemoryRouter>
-  )
+  // Layout now resolves the org from route context (OrgProvider), so this
+  // renders the full App at an org route rather than a bare <Layout/>.
+  const fetchMock = vi.fn((input: RequestInfo | URL) => {
+    const url = String(input)
+    if (url === '/api/me') {
+      return Promise.resolve(meResponse([{ id: 1, name: 'Acme', role: 'owner' }]))
+    }
+    return Promise.resolve(
+      new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } })
+    )
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  window.history.pushState({}, '', '/org/1')
+
+  render(<App />)
 
   // Sidebar should be visible with title
-  expect(screen.getByText(/Copy Desk/i)).toBeInTheDocument()
+  expect(await screen.findByText(/Copy Desk/i)).toBeInTheDocument()
 
   // Navigation links should be present (check for all matches)
   const overviewLinks = screen.getAllByText(/Overview/i)
@@ -37,6 +45,7 @@ test('Layout renders sidebar navigation', async () => {
   expect(screen.getByRole('link', { name: 'Trade' })).toBeInTheDocument()
   expect(screen.getByRole('link', { name: 'History' })).toBeInTheDocument()
   expect(screen.getByRole('link', { name: 'Logs' })).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: 'Members' })).toBeInTheDocument()
 
   // Logout button should be present
   expect(screen.getByRole('button', { name: /log out/i })).toBeInTheDocument()

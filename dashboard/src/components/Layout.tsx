@@ -1,17 +1,20 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom'
-import { api } from '../lib/api'
+import { api, orgApi } from '../lib/api'
+import { useOrg } from '../lib/org'
+import { can, type Role } from '../lib/roles'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
 import type { Account, ApiState, CloseAllResult, Settings } from '../lib/types'
 import ConfirmDialog from './ConfirmDialog'
 
-const navItems = [
-  { path: '/', label: 'Overview' },
-  { path: '/accounts', label: 'Accounts' },
-  { path: '/positions', label: 'Positions' },
-  { path: '/trade', label: 'Trade' },
-  { path: '/history', label: 'History' },
-  { path: '/logs', label: 'Logs' },
+const navItems = (orgId: number, role: Role) => [
+  { path: `/org/${orgId}`, label: 'Overview' },
+  { path: `/org/${orgId}/accounts`, label: 'Accounts' },
+  { path: `/org/${orgId}/positions`, label: 'Positions' },
+  ...(can(role, 'trade') ? [{ path: `/org/${orgId}/trade`, label: 'Trade' }] : []),
+  { path: `/org/${orgId}/history`, label: 'History' },
+  { path: `/org/${orgId}/logs`, label: 'Logs' },
+  { path: `/org/${orgId}/members`, label: 'Members' },
 ]
 
 function money(value: number | null | undefined): string {
@@ -34,6 +37,7 @@ function signedMoney(value: number | null | undefined): string {
  * never the moment you're on the right page.
  */
 function DeskStrip() {
+  const { orgId, role } = useOrg()
   const [settings, setSettings] = useState<Settings | null>(null)
   const [masterState, setMasterState] = useState<{ equity?: number | null; open_pnl?: number } | null>(null)
   const [dialogOpen, setDialogOpen] = useState(false)
@@ -43,9 +47,9 @@ function DeskStrip() {
   const refresh = useCallback(async () => {
     try {
       const [sett, accounts, state] = await Promise.all([
-        api<Settings>('/api/settings'),
-        api<Account[]>('/api/accounts'),
-        api<ApiState>('/api/state'),
+        orgApi<Settings>(orgId, 'settings'),
+        orgApi<Account[]>(orgId, 'accounts'),
+        orgApi<ApiState>(orgId, 'state'),
       ])
       setSettings(sett)
       const master = accounts.find((a) => a.role === 'master')
@@ -54,7 +58,7 @@ function DeskStrip() {
     } catch {
       // The strip is a passenger; pages surface their own errors.
     }
-  }, [])
+  }, [orgId])
 
   useEffect(() => {
     refresh()
@@ -62,12 +66,12 @@ function DeskStrip() {
     return () => clearInterval(interval)
   }, [refresh])
 
-  useLiveRefresh(refresh)
+  useLiveRefresh(refresh, orgId)
 
   const handleCloseAll = async () => {
     try {
       setBusy(true)
-      const result = await api<CloseAllResult>('/api/control/close-all', {
+      const result = await orgApi<CloseAllResult>(orgId, 'control/close-all', {
         method: 'POST',
         body: JSON.stringify({}),
       })
@@ -125,12 +129,14 @@ function DeskStrip() {
               {signedMoney(masterState?.open_pnl)}
             </span>
           </div>
-          <button
-            onClick={() => setDialogOpen(true)}
-            className="px-3 py-1.5 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-white transition-colors"
-          >
-            Close all positions
-          </button>
+          {can(role, 'control') && (
+            <button
+              onClick={() => setDialogOpen(true)}
+              className="px-3 py-1.5 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-white transition-colors"
+            >
+              Close all positions
+            </button>
+          )}
         </div>
       </div>
 
@@ -146,22 +152,24 @@ function DeskStrip() {
         </div>
       )}
 
-      <ConfirmDialog
-        open={dialogOpen}
-        title="Close every position, everywhere"
-        confirmLabel="Close every position"
-        danger
-        typeToConfirm="CLOSE ALL"
-        busy={busy}
-        onConfirm={handleCloseAll}
-        onCancel={() => setDialogOpen(false)}
-      >
-        <p>
-          This closes every open position and cancels every working order in
-          every enabled account — master and slaves — at market, and pauses
-          copying. It cannot be undone.
-        </p>
-      </ConfirmDialog>
+      {can(role, 'control') && (
+        <ConfirmDialog
+          open={dialogOpen}
+          title="Close every position, everywhere"
+          confirmLabel="Close every position"
+          danger
+          typeToConfirm="CLOSE ALL"
+          busy={busy}
+          onConfirm={handleCloseAll}
+          onCancel={() => setDialogOpen(false)}
+        >
+          <p>
+            This closes every open position and cancels every working order in
+            every enabled account in this organization at market, and pauses
+            copying. It cannot be undone.
+          </p>
+        </ConfirmDialog>
+      )}
     </>
   )
 }
@@ -169,6 +177,7 @@ function DeskStrip() {
 export default function Layout() {
   const location = useLocation()
   const navigate = useNavigate()
+  const { orgId, role, me } = useOrg()
 
   const handleLogout = async () => {
     try {
@@ -180,17 +189,29 @@ export default function Layout() {
     }
   }
 
+  const items = navItems(orgId, role)
+
   return (
     <div className="flex h-screen bg-paper">
       {/* Sidebar */}
       <div className="w-56 border-r border-line bg-card flex flex-col">
         <div className="px-6 pt-6 pb-5 border-b border-line">
           <h1 className="font-display text-xl text-brand">Copy Desk</h1>
+          <select
+            aria-label="Organization"
+            value={orgId}
+            onChange={(e) => navigate(`/org/${e.target.value}`)}
+            className="mt-2 w-full text-sm border border-line-strong rounded bg-card text-ink px-2 py-1"
+          >
+            {me.orgs.map((o) => (
+              <option key={o.id} value={o.id}>{o.name}</option>
+            ))}
+          </select>
           <p className="desk-label mt-1">FP Markets · cTrader</p>
         </div>
 
         <nav className="mt-4 flex-1">
-          {navItems.map((item) => {
+          {items.map((item) => {
             const active = location.pathname === item.path
             return (
               <Link

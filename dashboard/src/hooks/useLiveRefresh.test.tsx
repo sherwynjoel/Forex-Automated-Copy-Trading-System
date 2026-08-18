@@ -26,8 +26,8 @@ class MockWebSocket {
   }
 }
 
-function Probe({ onRefetch }: { onRefetch: () => void }) {
-  useLiveRefresh(onRefetch)
+function Probe({ onRefetch, orgId = 1 }: { onRefetch: () => void; orgId?: number }) {
+  useLiveRefresh(onRefetch, orgId)
   return null
 }
 

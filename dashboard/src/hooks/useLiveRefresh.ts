@@ -14,7 +14,7 @@ const REFRESH_CATEGORIES = new Set(['master_event', 'slave_action', 'drift', 'co
  * refreshed its position list. Bursts of events collapse into one such
  * pair. The regular polling stays as the fallback when the socket is down.
  */
-export function useLiveRefresh(refetch: () => void) {
+export function useLiveRefresh(refetch: () => void, orgId: number) {
   const refetchRef = useRef(refetch)
   refetchRef.current = refetch
 
@@ -37,7 +37,7 @@ export function useLiveRefresh(refetch: () => void) {
 
     const connect = () => {
       try {
-        ws = eventsSocket()
+        ws = eventsSocket(orgId)
       } catch {
         // No WebSocket support (or construction failed): the 5s poll
         // still keeps the page current, just without instant refresh.
@@ -72,5 +72,5 @@ export function useLiveRefresh(refetch: () => void) {
       burstTimers.forEach(clearTimeout)
       ws?.close()
     }
-  }, [])
+  }, [orgId])
 }

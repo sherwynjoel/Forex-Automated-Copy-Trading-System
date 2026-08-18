@@ -82,7 +82,11 @@ export default function Trade() {
     loadAccountData()
   }, [loadAccountData])
 
-  useLiveRefresh(loadAccountData)
+  // Task 17: this page still calls the unscoped /api/* endpoints above and
+  // isn't rendered under org route context in its tests, so useOrg() isn't
+  // trivially available here — orgId is a placeholder until the page is
+  // converted to orgApi/org-scoped routing.
+  useLiveRefresh(loadAccountData, 0)
 
   const selected = accounts.find((a) => a.ctid_trader_account_id === accountId)
   const selectedSymbol = symbols.find((s) => s.name === ticket.symbol)
