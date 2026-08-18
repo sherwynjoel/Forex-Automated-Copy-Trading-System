@@ -18,7 +18,18 @@ from fastapi import APIRouter, Depends, Query, Request
 from ..config import ApiConfig
 from ..db import get_conn
 from ..rbac import OrgContext, require_org_role, require_account_in_org
-from .settings_control import _proxy_to_copier
+from .settings_control import COPIER_SLOW_COMMAND_TIMEOUT_S, _proxy_to_copier
+
+# Hard ceiling on /analytics' broker fan-out. Each week is one sequential
+# ProtoOADealListReq on the CTraderClient that EVERY org's orders share, and
+# the SDK paces that wire at 5 messages/second -- so the request's weeks are
+# seconds of wire occupancy for the whole deployment, chosen from a one-click
+# dropdown by anyone with `viewer`. 12 weeks (~2.4s) is the most a read this
+# cheap to trigger may cost everyone else. Out-of-range values are CLAMPED,
+# not rejected, exactly as `limit` is on /events -- a range control is not a
+# validation error.
+MIN_ANALYTICS_WEEKS = 1
+MAX_ANALYTICS_WEEKS = 12
 
 
 def create_insights_router() -> APIRouter:
@@ -100,14 +111,29 @@ def create_insights_router() -> APIRouter:
         conn: psycopg.Connection = Depends(get_conn),
         cfg: ApiConfig = Depends(ApiConfig.from_env),
     ) -> dict:
-        """Performance aggregation over the last `weeks` of deal history."""
+        """Performance aggregation over the last `weeks` of deal history.
+
+        `weeks` is clamped to [MIN_ANALYTICS_WEEKS, MAX_ANALYTICS_WEEKS]
+        rather than validated: see the constants for why the ceiling exists.
+        The copier clamps again on its own side (it is reachable without the
+        api), so this is a budget, not the only guard.
+
+        Unlike the other three proxies this one is bounded by BROKER round
+        trips, not local work -- up to MAX_ANALYTICS_WEEKS sequential deal
+        requests paced at 5 msg/s -- so it gets the same raised per-request
+        timeout as /resync and /close-all. On the shared client's 5s default
+        a legitimate multi-week request would 502 while the copier kept
+        spending broker budget on a result nobody would receive.
+        """
         require_account_in_org(conn, ctx.org_id, account_id)
+        weeks = max(MIN_ANALYTICS_WEEKS, min(weeks, MAX_ANALYTICS_WEEKS))
         client = http_request.app.state.http
         return await _proxy_to_copier(
             client,
             f"{cfg.copier_control_url}/analytics"
             f"?account_id={account_id}&weeks={weeks}",
             method="GET",
+            timeout=COPIER_SLOW_COMMAND_TIMEOUT_S,
         )
 
     @router.get("/overview", response_model=dict)

@@ -121,6 +121,22 @@ test('changing the range refetches with new weeks', async () => {
   })
 })
 
+test('the range control stops at the API ceiling of 12 weeks', async () => {
+  // Each week is one sequential broker request on the wire every org
+  // shares, so the dropdown must not offer a range the API would clamp
+  // anyway (routes/insights.py:MAX_ANALYTICS_WEEKS).
+  mockRoutes()
+  renderPage()
+
+  await screen.findByText('+116.70')
+  const options = Array.from(
+    (screen.getByLabelText(/range/i) as HTMLSelectElement).options,
+  ).map((o) => Number(o.value))
+
+  expect(options).toEqual([4, 8, 12])
+  expect(Math.max(...options)).toBeLessThanOrEqual(12)
+})
+
 test('changing the account refetches its analytics', async () => {
   const fetchMock = mockRoutes()
   renderPage()

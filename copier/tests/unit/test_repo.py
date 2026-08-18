@@ -725,6 +725,45 @@ def test_portfolio_snapshot_upsert_keeps_an_existing_org_stamp(db, org_id):
     assert row[1] == org_id
 
 
+def test_org_for_account_resolves_the_owning_org(db, org_id):
+    """The single-row tenancy lookup behind push-event handling: accounts
+    100/101 are seeded into org_id by the autouse fixture."""
+    repo = Repo(db)
+    assert repo.org_for_account(100) == org_id
+    assert repo.org_for_account(101) == org_id
+
+
+def test_org_for_account_is_none_for_an_unknown_account(db):
+    """An account the DB has never seen resolves to None rather than
+    raising -- the callers (pushed balance / margin call) must be able to
+    log and drop, not crash the client's callback."""
+    repo = Repo(db)
+    assert repo.org_for_account(999_999) is None
+
+
+def test_org_for_account_does_not_cross_orgs(db, org_id):
+    """A second org's account resolves to ITS org, never to the first --
+    this lookup is what keeps one tenant's pushed balance out of another
+    tenant's state tracker."""
+    with psycopg.connect(db, autocommit=True) as conn:
+        (other_org,) = conn.execute(
+            "INSERT INTO orgs (name) VALUES ('Other') RETURNING id").fetchone()
+        (other_conn,) = conn.execute(
+            """INSERT INTO ctid_connections (org_id, access_token_enc,
+                   refresh_token_enc, granted_at, expires_at)
+               VALUES (%s, 'x', 'y', now(), now() + interval '30 days')
+               RETURNING id""", (other_org,)).fetchone()
+        conn.execute(
+            """INSERT INTO accounts (ctid_trader_account_id, ctid_connection_id,
+                   org_id, trader_login, is_live, role, enabled, multiplier)
+               VALUES (200, %s, %s, 20000, false, 'slave', true, 1.0)""",
+            (other_conn, other_org))
+
+    repo = Repo(db)
+    assert repo.org_for_account(200) == other_org
+    assert repo.org_for_account(100) == org_id
+
+
 def test_log_event_accepts_risk_category(db):
     repo = Repo(db)
     event_id = repo.log_event("risk", "error", {"action": "margin_call"}, account_id=100)

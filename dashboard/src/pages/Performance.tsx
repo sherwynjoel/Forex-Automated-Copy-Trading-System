@@ -122,10 +122,13 @@ export default function Performance() {
             onChange={(e) => setWeeks(Number(e.target.value))}
             className="rounded border border-line-strong px-3 py-2 text-sm bg-card"
           >
+            {/* 12 weeks is the API's ceiling (routes/insights.py:
+                MAX_ANALYTICS_WEEKS): each week is one sequential broker
+                request on the wire every org shares, so the range control
+                stops where the budget does. */}
             <option value={4}>4 weeks</option>
             <option value={8}>8 weeks</option>
             <option value={12}>12 weeks</option>
-            <option value={26}>26 weeks</option>
           </select>
         </div>
         {a?.truncated && (

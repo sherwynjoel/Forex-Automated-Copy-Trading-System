@@ -208,6 +208,27 @@ class Repo:
             for row in rows
         ]
 
+    def org_for_account(self, account_id: int) -> int | None:
+        """The org owning one broker account, or None if it is unknown.
+
+        The narrow read behind push-event tenancy (CopierApp._on_trader_updated
+        and _on_margin_call): those events arrive keyed only by
+        ctidTraderAccountId, and every one of them needs the org before it can
+        write anything. Resolving that through build_routing() would load the
+        WHOLE accounts table and then a symbol cache per slave -- an N+1 of
+        connections and queries on a path that fires on every balance change.
+
+        Deliberately uncached: a stale mapping would route one tenant's money
+        into another's tracker, which is exactly what the lookup exists to
+        prevent. One connection, one indexed lookup on the primary key.
+        """
+        with psycopg.connect(self.dsn, autocommit=True) as conn:
+            row = conn.execute(
+                "SELECT org_id FROM accounts WHERE ctid_trader_account_id = %s",
+                (account_id,),
+            ).fetchone()
+        return row[0] if row else None
+
     def set_account_status(self, account_id: int, status: str, last_error: str | None = None) -> None:
         """Set account status and optional error message."""
         with psycopg.connect(self.dsn, autocommit=True) as conn:

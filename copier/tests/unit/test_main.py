@@ -530,10 +530,17 @@ def test_startup_with_zero_accounts_does_not_crash(db, fernet_key):
     assert app.state_trackers == {}
 
 
-def test_build_app_wires_execution_and_invalidated_to_every_client_all_shards(db, fernet_key):
-    """Finding #6: on_execution/on_tokens_invalidated must be wired to EVERY
-    client (all shards, both environments) -- slave shards must deliver
-    execution events too, not just the master's client."""
+def test_build_app_wires_every_push_consumer_to_every_client_all_shards(db, fernet_key):
+    """Finding #6, extended to the pushed-event consumers: EVERY consumer
+    must be wired to EVERY client (all shards, both environments).
+
+    Slave shards must deliver execution events too, not just the master's
+    client -- and the same is true of the two push consumers added with the
+    analytics batch. A client missing on_trader_updated shows stale balances
+    for whatever accounts it carries; one missing on_margin_call silently
+    never raises the dashboard's margin-call banner for them. Both failures
+    are invisible until the moment they matter, which is why this asserts
+    per client rather than "at least one was wired"."""
     fernet = Fernet(fernet_key.encode())
     with psycopg.connect(db, autocommit=True) as conn:
         org_id = _insert_org(conn, "Org A")
@@ -563,6 +570,65 @@ def test_build_app_wires_execution_and_invalidated_to_every_client_all_shards(db
     for client in built:
         assert client.on_execution.call_count == 1
         assert client.on_tokens_invalidated.call_count == 1
+        assert client.on_trader_updated.call_count == 1
+        assert client.on_margin_call.call_count == 1
+
+
+@pytest_twisted.inlineCallbacks
+def test_reload_wires_every_push_consumer_to_a_new_environment_client(db, fernet_key):
+    """The second client-creation path: reload() builds a client when an org
+    acquires an account in an environment nothing was connected to yet.
+
+    It must go through wire_client() like build_app does -- a client built
+    here that missed on_trader_updated/on_margin_call would serve stale
+    balances and swallow margin calls for every account on that environment,
+    with nothing at boot to reveal it."""
+    fernet = Fernet(fernet_key.encode())
+    with psycopg.connect(db, autocommit=True) as conn:
+        org_id = _insert_org(conn, "Org A")
+        connection_id = _insert_connection(conn, org_id, fernet, TOKEN_A)
+        # Demo only at boot, so the live environment has no client yet.
+        conn.execute(
+            "INSERT INTO accounts (ctid_trader_account_id, org_id, ctid_connection_id,"
+            " trader_login, is_live, role, enabled, multiplier)"
+            " VALUES (10, %(org)s, %(conn)s, 1, false, 'master', true, 1.0)",
+            {"org": org_id, "conn": connection_id},
+        )
+
+    from unittest.mock import MagicMock
+    built = []
+
+    def factory(is_live):
+        client = MagicMock()
+        client.ready = defer.succeed(client)
+        client.authorize_account.return_value = defer.succeed(None)
+        client.send.return_value = defer.succeed(None)
+        built.append((is_live, client))
+        return client
+
+    repo = Repo(db)
+    token_store = TokenStore(db, fernet_key)
+    app = main.build_app(repo, token_store, factory, shards=1)
+    assert [is_live for is_live, _ in built] == [False]  # demo only so far
+
+    # A LIVE account appears; reload() must build and fully wire its client.
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO accounts (ctid_trader_account_id, org_id, ctid_connection_id,"
+            " trader_login, is_live, role, enabled, multiplier)"
+            " VALUES (11, %(org)s, %(conn)s, 2, true, 'slave', true, 1.0)",
+            {"org": org_id, "conn": connection_id},
+        )
+
+    yield app.reload()
+
+    live_clients = [c for is_live, c in built if is_live]
+    assert live_clients, "reload() did not build a client for the live environment"
+    for client in live_clients:
+        assert client.on_execution.call_count == 1
+        assert client.on_tokens_invalidated.call_count == 1
+        assert client.on_trader_updated.call_count == 1
+        assert client.on_margin_call.call_count == 1
 
 
 def test_build_app_wires_the_position_change_hook(db, fernet_key):

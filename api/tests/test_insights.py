@@ -10,6 +10,7 @@ import httpx
 import psycopg
 import pytest
 
+from api.routes.settings_control import COPIER_SLOW_COMMAND_TIMEOUT_S
 from conftest import default_mock_callback
 
 
@@ -140,11 +141,64 @@ def test_analytics_proxies_with_weeks(seeded):
     assert "weeks=8" in url
 
 
+@pytest.mark.parametrize("requested,forwarded", [
+    (26, 12),    # the old dashboard ceiling: clamped, not rejected
+    (100, 12),
+    (0, 1),
+    (-5, 1),
+    (12, 12),    # the boundary itself is allowed through untouched
+    (1, 1),
+])
+def test_analytics_weeks_is_clamped_not_rejected(seeded, requested, forwarded):
+    """`weeks` is a range control, not a validation surface: out-of-range
+    values are clamped the way /events clamps `limit`.
+
+    The ceiling is a shared-resource budget -- each week is one sequential
+    broker request on the CTraderClient EVERY org's orders go through -- and
+    it is reachable by anyone with `viewer` from a dropdown, so it cannot be
+    left to the caller.
+    """
+    client, org_id = seeded
+    calls = _record_copier(client)
+
+    response = client.get(
+        f"/api/orgs/{org_id}/accounts/12345/analytics?weeks={requested}")
+
+    assert response.status_code == 200
+    url = next(u for u in calls if "/analytics" in u)
+    assert f"weeks={forwarded}" in url
+
+
+def test_analytics_gets_the_slow_command_timeout(seeded):
+    """The analytics proxy is bounded by broker round trips, not local work,
+    so it must not inherit the shared client's fail-fast 5s default -- that
+    would 502 a legitimate multi-week read while the copier kept spending
+    broker budget on a result nobody would receive."""
+    seen = {}
+
+    def callback(request):
+        url = str(request.url)
+        if "/analytics" in url:
+            seen["timeout"] = request.extensions.get("timeout")
+            return httpx.Response(200, json={"closed_trades": 0})
+        return default_mock_callback(request)
+
+    client, org_id = seeded
+    client.app.state.mock_transport.set_callback(callback)
+
+    response = client.get(f"/api/orgs/{org_id}/accounts/12345/analytics")
+
+    assert response.status_code == 200
+    # httpx records the per-request override in the transport extensions.
+    assert seen["timeout"]["read"] == COPIER_SLOW_COMMAND_TIMEOUT_S
+
+
 @pytest.mark.parametrize("tail", [
     "margin-estimate?symbol=EURUSD&volume_lots=0.1",
     "trendbars?symbol=EURUSD&period=H1&from=0&to=1",
     "positions/7001/deals?from=0&to=1",
     "analytics",
+    "history/cashflow?from=0&to=1",
 ])
 def test_proxies_refuse_another_orgs_account(seeded, other_org, tail):
     """A foreign account id is a 404 through THIS org's paths -- and the

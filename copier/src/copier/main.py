@@ -168,9 +168,15 @@ class CopierApp:
         Push events arrive keyed only by ctidTraderAccountId, so every
         consumer of one has to resolve tenancy itself before writing
         anything org-scoped.
+
+        Goes through the repo's single-row lookup rather than
+        routing_provider(): the latter rebuilds the whole OrgRouting, which
+        loads every account AND a symbol cache per slave -- an N+1 of
+        connections on a path that fires on every pushed balance change.
+        Freshness is unchanged; both read the DB on every call.
         """
         try:
-            return self.routing_provider().org_by_account.get(account_id)
+            return self.repo.org_for_account(account_id)
         except Exception:
             log.exception("failed to resolve org for account %s", account_id)
             return None
@@ -197,8 +203,17 @@ class CopierApp:
         one's snapshot feeds that org's /state, so applying a balance to the
         wrong tracker would show one tenant's money on another's Overview.
         """
-        org_id = self._org_for_account(evt.ctidTraderAccountId)
+        account_id = evt.ctidTraderAccountId
+        org_id = self._org_for_account(account_id)
         if org_id is None:
+            # Not silent: a balance push for an account we cannot place is
+            # a real anomaly (an account deleted mid-flight, or a client
+            # still authed for a grant that is gone), and dropping it means
+            # that account's Overview balance quietly goes stale until the
+            # 60s poll -- which would also skip it.
+            log.warning(
+                "trader update for account %s: no owning org, balance dropped",
+                account_id)
             return
         tracker = self.state_trackers.get(org_id)
         if tracker is not None:
@@ -214,6 +229,14 @@ class CopierApp:
         """
         mc = evt.marginCall
         account_id = evt.ctidTraderAccountId
+        org_id = self._org_for_account(account_id)
+        if org_id is None:
+            # Still logged (a margin call is never dropped), but loudly:
+            # routes/events.py filters NULL-org rows out, so this one will
+            # not reach any dashboard banner.
+            log.warning(
+                "margin call for account %s: no owning org, the event will "
+                "not be visible on any dashboard", account_id)
         try:
             self.repo.log_event(
                 'risk', 'error',
@@ -221,7 +244,7 @@ class CopierApp:
                  'margin_call_type': ProtoOANotificationType.Name(mc.marginCallType),
                  'margin_level_threshold': mc.marginLevelThreshold},
                 account_id=account_id,
-                org_id=self._org_for_account(account_id),
+                org_id=org_id,
             )
         except Exception:
             log.exception("failed to log margin call event")
