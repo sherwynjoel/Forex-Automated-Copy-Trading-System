@@ -17,16 +17,24 @@ class MappingNotFound(KeyError):
 
 @dataclass(frozen=True)
 class Settings:
-    """Global settings row."""
+    """Global settings row (process config only -- per-org state lives on OrgRow)."""
+    shards: int
+
+
+@dataclass(frozen=True)
+class OrgRow:
+    """One org's engine-relevant state (per-org kill switch and dry-run)."""
+    org_id: int
+    name: str
     copying_enabled: bool
     dry_run: bool
-    shards: int
 
 
 @dataclass(frozen=True)
 class AccountRow:
     """Account row representation."""
     account_id: int
+    org_id: int
     connection_id: int
     trader_login: int
     is_live: bool
@@ -56,6 +64,7 @@ class Repo:
         payload: dict,
         account_id: int | None = None,
         latency_ms: int | None = None,
+        org_id: int | None = None,
     ) -> int:
         """Log an event and return its ID.
 
@@ -65,6 +74,8 @@ class Repo:
             payload: JSON payload dict
             account_id: Optional account ID
             latency_ms: Optional latency in milliseconds
+            org_id: Optional org ID (events.org_id is nullable -- the audit log
+                must survive org deletion, so some events are org-less)
 
         Returns:
             The new event ID
@@ -72,37 +83,35 @@ class Repo:
         with psycopg.connect(self.dsn, autocommit=True) as conn:
             (event_id,) = conn.execute(
                 """
-                INSERT INTO events (account_id, category, severity, latency_ms, payload)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO events (account_id, org_id, category, severity, latency_ms, payload)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
-                (account_id, category, severity, latency_ms, Jsonb(payload)),
+                (account_id, org_id, category, severity, latency_ms, Jsonb(payload)),
             ).fetchone()
         return event_id
 
     # ---------- settings ----------
 
     def get_settings(self) -> Settings:
-        """Get current global settings."""
+        """Get current global (process-config-only) settings."""
         with psycopg.connect(self.dsn, autocommit=True) as conn:
             row = conn.execute(
-                "SELECT copying_enabled, dry_run, shards FROM settings WHERE id = true"
+                "SELECT shards FROM settings WHERE id = true"
             ).fetchone()
         if not row:
             raise RuntimeError("Settings row not found")
-        return Settings(copying_enabled=row[0], dry_run=row[1], shards=row[2])
+        return Settings(shards=row[0])
 
     def set_setting(self, name: str, value: Any) -> None:
-        """Set a single setting value.
+        """Set a single global setting value.
 
         Args:
-            name: Setting name (copying_enabled, dry_run, shards)
+            name: Setting name (shards)
             value: New value
         """
         # Map setting names to SQL column names
         columns = {
-            "copying_enabled": "copying_enabled",
-            "dry_run": "dry_run",
             "shards": "shards",
         }
         if name not in columns:
@@ -115,6 +124,61 @@ class Repo:
                 (value,),
             )
 
+    # ---------- orgs ----------
+
+    def load_orgs(self) -> list[OrgRow]:
+        """Load all orgs."""
+        with psycopg.connect(self.dsn, autocommit=True) as conn:
+            rows = conn.execute(
+                "SELECT id, name, copying_enabled, dry_run FROM orgs"
+            ).fetchall()
+        return [OrgRow(org_id=r[0], name=r[1], copying_enabled=r[2], dry_run=r[3])
+                for r in rows]
+
+    def get_org(self, org_id: int) -> OrgRow:
+        """Get a single org by id.
+
+        Raises RuntimeError if the org does not exist.
+        """
+        with psycopg.connect(self.dsn, autocommit=True) as conn:
+            row = conn.execute(
+                "SELECT id, name, copying_enabled, dry_run FROM orgs WHERE id = %s",
+                (org_id,),
+            ).fetchone()
+        if not row:
+            raise RuntimeError(f"org {org_id} not found")
+        return OrgRow(org_id=row[0], name=row[1], copying_enabled=row[2], dry_run=row[3])
+
+    def set_org_setting(self, org_id: int, name: str, value: Any) -> None:
+        """Set a single per-org setting value.
+
+        Args:
+            org_id: The org to update
+            name: Setting name (copying_enabled, dry_run)
+            value: New value
+        """
+        columns = {"copying_enabled": "copying_enabled", "dry_run": "dry_run"}
+        if name not in columns:
+            raise ValueError(f"Unknown org setting: {name}")
+        with psycopg.connect(self.dsn, autocommit=True) as conn:
+            conn.execute(
+                f"UPDATE orgs SET {columns[name]} = %s WHERE id = %s",
+                (value, org_id),
+            )
+
+    def connection_org(self, connection_id: int) -> int:
+        """Get the org_id that owns a ctid_connection.
+
+        Raises RuntimeError if the connection does not exist.
+        """
+        with psycopg.connect(self.dsn, autocommit=True) as conn:
+            row = conn.execute(
+                "SELECT org_id FROM ctid_connections WHERE id = %s", (connection_id,)
+            ).fetchone()
+        if not row:
+            raise RuntimeError(f"connection {connection_id} not found")
+        return row[0]
+
     # ---------- accounts ----------
 
     def load_accounts(self) -> list[AccountRow]:
@@ -122,7 +186,7 @@ class Repo:
         with psycopg.connect(self.dsn, autocommit=True) as conn:
             rows = conn.execute(
                 """
-                SELECT ctid_trader_account_id, ctid_connection_id, trader_login, is_live,
+                SELECT ctid_trader_account_id, org_id, ctid_connection_id, trader_login, is_live,
                        role, enabled, multiplier, status, last_error
                 FROM accounts
                 """
@@ -131,14 +195,15 @@ class Repo:
         return [
             AccountRow(
                 account_id=row[0],
-                connection_id=row[1],
-                trader_login=row[2],
-                is_live=row[3],
-                role=row[4],
-                enabled=row[5],
-                multiplier=row[6],  # Already a Decimal from psycopg
-                status=row[7],
-                last_error=row[8],
+                org_id=row[1],
+                connection_id=row[2],
+                trader_login=row[3],
+                is_live=row[4],
+                role=row[5],
+                enabled=row[6],
+                multiplier=row[7],  # Already a Decimal from psycopg
+                status=row[8],
+                last_error=row[9],
             )
             for row in rows
         ]
@@ -185,22 +250,36 @@ class Repo:
         self,
         account_id: int,
         connection_id: int,
+        org_id: int,
         trader_login: int,
         is_live: bool,
-    ) -> None:
-        """Upsert an account."""
+    ) -> bool:
+        """Upsert an account, guarding cross-org ownership atomically.
+
+        A broker account discovered by one org must never be silently
+        rewritten by another org's discovery sweep -- the WHERE clause on the
+        ON CONFLICT DO UPDATE makes the update a no-op (rowcount 0) whenever
+        the existing row belongs to a different org, instead of racing a
+        SELECT-then-UPDATE.
+
+        Returns True if the row was inserted or updated (this org owns it),
+        False if another org already owns this account_id.
+        """
         with psycopg.connect(self.dsn, autocommit=True) as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
-                INSERT INTO accounts (ctid_trader_account_id, ctid_connection_id, trader_login, is_live)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO accounts (ctid_trader_account_id, ctid_connection_id,
+                                      org_id, trader_login, is_live)
+                VALUES (%s, %s, %s, %s, %s)
                 ON CONFLICT (ctid_trader_account_id) DO UPDATE SET
                     ctid_connection_id = EXCLUDED.ctid_connection_id,
                     trader_login = EXCLUDED.trader_login,
                     is_live = EXCLUDED.is_live
+                WHERE accounts.org_id = EXCLUDED.org_id
                 """,
-                (account_id, connection_id, trader_login, is_live),
+                (account_id, connection_id, org_id, trader_login, is_live),
             )
+            return cursor.rowcount > 0
 
     # ---------- symbol cache ----------
 
@@ -257,6 +336,7 @@ class Repo:
         master_position_id: int,
         slave_account_id: int,
         client_order_id: str,
+        org_id: int,
     ) -> None:
         """Create a pending position mapping, or leave the existing one alone.
 
@@ -291,11 +371,11 @@ class Repo:
         with psycopg.connect(self.dsn, autocommit=True) as conn:
             conn.execute(
                 """
-                INSERT INTO mappings (master_position_id, slave_account_id, client_order_id, status)
-                VALUES (%s, %s, %s, 'pending')
+                INSERT INTO mappings (master_position_id, slave_account_id, client_order_id, org_id, status)
+                VALUES (%s, %s, %s, %s, 'pending')
                 ON CONFLICT (client_order_id) DO NOTHING
                 """,
-                (master_position_id, slave_account_id, client_order_id),
+                (master_position_id, slave_account_id, client_order_id, org_id),
             )
 
     def activate_position_mapping(
@@ -402,15 +482,16 @@ class Repo:
         master_order_id: int,
         slave_account_id: int,
         client_order_id: str,
+        org_id: int,
     ) -> None:
         """Create a pending order mapping."""
         with psycopg.connect(self.dsn, autocommit=True) as conn:
             conn.execute(
                 """
-                INSERT INTO mappings (master_order_id, slave_account_id, client_order_id, status)
-                VALUES (%s, %s, %s, 'pending')
+                INSERT INTO mappings (master_order_id, slave_account_id, client_order_id, org_id, status)
+                VALUES (%s, %s, %s, %s, 'pending')
                 """,
-                (master_order_id, slave_account_id, client_order_id),
+                (master_order_id, slave_account_id, client_order_id, org_id),
             )
 
     def activate_order_mapping(self, client_order_id: str, slave_order_id: int) -> None:
@@ -512,30 +593,36 @@ class Repo:
         slave_account_id: int,
         slave_position_id: int,
         slave_volume: int,
+        org_id: int,
     ) -> None:
         """Adopt an existing position (drift remedy)."""
         with psycopg.connect(self.dsn, autocommit=True) as conn:
             conn.execute(
                 """
-                INSERT INTO mappings (master_position_id, slave_account_id, slave_position_id, slave_volume, status)
-                VALUES (%s, %s, %s, %s, 'active')
+                INSERT INTO mappings (master_position_id, slave_account_id, slave_position_id,
+                                      slave_volume, org_id, status)
+                VALUES (%s, %s, %s, %s, %s, 'active')
                 """,
-                (master_position_id, slave_account_id, slave_position_id, slave_volume),
+                (master_position_id, slave_account_id, slave_position_id, slave_volume, org_id),
             )
 
-    def mapping_rows(self) -> list[dict]:
-        """Get all mapping rows as dictionaries."""
+    def mapping_rows(self, org_id: int | None = None) -> list[dict]:
+        """Get mapping rows as dictionaries, optionally filtered to one org."""
+        query = """
+            SELECT id, master_position_id, master_order_id, slave_account_id,
+                   slave_position_id, slave_order_id, slave_volume, client_order_id,
+                   org_id, status, error, fill_price, created_at, updated_at
+            FROM mappings
+            """
+        params: tuple = ()
+        if org_id is not None:
+            query += " WHERE org_id = %s"
+            params = (org_id,)
+
         with psycopg.connect(self.dsn, autocommit=True) as conn:
             # Use column names
             conn.row_factory = psycopg.rows.dict_row
-            rows = conn.execute(
-                """
-                SELECT id, master_position_id, master_order_id, slave_account_id,
-                       slave_position_id, slave_order_id, slave_volume, client_order_id,
-                       status, error, fill_price, created_at, updated_at
-                FROM mappings
-                """
-            ).fetchall()
+            rows = conn.execute(query, params).fetchall()
 
         return rows
 

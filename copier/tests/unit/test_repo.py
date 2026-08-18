@@ -17,28 +17,37 @@ def repo(db):
     return Repo(db)
 
 
+@pytest.fixture
+def org_id(db):
+    """Create an org and return its id, so mapping/account calls can thread it through."""
+    with psycopg.connect(db, autocommit=True) as conn:
+        row = conn.execute("INSERT INTO orgs (name) VALUES ('Test Org') RETURNING id").fetchone()
+    return row[0]
+
+
 @pytest.fixture(autouse=True)
-def seed_connections_and_accounts(db):
+def seed_connections_and_accounts(db, org_id):
     """Seed one connection and accounts 100/101 for testing."""
     with psycopg.connect(db, autocommit=True) as conn:
         # Create a ctid_connection
         conn.execute(
             """
-            INSERT INTO ctid_connections (access_token_enc, refresh_token_enc, granted_at, expires_at)
-            VALUES (%s, %s, now(), now() + interval '1 hour')
+            INSERT INTO ctid_connections (org_id, access_token_enc, refresh_token_enc, granted_at, expires_at)
+            VALUES (%s, %s, %s, now(), now() + interval '1 hour')
             RETURNING id
             """,
-            ("token_access", "token_refresh"),
+            (org_id, "token_access", "token_refresh"),
         )
 
         # Create accounts 100 (slave) and 101 (slave)
         conn.execute(
             """
-            INSERT INTO accounts (ctid_trader_account_id, ctid_connection_id, trader_login, is_live, role, enabled, multiplier)
+            INSERT INTO accounts (ctid_trader_account_id, ctid_connection_id, org_id, trader_login, is_live, role, enabled, multiplier)
             VALUES
-                (100, 1, 10000, false, 'slave', true, 1.5),
-                (101, 1, 10001, false, 'slave', true, 2.0)
-            """
+                (100, 1, %(org_id)s, 10000, false, 'slave', true, 1.5),
+                (101, 1, %(org_id)s, 10001, false, 'slave', true, 2.0)
+            """,
+            {"org_id": org_id},
         )
     yield
 
@@ -69,30 +78,26 @@ def test_log_event_writes_row_and_notifies(db):
 
 
 def test_settings_roundtrip(db):
-    """Test that settings can be read and updated."""
+    """Test that settings (process config only -- shards) can be read and updated."""
     repo = Repo(db)
 
     # Get initial settings
     settings1 = repo.get_settings()
-    assert settings1.copying_enabled is True
-    assert settings1.dry_run is False
     assert settings1.shards == 1
 
-    # Update dry_run
-    repo.set_setting("dry_run", True)
+    # Update shards
+    repo.set_setting("shards", 4)
 
     settings2 = repo.get_settings()
-    assert settings2.copying_enabled is True
-    assert settings2.dry_run is True
-    assert settings2.shards == 1
+    assert settings2.shards == 4
 
 
-def test_position_mapping_lifecycle(db):
+def test_position_mapping_lifecycle(db, org_id):
     """Test position mapping from creation through activation to close."""
     repo = Repo(db)
 
     # Step 1: Create pending mapping for master position 11
-    repo.create_position_mapping(11, 101, "cm11.101")
+    repo.create_position_mapping(11, 101, "cm11.101", org_id=org_id)
 
     # Position entries should be empty (still pending)
     entries = repo.position_entries(11)
@@ -119,11 +124,11 @@ def test_position_mapping_lifecycle(db):
     assert entries == []
 
 
-def test_fail_mapping_records_error(db):
+def test_fail_mapping_records_error(db, org_id):
     """Test that fail_mapping records an error."""
     repo = Repo(db)
 
-    repo.create_position_mapping(20, 100, "cm20.100")
+    repo.create_position_mapping(20, 100, "cm20.100", org_id=org_id)
     repo.fail_mapping("cm20.100", "Connection lost")
 
     # Check the mapping status
@@ -137,12 +142,12 @@ def test_fail_mapping_records_error(db):
     assert row[1] == "Connection lost"
 
 
-def test_order_mapping_and_pending_fill_link(db):
+def test_order_mapping_and_pending_fill_link(db, org_id):
     """Test order mapping lifecycle and pending fill linking."""
     repo = Repo(db)
 
     # Step 1: Create order mapping for master order 42
-    repo.create_order_mapping(42, 101, "co42.101")
+    repo.create_order_mapping(42, 101, "co42.101", org_id=org_id)
 
     # Step 2: Activate the order mapping
     repo.activate_order_mapping("co42.101", 900)
@@ -164,12 +169,12 @@ def test_order_mapping_and_pending_fill_link(db):
     assert pos_entries[0] == PositionMappingEntry(101, 555, 1_000_000)
 
 
-def test_upsert_and_load_accounts(db):
+def test_upsert_and_load_accounts(db, org_id):
     """Test upserting and loading accounts with decimal multiplier."""
     repo = Repo(db)
 
     # Upsert a new account
-    repo.upsert_account(102, 1, 10002, False)
+    assert repo.upsert_account(102, 1, org_id, 10002, False) is True
 
     # Load accounts
     accounts = repo.load_accounts()
@@ -184,6 +189,7 @@ def test_upsert_and_load_accounts(db):
     # Find account 102
     acc102 = next((a for a in accounts if a.account_id == 102), None)
     assert acc102 is not None
+    assert acc102.org_id == org_id
     assert acc102.connection_id == 1
     assert acc102.trader_login == 10002
     assert acc102.is_live is False
@@ -226,15 +232,15 @@ def test_set_account_status(db):
     assert row[1] == "Low balance"
 
 
-def test_mapping_rows(db):
+def test_mapping_rows(db, org_id):
     """Test retrieving all mapping rows."""
     repo = Repo(db)
 
     # Create some mappings
-    repo.create_position_mapping(10, 100, "cm10.100")
+    repo.create_position_mapping(10, 100, "cm10.100", org_id=org_id)
     repo.activate_position_mapping("cm10.100", 111, 5_000_000)
 
-    repo.create_order_mapping(20, 101, "co20.101")
+    repo.create_order_mapping(20, 101, "co20.101", org_id=org_id)
     repo.activate_order_mapping("co20.101", 222)
 
     # Get all mapping rows
@@ -251,11 +257,11 @@ def test_mapping_rows(db):
         assert "status" in row
 
 
-def test_close_order_mapping(db):
+def test_close_order_mapping(db, org_id):
     """Test closing an order mapping."""
     repo = Repo(db)
 
-    repo.create_order_mapping(50, 100, "co50.100")
+    repo.create_order_mapping(50, 100, "co50.100", org_id=org_id)
     repo.activate_order_mapping("co50.100", 555)
 
     # Close the order mapping
@@ -266,12 +272,12 @@ def test_close_order_mapping(db):
     assert entries == []
 
 
-def test_adopt_position_mapping(db):
+def test_adopt_position_mapping(db, org_id):
     """Test adopting an existing position (drift remedy)."""
     repo = Repo(db)
 
     # Adopt an existing position
-    repo.adopt_position_mapping(99, 100, 777, 3_000_000)
+    repo.adopt_position_mapping(99, 100, 777, 3_000_000, org_id=org_id)
 
     # Should have the position entry
     entries = repo.position_entries(99)
@@ -299,12 +305,12 @@ def test_mapping_state_protocol_compliance(db):
     assert isinstance(ord, (list, tuple))
 
 
-def test_concurrent_reduce_position_mapping_no_race(db):
+def test_concurrent_reduce_position_mapping_no_race(db, org_id):
     """Test that concurrent reduces are atomic (no TOCTOU race)."""
     repo = Repo(db)
 
     # Create a position mapping with 10M volume
-    repo.create_position_mapping(30, 100, "cm30.100")
+    repo.create_position_mapping(30, 100, "cm30.100", org_id=org_id)
     repo.activate_position_mapping("cm30.100", 666, 10_000_000)
 
     # Concurrent reduces: thread 1 reduces 3M, thread 2 reduces 2M
@@ -378,12 +384,12 @@ def test_activate_pending_fill_raises_on_unknown(db):
         repo.activate_pending_fill(100, 999, 555, 1_000_000)
 
 
-def test_link_pending_fill_does_not_touch_failed_rows(db):
+def test_link_pending_fill_does_not_touch_failed_rows(db, org_id):
     """Test that link_pending_fill only updates active rows, not failed ones."""
     repo = Repo(db)
 
     # Create an order mapping
-    repo.create_order_mapping(60, 100, "co60.100")
+    repo.create_order_mapping(60, 100, "co60.100", org_id=org_id)
     repo.activate_order_mapping("co60.100", 777)
 
     # Simulate it failing (manually set status to failed)
@@ -446,7 +452,7 @@ def test_link_pending_fill_raises_on_unknown_order(db):
 
 # ---------- N2: master position increases ----------
 
-def test_create_position_mapping_is_idempotent_for_an_increase(db):
+def test_create_position_mapping_is_idempotent_for_an_increase(db, org_id):
     """N2 (repo half): the SECOND dispatch of the same (master position,
     slave) -- a master position INCREASE, which reuses the deterministic
     client_order_id `cm{pid}.{slave}` -- must not raise.
@@ -458,15 +464,15 @@ def test_create_position_mapping_is_idempotent_for_an_increase(db):
     """
     repo = Repo(db)
 
-    repo.create_position_mapping(500, 100, "cm500.100")
-    repo.create_position_mapping(500, 100, "cm500.100")   # the increase
+    repo.create_position_mapping(500, 100, "cm500.100", org_id=org_id)
+    repo.create_position_mapping(500, 100, "cm500.100", org_id=org_id)   # the increase
 
     rows = [r for r in repo.mapping_rows() if r["client_order_id"] == "cm500.100"]
     assert len(rows) == 1, "an increase must reuse the existing mapping row, not add one"
     assert rows[0]["status"] == "pending"
 
 
-def test_activate_position_mapping_accumulates_volume_across_fills(db):
+def test_activate_position_mapping_accumulates_volume_across_fills(db, org_id):
     """N2 (repo half): the increase's fill ADDS to the mapping's volume.
 
     cTrader merges a same-direction add into the existing position, so the
@@ -477,10 +483,10 @@ def test_activate_position_mapping_accumulates_volume_across_fills(db):
     both compute against.
     """
     repo = Repo(db)
-    repo.create_position_mapping(500, 100, "cm500.100")
+    repo.create_position_mapping(500, 100, "cm500.100", org_id=org_id)
 
     repo.activate_position_mapping("cm500.100", 777, 10_000_000, fill_price=1.10500)
-    repo.create_position_mapping(500, 100, "cm500.100")            # increase dispatched
+    repo.create_position_mapping(500, 100, "cm500.100", org_id=org_id)            # increase dispatched
     repo.activate_position_mapping("cm500.100", 777, 5_000_000, fill_price=1.10900)
 
     (row,) = [r for r in repo.mapping_rows() if r["client_order_id"] == "cm500.100"]
@@ -492,7 +498,7 @@ def test_activate_position_mapping_accumulates_volume_across_fills(db):
     assert row["fill_price"] == pytest.approx(1.10500)
 
 
-def test_reduce_position_mapping_operates_on_the_aggregate(db):
+def test_reduce_position_mapping_operates_on_the_aggregate(db, org_id):
     """N2 (consequence): with one row per (master position, slave), a close
     deducts from the aggregate exactly once.
 
@@ -502,9 +508,9 @@ def test_reduce_position_mapping_operates_on_the_aggregate(db):
     deducted the full closed volume from BOTH.
     """
     repo = Repo(db)
-    repo.create_position_mapping(500, 100, "cm500.100")
+    repo.create_position_mapping(500, 100, "cm500.100", org_id=org_id)
     repo.activate_position_mapping("cm500.100", 777, 10_000_000)
-    repo.create_position_mapping(500, 100, "cm500.100")
+    repo.create_position_mapping(500, 100, "cm500.100", org_id=org_id)
     repo.activate_position_mapping("cm500.100", 777, 5_000_000)
 
     repo.reduce_position_mapping(100, 777, 6_000_000)
@@ -514,14 +520,14 @@ def test_reduce_position_mapping_operates_on_the_aggregate(db):
     assert row["status"] == "active"
 
 
-def test_position_entries_reports_one_aggregated_entry_per_slave(db):
+def test_position_entries_reports_one_aggregated_entry_per_slave(db, org_id):
     """The decision layer sees ONE entry per slave for an increased position,
     carrying the aggregate volume -- so a later close emits one ClosePosition
     per slave, sized against the slave's real position."""
     repo = Repo(db)
-    repo.create_position_mapping(500, 100, "cm500.100")
+    repo.create_position_mapping(500, 100, "cm500.100", org_id=org_id)
     repo.activate_position_mapping("cm500.100", 777, 10_000_000)
-    repo.create_position_mapping(500, 100, "cm500.100")
+    repo.create_position_mapping(500, 100, "cm500.100", org_id=org_id)
     repo.activate_position_mapping("cm500.100", 777, 5_000_000)
 
     entries = repo.position_entries(500)
@@ -565,9 +571,9 @@ def test_clear_degraded_is_a_no_op_on_an_ok_account(db):
 
 # ---------- T9c: fill price on the mapping row ----------
 
-def test_activate_pending_fill_stamps_fill_price(db):
+def test_activate_pending_fill_stamps_fill_price(db, org_id):
     repo = Repo(db)
-    repo.create_order_mapping(900, 100, "co900.100")
+    repo.create_order_mapping(900, 100, "co900.100", org_id=org_id)
     repo.activate_order_mapping("co900.100", 4242)
 
     repo.activate_pending_fill(100, 4242, 888, 2_000_000, fill_price=1.23456)
