@@ -304,7 +304,9 @@ master" to "*which org's* master is this account". Concretely:
 - Invite tokens: 32-byte urlsafe, hashed at rest, single-use, 7-day
   expiry, revocable.
 - Session fixation prevented by re-issuing the cookie at login; CSRF
-  double-submit unchanged and now also covers `register`/`join`.
+  double-submit unchanged and covers `join` and all org routes. `register`
+  is CSRF-exempt like `login` — both are pre-session endpoints where no
+  CSRF cookie exists yet.
 - The copier control port keeps its "Docker network only" trust model —
   compose must continue not publishing port 8080; every scoped command
   carries an explicit `org_id` chosen by the API, never by the browser.
