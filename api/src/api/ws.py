@@ -24,6 +24,9 @@ class EventBroadcaster:
         self.listener_connection: AsyncConnection = None
         self.query_connection: AsyncConnection = None
         self.dsn = None
+        # EmailAlerter (set by create_app's lifespan); every event fetched
+        # for the WebSocket feed is offered to it too.
+        self.alerter = None
         # Set True once LISTEN events has actually been registered with Postgres.
         # Lets callers (e.g. tests) know it's safe to INSERT without racing the
         # listener's startup (asyncio.create_task only *schedules* the coroutine;
@@ -96,6 +99,13 @@ class EventBroadcaster:
                         }
                         logger.debug(f"Broadcasting event: {event['id']}")
                         await self.broadcast(event)
+                        if self.alerter is not None:
+                            # consider() never raises, but belt and braces:
+                            # alerting must not kill the listener loop.
+                            try:
+                                await self.alerter.consider(event)
+                            except Exception:
+                                logger.exception("email alerter failed")
                 except Exception as e:
                     logger.error(f"Error processing event: {e}")
 

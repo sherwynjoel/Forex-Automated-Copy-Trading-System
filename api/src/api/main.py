@@ -20,6 +20,8 @@ from .routes.accounts import create_accounts_router
 from .routes.events import create_events_router
 from .routes.settings_control import create_settings_control_router, create_state_router
 from .routes.trading import create_trading_router
+from .routes.insights import create_insights_router
+from .alerts import EmailAlerter
 from .ws import create_ws_router, broadcaster
 
 
@@ -45,6 +47,9 @@ def create_app(http_transport: Optional[httpx.BaseTransport] = None) -> FastAPI:
             app.state.http = httpx.AsyncClient(transport=http_transport)
         else:
             app.state.http = httpx.AsyncClient()
+
+        # Email alerter rides the same event stream the WebSocket feed uses.
+        broadcaster.alerter = EmailAlerter.from_env(app.state.http)
 
         # Set DSN and start listener task immediately
         broadcaster.dsn = cfg.postgres_dsn
@@ -86,6 +91,10 @@ def create_app(http_transport: Optional[httpx.BaseTransport] = None) -> FastAPI:
     # Include trading actions router (manual orders, closes, kill switch)
     trading_router = create_trading_router()
     app.include_router(trading_router)
+
+    # Include insights router (margin, candles, analytics, overview stats)
+    insights_router = create_insights_router()
+    app.include_router(insights_router)
 
     # Include events router
     events_router = create_events_router()

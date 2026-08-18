@@ -250,11 +250,12 @@ def create_accounts_router() -> APIRouter:
         conn: psycopg.Connection = Depends(get_conn),
         cfg: ApiConfig = Depends(ApiConfig.from_env),
     ) -> dict:
-        """Proxy deal/order history for one account from the copier.
-        `from`/`to` are epoch milliseconds; cTrader allows at most a one-week
-        window per request, so the dashboard pages by date range."""
-        if kind not in ("deals", "orders"):
-            raise HTTPException(status_code=400, detail="kind must be deals or orders")
+        """Proxy deal/order/cash-flow history for one account from the
+        copier. `from`/`to` are epoch milliseconds; cTrader allows at most a
+        one-week window per request, so the dashboard pages by date range."""
+        if kind not in ("deals", "orders", "cashflow"):
+            raise HTTPException(
+                status_code=400, detail="kind must be deals, orders or cashflow")
         exists = conn.execute(
             "SELECT 1 FROM accounts WHERE ctid_trader_account_id = %s",
             (account_id,),
