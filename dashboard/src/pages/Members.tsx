@@ -50,9 +50,17 @@ export default function Members() {
 
   const removeMember = async (userId: number) => {
     setError(null)
+    const isSelf = userId === me.user.id
     try {
       await orgApi(orgId, `members/${userId}`, { method: 'DELETE' })
-      await refresh()
+      if (isSelf) {
+        // A successful self-leave means we're no longer a member of this
+        // org — refetching would 403 and surface a false failure. Leave
+        // the org instead of refreshing its now-inaccessible member list.
+        navigate('/welcome')
+      } else {
+        await refresh()
+      }
     } catch (err) {
       setError(err instanceof Error && err.message.includes('409')
         ? 'An organization must keep at least one owner.'
@@ -179,8 +187,13 @@ export default function Members() {
           <form
             onSubmit={async (e) => {
               e.preventDefault()
-              await api(`/api/orgs/${orgId}`, { method: 'PATCH', body: JSON.stringify({ name: orgName }) })
-              await refreshMe()
+              setError(null)
+              try {
+                await api(`/api/orgs/${orgId}`, { method: 'PATCH', body: JSON.stringify({ name: orgName }) })
+                await refreshMe()
+              } catch {
+                setError('Could not rename organization')
+              }
             }}
             className="flex items-center gap-3"
           >
@@ -212,6 +225,8 @@ export default function Members() {
               try {
                 await api(`/api/orgs/${orgId}`, { method: 'DELETE' })
                 navigate('/welcome')
+              } catch {
+                setError('Could not delete organization')
               } finally {
                 setDeleteBusy(false)
                 setDeleteOpen(false)

@@ -110,6 +110,24 @@ test('owner can change a role via the role select', async () => {
   })
 })
 
+test('self-leave DELETEs the own membership and navigates away without an error banner', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('trader', 2))
+  const fetchMock = mockRoutes()
+  renderMembers()
+
+  const leaveButton = await screen.findByRole('button', { name: 'Leave' })
+  await userEvent.click(leaveButton)
+
+  await waitFor(() => {
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/orgs/1/members/2',
+      expect.objectContaining({ method: 'DELETE' })
+    )
+    expect(navigateMock).toHaveBeenCalledWith('/welcome')
+  })
+  expect(screen.queryByText(/could not remove member/i)).not.toBeInTheDocument()
+})
+
 test('non-owner sees read-only roles and no invite form', async () => {
   useOrgMock.mockReturnValue(makeOrgValue('viewer', 3))
   mockRoutes()
@@ -178,6 +196,23 @@ test('owner can rename the org', async () => {
       '/api/orgs/1',
       expect.objectContaining({ method: 'PATCH', body: JSON.stringify({ name: 'Acme Renamed' }) })
     )
+  })
+})
+
+test('rename failure shows an error banner', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  mockRoutes({
+    'PATCH /api/orgs/1': () => new Response('Server error', { status: 500 }),
+  })
+  renderMembers()
+
+  const input = await screen.findByLabelText('Organization name')
+  await userEvent.clear(input)
+  await userEvent.type(input, 'Acme Renamed')
+  await userEvent.click(screen.getByRole('button', { name: /^rename$/i }))
+
+  await waitFor(() => {
+    expect(screen.getByText('Could not rename organization')).toBeInTheDocument()
   })
 })
 
