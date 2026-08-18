@@ -196,9 +196,35 @@ slave, confirm a few real trades copy correctly, then scale up.
   nickname instead (stored in `accounts.nickname`).
 - **Trade history** — the History screen serves account-wise closed
   positions (realized P&L reconstructed from closing deals), every fill,
-  and the order log, straight from the broker
-  (`GET /api/accounts/{id}/history/{deals,orders}?from&to`). cTrader caps
-  each request at a one-week window, so the screen pages by week.
+  the order log, and a cash-flow tab (deposits/withdrawals), straight from
+  the broker (`GET /api/accounts/{id}/history/{deals,orders,cashflow}?from&to`).
+  cTrader caps each request at a one-week window, so the screen pages by
+  week. Clicking a closed position opens its full deal lifecycle
+  (`GET /api/accounts/{id}/positions/{pid}/deals`).
+- **Performance** — the Performance screen aggregates broker deal history
+  (`GET /api/accounts/{id}/analytics?weeks=N`, up to 26 weeks) into net
+  P&L, win rate, profit factor, best/worst trade, max drawdown, a
+  balance-after-close equity curve, weekly P&L, and per-symbol results.
+  The Overview shows the same headline numbers for the master ("the
+  copier's" performance) plus a portfolio-value tile compared against
+  yesterday's closing value — daily per-account snapshots are written by
+  the copier's balance refresh into `portfolio_snapshots`.
+- **Live balances & margin calls** — the copier consumes the broker's
+  pushed `ProtoOATraderUpdatedEvent` (balances update instantly, the 60s
+  poll is now just a safety net) and `ProtoOAMarginCallTriggerEvent`
+  (logged as `risk`-category error events; the dashboard shows a red
+  banner on every page for a margin call less than 30 minutes old).
+- **Pre-trade margin** — the Trade screen's ticket shows the broker's own
+  margin requirement for the order you are about to place
+  (`GET /api/accounts/{id}/margin-estimate?symbol&volume_lots`), plus a
+  candlestick chart (`GET /api/accounts/{id}/trendbars`) with your open
+  positions' entry/SL/TP marked.
+- **Email alerts** — margin calls, kill-switch fires, token refresh
+  failures, degraded slaves, and rejected copy orders can each send one
+  email (rate-limited per condition to one per 15 minutes) via
+  [Resend](https://resend.com). Set `RESEND_API_KEY` and `ALERT_EMAIL_TO`
+  in `.env` (see `.env.example`); leave them empty and no email is ever
+  attempted.
 - **Disconnect** — the Accounts screen's Disconnect button removes the
   cTrader ID grant behind an account (`DELETE
   /api/accounts/{id}/connection`), which cascades to every account under
@@ -312,7 +338,7 @@ api/              FastAPI backend
   tests/          route + auth + oauth tests against a real Postgres
   .venv/          local virtualenv (not committed)
 dashboard/        React + Vite + TypeScript frontend
-  src/pages/      Overview, Accounts, Positions, Trade, History, Logs, Login
+  src/pages/      Overview, Accounts, Positions, Trade, History, Performance, Logs, Login
   src/components/ shared UI (kill switch, layout + desk strip, confirm dialog)
 db/
   migrations/     ordered .sql files, applied by the compose `migrate` service
