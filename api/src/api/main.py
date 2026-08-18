@@ -19,6 +19,7 @@ from .oauth import create_oauth_router
 from .routes.accounts import create_accounts_router
 from .routes.events import create_events_router
 from .routes.settings_control import create_settings_control_router, create_state_router
+from .routes.trading import create_trading_router
 from .ws import create_ws_router, broadcaster
 
 
@@ -81,6 +82,10 @@ def create_app(http_transport: Optional[httpx.BaseTransport] = None) -> FastAPI:
 
     state_router = create_state_router()
     app.include_router(state_router)
+
+    # Include trading actions router (manual orders, closes, kill switch)
+    trading_router = create_trading_router()
+    app.include_router(trading_router)
 
     # Include events router
     events_router = create_events_router()

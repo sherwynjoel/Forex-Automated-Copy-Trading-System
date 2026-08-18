@@ -298,6 +298,140 @@ def test_disconnect_account_requires_csrf(app_client, db):
     assert response.status_code == 403
 
 
+def _seed_symbols(db, account_id):
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute(
+            """INSERT INTO symbol_cache (account_id, name, symbol_id, digits, lot_size, min_volume, step_volume)
+               VALUES (%s, 'EURUSD', 1, 5, 10000000, 100000, 100000),
+                      (%s, 'GBPUSD', 2, 5, 10000000, 100000, 100000)""",
+            (account_id, account_id),
+        )
+
+
+def _login(app_client):
+    response = app_client.post("/api/login", json={"password": "hunter2!"})
+    assert response.status_code == 204
+    return response.cookies.get("csrf")
+
+
+def test_patch_nickname_and_list_returns_it(app_client, db):
+    """PATCH can set a nickname; GET /api/accounts returns it."""
+    csrf_token = _login(app_client)
+    conn_id = _seed_connection(db)
+    _seed_account(db, 12345, conn_id, 111111, True)
+
+    response = app_client.patch(
+        "/api/accounts/12345",
+        json={"nickname": "Main live account"},
+        headers={"X-CSRF-Token": csrf_token},
+    )
+    assert response.status_code == 200
+    assert response.json()["nickname"] == "Main live account"
+
+    accounts = app_client.get("/api/accounts").json()
+    assert accounts[0]["nickname"] == "Main live account"
+
+
+def test_account_details_merges_copier_and_db(app_client, db):
+    """GET /api/accounts/{id}/details returns the copier's broker-side
+    profile merged with what only the DB knows (nickname, role, grant)."""
+    csrf_token = _login(app_client)
+    conn_id = _seed_connection(db)
+    _seed_account(db, 12345, conn_id, 111111, True, role="master")
+    app_client.patch(
+        "/api/accounts/12345", json={"nickname": "Big master"},
+        headers={"X-CSRF-Token": csrf_token})
+
+    import httpx
+    from conftest import default_mock_callback
+
+    def callback(request):
+        url = str(request.url)
+        if "copier.test" in url and "/details" in url:
+            assert "account_id=12345" in url
+            return httpx.Response(200, json={
+                "account_id": 12345, "balance": 10000.0,
+                "broker_name": "FP Markets", "deposit_currency": "USD",
+                "leverage": 50.0, "account_type": "HEDGED",
+                "open_positions": [], "pending_orders": [],
+            })
+        return default_mock_callback(request)
+
+    app_client.app.state.mock_transport.set_callback(callback)
+
+    response = app_client.get("/api/accounts/12345/details")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["balance"] == 10000.0
+    assert data["broker_name"] == "FP Markets"
+    assert data["nickname"] == "Big master"
+    assert data["role"] == "master"
+    assert data["is_live"] is True
+    assert data["enabled"] is True
+    assert "granted_at" in data["connection"]
+    assert "expires_at" in data["connection"]
+    assert data["connection"]["status"] == "active"
+
+
+def test_account_details_unknown_account_404(app_client, db):
+    _login(app_client)
+    response = app_client.get("/api/accounts/99999/details")
+    assert response.status_code == 404
+
+
+def test_account_history_proxies_window(app_client, db):
+    """GET /api/accounts/{id}/history/{deals,orders} forwards the window to
+    the copier and returns its payload."""
+    _login(app_client)
+    conn_id = _seed_connection(db)
+    _seed_account(db, 12345, conn_id, 111111, True)
+
+    import httpx
+    from conftest import default_mock_callback
+    seen = []
+
+    def callback(request):
+        url = str(request.url)
+        if "copier.test" in url and "/history/" in url:
+            seen.append(url)
+            if "/deals" in url:
+                return httpx.Response(200, json={"deals": [{"deal_id": 1}], "has_more": False})
+            return httpx.Response(200, json={"orders": [], "has_more": False})
+        return default_mock_callback(request)
+
+    app_client.app.state.mock_transport.set_callback(callback)
+
+    response = app_client.get("/api/accounts/12345/history/deals?from=1000&to=2000")
+    assert response.status_code == 200
+    assert response.json()["deals"] == [{"deal_id": 1}]
+
+    response = app_client.get("/api/accounts/12345/history/orders?from=1000&to=2000")
+    assert response.status_code == 200
+    assert response.json()["orders"] == []
+
+    assert any("account_id=12345" in u and "from=1000" in u and "to=2000" in u
+               and "/deals" in u for u in seen)
+    assert any("/orders" in u for u in seen)
+
+
+def test_account_symbols_from_cache(app_client, db):
+    """GET /api/accounts/{id}/symbols lists the account's cached symbols
+    (for the order ticket) straight from the DB -- no copier round trip."""
+    _login(app_client)
+    conn_id = _seed_connection(db)
+    _seed_account(db, 12345, conn_id, 111111, True)
+    _seed_symbols(db, 12345)
+
+    response = app_client.get("/api/accounts/12345/symbols")
+    assert response.status_code == 200
+    symbols = response.json()
+    assert {s["name"] for s in symbols} == {"EURUSD", "GBPUSD"}
+    eurusd = next(s for s in symbols if s["name"] == "EURUSD")
+    assert eurusd["min_volume_lots"] == 0.01
+    assert eurusd["step_volume_lots"] == 0.01
+    assert eurusd["digits"] == 5
+
+
 def test_patch_nonexistent_account_404(app_client, db):
     """PATCH nonexistent account returns 404."""
     response = app_client.post("/api/login", json={"password": "hunter2!"})
