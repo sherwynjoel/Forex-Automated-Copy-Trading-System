@@ -108,18 +108,6 @@ def user_id_from_session_cookie(session: str, cfg: ApiConfig) -> Optional[int]:
     return None
 
 
-def require_admin(
-    session: Optional[str] = Cookie(None),
-    cfg: ApiConfig = Depends(ApiConfig.from_env),
-) -> bool:
-    """Deprecated: the single-admin auth model is gone (see require_user).
-
-    Kept only so route modules not yet converted to per-user auth (Tasks
-    3-8) still import successfully; always rejects.
-    """
-    raise HTTPException(status_code=401, detail="Not authenticated")
-
-
 class LoginRateLimiter:
     """Rate limiter for login attempts."""
 
