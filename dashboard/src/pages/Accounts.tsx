@@ -246,9 +246,9 @@ export default function Accounts() {
 
   return (
     <div className="space-y-6 max-w-6xl">
-      <header className="flex items-end justify-between">
+      <header className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
         <div>
-          <h1 className="font-display text-2xl text-ink">Accounts</h1>
+          <h1 className="page-title">Accounts</h1>
           <p className="text-sm text-ink-soft mt-1">
             One cTrader ID grant covers every account under it. Roles,
             multipliers, nicknames, and cutoff dates apply per account.
@@ -257,7 +257,7 @@ export default function Accounts() {
         {can(role, 'control') && (
           <button
             onClick={handleConnectOAuth}
-            className="px-4 py-2 bg-brand text-white text-sm font-semibold rounded hover:bg-brand-deep transition-colors"
+            className="w-full md:w-auto shrink-0 px-4 py-2.5 bg-brand text-white text-sm font-semibold rounded hover:bg-brand-deep transition-colors"
           >
             Connect cTrader ID
           </button>
@@ -273,7 +273,7 @@ export default function Accounts() {
         </div>
       )}
       {error && (
-        <div className="rounded border border-loss/30 bg-loss-wash px-4 py-3 text-sm text-loss-deep">
+        <div role="alert" className="rounded border border-loss/30 bg-loss-wash px-4 py-3 text-sm text-loss-deep">
           {error}
         </div>
       )}
@@ -287,7 +287,7 @@ export default function Accounts() {
         </div>
       ) : (
         <div className="bg-card rounded-lg border border-line overflow-x-auto">
-          <table className="w-full text-sm">
+          <table className="stack-table w-full text-sm">
             <thead>
               <tr className="text-left border-b border-line">
                 <th className="desk-label px-5 py-2.5 font-semibold">Account</th>
@@ -307,7 +307,7 @@ export default function Accounts() {
                 const isPending = pendingRows.has(id)
                 return (
                   <tr key={id} className={`border-b border-line last:border-0 align-top ${isPending ? 'opacity-60' : ''}`}>
-                    <td className="px-5 py-3">
+                    <td data-label="Account" className="px-5 py-3">
                       <div className="num text-ink">{account.trader_login}</div>
                       <div className="text-xs text-ink-faint">cTID {id}</div>
                       {account.status === 'degraded' && (
@@ -319,7 +319,7 @@ export default function Accounts() {
                         </div>
                       )}
                     </td>
-                    <td className="px-3 py-3">
+                    <td data-label="Nickname" className="px-3 py-3">
                       {can(role, 'control') ? (
                         <input
                           type="text"
@@ -336,14 +336,14 @@ export default function Accounts() {
                         <span className="text-ink">{account.nickname || '—'}</span>
                       )}
                     </td>
-                    <td className="px-3 py-3">
+                    <td data-label="Env" className="px-3 py-3">
                       <span className={`text-xs font-semibold px-2 py-0.5 rounded ${
-                        account.is_live ? 'bg-loss-wash text-loss' : 'bg-paper text-ink-soft'
+                        account.is_live ? 'bg-loss-wash text-loss-deep' : 'bg-line text-ink-soft'
                       }`}>
                         {account.is_live ? 'Live' : 'Demo'}
                       </span>
                     </td>
-                    <td className="px-3 py-3">
+                    <td data-label="Role" className="px-3 py-3">
                       {can(role, 'control') ? (
                         <select
                           aria-label={`Role for account ${account.trader_login}`}
@@ -363,7 +363,7 @@ export default function Accounts() {
                         <div className="text-loss text-xs mt-1">{roleErrors[id]}</div>
                       )}
                     </td>
-                    <td className="px-3 py-3">
+                    <td data-label="Multiplier" className="px-3 py-3">
                       {account.role === 'slave' ? (
                         can(role, 'control') ? (
                           <div>
@@ -390,7 +390,7 @@ export default function Accounts() {
                         <span className="text-ink-faint">—</span>
                       )}
                     </td>
-                    <td className="px-3 py-3">
+                    <td data-label="Enabled" className="px-3 py-3">
                       {can(role, 'control') ? (
                         <input
                           type="checkbox"
@@ -404,7 +404,7 @@ export default function Accounts() {
                         <span className="text-ink">{account.enabled ? 'Yes' : 'No'}</span>
                       )}
                     </td>
-                    <td className="px-3 py-3">
+                    <td data-label="Cutoff" className="px-3 py-3">
                       {can(role, 'control') ? (
                         <input
                           type="date"
@@ -420,11 +420,11 @@ export default function Accounts() {
                         <span className="num text-ink">{account.cutoff_date || '—'}</span>
                       )}
                     </td>
-                    <td className="px-3 py-3">
+                    <td data-label="Grant" className="px-3 py-3">
                       <span className={`text-xs font-medium px-2 py-0.5 rounded ${
                         account.connection_status === 'active'
-                          ? 'bg-profit-wash text-profit'
-                          : 'bg-warn-wash text-warn'
+                          ? 'bg-profit-wash text-profit-deep'
+                          : 'bg-warn-wash text-warn-deep'
                       }`}>
                         {account.connection_status === 'active' ? 'Active' : account.connection_status}
                       </span>
@@ -512,7 +512,7 @@ export default function Accounts() {
 
       {/* Details drawer */}
       {detailsFor && (
-        <div className="fixed inset-0 z-40 flex justify-end bg-ink/30" onClick={() => setDetailsFor(null)}>
+        <div className="fixed inset-0 z-40 flex justify-end bg-black/60" onClick={() => setDetailsFor(null)}>
           <aside
             className="w-full max-w-md h-full bg-card border-l border-line overflow-y-auto"
             onClick={(e) => e.stopPropagation()}

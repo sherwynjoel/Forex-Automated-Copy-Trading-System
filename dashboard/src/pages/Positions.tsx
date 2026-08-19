@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { ApiState, MasterPosition, PendingOrder, PositionCopy, DriftItem } from '../lib/types'
 import { orgApi } from '../lib/api'
 import { useOrg } from '../lib/org'
+import Banner from '../components/Banner'
 import { can } from '../lib/roles'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
 
@@ -115,7 +116,7 @@ export default function Positions() {
   }
 
   if (error && !state) {
-    return <div className="p-6 text-red-600">Error: {error}</div>
+    return <div className="p-6"><Banner kind="error">{error}</Banner></div>
   }
 
   if (!state) {
@@ -125,7 +126,7 @@ export default function Positions() {
   return (
     <div className="space-y-8 max-w-6xl">
       <header>
-        <h1 className="font-display text-2xl text-ink">Positions</h1>
+        <h1 className="page-title">Positions</h1>
         <p className="text-sm text-ink-soft mt-1">
           The master's open book and how each slave copy tracks it. Close or
           trim positions from the Trade page.
@@ -145,7 +146,7 @@ export default function Positions() {
           <p className="text-ink-faint">No open master positions</p>
         ) : (
           <div className="overflow-x-auto bg-card border border-line rounded-lg">
-            <table className="w-full border-collapse">
+            <table className="stack-table w-full border-collapse">
               <thead>
                 <tr>
                   <th className="desk-label p-3 text-left border-b border-line">Symbol</th>
@@ -178,7 +179,7 @@ export default function Positions() {
           <p className="text-ink-faint">No pending orders</p>
         ) : (
           <div className="overflow-x-auto bg-card border border-line rounded-lg">
-            <table className="w-full border-collapse">
+            <table className="stack-table w-full border-collapse">
               <thead>
                 <tr>
                   <th className="desk-label p-3 text-left border-b border-line">Symbol</th>
@@ -237,12 +238,12 @@ function PositionRow({
 }) {
   return (
     <>
-      <tr className="border-b border-line last:border-0 hover:bg-paper">
-        <td className="num p-3">{position.symbol || `ID:${position.symbol_id}`}</td>
-        <td className="num p-3">{position.side}</td>
-        <td className="num p-3 text-right">{position.volume_lots || position.volume}</td>
-        <td className="num p-3 text-right">{position.price.toFixed(5)}</td>
-        <td className="num p-3 text-right">
+      <tr className="border-b border-line last:border-0 hover:bg-line">
+        <td data-label="Symbol" className="num p-3">{position.symbol || `ID:${position.symbol_id}`}</td>
+        <td data-label="Side" className="num p-3">{position.side}</td>
+        <td data-label="Volume (units)" className="num p-3 text-right">{position.volume_lots || position.volume}</td>
+        <td data-label="Entry Price" className="num p-3 text-right">{position.price.toFixed(5)}</td>
+        <td data-label="P&L" className="num p-3 text-right">
           {position.pnl_quote != null ? position.pnl_quote.toFixed(2) : '-'}
         </td>
         <td className="p-3 text-center">
@@ -259,7 +260,7 @@ function PositionRow({
           <td colSpan={6} className="p-4">
             <div className="ml-4 space-y-2">
               <h4 className="desk-label mb-2">Slave Copies</h4>
-              <table className="w-full text-sm">
+              <table className="stack-table w-full text-sm">
                 <thead>
                   <tr>
                     <th className="desk-label p-2 text-left border-b border-line">Account</th>
@@ -294,9 +295,9 @@ function OrderRow({
 }) {
   return (
     <>
-      <tr className="border-b border-line last:border-0 hover:bg-paper">
-        <td className="num p-3">{order.symbol || `ID:${order.symbol_id}`}</td>
-        <td className="num p-3 text-right">{order.volume_lots || order.volume}</td>
+      <tr className="border-b border-line last:border-0 hover:bg-line">
+        <td data-label="Symbol" className="num p-3">{order.symbol || `ID:${order.symbol_id}`}</td>
+        <td data-label="Volume (units)" className="num p-3 text-right">{order.volume_lots || order.volume}</td>
         <td className="p-3 text-center">
           {order.copies.length > 0 && (
             <button
@@ -355,11 +356,11 @@ function CopyRow({
 
   return (
     <tr className="border-b border-line last:border-0">
-      <td className="num p-2">{copy.slave_account_id}</td>
-      <td className="num p-2">{copy.status}</td>
-      <td className="desk-label p-2 text-right border-b border-line">{fillPriceDisplay}</td>
-      <td className="desk-label p-2 text-right border-b border-line">{slippageDisplay}</td>
-      <td className="num p-2">{copy.error || '-'}</td>
+      <td data-label="Account" className="num p-2">{copy.slave_account_id}</td>
+      <td data-label="Status" className="num p-2">{copy.status}</td>
+      <td data-label="Fill Price" className="num p-2 text-right">{fillPriceDisplay}</td>
+      <td data-label="Slippage (pts)" className="num p-2 text-right">{slippageDisplay}</td>
+      <td data-label="Error" className="num p-2">{copy.error || '-'}</td>
     </tr>
   )
 }

@@ -270,7 +270,7 @@ export default function Trade() {
     return (
       <div className="space-y-6 max-w-5xl">
         <header>
-          <h1 className="font-display text-2xl text-ink">Trade</h1>
+          <h1 className="page-title">Trade</h1>
         </header>
         <p className="text-sm text-ink-soft">
           Your role does not allow placing orders.
@@ -282,7 +282,7 @@ export default function Trade() {
   return (
     <div className="space-y-6 max-w-5xl">
       <header>
-        <h1 className="font-display text-2xl text-ink">Trade</h1>
+        <h1 className="page-title">Trade</h1>
         <p className="text-sm text-ink-soft mt-1">
           Place orders on any connected account. Master orders replicate to
           every slave; slave orders stay where you put them.
@@ -298,7 +298,7 @@ export default function Trade() {
         </div>
       )}
       {error && (
-        <div className="rounded border border-loss/30 bg-loss-wash px-4 py-3 text-sm text-loss-deep">
+        <div role="alert" className="rounded border border-loss/30 bg-loss-wash px-4 py-3 text-sm text-loss-deep">
           {error}
         </div>
       )}
@@ -323,7 +323,7 @@ export default function Trade() {
               ))}
             </select>
             {selected?.role === 'slave' && (
-              <p className="mt-2 text-xs text-warn bg-warn-wash rounded px-2 py-1.5">
+              <p className="mt-2 text-xs text-warn-deep bg-warn-wash rounded px-2 py-1.5">
                 Manual order on a slave: it is not copied anywhere and the
                 copier leaves the position for you to manage.
               </p>
@@ -412,7 +412,7 @@ export default function Trade() {
                 min={selectedSymbol?.min_volume_lots ?? 0.01}
                 value={ticket.volumeLots}
                 onChange={(e) => setTicket({ ...ticket, volumeLots: e.target.value })}
-                className="num w-full rounded border border-line-strong px-3 py-2 text-sm"
+                className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card"
               />
             </div>
           </div>
@@ -423,7 +423,7 @@ export default function Trade() {
               <input
                 id="ticket-limit" type="number" step="0.00001" value={ticket.limitPrice}
                 onChange={(e) => setTicket({ ...ticket, limitPrice: e.target.value })}
-                className="num w-full rounded border border-line-strong px-3 py-2 text-sm"
+                className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card"
               />
             </div>
           )}
@@ -433,7 +433,7 @@ export default function Trade() {
               <input
                 id="ticket-stop" type="number" step="0.00001" value={ticket.stopPrice}
                 onChange={(e) => setTicket({ ...ticket, stopPrice: e.target.value })}
-                className="num w-full rounded border border-line-strong px-3 py-2 text-sm"
+                className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card"
               />
             </div>
           )}
@@ -445,7 +445,7 @@ export default function Trade() {
                 id="ticket-sl" type="number" step="0.00001" value={ticket.stopLoss}
                 placeholder="none"
                 onChange={(e) => setTicket({ ...ticket, stopLoss: e.target.value })}
-                className="num w-full rounded border border-line-strong px-3 py-2 text-sm"
+                className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card"
               />
             </div>
             <div>
@@ -454,13 +454,13 @@ export default function Trade() {
                 id="ticket-tp" type="number" step="0.00001" value={ticket.takeProfit}
                 placeholder="none"
                 onChange={(e) => setTicket({ ...ticket, takeProfit: e.target.value })}
-                className="num w-full rounded border border-line-strong px-3 py-2 text-sm"
+                className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card"
               />
             </div>
           </div>
 
           {margin && (
-            <p className="text-xs text-ink-soft bg-paper rounded px-2 py-1.5">
+            <p className="text-xs text-ink-soft bg-paper border border-line rounded px-2 py-1.5">
               Margin required ≈{' '}
               <span className="num text-ink">{margin.buy_margin.toFixed(2)}</span> buy ·{' '}
               <span className="num text-ink">{margin.sell_margin.toFixed(2)}</span> sell
@@ -472,7 +472,7 @@ export default function Trade() {
             </p>
           )}
           {ticketProblem && (
-            <p className="text-xs text-ink-faint">{ticketProblem}</p>
+            <p className="text-xs font-medium text-ink-soft">{ticketProblem}</p>
           )}
           <button
             onClick={() => setReviewOpen(true)}
@@ -545,7 +545,7 @@ export default function Trade() {
               </p>
             ) : (
               <div className="overflow-x-auto">
-                <table className="w-full text-sm">
+                <table className="stack-table w-full text-sm">
                   <thead>
                     <tr className="text-left border-b border-line">
                       <th className="desk-label px-5 py-2 font-semibold">ID</th>
@@ -560,14 +560,14 @@ export default function Trade() {
                   <tbody>
                     {details.open_positions.map((pos) => (
                       <tr key={pos.position_id} className="border-b border-line last:border-0">
-                        <td className="num px-5 py-2.5 text-ink-soft">{pos.position_id}</td>
-                        <td className="num px-3 py-2.5">{pos.symbol ?? pos.symbol_id}</td>
-                        <td className={`px-3 py-2.5 font-medium ${pos.side === 'BUY' ? 'text-profit' : 'text-loss'}`}>
+                        <td data-label="ID" className="num px-5 py-2.5 text-ink-soft">{pos.position_id}</td>
+                        <td data-label="Symbol" className="num px-3 py-2.5">{pos.symbol ?? pos.symbol_id}</td>
+                        <td data-label="Side" className={`px-3 py-2.5 font-medium ${pos.side === 'BUY' ? 'text-profit' : 'text-loss'}`}>
                           {pos.side}
                         </td>
-                        <td className="num px-3 py-2.5 text-right">{pos.volume_lots ?? pos.volume}</td>
-                        <td className="num px-3 py-2.5 text-right">{pos.price}</td>
-                        <td className="num px-3 py-2.5 text-right text-ink-soft">
+                        <td data-label="Lots" className="num px-3 py-2.5 text-right">{pos.volume_lots ?? pos.volume}</td>
+                        <td data-label="Entry" className="num px-3 py-2.5 text-right">{pos.price}</td>
+                        <td data-label="SL / TP" className="num px-3 py-2.5 text-right text-ink-soft">
                           {pos.stop_loss ?? '—'} / {pos.take_profit ?? '—'}
                         </td>
                         <td className="px-3 py-2.5 text-right">
@@ -596,7 +596,7 @@ export default function Trade() {
               </p>
             ) : (
               <div className="overflow-x-auto">
-                <table className="w-full text-sm">
+                <table className="stack-table w-full text-sm">
                   <thead>
                     <tr className="text-left border-b border-line">
                       <th className="desk-label px-5 py-2 font-semibold">ID</th>
@@ -611,14 +611,14 @@ export default function Trade() {
                   <tbody>
                     {details.pending_orders.map((order) => (
                       <tr key={order.order_id} className="border-b border-line last:border-0">
-                        <td className="num px-5 py-2.5 text-ink-soft">{order.order_id}</td>
-                        <td className="num px-3 py-2.5">{order.symbol ?? order.symbol_id}</td>
-                        <td className="px-3 py-2.5">{order.order_type}</td>
-                        <td className={`px-3 py-2.5 font-medium ${order.side === 'BUY' ? 'text-profit' : 'text-loss'}`}>
+                        <td data-label="ID" className="num px-5 py-2.5 text-ink-soft">{order.order_id}</td>
+                        <td data-label="Symbol" className="num px-3 py-2.5">{order.symbol ?? order.symbol_id}</td>
+                        <td data-label="Type" className="px-3 py-2.5">{order.order_type}</td>
+                        <td data-label="Side" className={`px-3 py-2.5 font-medium ${order.side === 'BUY' ? 'text-profit' : 'text-loss'}`}>
                           {order.side}
                         </td>
-                        <td className="num px-3 py-2.5 text-right">{order.volume_lots ?? order.volume}</td>
-                        <td className="num px-3 py-2.5 text-right">
+                        <td data-label="Lots" className="num px-3 py-2.5 text-right">{order.volume_lots ?? order.volume}</td>
+                        <td data-label="Price" className="num px-3 py-2.5 text-right">
                           {order.limit_price ?? order.stop_price ?? '—'}
                         </td>
                         <td className="px-3 py-2.5 text-right">
@@ -720,7 +720,7 @@ export default function Trade() {
             value={partialLots}
             placeholder={closing?.volume_lots ?? 'all'}
             onChange={(e) => setPartialLots(e.target.value)}
-            className="num w-full rounded border border-line-strong px-3 py-2 text-sm"
+            className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card"
           />
         </div>
       </ConfirmDialog>

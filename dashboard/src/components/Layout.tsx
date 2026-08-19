@@ -6,6 +6,8 @@ import { can, type Role } from '../lib/roles'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
 import type { Account, ApiState, CloseAllResult, EventResponse, Settings } from '../lib/types'
 import ConfirmDialog from './ConfirmDialog'
+import Logo from './Logo'
+import { money, signed, errorText } from '../lib/format'
 
 const navItems = (orgId: number, role: Role) => [
   { path: `/org/${orgId}`, label: 'Overview' },
@@ -17,19 +19,6 @@ const navItems = (orgId: number, role: Role) => [
   { path: `/org/${orgId}/logs`, label: 'Logs' },
   { path: `/org/${orgId}/members`, label: 'Members' },
 ]
-
-function money(value: number | null | undefined): string {
-  if (value == null) return '—'
-  return value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-}
-
-function signedMoney(value: number | null | undefined): string {
-  if (value == null) return '—'
-  const formatted = Math.abs(value).toLocaleString('en-US', {
-    minimumFractionDigits: 2, maximumFractionDigits: 2,
-  })
-  return `${value < 0 ? '-' : '+'}${formatted}`
-}
 
 function localISODate(): string {
   const now = new Date()
@@ -55,7 +44,7 @@ function DeskStrip() {
   const [masterState, setMasterState] = useState<{ equity?: number | null; open_pnl?: number } | null>(null)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [notice, setNotice] = useState<string | null>(null)
+  const [notice, setNotice] = useState<{ kind: 'notice' | 'error'; text: string } | null>(null)
   const [marginCall, setMarginCall] = useState<EventResponse | null>(null)
   const [dismissedRiskId, setDismissedRiskId] = useState<number | null>(null)
   const [cutoffReminder, setCutoffReminder] = useState<EventResponse | null>(null)
@@ -123,14 +112,20 @@ function DeskStrip() {
       })
       const closed = result.accounts.reduce((n, a) => n + a.positions_closed, 0)
       const cancelled = result.accounts.reduce((n, a) => n + a.orders_cancelled, 0)
-      setNotice(
-        `Closed ${closed} position${closed === 1 ? '' : 's'} and cancelled ` +
-        `${cancelled} order${cancelled === 1 ? '' : 's'} across ` +
-        `${result.accounts.length} account${result.accounts.length === 1 ? '' : 's'}. Copying is paused.`)
+      setNotice({
+        kind: 'notice',
+        text:
+          `Closed ${closed} position${closed === 1 ? '' : 's'} and cancelled ` +
+          `${cancelled} order${cancelled === 1 ? '' : 's'} across ` +
+          `${result.accounts.length} account${result.accounts.length === 1 ? '' : 's'}. Copying is paused.`,
+      })
       setDialogOpen(false)
       await refresh()
     } catch (err) {
-      setNotice(`Close all failed: ${err instanceof Error ? err.message : 'unknown error'}`)
+      setNotice({
+        kind: 'error',
+        text: `Close all failed: ${errorText(err, 'unknown error')} — positions may still be open.`,
+      })
       setDialogOpen(false)
     } finally {
       setBusy(false)
@@ -149,8 +144,8 @@ function DeskStrip() {
 
   return (
     <>
-      <div className="h-11 border-b border-line bg-card flex items-center gap-6 px-6 text-sm">
-        <div className="flex items-center gap-2 min-w-32">
+      <div className="min-h-11 border-b border-line bg-card flex flex-wrap items-center gap-x-4 gap-y-1.5 px-4 md:px-6 py-2 md:py-1.5 text-sm">
+        <div className="order-1 flex items-center gap-2">
           <span
             aria-hidden="true"
             className={`inline-block w-2 h-2 rounded-full ${
@@ -163,33 +158,33 @@ function DeskStrip() {
           </span>
         </div>
         {dryRun && (
-          <span className="desk-label text-warn bg-warn-wash px-2 py-0.5 rounded">
+          <span className="order-2 desk-label text-warn-deep bg-warn-wash px-2 py-0.5 rounded">
             Dry run
           </span>
         )}
-        <div className="hidden md:flex items-center gap-6 ml-auto">
+        {can(role, 'control') && (
+          <button
+            onClick={() => setDialogOpen(true)}
+            className="order-3 ml-auto md:order-5 md:ml-0 px-3 py-1.5 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-white transition-colors"
+          >
+            Close all positions
+          </button>
+        )}
+        <div className="order-4 w-full flex items-center justify-between gap-x-4 md:w-auto md:ml-auto md:justify-start md:gap-6">
           <div className="flex items-baseline gap-2">
             <span className="desk-label">Master equity</span>
-            <span className="num text-ink">{money(masterState?.equity)}</span>
+            <span className="num font-semibold text-ink">{money(masterState?.equity)}</span>
           </div>
           <div className="flex items-baseline gap-2">
             <span className="desk-label">Open P&L</span>
             <span
-              className={`num ${
+              className={`num font-semibold ${
                 (masterState?.open_pnl ?? 0) < 0 ? 'text-loss' : 'text-profit'
               }`}
             >
-              {signedMoney(masterState?.open_pnl)}
+              {signed(masterState?.open_pnl)}
             </span>
           </div>
-          {can(role, 'control') && (
-            <button
-              onClick={() => setDialogOpen(true)}
-              className="px-3 py-1.5 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-white transition-colors"
-            >
-              Close all positions
-            </button>
-          )}
         </div>
       </div>
 
@@ -208,7 +203,7 @@ function DeskStrip() {
           </span>
           <button
             onClick={() => setDismissedRiskId(marginCall.id)}
-            className="text-white/80 hover:text-white text-xs font-medium ml-4"
+            className="text-white hover:underline text-xs font-medium ml-4"
           >
             Dismiss
           </button>
@@ -222,7 +217,7 @@ function DeskStrip() {
           className="px-6 py-2.5 bg-warn-wash border-b border-line text-sm text-ink flex items-center justify-between"
         >
           <span>
-            <strong className="text-warn">Account cutoff</strong>
+            <strong className="text-warn-deep">Account cutoff</strong>
             {' — '}{reminderAccountName} reaches its cutoff on{' '}
             <span className="num">{reminderCutoffDate}</span>
             {cutoffDaysPhrase(reminderCutoffDate)}.
@@ -237,11 +232,16 @@ function DeskStrip() {
       )}
 
       {notice && (
-        <div className="px-6 py-2 bg-brand-wash border-b border-line text-sm text-ink flex items-center justify-between">
-          <span>{notice}</span>
+        <div
+          role={notice.kind === 'error' ? 'alert' : 'status'}
+          className={`px-6 py-2 border-b border-line text-sm flex items-center justify-between ${
+            notice.kind === 'error' ? 'bg-loss-wash text-loss-deep' : 'bg-brand-wash text-ink'
+          }`}
+        >
+          <span>{notice.text}</span>
           <button
             onClick={() => setNotice(null)}
-            className="text-ink-soft hover:text-ink text-xs font-medium"
+            className="text-xs font-medium opacity-70 hover:opacity-100"
           >
             Dismiss
           </button>
@@ -274,6 +274,7 @@ export default function Layout() {
   const location = useLocation()
   const navigate = useNavigate()
   const { orgId, role, me } = useOrg()
+  const [menuOpen, setMenuOpen] = useState(false)
 
   const handleLogout = async () => {
     try {
@@ -287,64 +288,118 @@ export default function Layout() {
 
   const items = navItems(orgId, role)
 
-  return (
-    <div className="flex h-screen bg-paper">
-      {/* Sidebar */}
-      <div className="w-56 border-r border-line bg-card flex flex-col">
-        <div className="px-6 pt-6 pb-5 border-b border-line">
-          <h1 className="font-display text-xl text-brand">Copy Desk</h1>
-          <select
-            aria-label="Organization"
-            value={orgId}
-            onChange={(e) => navigate(`/org/${e.target.value}`)}
-            className="mt-2 w-full text-sm border border-line-strong rounded bg-card text-ink px-2 py-1"
-          >
-            {me.orgs.map((o) => (
-              <option key={o.id} value={o.id}>{o.name}</option>
-            ))}
-          </select>
-          <p className="desk-label mt-1">FP Markets · cTrader</p>
-        </div>
+  // The drawer never outlives a navigation, and Escape dismisses it.
+  useEffect(() => {
+    setMenuOpen(false)
+  }, [location.pathname])
 
-        <nav className="mt-4 flex-1">
-          {items.map((item) => {
-            const active = location.pathname === item.path
-            return (
-              <Link
-                key={item.path}
-                to={item.path}
-                className={`relative block px-6 py-2.5 text-sm transition-colors ${
-                  active
-                    ? 'text-brand font-semibold'
-                    : 'text-ink-soft hover:text-ink hover:bg-paper'
-                }`}
-              >
-                {active && (
-                  <span
-                    aria-hidden="true"
-                    className="absolute left-0 top-1 bottom-1 w-0.5 bg-brand rounded-r"
-                  />
-                )}
-                {item.label}
-              </Link>
-            )
-          })}
-        </nav>
+  useEffect(() => {
+    if (!menuOpen) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMenuOpen(false)
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [menuOpen])
 
-        <div className="border-t border-line p-4">
-          <button
-            onClick={handleLogout}
-            className="w-full text-left px-2 py-2 text-sm text-ink-soft hover:text-ink transition-colors"
-          >
-            Log out
-          </button>
-        </div>
+  const sidebarContent = (dense: boolean) => (
+    <>
+      <div className="px-6 pt-6 pb-5 border-b border-line">
+        <Logo size={26} />
+        <select
+          aria-label="Organization"
+          value={orgId}
+          onChange={(e) => navigate(`/org/${e.target.value}`)}
+          className="mt-2 w-full text-sm border border-line-strong rounded bg-card text-ink px-2 py-1"
+        >
+          {me.orgs.map((o) => (
+            <option key={o.id} value={o.id}>{o.name}</option>
+          ))}
+        </select>
+        <p className="desk-label mt-1">FP Markets · cTrader</p>
       </div>
 
+      <nav className="mt-4 flex-1 overflow-y-auto">
+        {items.map((item) => {
+          const active = location.pathname === item.path
+          return (
+            <Link
+              key={item.path}
+              to={item.path}
+              onClick={() => setMenuOpen(false)}
+              className={`relative block px-6 text-sm transition-colors ${
+                dense ? 'py-2.5' : 'py-3'
+              } ${
+                active
+                  ? 'text-brand font-semibold'
+                  : 'text-ink-soft hover:text-ink hover:bg-paper'
+              }`}
+            >
+              {active && (
+                <span
+                  aria-hidden="true"
+                  className="absolute left-0 top-1 bottom-1 w-0.5 bg-brand rounded-r"
+                />
+              )}
+              {item.label}
+            </Link>
+          )
+        })}
+      </nav>
+
+      <div className="border-t border-line p-4">
+        <button
+          onClick={handleLogout}
+          className="w-full text-left px-2 py-2 text-sm text-ink-soft hover:text-ink transition-colors"
+        >
+          Log out
+        </button>
+      </div>
+    </>
+  )
+
+  return (
+    <div className="flex h-screen bg-paper">
+      {/* Persistent sidebar — desktop only */}
+      <div className="hidden lg:flex w-56 border-r border-line bg-card flex-col">
+        {sidebarContent(true)}
+      </div>
+
+      {/* Off-canvas drawer — phone and tablet */}
+      {menuOpen && (
+        <div className="fixed inset-0 z-40 lg:hidden">
+          <div
+            className="absolute inset-0 bg-black/40"
+            onClick={() => setMenuOpen(false)}
+          />
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Navigation"
+            className="relative h-full w-72 max-w-[85vw] bg-card border-r border-line flex flex-col shadow-xl"
+          >
+            {sidebarContent(false)}
+          </div>
+        </div>
+      )}
+
       {/* Main content */}
-      <div className="flex-1 flex flex-col overflow-hidden">
+      <div className="flex-1 flex flex-col overflow-hidden min-w-0">
+        {/* Mobile header: menu + brand */}
+        <div className="lg:hidden h-12 shrink-0 border-b border-line bg-card flex items-center gap-2 px-2">
+          <button
+            aria-label="Open menu"
+            onClick={() => setMenuOpen(true)}
+            className="h-11 w-11 flex items-center justify-center rounded text-ink-soft hover:text-ink"
+          >
+            <svg aria-hidden="true" viewBox="0 0 20 20" className="h-5 w-5">
+              <path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+            </svg>
+          </button>
+          <Logo size={22} textClass="text-base" />
+        </div>
         <DeskStrip />
-        <main className="flex-1 overflow-y-auto p-6">
+        <main className="flex-1 overflow-y-auto p-4 md:p-6">
           <Outlet />
         </main>
       </div>

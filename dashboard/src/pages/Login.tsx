@@ -1,6 +1,9 @@
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { api } from '../lib/api'
+import { errorText } from '../lib/format'
+import Banner from '../components/Banner'
+import Logo from '../components/Logo'
 
 export default function Login() {
   const [email, setEmail] = useState('')
@@ -22,74 +25,57 @@ export default function Login() {
       })
       navigate('/')
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Login failed')
+      setError(errorText(err, 'Login failed'))
     } finally {
       setIsLoading(false)
     }
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-paper py-12 px-4 sm:px-6 lg:px-8">
-      <div className="max-w-md w-full space-y-8">
-        <div>
-          <h2 className="mt-6 text-center font-display text-3xl text-brand">
-            Copy Desk
-          </h2>
-          <p className="mt-2 text-center text-sm text-ink-soft">
-            Sign in to open the desk
-          </p>
+    <div className="min-h-screen flex items-center justify-center bg-paper py-12 px-4">
+      <div className="w-full max-w-md">
+        <div className="text-center mb-8">
+          <h1 className="flex justify-center"><Logo size={38} textClass="text-3xl" /></h1>
+          <p className="mt-2 text-sm text-ink-soft">Sign in to open the desk</p>
         </div>
-        <form className="mt-8 space-y-6" onSubmit={handleSubmit}>
-          {error && (
-            <div className="rounded-md bg-loss-wash p-4">
-              <p className="text-sm font-medium text-loss-deep">{error}</p>
-            </div>
-          )}
-          <div className="rounded-md shadow-sm -space-y-px">
-            <div>
-              <label htmlFor="email" className="sr-only">
-                Email
-              </label>
-              <input
-                id="email"
-                name="email"
-                type="email"
-                autoComplete="email"
-                required
-                className="appearance-none relative block w-full px-3 py-2 border border-line-strong placeholder-ink-faint text-ink rounded-t-md bg-card sm:text-sm"
-                placeholder="Email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-              />
-            </div>
-            <div>
-              <label htmlFor="password" className="sr-only">
-                Password
-              </label>
-              <input
-                id="password"
-                name="password"
-                type="password"
-                autoComplete="current-password"
-                required
-                className="appearance-none relative block w-full px-3 py-2 border border-line-strong placeholder-ink-faint text-ink rounded-b-md bg-card sm:text-sm"
-                placeholder="Password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-              />
-            </div>
-          </div>
-
+        <form
+          className="bg-card rounded-lg border border-line p-8 space-y-5"
+          onSubmit={handleSubmit}
+        >
+          {error && <Banner kind="error">{error}</Banner>}
           <div>
-            <button
-              type="submit"
-              disabled={isLoading}
-              className="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-semibold rounded-md text-white bg-brand hover:bg-brand-deep transition-colors disabled:opacity-50"
-            >
-              {isLoading ? 'Signing in...' : 'Sign in'}
-            </button>
+            <label htmlFor="email" className="desk-label block mb-1">Email</label>
+            <input
+              id="email"
+              name="email"
+              type="email"
+              autoComplete="email"
+              required
+              className="w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+            />
           </div>
-
+          <div>
+            <label htmlFor="password" className="desk-label block mb-1">Password</label>
+            <input
+              id="password"
+              name="password"
+              type="password"
+              autoComplete="current-password"
+              required
+              className="w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+          </div>
+          <button
+            type="submit"
+            disabled={isLoading}
+            className="w-full py-2.5 rounded bg-brand text-white text-sm font-semibold hover:bg-brand-deep transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {isLoading ? 'Signing in...' : 'Sign in'}
+          </button>
           <p className="text-center text-sm text-ink-soft">
             New here?{' '}
             <Link to="/register" className="font-medium text-brand hover:text-brand-deep">

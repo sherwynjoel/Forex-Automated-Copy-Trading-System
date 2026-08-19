@@ -24,17 +24,30 @@ test('Layout renders sidebar navigation', async () => {
     if (url === '/api/me') {
       return Promise.resolve(meResponse([{ id: 1, name: 'Acme', role: 'owner' }]))
     }
-    return Promise.resolve(
-      new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } })
-    )
+    const json = (payload: unknown) =>
+      Promise.resolve(new Response(JSON.stringify(payload), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      }))
+    // List endpoints must answer with lists — Overview renders under this
+    // route and crashes on a bare object where an array belongs.
+    if (url.includes('/accounts')) return json([])
+    if (url.includes('/settings')) return json({ copying_enabled: true, dry_run: false })
+    if (url.includes('/state')) {
+      return json({ accounts: {}, master_positions: [], pending_orders: [], drift: [] })
+    }
+    if (url.includes('/events')) return json([])
+    // Optional endpoints (overview stats, analytics) may honestly 404 —
+    // Overview renders its placeholders on that path.
+    return Promise.resolve(new Response(null, { status: 404 }))
   })
   vi.stubGlobal('fetch', fetchMock)
   window.history.pushState({}, '', '/org/1')
 
   render(<App />)
 
-  // Sidebar should be visible with title
-  expect(await screen.findByText(/Copy Desk/i)).toBeInTheDocument()
+  // The brand lockup renders in the sidebar (and again in the mobile header,
+  // which jsdom cannot hide via the lg: breakpoint).
+  expect((await screen.findAllByText(/MirrorFleet|Fleet/)).length).toBeGreaterThan(0)
 
   // Navigation links should be present (check for all matches)
   const overviewLinks = screen.getAllByText(/Overview/i)

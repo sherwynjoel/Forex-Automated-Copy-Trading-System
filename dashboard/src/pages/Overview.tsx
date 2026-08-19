@@ -5,6 +5,11 @@ import type {
   Account, Analytics, ApiState, OverviewStats, Settings, StateSnapshot,
 } from '../lib/types'
 import KillSwitch from '../components/KillSwitch'
+import StatTile from '../components/StatTile'
+import StatusDot from '../components/StatusDot'
+import Banner from '../components/Banner'
+import { Sparkline, WinRateMeter, TradeBar } from '../components/charts'
+import { money, signed, errorText } from '../lib/format'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
 
 /**
@@ -36,38 +41,7 @@ async function loadState(
   return { accounts: envelope.accounts ?? {}, envelope }
 }
 
-function money(value: number | null | undefined): string {
-  if (value == null) return '—'
-  return value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-}
-
-function signed(value: number | null | undefined): string {
-  if (value == null) return '—'
-  const formatted = Math.abs(value).toLocaleString('en-US', {
-    minimumFractionDigits: 2, maximumFractionDigits: 2,
-  })
-  return `${value < 0 ? '-' : '+'}${formatted}`
-}
-
-function Tile({ label, value, tone, sub }: {
-  label: string
-  value: string
-  tone?: 'profit' | 'loss' | 'brand'
-  sub?: React.ReactNode
-}) {
-  const toneClass =
-    tone === 'profit' ? 'text-profit'
-    : tone === 'loss' ? 'text-loss'
-    : tone === 'brand' ? 'text-brand'
-    : 'text-ink'
-  return (
-    <div className="rounded-lg border border-line bg-card p-4">
-      <div className="desk-label">{label}</div>
-      <div className={`num text-2xl mt-1 ${toneClass}`}>{value}</div>
-      {sub != null && <div className="text-xs text-ink-faint mt-0.5">{sub}</div>}
-    </div>
-  )
-}
+// Shared desk primitives: one tile, one banner, one formatter set app-wide.
 
 export default function Overview() {
   const { orgId } = useOrg()
@@ -78,6 +52,7 @@ export default function Overview() {
   const [stats, setStats] = useState<OverviewStats | null>(null)
   const [copierPerf, setCopierPerf] = useState<Analytics | null>(null)
   const [loading, setLoading] = useState(true)
+  const [actionError, setActionError] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   // Load accounts and settings on mount
@@ -93,7 +68,7 @@ export default function Overview() {
         setAccounts(accs)
         setSettings(sett)
       } catch (err) {
-        setError(String(err))
+        setError(errorText(err, 'Failed to load the overview'))
       } finally {
         setLoading(false)
       }
@@ -142,6 +117,7 @@ export default function Overview() {
 
   const handlePauseResume = async (accountId: number, isPaused: boolean) => {
     try {
+      setActionError(null)
       const endpoint = isPaused ? 'control/resume' : 'control/pause'
       await orgApi(orgId, endpoint, {
         method: 'POST',
@@ -149,7 +125,8 @@ export default function Overview() {
       })
       await refreshState()
     } catch (err) {
-      console.error('Failed to update account status:', err)
+      setActionError(
+        `${isPaused ? 'Resume' : 'Pause'} failed: ${errorText(err, 'the copier did not respond')}`)
     }
   }
 
@@ -162,7 +139,7 @@ export default function Overview() {
   }
 
   if (error) {
-    return <div className="text-loss">Error: {error}</div>
+    return <Banner kind="error">{error}</Banner>
   }
 
   const masterAccount = accounts.find((a) => a.role === 'master')
@@ -198,6 +175,14 @@ export default function Overview() {
 
   return (
     <div className="space-y-6 max-w-6xl">
+      <header>
+        <h1 className="page-title">Overview</h1>
+      </header>
+
+      {actionError && (
+        <Banner kind="error" onDismiss={() => setActionError(null)}>{actionError}</Banner>
+      )}
+
       {/* Token Refresh Failure Alert */}
       {refreshFailedAccounts.length > 0 && (
         <div
@@ -205,13 +190,17 @@ export default function Overview() {
           role="alert"
           className="bg-loss text-white p-4 rounded-lg flex items-start gap-3"
         >
-          <span className="text-2xl leading-none" aria-hidden="true">⚠️</span>
+          <svg aria-hidden="true" viewBox="0 0 20 20" className="h-6 w-6 shrink-0 mt-0.5">
+            <path d="M10 2 1.5 17h17L10 2z" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+            <rect x="9.25" y="8" width="1.5" height="4.5" rx="0.75" fill="currentColor" />
+            <circle cx="10" cy="14.6" r="0.9" fill="currentColor" />
+          </svg>
           <div>
             <p className="font-bold">
               Token refresh failed for account{refreshFailedAccounts.length > 1 ? 's' : ''}:{' '}
               {refreshFailedAccounts.map((a) => a.trader_login).join(', ')}
             </p>
-            <p className="text-sm mt-1 text-white/80">
+            <p className="text-sm mt-1 text-white">
               Copying for these accounts will stop when the token expires. Reconnect via
               Accounts &rarr; Connect cTrader ID.
             </p>
@@ -221,7 +210,7 @@ export default function Overview() {
 
       {/* Portfolio stat row */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <Tile
+        <StatTile
           label="Portfolio value"
           value={money(portfolioValue)}
           tone="brand"
@@ -231,18 +220,18 @@ export default function Overview() {
             </span>
           ) : 'vs yesterday: no snapshot yet'}
         />
-        <Tile
+        <StatTile
           label="Accounts connected"
           value={String(stats?.accounts_connected ?? accounts.length)}
           sub={`${stats?.masters ?? (masterAccount ? 1 : 0)} master · ${stats?.active_slaves ?? slaveAccounts.length} active slaves`}
         />
-        <Tile
+        <StatTile
           label="Open P&L"
           value={signed(totalOpenPnl)}
           tone={totalOpenPnl < 0 ? 'loss' : 'profit'}
           sub={`${openTrades} open trade${openTrades === 1 ? '' : 's'}`}
         />
-        <Tile
+        <StatTile
           label="Copied today"
           value={String(stats?.copied_today ?? '—')}
           sub={stats && stats.degraded > 0
@@ -272,20 +261,37 @@ export default function Overview() {
               <div className={`num text-xl mt-0.5 ${copierPerf.net_pnl < 0 ? 'text-loss' : 'text-profit'}`}>
                 {signed(copierPerf.net_pnl)}
               </div>
+              <div data-chart="perf-sparkline" className="mt-2">
+                <Sparkline
+                  points={copierPerf.equity_curve}
+                  label={`Balance trend across ${copierPerf.closed_trades} closed trades`}
+                />
+              </div>
             </div>
             <div>
               <div className="desk-label">Win rate</div>
               <div className="num text-xl mt-0.5 text-ink">
                 {copierPerf.win_rate != null ? `${(copierPerf.win_rate * 100).toFixed(1)}%` : '—'}
               </div>
+              <WinRateMeter wins={copierPerf.wins} losses={copierPerf.losses} />
             </div>
             <div>
               <div className="desk-label">Best trade</div>
               <div className="num text-xl mt-0.5 text-profit">{signed(copierPerf.best_trade)}</div>
+              <TradeBar
+                value={copierPerf.best_trade}
+                max={Math.max(Math.abs(copierPerf.best_trade ?? 0), Math.abs(copierPerf.worst_trade ?? 0))}
+                tone="profit"
+              />
             </div>
             <div>
               <div className="desk-label">Worst trade</div>
               <div className="num text-xl mt-0.5 text-loss">{signed(copierPerf.worst_trade)}</div>
+              <TradeBar
+                value={copierPerf.worst_trade}
+                max={Math.max(Math.abs(copierPerf.best_trade ?? 0), Math.abs(copierPerf.worst_trade ?? 0))}
+                tone="loss"
+              />
             </div>
           </div>
         )}
@@ -294,7 +300,7 @@ export default function Overview() {
       {/* Kill Switch and Status Bar */}
       <div className="bg-card p-6 rounded-lg border border-line flex items-center justify-between flex-wrap gap-4">
         <div>
-          <h2 className="font-display text-lg text-ink">Copying Status</h2>
+          <h2 className="font-display text-lg font-semibold text-ink">Copying Status</h2>
           <p className="text-sm text-ink-soft mt-1">
             {settings?.copying_enabled ? 'Actively copying trades' : 'Copying paused'}
           </p>
@@ -311,7 +317,7 @@ export default function Overview() {
           </p>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+            <table className="stack-table w-full text-sm">
               <thead>
                 <tr className="text-left border-b border-line">
                   <th className="desk-label px-5 py-2 font-semibold">Status</th>
@@ -337,24 +343,24 @@ export default function Overview() {
                   return (
                     <tr key={`${copy.slave_account_id}-${copy.master_position_id}-${copy.master_order_id}-${i}`}
                         className="border-b border-line last:border-0">
-                      <td className="px-5 py-2.5">
+                      <td data-label="Status" className="px-5 py-2.5">
                         <span className={`text-xs font-medium px-2 py-0.5 rounded ${
-                          copy.status === 'active' ? 'bg-profit-wash text-profit'
-                          : copy.status === 'failed' ? 'bg-loss-wash text-loss'
-                          : copy.status === 'closed' ? 'bg-paper text-ink-soft'
-                          : 'bg-warn-wash text-warn'
+                          copy.status === 'active' ? 'bg-profit-wash text-profit-deep'
+                          : copy.status === 'failed' ? 'bg-loss-wash text-loss-deep'
+                          : copy.status === 'closed' ? 'bg-line text-ink-soft'
+                          : 'bg-warn-wash text-warn-deep'
                         }`}>
                           {copy.status}
                         </span>
                       </td>
-                      <td className="num px-3 py-2.5 text-ink-soft">
+                      <td data-label="Master" className="tnum px-3 py-2.5 text-ink-soft">
                         {copy.master_position_id ?? copy.master_order_id ?? '—'}
                       </td>
-                      <td className="px-3 py-2.5">
-                        {copy.slave_nickname || <span className="num">{copy.slave_login}</span>}
+                      <td data-label="Slave" className="px-3 py-2.5">
+                        {copy.slave_nickname || <span className="tnum">{copy.slave_login}</span>}
                       </td>
-                      <td className="num px-3 py-2.5">{copy.symbol ?? '—'}</td>
-                      <td className="num px-5 py-2.5 text-right">
+                      <td data-label="Symbol" className="tnum px-3 py-2.5">{copy.symbol ?? '—'}</td>
+                      <td data-label="P&L" className="tnum px-5 py-2.5 text-right">
                         {copy.status === 'failed' && copy.error ? (
                           <span className="text-xs text-loss" title={copy.error}>
                             {copy.error.length > 24 ? copy.error.slice(0, 24) + '…' : copy.error}
@@ -378,7 +384,7 @@ export default function Overview() {
       {masterAccount && masterState && (
         <div className="bg-card p-6 rounded-lg border border-line">
           <div className="flex items-baseline justify-between mb-5">
-            <h3 className="font-display text-xl text-ink">
+            <h3 className="font-display text-xl font-semibold text-ink">
               Master Account ({masterAccount.trader_login})
             </h3>
             {masterAccount.nickname && (
@@ -388,18 +394,18 @@ export default function Overview() {
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div className="rounded border border-line bg-paper p-4">
               <div className="desk-label">Equity</div>
-              <div className="num text-2xl mt-1 text-brand">${masterState.equity?.toFixed(2)}</div>
+              <div className="num text-2xl font-semibold mt-1 text-brand">{money(masterState.equity)}</div>
             </div>
             <div className="rounded border border-line bg-paper p-4">
               <div className="desk-label">Balance</div>
-              <div className="num text-2xl mt-1 text-ink">${masterState.balance?.toFixed(2)}</div>
+              <div className="num text-2xl font-semibold mt-1 text-ink">{money(masterState.balance)}</div>
             </div>
             <div className="rounded border border-line bg-paper p-4">
               <div className={`desk-label ${masterState.open_pnl >= 0 ? 'text-profit' : 'text-loss'}`}>
                 Open P&L
               </div>
-              <div className={`num text-2xl mt-1 ${masterState.open_pnl >= 0 ? 'text-profit' : 'text-loss'}`}>
-                ${masterState.open_pnl?.toFixed(2)}
+              <div className={`num text-2xl font-semibold mt-1 ${masterState.open_pnl >= 0 ? 'text-profit' : 'text-loss'}`}>
+                {signed(masterState.open_pnl)}
               </div>
             </div>
           </div>
@@ -409,7 +415,7 @@ export default function Overview() {
       {/* Slave Grid */}
       {slaveAccounts.length > 0 && (
         <div>
-          <h3 className="font-display text-xl text-ink mb-4">Slave Accounts</h3>
+          <h3 className="font-display text-xl font-semibold text-ink mb-4">Slave Accounts</h3>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {slaveAccounts.map((slave) => {
               const slaveState = state[String(slave.ctid_trader_account_id)]
@@ -417,13 +423,13 @@ export default function Overview() {
               const isDegraded = slave.status === 'degraded'
               const isRefreshFailed = slave.connection_status === 'refresh_failed'
 
-              let statusIcon = '🟢'
+              let statusTone: 'ok' | 'paused' | 'degraded' = 'ok'
               let statusLabel = 'OK'
               if (isPaused) {
-                statusIcon = '⏸'
+                statusTone = 'paused'
                 statusLabel = 'Paused'
               } else if (isDegraded) {
-                statusIcon = '🔴'
+                statusTone = 'degraded'
                 statusLabel = 'Degraded'
               }
 
@@ -431,7 +437,7 @@ export default function Overview() {
                 <div
                   key={slave.ctid_trader_account_id}
                   data-testid="slave-tile"
-                  className={`bg-card p-5 rounded-lg border transition-shadow hover:shadow-md ${
+                  className={`bg-card p-5 rounded-lg border transition-colors hover:border-line-strong ${
                     isRefreshFailed ? 'border-warn' : 'border-line'
                   }`}
                 >
@@ -445,9 +451,9 @@ export default function Overview() {
                         {slave.nickname ? `${slave.trader_login} · ` : ''}ID: {slave.ctid_trader_account_id}
                       </p>
                     </div>
-                    <div className="text-center">
-                      <div className="text-2xl">{statusIcon}</div>
-                      <p className="desk-label mt-0.5">{statusLabel}</p>
+                    <div className="flex flex-col items-center gap-1">
+                      <StatusDot tone={statusTone} />
+                      <p className="desk-label">{statusLabel}</p>
                     </div>
                   </div>
 
@@ -466,9 +472,9 @@ export default function Overview() {
                   {isRefreshFailed && (
                     <div
                       data-testid="slave-refresh-failed-marker"
-                      className="mb-4 px-3 py-2 bg-warn-wash border border-warn/40 text-warn text-xs font-semibold rounded flex items-center gap-1"
+                      className="mb-4 px-3 py-2 bg-warn-wash border border-warn/40 text-warn-deep text-xs font-semibold rounded flex items-center gap-1.5"
                     >
-                      <span aria-hidden="true">🔑</span> Token Refresh Failed - reconnect required
+                      <StatusDot tone="warn" /> Token refresh failed — reconnect required
                     </div>
                   )}
 
@@ -477,11 +483,11 @@ export default function Overview() {
                     <div className="space-y-1.5 mb-4 text-sm">
                       <div className="flex justify-between">
                         <span className="text-ink-soft">Equity:</span>
-                        <span className="num text-ink">${slaveState.equity?.toFixed(2)}</span>
+                        <span className="num text-ink">{money(slaveState.equity)}</span>
                       </div>
                       <div className="flex justify-between">
                         <span className="text-ink-soft">Balance:</span>
-                        <span className="num text-ink">${slaveState.balance?.toFixed(2)}</span>
+                        <span className="num text-ink">{money(slaveState.balance)}</span>
                       </div>
                       <div className="flex justify-between">
                         <span className="text-ink-soft">Open Positions:</span>
@@ -493,10 +499,10 @@ export default function Overview() {
                   {/* Action Button */}
                   <button
                     onClick={() => handlePauseResume(slave.ctid_trader_account_id, isPaused)}
-                    className={`w-full py-2 px-4 rounded text-sm font-semibold text-white transition-colors ${
+                    className={`w-full py-2 px-4 rounded text-sm font-semibold transition-colors ${
                       isPaused
-                        ? 'bg-profit hover:bg-brand-deep'
-                        : 'bg-warn hover:opacity-90'
+                        ? 'bg-profit text-white hover:bg-profit-deep'
+                        : 'border border-brand text-brand hover:bg-brand-wash hover:text-brand-deep'
                     }`}
                   >
                     {isPaused ? 'Resume' : 'Pause'}

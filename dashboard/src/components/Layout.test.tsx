@@ -303,3 +303,36 @@ test('the Performance nav link points at the org-scoped route', async () => {
   const link = await screen.findByRole('link', { name: 'Performance' })
   expect(link).toHaveAttribute('href', '/org/1/performance')
 })
+
+test('mobile menu button opens the navigation drawer and a nav tap closes it', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  mockRoutes()
+  renderLayout()
+
+  // Drawer is closed by default
+  expect(screen.queryByRole('dialog', { name: /navigation/i })).not.toBeInTheDocument()
+
+  await userEvent.click(screen.getByRole('button', { name: /open menu/i }))
+  const drawer = await screen.findByRole('dialog', { name: /navigation/i })
+  expect(drawer).toBeInTheDocument()
+
+  // Tapping a nav destination closes the drawer
+  const { within } = await import('@testing-library/react')
+  await userEvent.click(within(drawer).getByRole('link', { name: /accounts/i }))
+  await waitFor(() => {
+    expect(screen.queryByRole('dialog', { name: /navigation/i })).not.toBeInTheDocument()
+  })
+})
+
+test('Escape closes the mobile navigation drawer', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  mockRoutes()
+  renderLayout()
+
+  await userEvent.click(screen.getByRole('button', { name: /open menu/i }))
+  await screen.findByRole('dialog', { name: /navigation/i })
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => {
+    expect(screen.queryByRole('dialog', { name: /navigation/i })).not.toBeInTheDocument()
+  })
+})

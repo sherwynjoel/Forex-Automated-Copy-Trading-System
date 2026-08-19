@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { orgApi, eventsSocket } from '../lib/api'
 import { useOrg } from '../lib/org'
+import { formatWhen } from '../lib/format'
 import { EventResponse } from '../lib/types'
 
 export default function Logs() {
@@ -131,18 +132,18 @@ export default function Logs() {
       case 'error':
         return 'bg-loss-wash text-loss-deep'
       case 'warning':
-        return 'bg-warn-wash text-warn'
+        return 'bg-warn-wash text-warn-deep'
       case 'info':
-        return 'bg-brand-wash text-brand'
+        return 'bg-brand-wash text-brand-deep'
       default:
-        return 'bg-paper text-ink'
+        return 'bg-line text-ink-soft'
     }
   }
 
   return (
     <div className="space-y-6 max-w-6xl">
       <header>
-        <h1 className="font-display text-2xl text-ink">Logs</h1>
+        <h1 className="page-title">Logs</h1>
         <p className="text-sm text-ink-soft mt-1">
           The append-only audit trail: every master event, copy action,
           connection change, and control command.
@@ -220,7 +221,7 @@ export default function Logs() {
       {/* Events Table */}
       <div className="bg-card rounded-lg border border-line overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-line">
+          <table className="stack-table min-w-full divide-y divide-line">
             <thead className="bg-paper">
               <tr>
                 <th className="desk-label px-6 py-3 text-left">
@@ -259,25 +260,25 @@ export default function Logs() {
                 </tr>
               )}
               {events.map((event) => (
-                <tr key={event.id} className="hover:bg-paper">
-                  <td className="num px-6 py-4 whitespace-nowrap text-sm text-ink">
-                    {event.ts}
+                <tr key={event.id} className="hover:bg-line">
+                  <td data-label="Timestamp" className="num px-6 py-4 whitespace-nowrap text-sm text-ink" title={event.ts}>
+                    {formatWhen(event.ts)}
                   </td>
-                  <td className="num px-6 py-4 whitespace-nowrap text-sm text-ink">
+                  <td data-label="Account" className="num px-6 py-4 whitespace-nowrap text-sm text-ink">
                     {event.account_id || '-'}
                   </td>
-                  <td className="num px-6 py-4 whitespace-nowrap text-sm text-ink">
+                  <td data-label="Category" className="px-6 py-4 whitespace-nowrap text-sm text-ink">
                     {event.category}
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm">
+                  <td data-label="Severity" className="px-6 py-4 whitespace-nowrap text-sm">
                     <span className={`px-3 py-1 inline-flex text-xs leading-5 font-semibold rounded-full ${getSeverityColor(event.severity)}`}>
                       {event.severity}
                     </span>
                   </td>
-                  <td className="num px-6 py-4 whitespace-nowrap text-sm text-ink">
+                  <td data-label="Latency (ms)" className="num px-6 py-4 whitespace-nowrap text-sm text-ink">
                     {event.latency_ms ?? '-'}
                   </td>
-                  <td className="px-6 py-4 text-sm text-ink">
+                  <td data-label="Payload" className="px-6 py-4 text-sm text-ink">
                     <button
                       onClick={() => toggleRowExpand(event.id)}
                       className="text-brand hover:text-brand-deep underline"

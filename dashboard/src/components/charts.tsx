@@ -1,7 +1,8 @@
 import { ReactNode, useEffect, useRef, useState } from 'react'
+import { signed as signedFmt } from '../lib/format'
 
 /**
- * Hand-rolled SVG charts in the Copy Desk design system.
+ * Hand-rolled SVG charts in the MirrorFleet design system.
  *
  * Rules baked in (see the dataviz method): one axis per chart, recessive
  * hairline grid, thin marks with the data end rounded, sign never encoded by
@@ -10,14 +11,14 @@ import { ReactNode, useEffect, useRef, useState } from 'react'
  * tokens with tabular-mono numerals, and a hover layer on every plot.
  */
 
-const INK_SOFT = '#5c6b66'
-const INK_FAINT = '#8a968f'
-const LINE = '#e3e8e5'
-const LINE_STRONG = '#c9d2cd'
-const BRAND = '#0e5a45'
-const BRAND_WASH = '#e9f1ee'
-const PROFIT = '#0b7a4b'
-const LOSS = '#b42332'
+const INK_SOFT = 'var(--color-ink-soft)'
+const INK_FAINT = 'var(--color-ink-faint)'
+const LINE = 'var(--color-line)'
+const LINE_STRONG = 'var(--color-line-strong)'
+const BRAND = 'var(--color-brand)'
+const BRAND_WASH = 'var(--color-brand-wash)'
+const PROFIT = 'var(--color-profit)'
+const LOSS = 'var(--color-loss)'
 
 const MONO = '"IBM Plex Mono", Menlo, monospace'
 
@@ -55,12 +56,7 @@ function Tooltip({ tip }: { tip: TooltipState | null }) {
   )
 }
 
-function signedFmt(value: number): string {
-  const formatted = Math.abs(value).toLocaleString('en-US', {
-    minimumFractionDigits: 2, maximumFractionDigits: 2,
-  })
-  return `${value < 0 ? '-' : '+'}${formatted}`
-}
+
 
 function shortDate(ms: number): string {
   return new Date(ms).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })
@@ -154,7 +150,7 @@ export function EquityCurve({ points, height = 220 }: {
         <path d={path} fill="none" stroke={BRAND} strokeWidth={2}
               strokeLinejoin="round" strokeLinecap="round" />
         {tip && (
-          <circle cx={tip.x} cy={tip.y} r={4} fill={BRAND} stroke="#fff" strokeWidth={2} />
+          <circle cx={tip.x} cy={tip.y} r={4} fill={BRAND} stroke="var(--color-paper)" strokeWidth={2} />
         )}
         {points.length > 0 && (
           <>
@@ -337,7 +333,7 @@ export function CandleChart({ bars, lines = [], height = 300, digits = 5 }: {
                     stroke={color} strokeWidth={1} />
               <rect
                 x={cx - bodyW / 2} y={bodyTop} width={bodyW} height={bodyH}
-                fill={up ? '#ffffff' : color}
+                fill={up ? 'var(--color-paper)' : color}
                 stroke={color} strokeWidth={1.2}
               />
               <rect
@@ -389,6 +385,80 @@ export function CandleChart({ bars, lines = [], height = 300, digits = 5 }: {
         )}
       </svg>
       <Tooltip tip={tip} />
+    </div>
+  )
+}
+
+/* ---------------------------------------------------------------------------
+   Micro-visualizations for stat tiles.  Same token palette as the big
+   charts; small enough to sit under a number without shouting.
+--------------------------------------------------------------------------- */
+
+/** Tiny trend line for a stat tile — brand hue, no axes, no grid. */
+export function Sparkline({ points, label }: {
+  points: { timestamp: number; balance: number }[]
+  label: string
+}) {
+  if (points.length < 2) return null
+  const W = 160
+  const H = 36
+  const PAD = 3
+  const values = points.map((pt) => pt.balance)
+  const min = Math.min(...values)
+  const max = Math.max(...values)
+  const span = max - min || 1
+  const x = (i: number) => PAD + (i / (points.length - 1)) * (W - 2 * PAD)
+  const y = (v: number) => H - PAD - ((v - min) / span) * (H - 2 * PAD)
+  const d = values.map((v, i) => `${i === 0 ? 'M' : 'L'}${x(i).toFixed(2)},${y(v).toFixed(2)}`).join(' ')
+  const last = values[values.length - 1]
+  return (
+    <svg
+      role="img"
+      aria-label={label}
+      viewBox={`0 0 ${W} ${H}`}
+      preserveAspectRatio="none"
+      className="w-full h-9"
+    >
+      <path d={d} fill="none" stroke={BRAND} strokeWidth={2}
+            strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+      <circle cx={x(values.length - 1)} cy={y(last)} r={3} fill={BRAND}
+              stroke="var(--color-card)" strokeWidth={1.5} />
+    </svg>
+  )
+}
+
+/** Single-ratio meter: profit fill on a quiet track. Not a pie of two. */
+export function WinRateMeter({ wins, losses }: { wins: number; losses: number }) {
+  const total = wins + losses
+  if (total === 0) return null
+  const pct = (wins / total) * 100
+  return (
+    <div
+      data-chart="win-meter"
+      role="img"
+      aria-label={`Win rate ${pct.toFixed(1)}%: ${wins} wins, ${losses} losses`}
+      className="mt-2 h-1.5 rounded-full bg-line overflow-hidden"
+    >
+      <div className="h-full rounded-full bg-profit" style={{ width: `${pct}%` }} />
+    </div>
+  )
+}
+
+/** Magnitude bar for one figure of a labeled pair sharing `max` as scale. */
+export function TradeBar({ value, max, tone }: {
+  value: number | null
+  max: number
+  tone: 'profit' | 'loss'
+}) {
+  if (value == null || max <= 0) return null
+  const pct = Math.min((Math.abs(value) / max) * 100, 100)
+  return (
+    <div data-chart="trade-bar" aria-hidden="true"
+         className="mt-2 h-1.5 rounded-full bg-line overflow-hidden">
+      <div
+        className={`h-full rounded-full ${tone === 'profit' ? 'bg-profit' : 'bg-loss'}`}
+        style={{ width: `${pct}%` }}
+      />
     </div>
   )
 }

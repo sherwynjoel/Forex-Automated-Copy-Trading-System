@@ -3,36 +3,14 @@ import { orgApi } from '../lib/api'
 import { useOrg } from '../lib/org'
 import type { Account, Analytics } from '../lib/types'
 import { EquityCurve, PnlBars } from '../components/charts'
+import StatTile from '../components/StatTile'
+import { signed } from '../lib/format'
 
 function accountLabel(account: Account): string {
   const name = account.nickname || `Account ${account.trader_login}`
   return `${name} · ${account.trader_login} · ${account.is_live ? 'Live' : 'Demo'}`
 }
 
-function signed(value: number | null | undefined): string {
-  if (value == null) return '—'
-  const formatted = Math.abs(value).toLocaleString('en-US', {
-    minimumFractionDigits: 2, maximumFractionDigits: 2,
-  })
-  return `${value < 0 ? '-' : '+'}${formatted}`
-}
-
-function StatTile({ label, value, tone, sub }: {
-  label: string
-  value: string
-  tone?: 'profit' | 'loss' | 'neutral'
-  sub?: string
-}) {
-  const toneClass =
-    tone === 'profit' ? 'text-profit' : tone === 'loss' ? 'text-loss' : 'text-ink'
-  return (
-    <div className="rounded-lg border border-line bg-card p-4">
-      <div className="desk-label">{label}</div>
-      <div className={`num text-2xl mt-1 ${toneClass}`}>{value}</div>
-      {sub && <div className="text-xs text-ink-faint mt-0.5">{sub}</div>}
-    </div>
-  )
-}
 
 /**
  * The performance dashboard: everything is derived from broker deal history
@@ -91,7 +69,7 @@ export default function Performance() {
   return (
     <div className="space-y-6 max-w-6xl">
       <header>
-        <h1 className="font-display text-2xl text-ink">Performance</h1>
+        <h1 className="page-title">Performance</h1>
         <p className="text-sm text-ink-soft mt-1">
           Realized results from the broker's own deal history — closed trades
           only; open positions live on Overview.
@@ -132,7 +110,7 @@ export default function Performance() {
           </select>
         </div>
         {a?.truncated && (
-          <p className="text-xs text-warn">
+          <p className="text-xs font-medium text-warn-deep">
             Some weeks had more fills than one request returns; totals may be
             slightly under-counted.
           </p>
@@ -140,7 +118,7 @@ export default function Performance() {
       </div>
 
       {error && (
-        <div className="rounded border border-loss/30 bg-loss-wash px-4 py-3 text-sm text-loss-deep">
+        <div role="alert" className="rounded border border-loss/30 bg-loss-wash px-4 py-3 text-sm text-loss-deep">
           {error}
         </div>
       )}
@@ -218,7 +196,7 @@ export default function Performance() {
             {/* Per-symbol */}
             <section className="rounded-lg border border-line bg-card">
               <h2 className="desk-label px-5 pt-5 pb-3">By symbol</h2>
-              <table className="w-full text-sm">
+              <table className="stack-table w-full text-sm">
                 <thead>
                   <tr className="text-left border-b border-line">
                     <th className="desk-label px-5 py-2 font-semibold">Symbol</th>
@@ -229,9 +207,9 @@ export default function Performance() {
                 <tbody>
                   {a.per_symbol.map((row) => (
                     <tr key={row.symbol} className="border-b border-line last:border-0">
-                      <td className="num px-5 py-2.5">{row.symbol}</td>
-                      <td className="num px-3 py-2.5 text-right">{row.trades}</td>
-                      <td className={`num px-5 py-2.5 text-right font-medium ${
+                      <td data-label="Symbol" className="num px-5 py-2.5">{row.symbol}</td>
+                      <td data-label="Trades" className="num px-3 py-2.5 text-right">{row.trades}</td>
+                      <td data-label="Gross P&L" className={`num px-5 py-2.5 text-right font-medium ${
                         row.gross_pnl >= 0 ? 'text-profit' : 'text-loss'
                       }`}>
                         {signed(row.gross_pnl)}

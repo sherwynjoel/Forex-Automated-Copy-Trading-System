@@ -1,36 +1,44 @@
 @import "tailwindcss";
 
 /* ---------------------------------------------------------------------------
-   Copy Desk design tokens — "private trading desk" direction.
+   MirrorFleet design tokens — "insights console" direction.
 
-   Palette: cool paper ground, white card surfaces, ledger-ink text, and a
-   deep bank green as the single brand hue.  Profit/loss/warning are the only
-   other saturated colors on the page; everything else stays hairline-quiet
-   so the numbers (always IBM Plex Mono, always tabular) carry the screen.
+   Modeled on the modern observability look: soft gray page ground, flat
+   white cards with hairline purple-gray borders, violet as the single
+   primary (buttons, links, active states), and amber / teal / pink as the
+   supporting data colors.  Ink is a purple-tinted near-black.  Type is
+   Rubik throughout; numbers stay IBM Plex Mono, always tabular.
 --------------------------------------------------------------------------- */
 
 @theme {
-  --color-paper: #f7f8f7;
+  --color-paper: #f8f8fa;
   --color-card: #ffffff;
-  --color-ink: #1a2421;
-  --color-ink-soft: #5c6b66;
-  --color-ink-faint: #8a968f;
-  --color-line: #e3e8e5;
-  --color-line-strong: #c9d2cd;
-  --color-brand: #0e5a45;
-  --color-brand-deep: #0a4534;
-  --color-brand-wash: #e9f1ee;
-  --color-profit: #0b7a4b;
-  --color-profit-wash: #e8f4ee;
-  --color-loss: #b42332;
-  --color-loss-deep: #8f1b27;
-  --color-loss-wash: #f9ebec;
-  --color-warn: #9a6b0b;
-  --color-warn-wash: #f8f1df;
+  --color-ink: #2b2233;
+  --color-ink-soft: #6e6379;
+  --color-ink-faint: #7a6e87;
+  --color-line: #e7e4ee;
+  --color-line-strong: #cfc9dc;
+  --color-brand: #6c5fc7;
+  --color-brand-deep: #5648a8;
+  --color-brand-wash: #efecfb;
+  --color-profit: #15803d;
+  --color-profit-deep: #116230;
+  --color-profit-wash: #e8f5ee;
+  --color-loss: #d6344b;
+  --color-loss-deep: #a82333;
+  --color-loss-wash: #fceceb;
+  --color-warn: #9a6700;
+  --color-warn-deep: #7a5200;
+  --color-warn-wash: #fbf0da;
 
-  --font-sans: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
-  --font-mono: "IBM Plex Mono", "SFMono-Regular", Menlo, monospace;
-  --font-display: "Fraunces", Georgia, "Times New Roman", serif;
+  --font-sans: "Rubik", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "JetBrains Mono", "SFMono-Regular", Menlo, monospace;
+  --font-display: "Rubik", "Helvetica Neue", Arial, sans-serif;
+}
+
+/* Native widgets follow the light ground. */
+:root {
+  color-scheme: light;
 }
 
 body {
@@ -40,14 +48,31 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* Every number on a trading desk lines up in columns. */
-.num {
-  font-family: var(--font-mono);
+/* Every number in the product: Rubik digits, tabular so columns align,
+   medium weight so figures stay crisp. (.tnum is the same style — kept as
+   an alias where markup already uses it.) */
+.num,
+.tnum {
+  font-family: var(--font-sans);
   font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  letter-spacing: 0.01em;
 }
 
 .font-display {
   font-family: var(--font-display);
+  font-weight: 600;
+}
+
+/* Page headings — Rubik bold, console-sized. */
+.page-title {
+  font-family: var(--font-display);
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+  color: var(--color-ink);
+  text-wrap: balance;
 }
 
 /* Small-caps section labels — the quiet structural voice of the desk. */
@@ -59,7 +84,68 @@ body {
   color: var(--color-ink-soft);
 }
 
-/* Visible keyboard focus everywhere, in the brand hue. */
+/* Selects paint their own chrome, with the violet chevron. */
+select.bg-card {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 6l4 4 4-4' fill='none' stroke='%236c5fc7' stroke-width='1.5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.55rem center;
+  background-size: 0.85rem;
+  padding-right: 2rem;
+}
+
+/* ---------------------------------------------------------------------------
+   Stacked tables on phones.  A .stack-table renders normally from md up;
+   below that each row becomes a card and each cell a "label · value" line,
+   with the label drawn from the cell's data-label attribute.  Cells without
+   a data-label (action buttons) right-align on their own line.
+--------------------------------------------------------------------------- */
+@media (max-width: 767px) {
+  .stack-table thead {
+    display: none;
+  }
+  .stack-table,
+  .stack-table tbody,
+  .stack-table tr,
+  .stack-table td {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .stack-table tr {
+    border: 1px solid var(--color-line) !important;
+    border-radius: 0.5rem;
+    margin: 0.75rem;
+    width: auto;
+    padding: 0.35rem 0.85rem;
+    background: var(--color-card);
+  }
+  .stack-table td {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 1rem;
+    padding: 0.45rem 0 !important;
+    border: 0 !important;
+    text-align: right;
+  }
+  .stack-table td[data-label]::before {
+    content: attr(data-label);
+    font-size: 0.6875rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-ink-soft);
+    text-align: left;
+    flex-shrink: 0;
+  }
+  .stack-table td:not([data-label]) {
+    justify-content: flex-end;
+  }
+}
+
+/* Visible keyboard focus everywhere, in violet. */
 :focus-visible {
   outline: 2px solid var(--color-brand);
   outline-offset: 2px;

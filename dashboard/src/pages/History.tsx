@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { orgApi } from '../lib/api'
 import { useOrg } from '../lib/org'
 import type { Account, CashFlowEntry, Deal, HistoricalOrder } from '../lib/types'
+import { money, signed } from '../lib/format'
 
 const WEEK_MS = 7 * 24 * 3600 * 1000
 
@@ -20,17 +21,6 @@ function formatWhen(ms: number | null | undefined): string {
   })
 }
 
-function formatMoney(value: number | null | undefined): string {
-  if (value == null) return '—'
-  return value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-}
-
-function signed(value: number): string {
-  const formatted = Math.abs(value).toLocaleString('en-US', {
-    minimumFractionDigits: 2, maximumFractionDigits: 2,
-  })
-  return `${value < 0 ? '-' : '+'}${formatted}`
-}
 
 function price(value: number | null | undefined, digits = 5): string {
   return value == null ? '—' : value.toFixed(digits)
@@ -137,7 +127,7 @@ export default function History() {
   return (
     <div className="space-y-6 max-w-6xl">
       <header>
-        <h1 className="font-display text-2xl text-ink">History</h1>
+        <h1 className="page-title">History</h1>
         <p className="text-sm text-ink-soft mt-1">
           Closed positions, fills, and orders for any account, straight from
           the broker. One week at a time — that is the most cTrader hands out
@@ -183,7 +173,7 @@ export default function History() {
           </button>
         </div>
         {hasMore && (
-          <p className="text-xs text-warn">
+          <p className="text-xs font-medium text-warn-deep">
             This week has more rows than one request returns; narrow the range
             to see everything.
           </p>
@@ -191,7 +181,7 @@ export default function History() {
       </div>
 
       {error && (
-        <div className="rounded border border-loss/30 bg-loss-wash px-4 py-3 text-sm text-loss-deep">
+        <div role="alert" className="rounded border border-loss/30 bg-loss-wash px-4 py-3 text-sm text-loss-deep">
           {error}
         </div>
       )}
@@ -219,7 +209,7 @@ export default function History() {
       {/* Position drill-down drawer */}
       {drillPosition != null && (
         <div
-          className="fixed inset-0 z-40 flex justify-end bg-ink/30"
+          className="fixed inset-0 z-40 flex justify-end bg-black/60"
           onClick={() => setDrillPosition(null)}
         >
           <aside
@@ -250,7 +240,7 @@ export default function History() {
                 The broker returned no deals for this position.
               </p>
             ) : (
-              <table className="w-full text-sm">
+              <table className="stack-table w-full text-sm">
                 <thead>
                   <tr className="text-left border-b border-line">
                     <th className="desk-label px-6 py-2 font-semibold">When</th>
@@ -263,20 +253,20 @@ export default function History() {
                 <tbody>
                   {drillDeals.map((deal) => (
                     <tr key={deal.deal_id} className="border-b border-line last:border-0">
-                      <td className="num px-6 py-2.5 text-ink-soft whitespace-nowrap">
+                      <td data-label="When" className="num px-6 py-2.5 text-ink-soft whitespace-nowrap">
                         {formatWhen(deal.execution_timestamp)}
                       </td>
-                      <td className={`px-3 py-2.5 font-medium ${deal.side === 'BUY' ? 'text-profit' : 'text-loss'}`}>
+                      <td data-label="Side" className={`px-3 py-2.5 font-medium ${deal.side === 'BUY' ? 'text-profit' : 'text-loss'}`}>
                         {deal.side}
                         <span className="text-xs text-ink-faint ml-1">
                           {deal.close ? 'close' : 'open'}
                         </span>
                       </td>
-                      <td className="num px-3 py-2.5 text-right">
+                      <td data-label="Lots" className="num px-3 py-2.5 text-right">
                         {deal.volume_lots ?? deal.filled_volume}
                       </td>
-                      <td className="num px-3 py-2.5 text-right">{price(deal.execution_price)}</td>
-                      <td className={`num px-6 py-2.5 text-right ${
+                      <td data-label="Price" className="num px-3 py-2.5 text-right">{price(deal.execution_price)}</td>
+                      <td data-label="P&L" className={`num px-6 py-2.5 text-right ${
                         deal.close
                           ? deal.close.gross_profit < 0 ? 'text-loss' : 'text-profit'
                           : 'text-ink-faint'
@@ -305,7 +295,7 @@ function CashFlowTable({ entries }: { entries: CashFlowEntry[] }) {
   }
   return (
     <div className="bg-card rounded-lg border border-line overflow-x-auto">
-      <table className="w-full text-sm">
+      <table className="stack-table w-full text-sm">
         <thead>
           <tr className="text-left border-b border-line">
             <th className="desk-label px-5 py-2.5 font-semibold">When</th>
@@ -320,25 +310,25 @@ function CashFlowTable({ entries }: { entries: CashFlowEntry[] }) {
             const isDeposit = entry.type.startsWith('DEPOSIT')
             return (
               <tr key={entry.id} className="border-b border-line last:border-0">
-                <td className="num px-5 py-2.5 text-ink-soft whitespace-nowrap">
+                <td data-label="When" className="num px-5 py-2.5 text-ink-soft whitespace-nowrap">
                   {formatWhen(entry.timestamp)}
                 </td>
-                <td className="px-3 py-2.5">
+                <td data-label="Type" className="px-3 py-2.5">
                   <span className={`text-xs font-medium px-2 py-0.5 rounded ${
-                    isDeposit ? 'bg-profit-wash text-profit' : 'bg-loss-wash text-loss'
+                    isDeposit ? 'bg-profit-wash text-profit-deep' : 'bg-loss-wash text-loss-deep'
                   }`}>
                     {entry.type}
                   </span>
                 </td>
-                <td className={`num px-3 py-2.5 text-right font-medium ${
+                <td data-label="Amount" className={`num px-3 py-2.5 text-right font-medium ${
                   isDeposit ? 'text-profit' : 'text-loss'
                 }`}>
                   {isDeposit ? '+' : '-'}{Math.abs(entry.amount).toLocaleString('en-US', {
                     minimumFractionDigits: 2, maximumFractionDigits: 2,
                   })}
                 </td>
-                <td className="num px-3 py-2.5 text-right">{formatMoney(entry.balance_after)}</td>
-                <td className="px-5 py-2.5 text-ink-soft">{entry.note || '—'}</td>
+                <td data-label="Balance after" className="num px-3 py-2.5 text-right">{money(entry.balance_after)}</td>
+                <td data-label="Note" className="px-5 py-2.5 text-ink-soft">{entry.note || '—'}</td>
               </tr>
             )
           })}
@@ -361,7 +351,7 @@ function ClosedPositionsTable({ deals, onDrill }: {
   }
   return (
     <div className="bg-card rounded-lg border border-line overflow-x-auto">
-      <table className="w-full text-sm">
+      <table className="stack-table w-full text-sm">
         <thead>
           <tr className="text-left border-b border-line">
             <th className="desk-label px-5 py-2.5 font-semibold">Closed</th>
@@ -383,10 +373,10 @@ function ClosedPositionsTable({ deals, onDrill }: {
             const positionSide = deal.side === 'SELL' ? 'BUY' : 'SELL'
             return (
               <tr key={deal.deal_id} className="border-b border-line last:border-0">
-                <td className="num px-5 py-2.5 text-ink-soft whitespace-nowrap">
+                <td data-label="Closed" className="num px-5 py-2.5 text-ink-soft whitespace-nowrap">
                   {formatWhen(deal.execution_timestamp)}
                 </td>
-                <td className="num px-3 py-2.5">
+                <td data-label="Position" className="num px-3 py-2.5">
                   <button
                     onClick={() => onDrill(deal.position_id)}
                     aria-label={`View position ${deal.position_id}`}
@@ -395,22 +385,22 @@ function ClosedPositionsTable({ deals, onDrill }: {
                     {deal.position_id}
                   </button>
                 </td>
-                <td className="num px-3 py-2.5">{deal.symbol ?? deal.symbol_id}</td>
-                <td className={`px-3 py-2.5 font-medium ${positionSide === 'BUY' ? 'text-profit' : 'text-loss'}`}>
+                <td data-label="Symbol" className="num px-3 py-2.5">{deal.symbol ?? deal.symbol_id}</td>
+                <td data-label="Side" className={`px-3 py-2.5 font-medium ${positionSide === 'BUY' ? 'text-profit' : 'text-loss'}`}>
                   {positionSide}
                 </td>
-                <td className="num px-3 py-2.5 text-right">
+                <td data-label="Lots" className="num px-3 py-2.5 text-right">
                   {close.closed_volume_lots ?? close.closed_volume}
                 </td>
-                <td className="num px-3 py-2.5 text-right whitespace-nowrap">
+                <td data-label="Entry → Exit" className="num px-3 py-2.5 text-right whitespace-nowrap">
                   {price(close.entry_price)} → {price(deal.execution_price)}
                 </td>
-                <td className={`num px-3 py-2.5 text-right font-medium ${close.gross_profit < 0 ? 'text-loss' : 'text-profit'}`}>
+                <td data-label="Gross P&L" className={`num px-3 py-2.5 text-right font-medium ${close.gross_profit < 0 ? 'text-loss' : 'text-profit'}`}>
                   {signed(close.gross_profit)}
                 </td>
-                <td className="num px-3 py-2.5 text-right text-ink-soft">{formatMoney(close.swap)}</td>
-                <td className="num px-3 py-2.5 text-right text-ink-soft">{formatMoney(close.commission)}</td>
-                <td className="num px-5 py-2.5 text-right">{formatMoney(close.balance)}</td>
+                <td data-label="Swap" className="num px-3 py-2.5 text-right text-ink-soft">{money(close.swap)}</td>
+                <td data-label="Commission" className="num px-3 py-2.5 text-right text-ink-soft">{money(close.commission)}</td>
+                <td data-label="Balance after" className="num px-5 py-2.5 text-right">{money(close.balance)}</td>
               </tr>
             )
           })}
@@ -426,7 +416,7 @@ function DealsTable({ deals }: { deals: Deal[] }) {
   }
   return (
     <div className="bg-card rounded-lg border border-line overflow-x-auto">
-      <table className="w-full text-sm">
+      <table className="stack-table w-full text-sm">
         <thead>
           <tr className="text-left border-b border-line">
             <th className="desk-label px-5 py-2.5 font-semibold">When</th>
@@ -443,19 +433,19 @@ function DealsTable({ deals }: { deals: Deal[] }) {
         <tbody>
           {deals.map((deal) => (
             <tr key={deal.deal_id} className="border-b border-line last:border-0">
-              <td className="num px-5 py-2.5 text-ink-soft whitespace-nowrap">
+              <td data-label="When" className="num px-5 py-2.5 text-ink-soft whitespace-nowrap">
                 {formatWhen(deal.execution_timestamp)}
               </td>
-              <td className="num px-3 py-2.5 text-ink-soft">{deal.deal_id}</td>
-              <td className="num px-3 py-2.5 text-ink-soft">{deal.position_id}</td>
-              <td className="num px-3 py-2.5">{deal.symbol ?? deal.symbol_id}</td>
-              <td className={`px-3 py-2.5 font-medium ${deal.side === 'BUY' ? 'text-profit' : 'text-loss'}`}>
+              <td data-label="Deal" className="num px-3 py-2.5 text-ink-soft">{deal.deal_id}</td>
+              <td data-label="Position" className="num px-3 py-2.5 text-ink-soft">{deal.position_id}</td>
+              <td data-label="Symbol" className="num px-3 py-2.5">{deal.symbol ?? deal.symbol_id}</td>
+              <td data-label="Side" className={`px-3 py-2.5 font-medium ${deal.side === 'BUY' ? 'text-profit' : 'text-loss'}`}>
                 {deal.side}
               </td>
-              <td className="num px-3 py-2.5 text-right">{deal.volume_lots ?? deal.filled_volume}</td>
-              <td className="num px-3 py-2.5 text-right">{price(deal.execution_price)}</td>
-              <td className="num px-3 py-2.5 text-right text-ink-soft">{formatMoney(deal.commission)}</td>
-              <td className="px-5 py-2.5 text-ink-soft">
+              <td data-label="Lots" className="num px-3 py-2.5 text-right">{deal.volume_lots ?? deal.filled_volume}</td>
+              <td data-label="Price" className="num px-3 py-2.5 text-right">{price(deal.execution_price)}</td>
+              <td data-label="Commission" className="num px-3 py-2.5 text-right text-ink-soft">{money(deal.commission)}</td>
+              <td data-label="Kind" className="px-5 py-2.5 text-ink-soft">
                 {deal.close ? 'Close' : 'Open'}
               </td>
             </tr>
@@ -472,7 +462,7 @@ function OrdersTable({ orders }: { orders: HistoricalOrder[] }) {
   }
   return (
     <div className="bg-card rounded-lg border border-line overflow-x-auto">
-      <table className="w-full text-sm">
+      <table className="stack-table w-full text-sm">
         <thead>
           <tr className="text-left border-b border-line">
             <th className="desk-label px-5 py-2.5 font-semibold">Updated</th>
@@ -489,33 +479,33 @@ function OrdersTable({ orders }: { orders: HistoricalOrder[] }) {
         <tbody>
           {orders.map((order) => (
             <tr key={order.order_id} className="border-b border-line last:border-0">
-              <td className="num px-5 py-2.5 text-ink-soft whitespace-nowrap">
+              <td data-label="Updated" className="num px-5 py-2.5 text-ink-soft whitespace-nowrap">
                 {formatWhen(order.update_timestamp)}
               </td>
-              <td className="num px-3 py-2.5 text-ink-soft">{order.order_id}</td>
-              <td className="num px-3 py-2.5">{order.symbol ?? order.symbol_id}</td>
-              <td className="px-3 py-2.5">{order.order_type}</td>
-              <td className={`px-3 py-2.5 font-medium ${order.side === 'BUY' ? 'text-profit' : 'text-loss'}`}>
+              <td data-label="Order" className="num px-3 py-2.5 text-ink-soft">{order.order_id}</td>
+              <td data-label="Symbol" className="num px-3 py-2.5">{order.symbol ?? order.symbol_id}</td>
+              <td data-label="Type" className="px-3 py-2.5">{order.order_type}</td>
+              <td data-label="Side" className={`px-3 py-2.5 font-medium ${order.side === 'BUY' ? 'text-profit' : 'text-loss'}`}>
                 {order.side}
               </td>
-              <td className="num px-3 py-2.5 text-right">{order.volume_lots ?? order.volume}</td>
-              <td className="num px-3 py-2.5 text-right">
+              <td data-label="Lots" className="num px-3 py-2.5 text-right">{order.volume_lots ?? order.volume}</td>
+              <td data-label="Price" className="num px-3 py-2.5 text-right">
                 {price(order.execution_price ?? order.limit_price ?? order.stop_price)}
               </td>
-              <td className="px-3 py-2.5">
+              <td data-label="Status" className="px-3 py-2.5">
                 <span
                   className={`text-xs font-medium px-2 py-0.5 rounded ${
                     order.status === 'FILLED'
-                      ? 'bg-profit-wash text-profit'
+                      ? 'bg-profit-wash text-profit-deep'
                       : order.status === 'REJECTED' || order.status === 'CANCELLED'
-                        ? 'bg-loss-wash text-loss'
-                        : 'bg-paper text-ink-soft'
+                        ? 'bg-loss-wash text-loss-deep'
+                        : 'bg-line text-ink'
                   }`}
                 >
                   {order.status}
                 </span>
               </td>
-              <td className="px-5 py-2.5 text-ink-soft">{order.label || '—'}</td>
+              <td data-label="Label" className="px-5 py-2.5 text-ink-soft">{order.label || '—'}</td>
             </tr>
           ))}
         </tbody>

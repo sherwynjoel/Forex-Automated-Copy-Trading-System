@@ -129,7 +129,8 @@ test('renders severity-coded rows', async () => {
   )
 
   await waitFor(() => {
-    expect(screen.getByText('2024-01-01T10:00:00Z')).toBeInTheDocument()
+    // Timestamps render human-readable; the raw ISO stays on the title attribute.
+    expect(screen.getByTitle('2024-01-01T10:00:00Z')).toBeInTheDocument()
     expect(screen.getByText('position_open')).toBeInTheDocument()
     expect(screen.getByText('position_close')).toBeInTheDocument()
   })

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { api } from '../lib/api'
+import Logo from '../components/Logo'
 
 export default function Join() {
   const { token } = useParams()
@@ -34,7 +35,7 @@ export default function Join() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-paper px-4">
       <div className="max-w-md w-full text-center space-y-4">
-        <h2 className="font-display text-3xl text-brand">Copy Desk</h2>
+        <h2 className="flex justify-center"><Logo size={38} textClass="text-3xl" /></h2>
         {error ? (
           <p className="text-sm font-medium text-loss-deep">{error}</p>
         ) : (

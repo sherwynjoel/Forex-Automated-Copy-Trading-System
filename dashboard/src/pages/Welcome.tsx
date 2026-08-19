@@ -1,23 +1,31 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../lib/api'
+import { errorText } from '../lib/format'
+import Banner from '../components/Banner'
+import Logo from '../components/Logo'
 
 export default function Welcome() {
   const [name, setName] = useState('')
   const [invite, setInvite] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const [creating, setCreating] = useState(false)
   const navigate = useNavigate()
 
   const createOrg = async (e: React.FormEvent) => {
     e.preventDefault()
+    if (creating) return
     try {
+      setCreating(true)
       const org = await api<{ id: number }>('/api/orgs', {
         method: 'POST',
         body: JSON.stringify({ name }),
       })
       navigate(`/org/${org.id}`)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not create organization')
+      setError(errorText(err, 'Could not create organization'))
+    } finally {
+      setCreating(false)
     }
   }
 
@@ -30,42 +38,39 @@ export default function Welcome() {
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-paper px-4">
-      <div className="max-w-md w-full space-y-10">
-        <h2 className="text-center font-display text-3xl text-brand">Copy Desk</h2>
-        {error && (
-          <div className="rounded-md bg-loss-wash p-4">
-            <p className="text-sm font-medium text-loss-deep">{error}</p>
-          </div>
-        )}
-        <form onSubmit={createOrg} className="space-y-4">
-          <h3 className="text-lg font-semibold text-ink">Create an organization</h3>
+      <div className="max-w-md w-full space-y-8">
+        <h1 className="flex justify-center"><Logo size={38} textClass="text-3xl" /></h1>
+        {error && <Banner kind="error">{error}</Banner>}
+        <form onSubmit={createOrg} className="bg-card rounded-lg border border-line p-6 space-y-4">
+          <h2 className="text-lg font-display font-semibold text-ink">Create an organization</h2>
           <input
             value={name}
             onChange={(e) => setName(e.target.value)}
             required
             placeholder="Organization name"
             aria-label="Organization name"
-            className="w-full px-3 py-2 border border-line-strong rounded-md bg-card text-ink sm:text-sm"
+            className="w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink"
           />
           <button
             type="submit"
-            className="w-full py-2 px-4 text-sm font-semibold rounded-md text-white bg-brand hover:bg-brand-deep transition-colors"
+            disabled={creating}
+            className="w-full py-2.5 rounded bg-brand text-white text-sm font-semibold hover:bg-brand-deep transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            Create organization
+            {creating ? 'Creating…' : 'Create organization'}
           </button>
         </form>
-        <form onSubmit={useInvite} className="space-y-4">
-          <h3 className="text-lg font-semibold text-ink">Or join with an invite</h3>
+        <form onSubmit={useInvite} className="bg-card rounded-lg border border-line p-6 space-y-4">
+          <h2 className="text-lg font-display font-semibold text-ink">Or join with an invite</h2>
           <input
             value={invite}
             onChange={(e) => setInvite(e.target.value)}
             placeholder="Paste an invite link or code"
             aria-label="Invite link or code"
-            className="w-full px-3 py-2 border border-line-strong rounded-md bg-card text-ink sm:text-sm"
+            className="w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink"
           />
           <button
             type="submit"
-            className="w-full py-2 px-4 text-sm font-semibold rounded-md border border-brand text-brand hover:bg-brand-wash transition-colors"
+            className="w-full py-2.5 rounded border border-brand text-brand text-sm font-semibold hover:bg-brand-wash hover:text-brand-deep transition-colors"
           >
             Join organization
           </button>

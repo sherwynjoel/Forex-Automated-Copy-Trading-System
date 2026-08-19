@@ -157,9 +157,9 @@ test('renders master card with equity/balance/pnl', async () => {
   })
 
   // Check master card displays the values
-  expect(screen.getByText('$12000.00')).toBeInTheDocument()
-  expect(screen.getByText('$10000.00')).toBeInTheDocument()
-  expect(screen.getByText('$2000.00')).toBeInTheDocument()
+  expect(screen.getByText('12,000.00')).toBeInTheDocument()
+  expect(screen.getByText('10,000.00')).toBeInTheDocument()
+  expect(screen.getByText('+2,000.00')).toBeInTheDocument()
 })
 
 test('master card renders equity/balance/P&L read from the nested accounts block', async () => {
@@ -212,14 +212,14 @@ test('master card renders equity/balance/P&L read from the nested accounts block
   })
 
   // Account 1 is the master; its numbers come from envelope.accounts['1'].
-  expect(screen.getByText('$12000.00')).toBeInTheDocument() // equity
-  expect(screen.getByText('$10000.00')).toBeInTheDocument() // balance
-  expect(screen.getByText('$2000.00')).toBeInTheDocument() // open P&L
+  expect(screen.getByText('12,000.00')).toBeInTheDocument() // equity
+  expect(screen.getByText('10,000.00')).toBeInTheDocument() // balance
+  expect(screen.getByText('+2,000.00')).toBeInTheDocument() // open P&L
 
   // ...and a slave tile's stats come from the same nested block, so a
   // regression cannot hide behind the master card alone.
-  expect(screen.getByText('$5500.00')).toBeInTheDocument() // slave 2 equity
-  expect(screen.getByText('$5000.00')).toBeInTheDocument() // slave 2 balance
+  expect(screen.getByText('5,500.00')).toBeInTheDocument() // slave 2 equity
+  expect(screen.getByText('5,000.00')).toBeInTheDocument() // slave 2 balance
 })
 
 test('renders no account stats when the accounts block is empty, without crashing', async () => {
@@ -244,7 +244,7 @@ test('renders no account stats when the accounts block is empty, without crashin
   })
 
   expect(screen.queryByText(/Master Account \(1001\)/)).not.toBeInTheDocument()
-  expect(screen.queryByText('$12000.00')).not.toBeInTheDocument()
+  expect(screen.queryByText('12,000.00')).not.toBeInTheDocument()
   // Slave tiles still render (they come from /api/orgs/1/accounts), just without stats.
   expect(screen.getAllByTestId('slave-tile').length).toBeGreaterThanOrEqual(2)
 })
@@ -946,6 +946,42 @@ function statsRoutes(state: unknown = mockState) {
     '/api/orgs/1/accounts/1/analytics?weeks=4': copierAnalytics,
   }
 }
+
+test('copier performance strip renders its micro-charts from analytics', async () => {
+  setRole('owner')
+  stubApi(statsRoutes({
+    ...mockState,
+  }))
+  // Give the curve real points so the sparkline has something to draw.
+  const routes = statsRoutes()
+  routes['/api/orgs/1/accounts/1/analytics?weeks=4'] = {
+    ...copierAnalytics,
+    equity_curve: [
+      { timestamp: 1700000000000, balance: 10000 },
+      { timestamp: 1700086400000, balance: 10250 },
+      { timestamp: 1700172800000, balance: 10512.5 },
+    ],
+  }
+  stubApi(routes)
+
+  const { container } = render(
+    <MemoryRouter>
+      <Overview />
+    </MemoryRouter>
+  )
+
+  await screen.findByText(/copier performance/i)
+  // Net P&L trend sparkline
+  await waitFor(() => {
+    expect(container.querySelector('[data-chart="perf-sparkline"] svg')).toBeTruthy()
+  })
+  // Win-rate meter announces the ratio
+  const meter = container.querySelector('[data-chart="win-meter"]')
+  expect(meter).toBeTruthy()
+  expect(meter!.getAttribute('aria-label')).toMatch(/70/)
+  // Best and worst trade get magnitude bars on a shared scale
+  expect(container.querySelectorAll('[data-chart="trade-bar"]').length).toBe(2)
+})
 
 test('portfolio row aggregates equity and compares to yesterday', async () => {
   setRole('owner')

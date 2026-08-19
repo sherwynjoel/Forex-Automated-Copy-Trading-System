@@ -34,7 +34,7 @@ export default function ConfirmDialog({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
       role="dialog"
       aria-modal="true"
       aria-label={title}
@@ -56,7 +56,7 @@ export default function ConfirmDialog({
                 value={typed}
                 onChange={(e) => setTyped(e.target.value)}
                 autoComplete="off"
-                className="num w-full rounded border border-line-strong px-3 py-2 text-sm text-ink"
+                className="num w-full rounded border border-line-strong px-3 py-2 text-sm text-ink bg-card"
               />
             </div>
           )}
@@ -65,7 +65,7 @@ export default function ConfirmDialog({
           <button
             onClick={onCancel}
             disabled={busy}
-            className="px-4 py-2 text-sm font-medium rounded border border-line-strong text-ink hover:bg-line/40 transition-colors disabled:opacity-50"
+            className="px-4 py-2 text-sm font-medium rounded border border-line-strong text-ink hover:bg-line transition-colors disabled:opacity-50"
           >
             Cancel
           </button>

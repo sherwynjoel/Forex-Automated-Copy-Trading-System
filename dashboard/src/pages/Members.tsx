@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { api, orgApi } from '../lib/api'
 import { can, type Role } from '../lib/roles'
 import { useOrg } from '../lib/org'
+import Banner from '../components/Banner'
 import type { Invite, Member } from '../lib/types'
 import ConfirmDialog from '../components/ConfirmDialog'
 
@@ -16,6 +17,7 @@ export default function Members() {
   const [invites, setInvites] = useState<Invite[]>([])
   const [inviteRole, setInviteRole] = useState<Role>('viewer')
   const [newInviteLink, setNewInviteLink] = useState<string | null>(null)
+  const [linkCopied, setLinkCopied] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [orgName, setOrgName] = useState(org.name)
   const [deleteOpen, setDeleteOpen] = useState(false)
@@ -75,7 +77,7 @@ export default function Members() {
       const invite = await orgApi<{ token: string }>(orgId, 'invites', {
         method: 'POST', body: JSON.stringify({ role: inviteRole }),
       })
-      setNewInviteLink(`${window.location.origin}/join/${invite.token}`)
+      setLinkCopied(false); setNewInviteLink(`${window.location.origin}/join/${invite.token}`)
       await refresh()
     } catch {
       setError('Could not create invite')
@@ -84,11 +86,11 @@ export default function Members() {
 
   return (
     <div className="space-y-8">
-      <h2 className="text-xl font-semibold text-ink">Members</h2>
+      <h1 className="page-title">Members</h1>
       {error && (
-        <div className="rounded-md bg-loss-wash p-3 text-sm text-loss-deep">{error}</div>
+        <Banner kind="error">{error}</Banner>
       )}
-      <table className="w-full text-sm">
+      <table className="stack-table w-full text-sm">
         <thead>
           <tr className="text-left desk-label border-b border-line">
             <th className="py-2">Name</th><th>Email</th><th>Role</th><th></th>
@@ -97,9 +99,9 @@ export default function Members() {
         <tbody>
           {members.map((m) => (
             <tr key={m.user_id} className="border-b border-line">
-              <td className="py-2 text-ink">{m.display_name}</td>
-              <td className="text-ink-soft">{m.email}</td>
-              <td>
+              <td data-label="Name" className="py-2 text-ink">{m.display_name}</td>
+              <td data-label="Email" className="text-ink-soft">{m.email}</td>
+              <td data-label="Role">
                 {can(role, 'manage_members') ? (
                   <select
                     aria-label={`Role for ${m.email}`}
@@ -151,10 +153,13 @@ export default function Members() {
             <div className="flex items-center gap-2 bg-brand-wash rounded p-3 text-sm">
               <code className="text-ink break-all">{newInviteLink}</code>
               <button
-                onClick={() => navigator.clipboard.writeText(newInviteLink)}
-                className="text-xs font-medium text-brand hover:underline shrink-0"
+                onClick={() => {
+                  navigator.clipboard.writeText(newInviteLink)
+                  setLinkCopied(true)
+                }}
+                className="text-xs font-medium text-brand-deep hover:underline shrink-0"
               >
-                Copy
+                {linkCopied ? 'Copied ✓' : 'Copy'}
               </button>
               <span className="desk-label shrink-0">shown once — copy it now</span>
             </div>
@@ -203,7 +208,7 @@ export default function Members() {
               aria-label="Organization name"
               className="border border-line-strong rounded bg-card px-2 py-1 text-sm"
             />
-            <button type="submit" className="px-3 py-1.5 text-xs font-semibold rounded border border-brand text-brand hover:bg-brand-wash">
+            <button type="submit" className="px-3 py-1.5 text-xs font-semibold rounded border border-brand text-brand hover:bg-brand-wash hover:text-brand-deep">
               Rename
             </button>
           </form>
