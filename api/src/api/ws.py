@@ -31,9 +31,10 @@ class EventBroadcaster:
         self.listener_connection: AsyncConnection = None
         self.query_connection: AsyncConnection = None
         self.dsn = None
-        # EmailAlerter (set by create_app's lifespan); every event fetched
-        # for the WebSocket feed is offered to it too.
+        # EmailAlerter and TelegramNotifier (set by create_app's lifespan);
+        # every event fetched for the WebSocket feed is offered to both.
         self.alerter = None
+        self.telegram = None
         # Set True once LISTEN events has actually been registered with Postgres.
         # Lets callers (e.g. tests) know it's safe to INSERT without racing the
         # listener's startup (asyncio.create_task only *schedules* the coroutine;
@@ -151,6 +152,11 @@ class EventBroadcaster:
                                 await self.alerter.consider(event)
                             except Exception:
                                 logger.exception("email alerter failed")
+                        if self.telegram is not None:
+                            try:
+                                await self.telegram.consider(event)
+                            except Exception:
+                                logger.exception("telegram notifier failed")
                 except Exception as e:
                     logger.error(f"Error processing event: {e}")
 

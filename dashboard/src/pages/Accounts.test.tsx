@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { render, screen, waitFor, within, fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi, afterEach, beforeEach } from 'vitest'
@@ -55,6 +55,7 @@ const mockAccounts = [
     last_error: null,
     connection_status: 'active',
     nickname: null,
+    cutoff_date: null,
   },
   {
     ctid_trader_account_id: 2,
@@ -67,6 +68,7 @@ const mockAccounts = [
     last_error: null,
     connection_status: 'active',
     nickname: 'Second desk',
+    cutoff_date: '2026-12-01',
   },
 ]
 
@@ -323,6 +325,68 @@ test('nickname edit PATCHes nickname', async () => {
       })
     )
   })
+})
+
+test('cutoff date edit PATCHes cutoff_date', async () => {
+  setRole('admin')
+  const fetchMock = mockRoutes()
+  renderAccounts()
+
+  await waitFor(() => {
+    expect(screen.getByText('12345')).toBeInTheDocument()
+  })
+
+  const cutoffInput = screen.getByLabelText(/cutoff date for account 12345/i)
+  fireEvent.change(cutoffInput, { target: { value: '2026-09-16' } })
+  fireEvent.blur(cutoffInput)
+
+  await waitFor(() => {
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/orgs/1/accounts/1',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({ cutoff_date: '2026-09-16' }),
+      })
+    )
+  })
+})
+
+test('clearing the cutoff date PATCHes an empty cutoff_date', async () => {
+  setRole('admin')
+  const fetchMock = mockRoutes()
+  renderAccounts()
+
+  await waitFor(() => {
+    expect(screen.getByText('12346')).toBeInTheDocument()
+  })
+
+  const cutoffInput = screen.getByLabelText(/cutoff date for account 12346/i)
+  expect((cutoffInput as HTMLInputElement).value).toBe('2026-12-01')
+  fireEvent.change(cutoffInput, { target: { value: '' } })
+  fireEvent.blur(cutoffInput)
+
+  await waitFor(() => {
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/orgs/1/accounts/2',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({ cutoff_date: '' }),
+      })
+    )
+  })
+})
+
+test('viewer sees the cutoff date read-only', async () => {
+  setRole('viewer')
+  mockRoutes()
+  renderAccounts()
+
+  await waitFor(() => {
+    expect(screen.getByText('12346')).toBeInTheDocument()
+  })
+
+  expect(screen.getByText('2026-12-01')).toBeInTheDocument()
+  expect(screen.queryByLabelText(/cutoff date for account/i)).not.toBeInTheDocument()
 })
 
 test('disconnect confirms then DELETEs the ACCOUNT-scoped connection route', async () => {

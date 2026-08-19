@@ -31,6 +31,18 @@ function signedMoney(value: number | null | undefined): string {
   return `${value < 0 ? '-' : '+'}${formatted}`
 }
 
+function localISODate(): string {
+  const now = new Date()
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+}
+
+function cutoffDaysPhrase(cutoff: string): string {
+  const days = Math.round((Date.parse(cutoff) - Date.parse(localISODate())) / 86_400_000)
+  if (Number.isNaN(days)) return ''
+  if (days <= 0) return ' (today)'
+  return days === 1 ? ' (tomorrow)' : ` (in ${days} days)`
+}
+
 /**
  * The desk strip: one glance = system state. Copying status with a live
  * pulse, the dry-run flag, the master's equity and open P&L, and the global
@@ -46,6 +58,8 @@ function DeskStrip() {
   const [notice, setNotice] = useState<string | null>(null)
   const [marginCall, setMarginCall] = useState<EventResponse | null>(null)
   const [dismissedRiskId, setDismissedRiskId] = useState<number | null>(null)
+  const [cutoffReminder, setCutoffReminder] = useState<EventResponse | null>(null)
+  const [dismissedReminderId, setDismissedReminderId] = useState<number | null>(null)
 
   const refresh = useCallback(async () => {
     try {
@@ -74,6 +88,21 @@ function DeskStrip() {
       setMarginCall(recent ?? null)
     } catch {
       // Older api without the risk category: no banner.
+    }
+    try {
+      // An admin-set account cutoff is a scheduled fact, not a transient
+      // alert: show the copier's one-time reminder on every page until
+      // dismissed or the date itself has passed. Org-scoped like the risk
+      // poll above.
+      const reminders = await orgApi<EventResponse[]>(
+        orgId, 'events?category=reminder&limit=5')
+      const upcoming = (reminders ?? []).find((event) => {
+        const cutoff = event.payload?.cutoff_date
+        return typeof cutoff === 'string' && cutoff >= localISODate()
+      })
+      setCutoffReminder(upcoming ?? null)
+    } catch {
+      // Older api without the reminder category: no banner.
     }
   }, [orgId])
 
@@ -110,6 +139,13 @@ function DeskStrip() {
 
   const copying = settings?.copying_enabled ?? null
   const dryRun = settings?.dry_run ?? false
+  const reminderCutoffDate =
+    typeof cutoffReminder?.payload?.cutoff_date === 'string'
+      ? cutoffReminder.payload.cutoff_date : null
+  const reminderAccountName =
+    (typeof cutoffReminder?.payload?.nickname === 'string' &&
+      cutoffReminder.payload.nickname) ||
+    `account ${cutoffReminder?.account_id}`
 
   return (
     <>
@@ -173,6 +209,27 @@ function DeskStrip() {
           <button
             onClick={() => setDismissedRiskId(marginCall.id)}
             className="text-white/80 hover:text-white text-xs font-medium ml-4"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      {cutoffReminder && reminderCutoffDate &&
+        cutoffReminder.id !== dismissedReminderId && (
+        <div
+          role="status"
+          className="px-6 py-2.5 bg-warn-wash border-b border-line text-sm text-ink flex items-center justify-between"
+        >
+          <span>
+            <strong className="text-warn">Account cutoff</strong>
+            {' — '}{reminderAccountName} reaches its cutoff on{' '}
+            <span className="num">{reminderCutoffDate}</span>
+            {cutoffDaysPhrase(reminderCutoffDate)}.
+          </span>
+          <button
+            onClick={() => setDismissedReminderId(cutoffReminder.id)}
+            className="text-ink-soft hover:text-ink text-xs font-medium ml-4"
           >
             Dismiss
           </button>

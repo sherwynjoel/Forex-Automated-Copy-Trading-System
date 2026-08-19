@@ -1,4 +1,5 @@
 """Accounts management endpoints."""
+from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Optional, List, Any
 
@@ -20,6 +21,8 @@ class PatchAccountRequest(BaseModel):
     multiplier: Optional[Any] = None  # Accept any type, validate manually
     enabled: Optional[bool] = None
     nickname: Optional[str] = None
+    # ISO date (YYYY-MM-DD); an empty string clears it, like nickname.
+    cutoff_date: Optional[str] = None
 
 
 class AccountResponse(BaseModel):
@@ -34,6 +37,7 @@ class AccountResponse(BaseModel):
     last_error: Optional[str] = None
     connection_status: str = "active"
     nickname: Optional[str] = None
+    cutoff_date: Optional[date] = None
 
 
 def create_accounts_router() -> APIRouter:
@@ -48,7 +52,8 @@ def create_accounts_router() -> APIRouter:
         """List this org's accounts with their connection status."""
         rows = conn.execute(
             """SELECT a.ctid_trader_account_id, a.trader_login, a.is_live, a.role, a.enabled,
-                      a.multiplier, a.status, a.last_error, c.status as conn_status, a.nickname
+                      a.multiplier, a.status, a.last_error, c.status as conn_status, a.nickname,
+                      a.cutoff_date
                FROM accounts a
                JOIN ctid_connections c ON a.ctid_connection_id = c.id
                WHERE a.org_id = %s
@@ -68,6 +73,7 @@ def create_accounts_router() -> APIRouter:
                 last_error=row[7],
                 connection_status=row[8],
                 nickname=row[9],
+                cutoff_date=row[10],
             )
             for row in rows
         ]
@@ -98,6 +104,16 @@ def create_accounts_router() -> APIRouter:
             except (InvalidOperation, ValueError, TypeError):
                 raise HTTPException(status_code=400, detail="multiplier must be a valid positive number")
 
+        # An empty (or whitespace) cutoff_date clears it, like nickname.
+        validated_cutoff = None
+        if request.cutoff_date is not None and request.cutoff_date.strip():
+            try:
+                validated_cutoff = date.fromisoformat(request.cutoff_date.strip())
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail="cutoff_date must be an ISO date (YYYY-MM-DD), or empty to clear")
+
         require_account_in_org(conn, ctx.org_id, account_id)
 
         # Build dynamic update
@@ -121,11 +137,15 @@ def create_accounts_router() -> APIRouter:
             updates.append("nickname = %s")
             params.append(request.nickname.strip() or None)
 
+        if request.cutoff_date is not None:
+            updates.append("cutoff_date = %s")
+            params.append(validated_cutoff)
+
         if not updates:
             # No updates requested, just return current account
             row = conn.execute(
                 """SELECT ctid_trader_account_id, trader_login, is_live, role, enabled,
-                          multiplier, status, last_error, nickname FROM accounts
+                          multiplier, status, last_error, nickname, cutoff_date FROM accounts
                    WHERE ctid_trader_account_id = %s AND org_id = %s""",
                 (account_id, ctx.org_id)
             ).fetchone()
@@ -139,6 +159,7 @@ def create_accounts_router() -> APIRouter:
                 "status": row[6],
                 "last_error": row[7],
                 "nickname": row[8],
+                "cutoff_date": row[9],
             }
 
         params.append(account_id)
@@ -160,7 +181,7 @@ def create_accounts_router() -> APIRouter:
         # Get updated account
         row = conn.execute(
             """SELECT ctid_trader_account_id, trader_login, is_live, role, enabled,
-                      multiplier, status, last_error, nickname FROM accounts
+                      multiplier, status, last_error, nickname, cutoff_date FROM accounts
                WHERE ctid_trader_account_id = %s AND org_id = %s""",
             (account_id, ctx.org_id)
         ).fetchone()
@@ -175,6 +196,7 @@ def create_accounts_router() -> APIRouter:
             "status": row[6],
             "last_error": row[7],
             "nickname": row[8],
+            "cutoff_date": row[9],
         }
 
         # If role was changed, trigger copier reload

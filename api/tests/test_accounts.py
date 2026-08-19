@@ -280,6 +280,55 @@ def test_patch_nickname_and_list_returns_it(org_client):
     assert accounts[0]["nickname"] == "Main live account"
 
 
+def test_patch_cutoff_date_and_list_returns_it(org_client):
+    """An admin can set the one-time cutoff date; the list surfaces it so
+    the dashboard can show and edit it."""
+    client, org_id, seed = org_client
+    seed(12345)
+
+    response = client.patch(
+        f"/api/orgs/{org_id}/accounts/12345",
+        json={"cutoff_date": "2026-09-16"},
+        headers=_csrf(client),
+    )
+    assert response.status_code == 200
+    assert response.json()["cutoff_date"] == "2026-09-16"
+
+    accounts = client.get(f"/api/orgs/{org_id}/accounts").json()
+    assert accounts[0]["cutoff_date"] == "2026-09-16"
+
+
+def test_patch_empty_cutoff_date_clears_it(org_client):
+    """An empty string clears the cutoff (mirrors the nickname contract):
+    no cutoff, no reminder."""
+    client, org_id, seed = org_client
+    seed(12345)
+    client.patch(
+        f"/api/orgs/{org_id}/accounts/12345",
+        json={"cutoff_date": "2026-09-16"}, headers=_csrf(client))
+
+    response = client.patch(
+        f"/api/orgs/{org_id}/accounts/12345",
+        json={"cutoff_date": ""}, headers=_csrf(client))
+
+    assert response.status_code == 200
+    assert response.json()["cutoff_date"] is None
+    accounts = client.get(f"/api/orgs/{org_id}/accounts").json()
+    assert accounts[0]["cutoff_date"] is None
+
+
+def test_patch_invalid_cutoff_date_400(org_client):
+    client, org_id, seed = org_client
+    seed(12345)
+
+    response = client.patch(
+        f"/api/orgs/{org_id}/accounts/12345",
+        json={"cutoff_date": "next tuesday"}, headers=_csrf(client))
+
+    assert response.status_code == 400
+    assert "cutoff_date" in response.json()["detail"]
+
+
 def test_account_details_merges_copier_and_db(org_client):
     """GET /api/orgs/{org_id}/accounts/{id}/details returns the copier's
     broker-side profile merged with what only the DB knows (nickname, role,

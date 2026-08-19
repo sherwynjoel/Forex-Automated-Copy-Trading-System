@@ -58,6 +58,7 @@ function mockRoutes(overrides: Record<string, unknown> = {}) {
       new Response(JSON.stringify(payload), {
         status: 200, headers: { 'Content-Type': 'application/json' },
       })
+    if (url.includes('category=reminder')) return respond(overrides['reminderEvents'] ?? [])
     if (url.includes('/events')) return respond(overrides['events'] ?? [])
     if (url.includes('/settings')) return respond(overrides['settings'] ?? settings)
     if (url.includes('/state')) return respond(overrides['state'] ?? apiState)
@@ -175,6 +176,63 @@ test('the risk-event poll behind the banner is org-scoped', async () => {
     expect(call).toBeTruthy()
     expect(String(call![0])).toBe('/api/orgs/1/events?category=risk&limit=5')
   })
+})
+
+function isoDaysFromNow(days: number): string {
+  return new Date(Date.now() + days * 86_400_000).toISOString().slice(0, 10)
+}
+
+function reminderEvent(cutoffDate: string, overrides: Record<string, unknown> = {}) {
+  return {
+    id: 7, ts: new Date().toISOString(), account_id: 12345,
+    category: 'reminder', severity: 'warning', latency_ms: null,
+    payload: { action: 'cutoff_approaching', cutoff_date: cutoffDate,
+               days_left: 2, nickname: 'FTMO demo', trader_login: 555 },
+    ...overrides,
+  }
+}
+
+test('an upcoming cutoff reminder raises a banner until the date passes', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  const cutoff = isoDaysFromNow(2)
+  mockRoutes({ reminderEvents: [reminderEvent(cutoff)] })
+  renderLayout()
+
+  expect(await screen.findByText(/account cutoff/i)).toBeInTheDocument()
+  expect(screen.getByText(/FTMO demo/)).toBeInTheDocument()
+  expect(screen.getByText(new RegExp(cutoff))).toBeInTheDocument()
+})
+
+test('the reminder poll behind the cutoff banner is org-scoped', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  const fetchMock = mockRoutes()
+  renderLayout()
+
+  await waitFor(() => {
+    const call = fetchMock.mock.calls.find(([u]) =>
+      String(u).includes('category=reminder'))
+    expect(call).toBeTruthy()
+    expect(String(call![0])).toBe('/api/orgs/1/events?category=reminder&limit=5')
+  })
+})
+
+test('a reminder whose cutoff has already passed raises no banner', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  mockRoutes({ reminderEvents: [reminderEvent(isoDaysFromNow(-3))] })
+  renderLayout()
+
+  await screen.findByText(/copying live/i)
+  expect(screen.queryByText(/account cutoff/i)).not.toBeInTheDocument()
+})
+
+test('dismissing the cutoff banner hides it', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  mockRoutes({ reminderEvents: [reminderEvent(isoDaysFromNow(2))] })
+  renderLayout()
+
+  await screen.findByText(/account cutoff/i)
+  await userEvent.click(screen.getByRole('button', { name: /dismiss/i }))
+  expect(screen.queryByText(/account cutoff/i)).not.toBeInTheDocument()
 })
 
 test('no banner without recent risk events', async () => {

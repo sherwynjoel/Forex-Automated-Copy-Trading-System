@@ -38,6 +38,9 @@ export interface Account {
   last_error?: string | null
   connection_status: string
   nickname?: string | null
+  // Admin-set one-time cutoff date (ISO YYYY-MM-DD); a reminder event fires
+  // two days before it.
+  cutoff_date?: string | null
 }
 
 export interface OpenPosition {

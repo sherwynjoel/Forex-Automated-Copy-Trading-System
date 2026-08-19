@@ -82,6 +82,11 @@ TOKEN_REFRESH_INTERVAL_S = 86400.0  # once per day
 BALANCE_REFRESH_INTERVAL_S = 60.0
 RESYNC_INTERVAL_S = 60.0
 RESYNC_DEBOUNCE_S = 0.5
+# Admin-set account cutoffs: remind this many calendar days before the date.
+# The scan is one cheap SQL query, so hourly keeps the reminder prompt
+# without waiting up to a day like the token-refresh cadence would.
+CUTOFF_REMINDER_DAYS = 2
+CUTOFF_REMINDER_INTERVAL_S = 3600.0
 CONTROL_PORT = 8080
 _SIDE_BY_NAME = {"BUY": ProtoOATradeSide.BUY, "SELL": ProtoOATradeSide.SELL}
 _ORDER_TYPE_BY_NAME = {
@@ -1497,6 +1502,31 @@ def make_client_factory(config: BootConfig) -> Callable[[bool], CTraderClient]:
     return factory
 
 
+def check_cutoff_reminders(repo: Repo) -> None:
+    """LoopingCall body: one org-stamped 'reminder' event per account whose
+    admin-set cutoff is at most CUTOFF_REMINDER_DAYS away, sent once per
+    cutoff value (the stamp lives in the DB, so restarts never repeat it).
+    The events INSERT is the whole fan-out: pg_notify carries it to the
+    dashboard feed and the API's Telegram notifier. Never raises: a
+    LoopingCall whose Deferred fails stops looping permanently.
+    """
+    try:
+        due = repo.accounts_due_cutoff_reminder(days_before=CUTOFF_REMINDER_DAYS)
+        for row in due:
+            repo.log_event(
+                'reminder', 'warning',
+                {'action': 'cutoff_approaching',
+                 'cutoff_date': row['cutoff_date'].isoformat(),
+                 'days_left': row['days_left'],
+                 'nickname': row['nickname'],
+                 'trader_login': row['trader_login']},
+                account_id=row['account_id'], org_id=row['org_id'],
+            )
+            repo.mark_cutoff_reminder_sent(row['account_id'], row['cutoff_date'])
+    except Exception:
+        log.exception("cutoff reminder scan failed")
+
+
 def boot(config: BootConfig, reactor_) -> CopierApp:
     """Wire a CopierApp into `reactor_` without ever calling reactor.run().
 
@@ -1552,6 +1582,18 @@ def boot(config: BootConfig, reactor_) -> CopierApp:
         start_d.addErrback(lambda f: log.error("resync loop failed to start: %s", f))
 
     reactor_.callWhenRunning(_start_resync_loop)
+
+    cutoff_reminder_call = task.LoopingCall(check_cutoff_reminders, repo)
+    cutoff_reminder_call.clock = reactor_
+    app.cutoff_reminder_call = cutoff_reminder_call
+
+    def _start_cutoff_reminder_loop():
+        # now=True: a reminder that came due while the copier was down
+        # should go out at boot, not up to an hour later.
+        start_d = cutoff_reminder_call.start(CUTOFF_REMINDER_INTERVAL_S, now=True)
+        start_d.addErrback(lambda f: log.error("cutoff reminder loop failed to start: %s", f))
+
+    reactor_.callWhenRunning(_start_cutoff_reminder_loop)
 
     site = make_control_site(app)
     reactor_.listenTCP(CONTROL_PORT, site, interface=CONTROL_BIND_INTERFACE)

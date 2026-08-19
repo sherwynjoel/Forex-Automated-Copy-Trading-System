@@ -402,10 +402,12 @@ def test_boot_composes_without_crashing_and_binds_all_interfaces(db, fernet_key)
     assert call["interface"] == "0.0.0.0"
     assert call["interface"] != "127.0.0.1"
     # startup + token-refresh loop + balance-refresh loop (N9) + resync
-    # loop were scheduled, not run inline (no reactor loop here).
-    assert len(fake_reactor.callWhenRunning_calls) == 4
+    # loop + cutoff-reminder loop were scheduled, not run inline (no
+    # reactor loop here).
+    assert len(fake_reactor.callWhenRunning_calls) == 5
     assert app.balance_refresh_call.interval is None   # not started until the reactor runs
     assert app.resync_call.interval is None            # not started until the reactor runs
+    assert app.cutoff_reminder_call.interval is None   # not started until the reactor runs
 
 
 def test_build_app_tolerates_zero_accounts_and_wires_dispatcher_before_app_exists(db, fernet_key):

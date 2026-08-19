@@ -287,6 +287,15 @@ slave, confirm a few real trades copy correctly, then scale up.
   attempted. Alerting is **instance-wide**: one API key and one recipient
   for the whole deployment, so every org's alerting events reach the same
   operator inbox — per-org recipients are future work.
+- **Account cutoff reminders** — an org admin can set a one-time **cutoff
+  date** per account on the Accounts screen (`PATCH
+  /api/orgs/{org_id}/accounts/{id}` with `cutoff_date: YYYY-MM-DD`; empty
+  clears it). Two days before the date the copier logs a `reminder` event,
+  which shows as a dismissible banner on every dashboard page and in the
+  events feed, and is sent to Telegram (set `TELEGRAM_BOT_TOKEN` and
+  `TELEGRAM_CHAT_ID` in `.env`; see `.env.example`). Reminders are
+  deliberately **not** emailed. Each distinct cutoff value reminds exactly
+  once — moving the date re-arms the reminder, restarts never repeat it.
 - **Disconnect** — the Accounts screen's Disconnect button removes the
   cTrader ID grant behind an account (`DELETE
   /api/orgs/{org_id}/accounts/{id}/connection`), which cascades to every account under

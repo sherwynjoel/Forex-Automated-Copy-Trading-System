@@ -23,6 +23,7 @@ from .routes.settings_control import create_settings_control_router, create_stat
 from .routes.trading import create_trading_router
 from .routes.insights import create_insights_router
 from .alerts import EmailAlerter
+from .telegram import TelegramNotifier
 from .ws import create_ws_router, broadcaster
 
 
@@ -59,8 +60,10 @@ def create_app(http_transport: Optional[httpx.BaseTransport] = None) -> FastAPI:
         else:
             app.state.http = httpx.AsyncClient()
 
-        # Email alerter rides the same event stream the WebSocket feed uses.
+        # Email alerter and Telegram notifier ride the same event stream the
+        # WebSocket feed uses.
         broadcaster.alerter = EmailAlerter.from_env(app.state.http)
+        broadcaster.telegram = TelegramNotifier.from_env(app.state.http)
 
         # Set DSN and start listener task immediately
         broadcaster.dsn = cfg.postgres_dsn

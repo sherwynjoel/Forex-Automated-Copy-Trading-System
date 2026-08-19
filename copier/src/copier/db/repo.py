@@ -302,6 +302,40 @@ class Repo:
             )
             return cursor.rowcount > 0
 
+    def accounts_due_cutoff_reminder(self, days_before: int) -> list[dict]:
+        """Accounts whose admin-set cutoff_date is at most `days_before`
+        calendar days away (or already past) and whose reminder for THAT
+        date has not been sent. IS DISTINCT FROM makes a moved cutoff due
+        again while a re-saved identical date stays quiet.
+        """
+        with psycopg.connect(self.dsn, autocommit=True) as conn:
+            rows = conn.execute(
+                """
+                SELECT ctid_trader_account_id, org_id, nickname, trader_login,
+                       cutoff_date, (cutoff_date - CURRENT_DATE) AS days_left
+                FROM accounts
+                WHERE cutoff_date IS NOT NULL
+                  AND cutoff_date <= CURRENT_DATE + %s
+                  AND cutoff_reminder_sent_for IS DISTINCT FROM cutoff_date
+                ORDER BY ctid_trader_account_id
+                """,
+                (days_before,),
+            ).fetchall()
+        return [
+            {"account_id": r[0], "org_id": r[1], "nickname": r[2],
+             "trader_login": r[3], "cutoff_date": r[4], "days_left": r[5]}
+            for r in rows
+        ]
+
+    def mark_cutoff_reminder_sent(self, account_id: int, cutoff_date) -> None:
+        """Stamp which cutoff value the reminder covered (send-once guard)."""
+        with psycopg.connect(self.dsn, autocommit=True) as conn:
+            conn.execute(
+                "UPDATE accounts SET cutoff_reminder_sent_for = %s "
+                "WHERE ctid_trader_account_id = %s",
+                (cutoff_date, account_id),
+            )
+
     # ---------- symbol cache ----------
 
     def save_symbol_cache(self, account_id: int, infos: dict[str, SymbolInfo]) -> None:

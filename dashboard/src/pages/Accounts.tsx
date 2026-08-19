@@ -30,6 +30,7 @@ export default function Accounts() {
   const [pendingRows, setPendingRows] = useState<Set<number>>(new Set())
   const [multiplierDrafts, setMultiplierDrafts] = useState<Record<number, string>>({})
   const [nicknameDrafts, setNicknameDrafts] = useState<Record<number, string>>({})
+  const [cutoffDrafts, setCutoffDrafts] = useState<Record<number, string>>({})
   const [disconnecting, setDisconnecting] = useState<Account | null>(null)
   const [flattening, setFlattening] = useState<Account | null>(null)
   const [detailsFor, setDetailsFor] = useState<Account | null>(null)
@@ -165,6 +166,23 @@ export default function Accounts() {
     })
   }
 
+  const handleCutoffBlur = (account: Account) => {
+    const draft = cutoffDrafts[account.ctid_trader_account_id]
+    if (draft === undefined || draft === (account.cutoff_date ?? '')) return
+    withPending(account.ctid_trader_account_id, async () => {
+      try {
+        // An empty value clears the cutoff (and with it the reminder).
+        await orgApi(orgId, `accounts/${account.ctid_trader_account_id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ cutoff_date: draft }),
+        })
+        await fetchAccounts()
+      } catch (err) {
+        setError(`Failed to update cutoff date (${err instanceof Error ? err.message : 'unknown'})`)
+      }
+    })
+  }
+
   const handleDisconnect = async () => {
     if (!disconnecting) return
     const accountId = disconnecting.ctid_trader_account_id
@@ -233,7 +251,7 @@ export default function Accounts() {
           <h1 className="font-display text-2xl text-ink">Accounts</h1>
           <p className="text-sm text-ink-soft mt-1">
             One cTrader ID grant covers every account under it. Roles,
-            multipliers, and nicknames apply per account.
+            multipliers, nicknames, and cutoff dates apply per account.
           </p>
         </div>
         {can(role, 'control') && (
@@ -278,6 +296,7 @@ export default function Accounts() {
                 <th className="desk-label px-3 py-2.5 font-semibold">Role</th>
                 <th className="desk-label px-3 py-2.5 font-semibold">Multiplier</th>
                 <th className="desk-label px-3 py-2.5 font-semibold">Enabled</th>
+                <th className="desk-label px-3 py-2.5 font-semibold">Cutoff</th>
                 <th className="desk-label px-3 py-2.5 font-semibold">Grant</th>
                 <th className="desk-label px-5 py-2.5 font-semibold text-right">Actions</th>
               </tr>
@@ -383,6 +402,22 @@ export default function Accounts() {
                         />
                       ) : (
                         <span className="text-ink">{account.enabled ? 'Yes' : 'No'}</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-3">
+                      {can(role, 'control') ? (
+                        <input
+                          type="date"
+                          aria-label={`Cutoff date for account ${account.trader_login}`}
+                          value={cutoffDrafts[id] ?? account.cutoff_date ?? ''}
+                          onChange={(e) =>
+                            setCutoffDrafts((prev) => ({ ...prev, [id]: e.target.value }))}
+                          onBlur={() => handleCutoffBlur(account)}
+                          disabled={isPending}
+                          className="num rounded border border-transparent hover:border-line-strong focus:border-line-strong px-2 py-1 text-sm bg-transparent"
+                        />
+                      ) : (
+                        <span className="num text-ink">{account.cutoff_date || '—'}</span>
                       )}
                     </td>
                     <td className="px-3 py-3">
