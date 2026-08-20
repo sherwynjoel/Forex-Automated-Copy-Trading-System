@@ -8,7 +8,7 @@ import KillSwitch from '../components/KillSwitch'
 import StatTile from '../components/StatTile'
 import StatusDot from '../components/StatusDot'
 import Banner from '../components/Banner'
-import { Sparkline, WinRateMeter, TradeBar } from '../components/charts'
+import { Sparkline, TradeBar } from '../components/charts'
 import { money, signed, errorText } from '../lib/format'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
 
@@ -167,6 +167,27 @@ export default function Overview() {
   // impossible to miss on the dashboard - not just a row in the Logs table.
   const refreshFailedAccounts = accounts.filter((a) => a.connection_status === 'refresh_failed')
 
+  // Trading-activity windows for the performance strip, derived from the
+  // analytics equity curve (one point per closed trade, balance-after).
+  // Window P&L = last balance minus the balance before the window's first
+  // trade; when the window opens the curve, the first trade's own P&L is
+  // unknowable from balance-after alone and is excluded.
+  const curve = copierPerf?.equity_curve ?? []
+  const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0)
+  const monday = new Date(dayStart)
+  monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7))
+  const windowStats = (fromMs: number) => {
+    const firstIdx = curve.findIndex((pt) => pt.timestamp >= fromMs)
+    if (firstIdx === -1) return { count: 0, pnl: 0 }
+    const baseline = curve[firstIdx - 1]?.balance ?? curve[firstIdx].balance
+    return {
+      count: curve.length - firstIdx,
+      pnl: curve[curve.length - 1].balance - baseline,
+    }
+  }
+  const today = windowStats(dayStart.getTime())
+  const thisWeek = windowStats(monday.getTime())
+
   // Live P&L per master position, for estimating each active copy's P&L.
   const masterPnlByPosition = new Map<number, { pnl: number | null; volume: number }>()
   for (const pos of envelope?.master_positions ?? []) {
@@ -269,29 +290,29 @@ export default function Overview() {
               </div>
             </div>
             <div>
-              <div className="desk-label">Win rate</div>
-              <div className="num text-xl mt-0.5 text-ink">
-                {copierPerf.win_rate != null ? `${(copierPerf.win_rate * 100).toFixed(1)}%` : '—'}
+              <div className="desk-label">Today's trades</div>
+              <div className="num text-xl mt-0.5 text-ink">{today.count}</div>
+              <div className="text-xs mt-0.5">
+                <span className={today.pnl < 0 ? 'text-loss' : 'text-profit'}>{signed(today.pnl)}</span>
+                <span className="text-ink-soft"> P&L</span>
               </div>
-              <WinRateMeter wins={copierPerf.wins} losses={copierPerf.losses} />
+              <TradeBar
+                value={today.count}
+                max={Math.max(thisWeek.count, 1)}
+                tone={today.pnl < 0 ? 'loss' : 'profit'}
+              />
             </div>
             <div>
-              <div className="desk-label">Best trade</div>
-              <div className="num text-xl mt-0.5 text-profit">{signed(copierPerf.best_trade)}</div>
-              <TradeBar
-                value={copierPerf.best_trade}
-                max={Math.max(Math.abs(copierPerf.best_trade ?? 0), Math.abs(copierPerf.worst_trade ?? 0))}
-                tone="profit"
-              />
+              <div className="desk-label">This week</div>
+              <div className="num text-xl mt-0.5 text-ink">{thisWeek.count}</div>
+              <div className="text-xs mt-0.5">
+                <span className={thisWeek.pnl < 0 ? 'text-loss' : 'text-profit'}>{signed(thisWeek.pnl)}</span>
+                <span className="text-ink-soft"> P&L</span>
+              </div>
             </div>
             <div>
               <div className="desk-label">Worst trade</div>
               <div className="num text-xl mt-0.5 text-loss">{signed(copierPerf.worst_trade)}</div>
-              <TradeBar
-                value={copierPerf.worst_trade}
-                max={Math.max(Math.abs(copierPerf.best_trade ?? 0), Math.abs(copierPerf.worst_trade ?? 0))}
-                tone="loss"
-              />
             </div>
           </div>
         )}

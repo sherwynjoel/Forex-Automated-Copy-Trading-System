@@ -947,19 +947,16 @@ function statsRoutes(state: unknown = mockState) {
   }
 }
 
-test('copier performance strip renders its micro-charts from analytics', async () => {
+test('copier performance strip shows sparkline plus today and this-week trade tiles', async () => {
   setRole('owner')
-  stubApi(statsRoutes({
-    ...mockState,
-  }))
-  // Give the curve real points so the sparkline has something to draw.
+  const now = Date.now()
   const routes = statsRoutes()
   routes['/api/orgs/1/accounts/1/analytics?weeks=4'] = {
     ...copierAnalytics,
     equity_curve: [
-      { timestamp: 1700000000000, balance: 10000 },
-      { timestamp: 1700086400000, balance: 10250 },
-      { timestamp: 1700172800000, balance: 10512.5 },
+      { timestamp: now - 20 * 86400000, balance: 10000 },
+      { timestamp: now - 3600000, balance: 10250 },
+      { timestamp: now - 1800000, balance: 10512.5 },
     ],
   }
   stubApi(routes)
@@ -971,16 +968,21 @@ test('copier performance strip renders its micro-charts from analytics', async (
   )
 
   await screen.findByText(/copier performance/i)
-  // Net P&L trend sparkline
+  // Net P&L trend sparkline stays
   await waitFor(() => {
     expect(container.querySelector('[data-chart="perf-sparkline"] svg')).toBeTruthy()
   })
-  // Win-rate meter announces the ratio
-  const meter = container.querySelector('[data-chart="win-meter"]')
-  expect(meter).toBeTruthy()
-  expect(meter!.getAttribute('aria-label')).toMatch(/70/)
-  // Best and worst trade get magnitude bars on a shared scale
-  expect(container.querySelectorAll('[data-chart="trade-bar"]').length).toBe(2)
+  // Win rate / best trade tiles are replaced by activity tiles
+  expect(screen.queryByText(/win rate/i)).not.toBeInTheDocument()
+  expect(screen.queryByText(/best trade/i)).not.toBeInTheDocument()
+  expect(container.querySelector('[data-chart="win-meter"]')).toBeNull()
+
+  // Two closed trades today (both also count toward the week), P&L from the curve
+  expect(screen.getByText(/today's trades/i)).toBeInTheDocument()
+  expect(screen.getByText(/this week/i)).toBeInTheDocument()
+  expect(screen.getAllByText('+512.50').length).toBe(2) // today and week P&L match here
+  // Today's share-of-week magnitude bar
+  expect(container.querySelectorAll('[data-chart="trade-bar"]').length).toBe(1)
 })
 
 test('portfolio row aggregates equity and compares to yesterday', async () => {
@@ -1006,7 +1008,7 @@ test('portfolio row aggregates equity and compares to yesterday', async () => {
   expect(screen.getByText('3')).toBeInTheDocument()
 })
 
-test('copier performance strip shows P&L, win rate, best and worst trades', async () => {
+test('copier performance strip shows net P&L, activity windows, and worst trade', async () => {
   setRole('owner')
   stubApi(statsRoutes())
 
@@ -1016,10 +1018,12 @@ test('copier performance strip shows P&L, win rate, best and worst trades', asyn
     </MemoryRouter>
   )
 
-  expect(await screen.findByText('+512.50')).toBeInTheDocument()
-  expect(screen.getByText('70.0%')).toBeInTheDocument()
-  expect(screen.getByText('+300.00')).toBeInTheDocument()
-  expect(screen.getByText('-120.00')).toBeInTheDocument()
+  expect(await screen.findByText('+512.50')).toBeInTheDocument() // net P&L
+  // Win rate / best trade tiles were replaced by activity windows.
+  expect(screen.queryByText('70.0%')).not.toBeInTheDocument()
+  expect(screen.getByText(/today's trades/i)).toBeInTheDocument()
+  expect(screen.getByText(/this week/i)).toBeInTheDocument()
+  expect(screen.getByText('-120.00')).toBeInTheDocument() // worst trade stays
   expect(screen.getByText(/10 trades taken · 7 won · 3 lost/)).toBeInTheDocument()
 })
 
