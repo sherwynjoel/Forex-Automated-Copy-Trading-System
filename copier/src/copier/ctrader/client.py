@@ -230,6 +230,7 @@ class CTraderClient:
         self._spot_cbs: list[Callable] = []
         self._trader_updated_cbs: list[Callable] = []
         self._margin_call_cbs: list[Callable] = []
+        self._conn_lost_cbs: list[Callable] = []
         self.ready: defer.Deferred = defer.Deferred()
         self._hb = task.LoopingCall(self._heartbeat)
         self._hb.clock = clock
@@ -391,6 +392,12 @@ class CTraderClient:
 
     def on_execution(self, cb) -> None: self._exec_cbs.append(cb)
     def on_account_disconnect(self, cb) -> None: self._disc_cbs.append(cb)
+    def on_disconnected(self, cb) -> None:
+        """cb() fires when the CONNECTION drops (vs on_account_disconnect,
+        which is the broker's per-account event). Connection-scoped broker
+        state (spot subscriptions, account auth) dies with the socket, so
+        holders of such state register here to reset it."""
+        self._conn_lost_cbs.append(cb)
     def on_tokens_invalidated(self, cb) -> None: self._invalid_cbs.append(cb)
     def on_spot(self, cb) -> None: self._spot_cbs.append(cb)
     def on_trader_updated(self, cb) -> None: self._trader_updated_cbs.append(cb)
@@ -514,6 +521,11 @@ class CTraderClient:
         if self._hb.running:
             self._hb.stop()
         self._authed_accounts.clear()
+        for cb in list(self._conn_lost_cbs):
+            try:
+                cb()
+            except Exception:
+                log.exception("on_disconnected callback raised")
 
     def _heartbeat(self) -> None:
         d = self._sdk.send(ProtoHeartbeatEvent())

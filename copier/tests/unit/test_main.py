@@ -208,6 +208,9 @@ class _FailingClient:
     def on_spot(self, cb):
         pass
 
+    def on_disconnected(self, cb):
+        pass
+
     def on_trader_updated(self, cb):
         pass
 
@@ -270,10 +273,12 @@ class _RecordingStateTracker:
 
     def __init__(self):
         self.refresh_calls = []
+        self.client_maps = []
         self.positions = {}
 
-    def refresh_balances(self, account_ids):
+    def refresh_balances(self, account_ids, clients_by_account=None):
         self.refresh_calls.append(list(account_ids))
+        self.client_maps.append(dict(clients_by_account or {}))
         return defer.succeed(None)
 
     def snapshot(self):
@@ -1514,6 +1519,35 @@ def test_boot_schedules_a_periodic_balance_refresh(db, fernet_key):
         app.balance_refresh_call.stop()
 
 
+def test_balance_refresh_routes_live_accounts_to_the_live_client(db, fernet_key):
+    """Prod org 3: one LIVE account among demo accounts (48376002). The
+    tracker used to push every ProtoOATraderReq down its master's (demo)
+    client, so the demo server rejected the live account's request with
+    INVALID_REQUEST twice a minute and its balance stayed unknown forever.
+    refresh_balances must hand the tracker a per-account client map routed
+    by (is_live, shard)."""
+    seed_db(db, fernet_key)
+    live_account = 555
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute(
+            """INSERT INTO accounts (ctid_trader_account_id, org_id, ctid_connection_id,
+                   trader_login, is_live, role, enabled, multiplier)
+               VALUES (%s, %s, 1, 55500, true, 'ignored', true, 1.0)""",
+            (live_account, ORG_A))
+    repo = Repo(db)
+    app = main.build_app(repo, TokenStore(db, fernet_key), make_stub_client_factory(), shards=1)
+
+    tracker = _RecordingStateTracker()
+    app.state_trackers = {ORG_A: tracker}
+
+    app.refresh_balances()
+
+    assert sorted(tracker.refresh_calls[0]) == [SLAVE_A1, SLAVE_A2, live_account, MASTER_A]
+    clients_map = tracker.client_maps[0]
+    assert clients_map[live_account] is app.clients[True][0]
+    assert clients_map[MASTER_A] is app.clients[False][0]
+
+
 def test_balance_refresh_is_per_org(db, fernet_key):
     """Each org's tracker refreshes ITS OWN accounts -- an account never
     reaches another org's broker session."""
@@ -1540,7 +1574,7 @@ def test_balance_refresh_survives_a_broker_failure_and_keeps_looping(db, fernet_
     app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
 
     class _ExplodingTracker(_RecordingStateTracker):
-        def refresh_balances(self, account_ids):
+        def refresh_balances(self, account_ids, clients_by_account=None):
             self.refresh_calls.append(list(account_ids))
             return defer.fail(RuntimeError("broker said no"))
 

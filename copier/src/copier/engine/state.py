@@ -94,11 +94,22 @@ class AccountStateTracker:
         self._balance_known: dict[int, bool] = {}  # account_id -> whether balance has been refreshed
         self._positions: dict[int, list[PositionSnapshot]] = {}  # account_id -> positions
         self._spots: dict[int, tuple[float, float]] = {}  # symbol_id -> (bid, ask)
+        # Symbol ids already subscribed on the CURRENT connection. Without
+        # this memory, every resync tick re-sent the full subscription and
+        # the broker rejected the repeats with ALREADY_SUBSCRIBED (one per
+        # org per minute on prod). Reset when the connection drops:
+        # broker-side subscriptions die with the socket.
+        self._subscribed_spots: set[int] = set()
 
         # Wire up callbacks
         self._client.on_spot(self.on_spot)
+        self._client.on_disconnected(self._subscribed_spots.clear)
 
-    def refresh_balances(self, account_ids: list[int]) -> defer.Deferred:
+    def refresh_balances(
+        self,
+        account_ids: list[int],
+        clients_by_account: Mapping[int, CTraderClient] | None = None,
+    ) -> defer.Deferred:
         """Refresh balances for given accounts via ProtoOATraderReq.
 
         Sends a ProtoOATraderReq for each account and stores balance scaled by
@@ -106,15 +117,22 @@ class AccountStateTracker:
 
         Args:
             account_ids: List of account IDs to refresh
+            clients_by_account: Per-account client routing. An org can mix
+                demo and live accounts (prod org 3 does), and a request for
+                a live account written down the master's demo connection is
+                rejected INVALID_REQUEST by the broker -- so each request
+                must ride the client for ITS account's environment. Falls
+                back to the master client for accounts not in the map.
 
         Returns:
             Deferred that fires when all trader requests complete
         """
+        clients_by_account = clients_by_account or {}
         deferreds = []
         for account_id in account_ids:
             req = ProtoOATraderReq()
             req.ctidTraderAccountId = account_id
-            d = self._client.send(req)
+            d = clients_by_account.get(account_id, self._client).send(req)
             # CTraderClient.send() resolves with the raw ProtoMessage envelope
             # (payloadType/payload bytes); it must be unwrapped into a typed
             # ProtoOATraderRes before .trader is accessible.
@@ -197,17 +215,28 @@ class AccountStateTracker:
             for pos in positions:
                 symbol_ids.add(pos.symbol_id)
 
-        if not symbol_ids:
-            # No positions, return immediate success
+        # Only the delta: this connection's existing subscriptions stay
+        # live, and re-subscribing them is an ALREADY_SUBSCRIBED rejection.
+        needed = symbol_ids - self._subscribed_spots
+        if not needed:
             return defer.succeed(None)
 
         # Subscribe on master account
         req = ProtoOASubscribeSpotsReq()
         req.ctidTraderAccountId = self._master_account_id
-        for sym_id in sorted(symbol_ids):
+        for sym_id in sorted(needed):
             req.symbolId.append(sym_id)
 
-        return self._client.send(req)
+        d = self._client.send(req)
+
+        def _mark_subscribed(response):
+            # Only a delivered request marks the symbols; a failed send
+            # leaves them unmarked so the next tick retries.
+            self._subscribed_spots |= needed
+            return response
+
+        d.addCallback(_mark_subscribed)
+        return d
 
     def on_spot(self, evt: ProtoOASpotEvent) -> None:
         """Handle spot event from the client.

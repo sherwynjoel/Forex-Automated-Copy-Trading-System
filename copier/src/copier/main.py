@@ -334,9 +334,18 @@ class CopierApp:
             if not enabled_ids:
                 continue
             try:
-                # refresh_balances() fans out one ProtoOATraderReq per account and
-                # DeferredLists them; the SDK's own 5 msg/s queue paces the wire.
-                yield tracker.refresh_balances(enabled_ids)
+                # refresh_balances() fans out one ProtoOATraderReq per
+                # account and DeferredLists them; the SDK queue paces the
+                # wire. Each request must ride ITS account's environment
+                # client -- an org can mix demo and live accounts, and the
+                # master's client only serves the master's environment.
+                clients_by_account = {}
+                for a in org_accounts:
+                    client = self._client_for_account(a)
+                    if client is not None:
+                        clients_by_account[a.account_id] = client
+                yield tracker.refresh_balances(
+                    enabled_ids, clients_by_account=clients_by_account)
             except Exception:
                 log.exception("refresh_balances: broker request failed (org %s)", org_id)
                 continue

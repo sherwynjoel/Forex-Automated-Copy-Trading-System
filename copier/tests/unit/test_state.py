@@ -484,6 +484,70 @@ def test_subscribes_only_open_position_symbols():
     assert list(reqs[0].symbolId) == [1]
 
 
+def _spot_tracker():
+    sdk, clock = StubSdk(), Clock()
+    client = CTraderClient(sdk, "cid", "csecret", clock=clock)
+    client.start()
+    sdk.connect()
+
+    class MockRepo:
+        pass
+
+    symbols = {
+        1: SymbolInfo(symbol_id=1, name="EURUSD", digits=5,
+                      lot_size=10_000_000, min_volume=100_000, step_volume=100_000),
+        2: SymbolInfo(symbol_id=2, name="GBPUSD", digits=5,
+                      lot_size=10_000_000, min_volume=100_000, step_volume=100_000),
+    }
+    tracker = AccountStateTracker(client, MockRepo(), 1001, symbols)
+    return tracker, sdk
+
+
+def _open_position(position_id, symbol_id):
+    return PositionSnapshot(position_id=position_id, symbol_id=symbol_id,
+                            side=Side.BUY, volume=10_000_000, price=1.1, label="")
+
+
+def test_ensure_spot_subscriptions_sends_only_new_symbols():
+    """Prod logged ALREADY_SUBSCRIBED once per org per minute: every 60s
+    resync tick re-sent the FULL spot subscription with no memory of what
+    this connection already holds, and the broker rejected the repeat.
+    ensure_spot_subscriptions must subscribe only the delta -- an unchanged
+    position set puts nothing on the wire."""
+    tracker, sdk = _spot_tracker()
+    tracker._positions[1001] = [_open_position(1, symbol_id=1)]
+
+    tracker.ensure_spot_subscriptions()
+    tracker.ensure_spot_subscriptions()   # same positions: no wire traffic
+
+    reqs = of_type(sdk.sent, ProtoOASubscribeSpotsReq)
+    assert len(reqs) == 1
+
+    tracker._positions[1001].append(_open_position(2, symbol_id=2))
+    tracker.ensure_spot_subscriptions()
+
+    reqs = of_type(sdk.sent, ProtoOASubscribeSpotsReq)
+    assert len(reqs) == 2
+    assert list(reqs[1].symbolId) == [2]  # only the NEW symbol
+
+
+def test_spot_subscriptions_reset_when_the_connection_drops():
+    """Broker-side spot subscriptions die with the connection: after a
+    reconnect the tracker must resubscribe from scratch, not assume the old
+    connection's subscriptions carried over."""
+    tracker, sdk = _spot_tracker()
+    tracker._positions[1001] = [_open_position(1, symbol_id=1)]
+    tracker.ensure_spot_subscriptions()
+
+    sdk.disconnect()
+    sdk.connect()
+    tracker.ensure_spot_subscriptions()
+
+    reqs = of_type(sdk.sent, ProtoOASubscribeSpotsReq)
+    assert len(reqs) == 2
+    assert list(reqs[1].symbolId) == [1]
+
+
 class _RawEnvelopeClient:
     """Client stub whose send() resolves exactly the way the real
     CTraderClient.send() does: with the raw ProtoMessage envelope
@@ -498,9 +562,47 @@ class _RawEnvelopeClient:
     def on_spot(self, cb):
         pass
 
+    def on_disconnected(self, cb):
+        pass
+
     def send(self, req):
         self.sent.append(req)
         return defer.succeed(self._raw_response)
+
+
+def _trader_envelope(account_id):
+    typed = ProtoOATraderRes()
+    typed.ctidTraderAccountId = account_id
+    typed.trader.ctidTraderAccountId = account_id
+    typed.trader.balance = 100_00
+    typed.trader.moneyDigits = 2
+    typed.trader.depositAssetId = 1
+    return ProtoMessage(payloadType=typed.payloadType,
+                        payload=typed.SerializeToString())
+
+
+def test_refresh_balances_routes_each_account_via_the_client_map():
+    """Prod org 3 mixes one LIVE account into a demo fleet; the tracker's
+    single master (demo) client can never serve the live account's
+    ProtoOATraderReq -- the demo server rejected it with INVALID_REQUEST
+    twice a minute and that balance stayed permanently unknown.
+    refresh_balances takes a per-account client map, falling back to the
+    master client only for accounts not in it."""
+    class MockRepo:
+        pass
+
+    symbols = {1: SymbolInfo(symbol_id=1, name="EURUSD", digits=5,
+                             lot_size=10_000_000, min_volume=100_000, step_volume=100_000)}
+    master_client = _RawEnvelopeClient(_trader_envelope(1001))
+    live_client = _RawEnvelopeClient(_trader_envelope(1002))
+    tracker = AccountStateTracker(master_client, MockRepo(), 1001, symbols)
+
+    tracker.refresh_balances([1001, 1002], clients_by_account={1002: live_client})
+
+    assert [r.ctidTraderAccountId for r in master_client.sent] == [1001]
+    assert [r.ctidTraderAccountId for r in live_client.sent] == [1002]
+    # Both balances landed, whichever client served them.
+    assert tracker._balance_known.get(1001) and tracker._balance_known.get(1002)
 
 
 def test_refresh_balances_unwraps_raw_envelope_before_reading_trader():
