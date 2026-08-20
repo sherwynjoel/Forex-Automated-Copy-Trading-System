@@ -23,6 +23,7 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
 from twisted.application.internet import ClientService, backoffPolicy
 from twisted.internet import defer, ssl, task
 from twisted.internet.endpoints import HostnameEndpoint, wrapClientTLS
+from twisted.protocols.basic import Int32StringReceiver
 from twisted.python.failure import Failure
 
 log = logging.getLogger(__name__)
@@ -47,6 +48,21 @@ HEARTBEAT_INTERVAL_S = 8.0   # server requires <= 10 s
 # since-moved price. A trade send must never wait out a reconnect backoff.
 SEND_HANDOFF_TIMEOUT_S = 2.0
 
+# The vendored TcpProtocol drains its outbound queue on a ONCE-PER-SECOND
+# LoopingCall (`self._send_task.start(1)`), sending at most
+# numberOfMessagesToSendPerSecond (SDK default 5) per tick. The 1s CADENCE
+# -- not the 5-message budget -- meant every queued broker round trip paid
+# up to a full second of pure queue wait: a 3-round-trip query (/details)
+# had a deterministic ~2.4s floor and /analytics ~4s (measured on prod,
+# 2026-08-20). Draining every DRAIN_TICK_S with DRAIN_BUDGET_PER_TICK
+# messages per tick cuts that wait to <=100ms while keeping a hard
+# budget/tick = 10 msg/s wire ceiling for the queued path: Spotware's
+# server cap is 50 req/s, and the trade path (instant=True, bypasses this
+# queue) is separately bucketed at 40/s by the Dispatcher's TokenBucket,
+# so 10/s here keeps even the combined worst case at the cap.
+DRAIN_TICK_S = 0.1
+DRAIN_BUDGET_PER_TICK = 1
+
 
 class _PerConnectionTcpProtocol(TcpProtocol):
     """TcpProtocol keeps its outbound queue (`_send_queue`) as a **class**
@@ -64,9 +80,21 @@ class _PerConnectionTcpProtocol(TcpProtocol):
     double-send.
     """
 
+    _drain_clock = None  # tests inject a twisted Clock; None = global reactor
+
     def connectionMade(self):
         self._send_queue = deque()
-        super().connectionMade()
+        # Replicates TcpProtocol.connectionMade (small, pinned SDK 0.9.2)
+        # instead of calling it: the SDK hardcodes .start(1) on its drain
+        # LoopingCall, and the faster DRAIN_TICK_S cadence is the whole
+        # point -- see the constant's comment for the latency/cap math.
+        Int32StringReceiver.connectionMade(self)
+        if not self._send_task:
+            self._send_task = task.LoopingCall(self._sendStrings)
+        if self._drain_clock is not None:
+            self._send_task.clock = self._drain_clock
+        self._send_task.start(DRAIN_TICK_S)
+        self.factory.connected(self)
 
 
 def _env_flag(name: str) -> bool:
@@ -176,6 +204,8 @@ def make_sdk_client(host: str, port: int, reactor_=None) -> Client:
         host, port, _PerConnectionTcpProtocol,
         endpoint=build_tls_endpoint(reactor_, host, port),
         retryPolicy=backoffPolicy(initialDelay=1.0, maxDelay=60.0, factor=2.0),
+        # Read by _sendStrings as the PER-TICK allowance (see DRAIN_TICK_S).
+        numberOfMessagesToSendPerSecond=DRAIN_BUDGET_PER_TICK,
     )
 
 
@@ -295,7 +325,7 @@ class CTraderClient:
         silently discarded rather than acted on.
 
         Sends with instant=True: TcpProtocol.send()'s default (instant=False)
-        only *enqueues* onto _send_queue, drained by a <=1s-cadence
+        only *enqueues* onto _send_queue, drained by a DRAIN_TICK_S-cadence
         LoopingCall -- if the connection dies inside that window (now that
         each connection has its own private queue, see
         _PerConnectionTcpProtocol, so the message can no longer be flushed
@@ -407,7 +437,9 @@ class CTraderClient:
         in a single reactor turn. Each one goes through the vendored SDK's
         `send()`, which arms its 5 s response timeout AT SEND TIME while the
         messages themselves drain out of TcpProtocol's queue at only
-        `numberOfMessagesToSendPerSecond` (5) per second. So on a reconnect
+        `numberOfMessagesToSendPerSecond` per drain tick (5 per 1s tick when
+        this was written; DRAIN_BUDGET_PER_TICK per DRAIN_TICK_S now -- the
+        serialization below is what matters, not the rate). So on a reconnect
         with N accounts, everything at queue index >= ~25 timed out before
         it was ever written; the SDK's `isCanceled` check then DROPPED it
         from the queue instead of sending it, and nothing ever retried --

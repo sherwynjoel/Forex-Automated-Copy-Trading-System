@@ -9,9 +9,9 @@ from twisted.internet.task import Clock
 from twisted.python.failure import Failure
 
 from copier.ctrader.client import (
-    HEARTBEAT_INTERVAL_S, SEND_HANDOFF_TIMEOUT_S, TLS_CA_FILE_ENV,
-    TLS_INSECURE_ENV, CTraderClient, _PerConnectionTcpProtocol,
-    client_tls_options, make_sdk_client)
+    DRAIN_BUDGET_PER_TICK, DRAIN_TICK_S, HEARTBEAT_INTERVAL_S,
+    SEND_HANDOFF_TIMEOUT_S, TLS_CA_FILE_ENV, TLS_INSECURE_ENV, CTraderClient,
+    _PerConnectionTcpProtocol, client_tls_options, make_sdk_client)
 from copier.testing.tls import make_self_signed_context
 
 
@@ -405,7 +405,7 @@ def test_send_no_reply_ignores_a_late_whenconnected_after_timeout():
 
 def test_send_no_reply_writes_synchronously_to_the_transport_not_the_drain_queue():
     """Guards N2: TcpProtocol.send(instant=False) (the default) only
-    *enqueues* onto _send_queue, drained by a <=1s-cadence LoopingCall. With
+    *enqueues* onto _send_queue, drained by a DRAIN_TICK_S-cadence LoopingCall. With
     each connection now owning its own private queue (I3), a message
     enqueued on a connection that dies before that tick fires is silently
     dropped -- yet send_no_reply had already reported success: no retry, no
@@ -504,6 +504,62 @@ def test_per_connection_tcp_protocol_isolates_send_queues():
     assert list(p2._send_queue) == []    # never visible on p2's -- the actual regression this guards
 
 
+def _clocked_real_protocol(budget=1):
+    """A REAL _PerConnectionTcpProtocol whose drain LoopingCall runs on a
+    test Clock, so tests can assert exactly when queued messages hit the
+    wire. `budget` is the factory's per-tick message allowance."""
+    clock = Clock()
+    protocol = _PerConnectionTcpProtocol()
+    protocol._drain_clock = clock
+    protocol.factory = _StubProtocolFactory()
+    protocol.factory.numberOfMessagesToSendPerSecond = budget
+    protocol.transport = _StubTransport()
+    protocol.connectionMade()
+    protocol.transport.written.clear()  # drop the start-tick heartbeat
+    return protocol, clock
+
+
+def test_queued_send_drains_on_a_100ms_tick_not_the_sdk_1s_tick():
+    """The vendored TcpProtocol drains its queue on a ONCE-PER-SECOND
+    LoopingCall, so every queued broker round trip paid up to 1s of pure
+    queue wait -- a 3-round-trip query (/details) had a deterministic
+    ~2.4s floor and /analytics ~4s (measured on prod, 2026-08-20; the
+    Spotware-API slowness the operator reported). The per-connection
+    subclass drains every DRAIN_TICK_S instead."""
+    protocol, clock = _clocked_real_protocol()
+
+    protocol.send(ProtoHeartbeatEvent())     # default instant=False: queued
+    assert protocol.transport.written == []  # nothing until a drain tick
+
+    clock.advance(DRAIN_TICK_S)
+    assert len(protocol.transport.written) == 1
+
+    # And decisively BEFORE the SDK's 1s cadence would have fired.
+    assert DRAIN_TICK_S <= 0.2
+
+
+def test_drain_budget_caps_queued_messages_per_tick():
+    """DRAIN_BUDGET_PER_TICK bounds the queued path's wire rate at
+    budget/DRAIN_TICK_S msg/s (10/s at the shipped 1-per-100ms): three
+    queued messages drain across three consecutive ticks, one each."""
+    protocol, clock = _clocked_real_protocol(budget=1)
+
+    for _ in range(3):
+        protocol.send(ProtoHeartbeatEvent())
+
+    for expected in (1, 2, 3):
+        clock.advance(DRAIN_TICK_S)
+        assert len(protocol.transport.written) == expected
+
+
+def test_make_sdk_client_sets_the_per_tick_budget():
+    """make_sdk_client must wire DRAIN_BUDGET_PER_TICK into the client --
+    the factory copies numberOfMessagesToSendPerSecond from it, and
+    _sendStrings reads it as the PER-TICK allowance."""
+    client = make_sdk_client("demo.example.invalid", 5035)
+    assert client.numberOfMessagesToSendPerSecond == DRAIN_BUDGET_PER_TICK
+
+
 # ---------- T1: TLS verification ----------
 
 def test_default_tls_options_verify_chain_and_hostname(monkeypatch):
@@ -572,7 +628,7 @@ def test_make_sdk_client_connects_over_a_tls_wrapped_endpoint(monkeypatch):
     endpoint = client._machine._endpoint
     assert type(endpoint).__name__ == "_WrapperEndpoint"
     # Still a working SDK Client in every other respect.
-    assert client.numberOfMessagesToSendPerSecond == 5
+    assert client.numberOfMessagesToSendPerSecond == DRAIN_BUDGET_PER_TICK
     assert client.isConnected is False
     assert client._responseDeferreds == {}
 
