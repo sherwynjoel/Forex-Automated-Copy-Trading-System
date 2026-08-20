@@ -385,6 +385,11 @@ class Reconciler:
         # AccountStateTracker.set_positions() and answer /state truthfully.
         self.master_positions: list[PositionSnapshot] = []
         self.master_orders: list[OrderSnapshot] = []
+        # Same exposure for every enabled slave's open positions: without it
+        # the state tracker only ever learns the master's book, and /state
+        # reports positions: 0 for slaves that the broker says are holding
+        # live copies.
+        self.slave_positions: dict[int, list[PositionSnapshot]] = {}
         # Drift ids the operator dismissed. Persisted (migration 008) and
         # loaded here so a deploy/restart no longer resurfaces every
         # dismissed item -- the old in-memory-only set meant each prod
@@ -462,6 +467,8 @@ class Reconciler:
             positions, orders = yield self._fetch_snapshot(slave_id)
             slave_positions[slave_id] = positions
             slave_orders[slave_id] = orders
+
+        self.slave_positions = slave_positions
 
         # Cache live slave position snapshots for close_orphan()/adopt() volume lookups.
         self._slave_positions = {

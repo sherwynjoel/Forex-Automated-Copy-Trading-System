@@ -582,6 +582,18 @@ class CopierApp:
                     for p in reconciler.master_positions
                 ]
                 tracker.set_positions(reconciler.master_account_id, positions)
+                # The slaves' books too: the dashboard's per-account position
+                # counts and open P&L read from this tracker, and a slave
+                # holding live copies must never report an empty book.
+                for slave_id, slave_pos in reconciler.slave_positions.items():
+                    tracker.set_positions(slave_id, [
+                        StatePositionSnapshot(
+                            position_id=p.position_id, symbol_id=p.symbol_id,
+                            side=p.side, volume=p.volume, price=p.price,
+                            label=p.label,
+                        )
+                        for p in slave_pos
+                    ])
                 try:
                     yield tracker.ensure_spot_subscriptions()
                 except Exception:

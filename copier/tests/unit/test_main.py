@@ -1157,6 +1157,39 @@ def test_resync_runs_one_org_or_every_org(db, fernet_key):
 
 
 @pytest_twisted.inlineCallbacks
+def test_resync_feeds_slave_positions_into_the_state_tracker(db, fernet_key):
+    """The slave tiles and /state read per-account positions from the state
+    tracker -- but resync used to push ONLY the master's snapshot, so every
+    slave reported positions: 0 / open_pnl: 0 forever, even while the same
+    payload listed active copies on those very slaves (the broker held six
+    open positions on a slave that the dashboard showed as flat)."""
+    org_a, _org_b = seed_two_orgs(db, fernet_key)
+    repo = Repo(db)
+    app = main.build_app(repo, TokenStore(db, fernet_key), make_stub_client_factory(), shards=1)
+
+    app.reconcilers[org_a].run = lambda: defer.succeed([])
+    app.reconcilers[org_a].master_positions = [
+        PositionSnapshot(position_id=42, symbol_id=1, side=Side.BUY,
+                         volume=10_000_000, price=1.10500, label="copy:m42")
+    ]
+    app.reconcilers[org_a].slave_positions = {
+        SLAVE_A1: [
+            PositionSnapshot(position_id=5001, symbol_id=1, side=Side.BUY,
+                             volume=5_000_000, price=1.10537, label="copy:m42")
+        ],
+        SLAVE_A2: [],
+    }
+    tracker = _RecordingStateTracker()
+    app.state_trackers = {org_a: tracker}
+
+    yield app.resync(org_a)
+
+    assert set(tracker.positions) == {MASTER_A, SLAVE_A1, SLAVE_A2}
+    assert [p.position_id for p in tracker.positions[SLAVE_A1]] == [5001]
+    assert tracker.positions[SLAVE_A2] == []  # explicitly flat, not unknown
+
+
+@pytest_twisted.inlineCallbacks
 def test_org_scoped_resync_refreshes_only_that_orgs_balances(db, fernet_key):
     """resync() ends with a balance refresh so the operator sees current
     numbers -- but a resync in org A must not put a ProtoOATraderReq on org

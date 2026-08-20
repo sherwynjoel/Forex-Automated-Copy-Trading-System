@@ -1008,6 +1008,122 @@ test('portfolio row aggregates equity and compares to yesterday', async () => {
   expect(screen.getByText('3')).toBeInTheDocument()
 })
 
+test('the Portfolio Value tile expands a per-account breakdown in place', async () => {
+  setRole('owner')
+  stubApi(statsRoutes())
+  const { within } = await import('@testing-library/react')
+
+  render(
+    <MemoryRouter>
+      <Overview />
+    </MemoryRouter>
+  )
+
+  await screen.findByText('Copying Status')
+  expect(screen.queryByText(/portfolio breakdown/i)).not.toBeInTheDocument()
+
+  await userEvent.click(screen.getByRole('button', { name: /portfolio value/i }))
+  const panel = screen.getByText(/portfolio breakdown/i).closest('section')!
+  // One row per account with its equity from the live state
+  expect(within(panel).getByText('12,000.00')).toBeInTheDocument()
+  expect(within(panel).getByText('5,500.00')).toBeInTheDocument()
+  expect(within(panel).getByText('2,900.00')).toBeInTheDocument()
+})
+
+test('the Accounts Connected tile expands a fleet status list, accordion-style', async () => {
+  setRole('owner')
+  stubApi(statsRoutes())
+  const { within } = await import('@testing-library/react')
+
+  render(
+    <MemoryRouter>
+      <Overview />
+    </MemoryRouter>
+  )
+
+  await screen.findByText('Copying Status')
+  // Open portfolio first, then accounts — accordion closes the first panel
+  await userEvent.click(screen.getByRole('button', { name: /portfolio value/i }))
+  expect(screen.getByText(/portfolio breakdown/i)).toBeInTheDocument()
+
+  await userEvent.click(screen.getByRole('button', { name: /accounts connected/i }))
+  expect(screen.queryByText(/portfolio breakdown/i)).not.toBeInTheDocument()
+  const panel = screen.getByText(/fleet status/i).closest('section')!
+  expect(within(panel).getAllByText(/slave/i).length).toBeGreaterThanOrEqual(2)
+  expect(within(panel).getByText(/master/i)).toBeInTheDocument()
+  expect(within(panel).getByText(/degraded/i)).toBeInTheDocument()
+})
+
+test("the Copied Today tile expands the list of today's copy fills", async () => {
+  setRole('owner')
+  // Pinned inside today regardless of the wall clock (an hour-ago stamp
+  // crosses midnight when the suite runs just after 00:00).
+  const todayStamp = new Date(); todayStamp.setHours(0, 5, 0, 0)
+  const routes = statsRoutes()
+  routes['/api/orgs/1/overview'] = {
+    ...overviewStats,
+    recent_copies: [
+      {
+        status: 'active', master_position_id: 42, master_order_id: null,
+        slave_account_id: 2, slave_login: 1002, slave_nickname: null,
+        symbol: 'EURUSD', slave_volume: 50000, fill_price: 1.105,
+        error: null, updated_at: todayStamp.toISOString(),
+      },
+      {
+        status: 'closed', master_position_id: 41, master_order_id: null,
+        slave_account_id: 3, slave_login: 1003, slave_nickname: null,
+        symbol: 'GBPUSD', slave_volume: 50000, fill_price: 1.27,
+        error: null, updated_at: new Date(Date.now() - 3 * 86400000).toISOString(),
+      },
+    ],
+  }
+  stubApi(routes)
+  const { within } = await import('@testing-library/react')
+
+  render(
+    <MemoryRouter>
+      <Overview />
+    </MemoryRouter>
+  )
+
+  await screen.findByText('Copying Status')
+  await userEvent.click(screen.getByRole('button', { name: /copied today/i }))
+
+  const panel = screen.getByText(/today's copy fills/i).closest('section')!
+  // The fill from an hour ago is listed; the three-day-old one is not
+  expect(within(panel).getByText('1.105')).toBeInTheDocument()
+  expect(within(panel).queryByText('1.27')).not.toBeInTheDocument()
+})
+
+test('the Open P&L tile expands a live open-contracts panel in place', async () => {
+  setRole('owner')
+  stubApi(statsRoutes())
+
+  render(
+    <MemoryRouter>
+      <Overview />
+    </MemoryRouter>
+  )
+
+  await screen.findByText('Copying Status')
+  // Panel hidden until the tile is toggled
+  expect(screen.queryByText('+200.00')).not.toBeInTheDocument()
+
+  const tile = screen.getByRole('button', { name: /open p&l/i })
+  expect(tile).toHaveAttribute('aria-expanded', 'false')
+  await userEvent.click(tile)
+
+  // Every running contract across accounts, with live P&L from the state feed
+  expect(tile).toHaveAttribute('aria-expanded', 'true')
+  expect(screen.getAllByText('EURUSD').length).toBeGreaterThanOrEqual(2)
+  expect(screen.getByText('+200.00')).toBeInTheDocument() // master's position
+  expect(screen.getByText('+500.00')).toBeInTheDocument() // slave's position
+
+  // Toggles closed again
+  await userEvent.click(tile)
+  expect(screen.queryByText('+200.00')).not.toBeInTheDocument()
+})
+
 test('copier performance strip shows net P&L, activity windows, and worst trade', async () => {
   setRole('owner')
   stubApi(statsRoutes())

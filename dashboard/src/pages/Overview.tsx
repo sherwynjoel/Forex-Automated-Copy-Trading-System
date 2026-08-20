@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { Link } from 'react-router-dom'
 import { orgApi } from '../lib/api'
 import { useOrg } from '../lib/org'
 import type {
@@ -9,7 +10,7 @@ import StatTile from '../components/StatTile'
 import StatusDot from '../components/StatusDot'
 import Banner from '../components/Banner'
 import { Sparkline, TradeBar } from '../components/charts'
-import { money, signed, errorText } from '../lib/format'
+import { money, signed, formatWhen, errorText } from '../lib/format'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
 
 /**
@@ -53,6 +54,10 @@ export default function Overview() {
   const [copierPerf, setCopierPerf] = useState<Analytics | null>(null)
   const [loading, setLoading] = useState(true)
   const [actionError, setActionError] = useState<string | null>(null)
+  type KpiPanel = 'portfolio' | 'accounts' | 'contracts' | 'fills'
+  const [expandedKpi, setExpandedKpi] = useState<KpiPanel | null>(null)
+  const toggleKpi = (panel: KpiPanel) =>
+    setExpandedKpi((cur) => (cur === panel ? null : panel))
   const [error, setError] = useState<string | null>(null)
 
   // Load accounts and settings on mount
@@ -167,6 +172,25 @@ export default function Overview() {
   // impossible to miss on the dashboard - not just a row in the Logs table.
   const refreshFailedAccounts = accounts.filter((a) => a.connection_status === 'refresh_failed')
 
+  // Today's copy fills from the stats feed, newest first.
+  const midnight = new Date(); midnight.setHours(0, 0, 0, 0)
+  const todaysFills = (stats?.recent_copies ?? [])
+    .filter((c) => Date.parse(c.updated_at) >= midnight.getTime())
+    .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at))
+
+  // Every running contract across the fleet, flattened from the live state
+  // feed -- refreshed by the same 5s poll / websocket as the KPI row.
+  const openContracts = accounts.flatMap((a) => {
+    const snap = state[String(a.ctid_trader_account_id)]
+    if (!snap?.positions?.length) return []
+    const accountLabel = `${a.nickname || `Account ${a.trader_login}`}${a.role === 'master' ? ' · master' : ''}`
+    return snap.positions.map((pos) => ({
+      accountId: a.ctid_trader_account_id,
+      accountLabel,
+      pos,
+    }))
+  })
+
   // Trading-activity windows for the performance strip, derived from the
   // analytics equity curve (one point per closed trade, balance-after).
   // Window P&L = last balance minus the balance before the window's first
@@ -240,17 +264,23 @@ export default function Overview() {
               {signed(vsYesterday * 100)}% vs yesterday
             </span>
           ) : 'vs yesterday: no snapshot yet'}
+          onClick={() => toggleKpi('portfolio')}
+          expanded={expandedKpi === 'portfolio'}
         />
         <StatTile
           label="Accounts connected"
           value={String(stats?.accounts_connected ?? accounts.length)}
           sub={`${stats?.masters ?? (masterAccount ? 1 : 0)} master · ${stats?.active_slaves ?? slaveAccounts.length} active slaves`}
+          onClick={() => toggleKpi('accounts')}
+          expanded={expandedKpi === 'accounts'}
         />
         <StatTile
           label="Open P&L"
           value={signed(totalOpenPnl)}
           tone={totalOpenPnl < 0 ? 'loss' : 'profit'}
           sub={`${openTrades} open trade${openTrades === 1 ? '' : 's'}`}
+          onClick={() => toggleKpi('contracts')}
+          expanded={expandedKpi === 'contracts'}
         />
         <StatTile
           label="Copied today"
@@ -258,8 +288,221 @@ export default function Overview() {
           sub={stats && stats.degraded > 0
             ? <span className="text-loss">{stats.degraded} degraded</span>
             : 'copy fills since midnight'}
+          onClick={() => toggleKpi('fills')}
+          expanded={expandedKpi === 'fills'}
         />
       </div>
+
+      {/* Per-account portfolio breakdown, expanded from the Portfolio tile */}
+      {expandedKpi === 'portfolio' && (
+        <section className="rounded-lg border border-line bg-card">
+          <div className="px-5 pt-4 pb-3 flex items-baseline justify-between">
+            <h2 className="desk-label">Portfolio breakdown · live</h2>
+            <Link
+              to={`/org/${orgId}/accounts`}
+              className="text-xs font-medium text-brand-deep hover:underline"
+            >
+              Manage accounts
+            </Link>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="stack-table w-full text-sm">
+              <thead>
+                <tr className="text-left border-b border-line">
+                  <th className="desk-label px-5 py-2 font-semibold">Account</th>
+                  <th className="desk-label px-3 py-2 font-semibold">Role</th>
+                  <th className="desk-label px-3 py-2 font-semibold text-right">Balance</th>
+                  <th className="desk-label px-3 py-2 font-semibold text-right">Equity</th>
+                  <th className="desk-label px-5 py-2 font-semibold text-right">Open P&L</th>
+                </tr>
+              </thead>
+              <tbody>
+                {accounts.map((a) => {
+                  const snap = state[String(a.ctid_trader_account_id)]
+                  return (
+                    <tr key={a.ctid_trader_account_id} className="border-b border-line last:border-0">
+                      <td data-label="Account" className="px-5 py-2.5">
+                        {a.nickname || `Account ${a.trader_login}`}
+                      </td>
+                      <td data-label="Role" className="px-3 py-2.5 text-ink-soft">{a.role}</td>
+                      <td data-label="Balance" className="tnum px-3 py-2.5 text-right">{money(snap?.balance)}</td>
+                      <td data-label="Equity" className="tnum px-3 py-2.5 text-right">{money(snap?.equity)}</td>
+                      <td data-label="Open P&L" className="tnum px-5 py-2.5 text-right">
+                        <span className={(snap?.open_pnl ?? 0) < 0 ? 'text-loss' : 'text-profit'}>
+                          {signed(snap?.open_pnl)}
+                        </span>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
+      {/* Fleet status list, expanded from the Accounts tile */}
+      {expandedKpi === 'accounts' && (
+        <section className="rounded-lg border border-line bg-card">
+          <div className="px-5 pt-4 pb-3 flex items-baseline justify-between">
+            <h2 className="desk-label">Fleet status</h2>
+            <Link
+              to={`/org/${orgId}/accounts`}
+              className="text-xs font-medium text-brand-deep hover:underline"
+            >
+              Manage accounts
+            </Link>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="stack-table w-full text-sm">
+              <thead>
+                <tr className="text-left border-b border-line">
+                  <th className="desk-label px-5 py-2 font-semibold">Account</th>
+                  <th className="desk-label px-3 py-2 font-semibold">Role</th>
+                  <th className="desk-label px-3 py-2 font-semibold">Health</th>
+                  <th className="desk-label px-5 py-2 font-semibold">Copying</th>
+                </tr>
+              </thead>
+              <tbody>
+                {accounts.map((a) => {
+                  // Anything that is not an affirmatively healthy status
+                  // reads as degraded -- 'disconnected' must never show OK.
+                  const degraded = a.status !== 'ok' && a.status !== 'connected'
+                  return (
+                    <tr key={a.ctid_trader_account_id} className="border-b border-line last:border-0">
+                      <td data-label="Account" className="px-5 py-2.5">
+                        {a.nickname || `Account ${a.trader_login}`}
+                      </td>
+                      <td data-label="Role" className="px-3 py-2.5 text-ink-soft">{a.role}</td>
+                      <td data-label="Health" className="px-3 py-2.5">
+                        <span className="inline-flex items-center gap-1.5">
+                          <StatusDot tone={degraded ? 'degraded' : 'ok'} />
+                          {degraded ? 'Degraded' : 'OK'}
+                        </span>
+                      </td>
+                      <td data-label="Copying" className="px-5 py-2.5 text-ink-soft">
+                        {a.role === 'master' ? '—' : a.enabled ? 'Enabled' : 'Paused'}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
+      {/* Today's copy fills, expanded from the Copied Today tile */}
+      {expandedKpi === 'fills' && (
+        <section className="rounded-lg border border-line bg-card">
+          <div className="px-5 pt-4 pb-3 flex items-baseline justify-between">
+            <h2 className="desk-label">Today's copy fills · live</h2>
+            <Link
+              to={`/org/${orgId}/logs`}
+              className="text-xs font-medium text-brand-deep hover:underline"
+            >
+              Full event log
+            </Link>
+          </div>
+          {todaysFills.length === 0 ? (
+            <p className="px-5 pb-5 text-sm text-ink-faint">
+              No copy fills yet today.
+            </p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="stack-table w-full text-sm">
+                <thead>
+                  <tr className="text-left border-b border-line">
+                    <th className="desk-label px-5 py-2 font-semibold">When</th>
+                    <th className="desk-label px-3 py-2 font-semibold">Status</th>
+                    <th className="desk-label px-3 py-2 font-semibold">Slave</th>
+                    <th className="desk-label px-3 py-2 font-semibold">Symbol</th>
+                    <th className="desk-label px-5 py-2 font-semibold text-right">Fill price</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {todaysFills.map((copy, i) => (
+                    <tr key={`${copy.slave_account_id}-${copy.master_position_id ?? copy.master_order_id}-${i}`}
+                        className="border-b border-line last:border-0">
+                      <td data-label="When" className="tnum px-5 py-2.5 text-ink-soft">
+                        {formatWhen(copy.updated_at)}
+                      </td>
+                      <td data-label="Status" className="px-3 py-2.5">
+                        <span className={`text-xs font-medium px-2 py-0.5 rounded ${
+                          copy.status === 'active' ? 'bg-profit-wash text-profit-deep'
+                          : copy.status === 'failed' ? 'bg-loss-wash text-loss-deep'
+                          : copy.status === 'closed' ? 'bg-line text-ink-soft'
+                          : 'bg-warn-wash text-warn-deep'
+                        }`}>
+                          {copy.status}
+                        </span>
+                      </td>
+                      <td data-label="Slave" className="px-3 py-2.5">
+                        {copy.slave_nickname || <span className="tnum">{copy.slave_login}</span>}
+                      </td>
+                      <td data-label="Symbol" className="tnum px-3 py-2.5">{copy.symbol ?? '—'}</td>
+                      <td data-label="Fill price" className="tnum px-5 py-2.5 text-right">
+                        {copy.fill_price ?? '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* Live open contracts, expanded in place from the Open P&L tile */}
+      {expandedKpi === 'contracts' && (
+        <section className="rounded-lg border border-line bg-card">
+          <div className="px-5 pt-4 pb-3 flex items-baseline justify-between">
+            <h2 className="desk-label">Open contracts · live</h2>
+            <Link
+              to={`/org/${orgId}/positions`}
+              className="text-xs font-medium text-brand-deep hover:underline"
+            >
+              Full positions view
+            </Link>
+          </div>
+          {openContracts.length === 0 ? (
+            <p className="px-5 pb-5 text-sm text-ink-faint">
+              No open contracts right now. Fills appear here the moment they happen.
+            </p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="stack-table w-full text-sm">
+                <thead>
+                  <tr className="text-left border-b border-line">
+                    <th className="desk-label px-5 py-2 font-semibold">Account</th>
+                    <th className="desk-label px-3 py-2 font-semibold">Symbol</th>
+                    <th className="desk-label px-3 py-2 font-semibold">Side</th>
+                    <th className="desk-label px-3 py-2 font-semibold text-right">Entry</th>
+                    <th className="desk-label px-5 py-2 font-semibold text-right">Live P&L</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {openContracts.map((row) => (
+                    <tr key={`${row.accountId}-${row.pos.position_id}`} className="border-b border-line last:border-0">
+                      <td data-label="Account" className="px-5 py-2.5">{row.accountLabel}</td>
+                      <td data-label="Symbol" className="tnum px-3 py-2.5">{row.pos.symbol ?? row.pos.symbol_id}</td>
+                      <td data-label="Side" className={`px-3 py-2.5 font-medium ${row.pos.side === 'BUY' ? 'text-profit' : 'text-loss'}`}>
+                        {row.pos.side}
+                      </td>
+                      <td data-label="Entry" className="tnum px-3 py-2.5 text-right">{row.pos.entry_price}</td>
+                      <td data-label="Live P&L" className="tnum px-5 py-2.5 text-right">
+                        <span className={(row.pos.pnl_quote ?? 0) < 0 ? 'text-loss' : 'text-profit'}>
+                          {signed(row.pos.pnl_quote)}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      )}
 
       {/* Copier performance strip (master's realized results, last 4 weeks) */}
       <section className="rounded-lg border border-line bg-card p-4">
