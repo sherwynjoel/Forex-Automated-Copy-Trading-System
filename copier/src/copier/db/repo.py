@@ -336,6 +336,36 @@ class Repo:
                 (cutoff_date, account_id),
             )
 
+    # ---------- drift dismissals ----------
+
+    def load_drift_dismissals(self, org_id: int) -> set[str]:
+        """Drift ids the operator dismissed in this org (survives restarts)."""
+        with psycopg.connect(self.dsn, autocommit=True) as conn:
+            rows = conn.execute(
+                "SELECT drift_id FROM drift_dismissals WHERE org_id = %s",
+                (org_id,),
+            ).fetchall()
+        return {r[0] for r in rows}
+
+    def save_drift_dismissal(self, org_id: int, drift_id: str) -> None:
+        """Record one dismissal; re-dismissing the same item is a no-op."""
+        with psycopg.connect(self.dsn, autocommit=True) as conn:
+            conn.execute(
+                "INSERT INTO drift_dismissals (org_id, drift_id) VALUES (%s, %s) "
+                "ON CONFLICT DO NOTHING",
+                (org_id, drift_id),
+            )
+
+    def prune_drift_dismissals(self, org_id: int, keep: set[str]) -> None:
+        """Drop this org's dismissals not in `keep` (their condition cleared,
+        so a returning condition must alert again). Other orgs untouched."""
+        with psycopg.connect(self.dsn, autocommit=True) as conn:
+            conn.execute(
+                "DELETE FROM drift_dismissals WHERE org_id = %s "
+                "AND NOT (drift_id = ANY(%s))",
+                (org_id, list(keep)),
+            )
+
     # ---------- symbol cache ----------
 
     def save_symbol_cache(self, account_id: int, infos: dict[str, SymbolInfo]) -> None:

@@ -385,13 +385,15 @@ class Reconciler:
         # AccountStateTracker.set_positions() and answer /state truthfully.
         self.master_positions: list[PositionSnapshot] = []
         self.master_orders: list[OrderSnapshot] = []
-        # Drift ids the operator dismissed. In-memory on purpose: a process
-        # restart re-surfaces dismissed items for a fresh look, but the
-        # periodic resync loop must not (before this set existed, dismiss()
-        # only logged, and every run() resurrected the item). DriftItem ids
-        # are _stable_id() digests, so the same condition maps to the same
-        # id across runs.
-        self._dismissed: set[str] = set()
+        # Drift ids the operator dismissed. Persisted (migration 008) and
+        # loaded here so a deploy/restart no longer resurfaces every
+        # dismissed item -- the old in-memory-only set meant each prod
+        # restart undid the operator's dismissals. DriftItem ids are
+        # _stable_id() digests, so the same condition maps to the same id
+        # across runs and restarts; _apply_dismissals prunes stored ids
+        # whose condition has cleared, so a RETURNING condition alerts
+        # again instead of staying muted forever.
+        self._dismissed: set[str] = repo.load_drift_dismissals(org_id)
 
     def _fetch_snapshot(self, account_id: int):
         """Send ProtoOAReconcileReq for one account and extract snapshots.
@@ -483,12 +485,7 @@ class Reconciler:
             mappings, enabled_slave_ids, dry_run=dry_run,
         )
 
-        # Suppress items the operator dismissed, and prune dismissals whose
-        # condition has cleared -- if the same condition ever comes back,
-        # it alerts again instead of staying muted forever.
-        computed_ids = {item.id for item in items}
-        self._dismissed &= computed_ids
-        items = [item for item in items if item.id not in self._dismissed]
+        items = self._apply_dismissals(items)
 
         # Log only drift that is NEW since the previous run. run() now also
         # fires from the periodic resync loop, and re-logging every
@@ -642,6 +639,19 @@ class Reconciler:
 
         return d
 
+    def _apply_dismissals(self, items: list[DriftItem]) -> list[DriftItem]:
+        """Suppress items the operator dismissed, and prune dismissals whose
+        condition has cleared -- if the same condition ever comes back, it
+        alerts again instead of staying muted forever. The prune is written
+        through to drift_dismissals only when something actually cleared,
+        so the steady state costs no DB write per resync tick."""
+        computed_ids = {item.id for item in items}
+        before = len(self._dismissed)
+        self._dismissed &= computed_ids
+        if len(self._dismissed) != before:
+            self.repo.prune_drift_dismissals(self.org_id, self._dismissed)
+        return [item for item in items if item.id not in self._dismissed]
+
     def dismiss(self, item_id: str) -> defer.Deferred:
         """Dismiss a drift item (user-initiated action).
 
@@ -682,8 +692,10 @@ class Reconciler:
                 org_id=self.org_id,
             )
             # Make the dismissal actually stick: hide the item from /state
-            # immediately and keep it suppressed across periodic resyncs
-            # (see _dismissed in __init__).
+            # immediately, keep it suppressed across periodic resyncs, and
+            # persist it so a restart doesn't resurface it (see _dismissed
+            # in __init__).
+            self.repo.save_drift_dismissal(self.org_id, item_id)
             self._dismissed.add(item_id)
             self.current = [i for i in self.current if i.id != item_id]
             d.callback(None)
