@@ -531,6 +531,73 @@ def test_ensure_spot_subscriptions_sends_only_new_symbols():
     assert list(reqs[1].symbolId) == [2]  # only the NEW symbol
 
 
+def test_quote_returns_the_last_spot_or_none():
+    """quote() is the ticket's read: the last (bid, ask) seen for a symbol,
+    or None when no tick has arrived on this connection yet."""
+    tracker, _sdk = _spot_tracker()
+    tracker._spots[1] = (1.1050, 1.1052)
+    assert tracker.quote(1) == (1.1050, 1.1052)
+    assert tracker.quote(2) is None
+
+
+def test_ensure_spot_subscription_subscribes_a_single_symbol_once():
+    """The trade ticket asks for quotes on symbols with no open position;
+    ensure_spot_subscription subscribes exactly that symbol on the master
+    connection, once — a repeat call puts nothing on the wire."""
+    tracker, sdk = _spot_tracker()
+
+    tracker.ensure_spot_subscription(2)
+    tracker.ensure_spot_subscription(2)
+
+    reqs = of_type(sdk.sent, ProtoOASubscribeSpotsReq)
+    assert len(reqs) == 1
+    assert list(reqs[0].symbolId) == [2]
+    assert reqs[0].ctidTraderAccountId == 1001
+
+
+def test_quotes_are_forgotten_when_the_connection_drops():
+    """A disconnect makes every cached spot stale: quote() must answer None
+    during the outage rather than serving the last pre-disconnect price as
+    live to the trade ticket."""
+    tracker, sdk = _spot_tracker()
+    tracker._spots[1] = (1.1050, 1.1052)
+
+    sdk.disconnect()
+
+    assert tracker.quote(1) is None
+
+
+def test_ensure_spot_subscription_does_not_stack_requests_while_one_is_in_flight():
+    """The dashboard polls quotes every 2s. If the first subscribe is still
+    unanswered (slow wire), repeat calls must not enqueue duplicates the
+    broker would reject with ALREADY_SUBSCRIBED."""
+    class SlowClient:
+        """send() never resolves — the subscribe request stays in flight."""
+        def __init__(self):
+            self.sent = []
+        def send(self, req):
+            self.sent.append(req)
+            return defer.Deferred()
+        def on_spot(self, cb):
+            pass
+        def on_disconnected(self, cb):
+            pass
+
+    client = SlowClient()
+
+    class MockRepo:
+        pass
+
+    symbols = {1: SymbolInfo(symbol_id=1, name="EURUSD", digits=5,
+                             lot_size=10_000_000, min_volume=100_000, step_volume=100_000)}
+    tracker = AccountStateTracker(client, MockRepo(), 1001, symbols)
+
+    tracker.ensure_spot_subscription(2)
+    tracker.ensure_spot_subscription(2)   # first one still unanswered
+
+    assert len(client.sent) == 1
+
+
 def test_spot_subscriptions_reset_when_the_connection_drops():
     """Broker-side spot subscriptions die with the connection: after a
     reconnect the tracker must resubscribe from scratch, not assume the old

@@ -1096,6 +1096,36 @@ class CopierApp:
         return {"account_id": account_id, "positions_closed": positions_closed,
                 "orders_cancelled": orders_cancelled, "error": None}
 
+    def get_quote(self, account_id: int, symbol_name: str) -> dict:
+        """Live (bid, ask) for one of the account's symbols, from the org's
+        state tracker. Asking also subscribes the symbol on the master
+        connection (fire-and-forget), so a symbol with no open position
+        starts ticking for the next poll. Null bid/ask before the first
+        tick -- the caller polls, it does not error."""
+        account = next(
+            (a for a in self.repo.load_accounts() if a.account_id == account_id),
+            None)
+        if account is None:
+            raise ValueError(f"unknown account {account_id}")
+        sym = self.repo.load_symbol_cache(account_id).get(symbol_name)
+        if sym is None:
+            raise ValueError(
+                f"unknown symbol {symbol_name!r} for account {account_id}")
+
+        tracker = self.state_trackers.get(account.org_id)
+        if tracker is None:
+            return {"symbol": symbol_name, "bid": None, "ask": None}
+
+        d = tracker.ensure_spot_subscription(sym.symbol_id)
+        d.addErrback(lambda f: log.warning(
+            "quote subscription for %s failed: %s", symbol_name, f))
+        spot = tracker.quote(sym.symbol_id)
+        return {
+            "symbol": symbol_name,
+            "bid": spot[0] if spot else None,
+            "ask": spot[1] if spot else None,
+        }
+
     def get_expected_margin(self, account_id: int, symbol_name: str,
                             volume_lots) -> defer.Deferred:
         """Pre-trade margin estimate for volume_lots of symbol_name."""

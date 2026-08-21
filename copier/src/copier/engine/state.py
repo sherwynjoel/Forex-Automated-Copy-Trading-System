@@ -100,10 +100,21 @@ class AccountStateTracker:
         # org per minute on prod). Reset when the connection drops:
         # broker-side subscriptions die with the socket.
         self._subscribed_spots: set[int] = set()
+        # Subscriptions sent but not yet answered: the 2s quote poll must not
+        # stack duplicate SubscribeSpots requests while one is in flight.
+        self._pending_spot_subs: set[int] = set()
 
         # Wire up callbacks
         self._client.on_spot(self.on_spot)
-        self._client.on_disconnected(self._subscribed_spots.clear)
+        self._client.on_disconnected(self._on_disconnected)
+
+    def _on_disconnected(self) -> None:
+        """Broker-side subscriptions die with the socket, and so does the
+        freshness of every cached price: forget both, so quotes read None
+        (not a stale pre-disconnect price) until the feed ticks again."""
+        self._subscribed_spots.clear()
+        self._pending_spot_subs.clear()
+        self._spots.clear()
 
     def refresh_balances(
         self,
@@ -236,6 +247,40 @@ class AccountStateTracker:
             return response
 
         d.addCallback(_mark_subscribed)
+        return d
+
+    def quote(self, symbol_id: int) -> tuple[float, float] | None:
+        """Last (bid, ask) seen for a symbol on this connection, or None
+        before the first tick arrives."""
+        return self._spots.get(symbol_id)
+
+    def ensure_spot_subscription(self, symbol_id: int) -> defer.Deferred:
+        """Subscribe ONE extra symbol on the master connection (the trade
+        ticket quotes symbols with no open position). Idempotent per
+        connection, including while a subscribe is still in flight -- a
+        repeat call puts nothing on the wire."""
+        if (symbol_id in self._subscribed_spots
+                or symbol_id in self._pending_spot_subs):
+            return defer.succeed(None)
+
+        req = ProtoOASubscribeSpotsReq()
+        req.ctidTraderAccountId = self._master_account_id
+        req.symbolId.append(symbol_id)
+
+        self._pending_spot_subs.add(symbol_id)
+        d = self._client.send(req)
+
+        def _mark_subscribed(response):
+            self._pending_spot_subs.discard(symbol_id)
+            self._subscribed_spots.add(symbol_id)
+            return response
+
+        def _unmark_pending(failure):
+            # A failed send retries on the next poll; do not wedge the id.
+            self._pending_spot_subs.discard(symbol_id)
+            return failure
+
+        d.addCallbacks(_mark_subscribed, _unmark_pending)
         return d
 
     def on_spot(self, evt: ProtoOASpotEvent) -> None:

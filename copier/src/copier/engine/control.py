@@ -425,6 +425,16 @@ class MarginEstimateResource(_JsonResource):
         return self.app.get_expected_margin(account_id, symbol, volume_lots)
 
 
+class QuoteResource(_JsonResource):
+    """GET /quote?account_id&symbol: live bid/ask for the trade ticket.
+    Null bid/ask before the first tick; asking subscribes the symbol."""
+
+    def _handle(self, request, body):
+        account_id = _int_arg(request, b"account_id")
+        symbol = _str_arg(request, b"symbol")
+        return self.app.get_quote(account_id, symbol)
+
+
 class TrendbarsResource(_JsonResource):
     """GET /trendbars?account_id&symbol&period&from&to: historical candles."""
 
@@ -500,6 +510,7 @@ class RootResource(resource.Resource):
         self.putChild(b"history", HistoryResource(app))
         self.putChild(b"order", PlaceOrderResource(app))
         self.putChild(b"margin-estimate", MarginEstimateResource(app))
+        self.putChild(b"quote", QuoteResource(app))
         self.putChild(b"trendbars", TrendbarsResource(app))
         self.putChild(b"position-deals", PositionDealsResource(app))
         self.putChild(b"analytics", AnalyticsResource(app))

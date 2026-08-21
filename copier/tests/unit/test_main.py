@@ -1105,6 +1105,41 @@ def test_get_state_reports_null_enrichment_rather_than_inventing_values(repo, to
     assert master_position["copies"][0]["volume_lots"] is None
 
 
+# ---------- get_quote ----------
+
+def test_get_quote_returns_the_tracked_spot(repo, token_store):
+    """The trade ticket polls get_quote for its selected symbol: the answer
+    is the tracker's live (bid, ask) for that symbol."""
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    _seed_symbol_cache(repo, [MASTER_A])
+    app.state_trackers[ORG_A]._spots[1] = (1.10600, 1.10620)
+
+    quote = app.get_quote(MASTER_A, "EURUSD")
+
+    assert quote == {"symbol": "EURUSD", "bid": 1.10600, "ask": 1.10620}
+
+
+def test_get_quote_before_any_tick_returns_nulls_not_an_error(repo, token_store):
+    """No tick yet (fresh subscription) answers null bid/ask — the dashboard
+    shows an honest placeholder and polls again, rather than erroring."""
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    _seed_symbol_cache(repo, [MASTER_A])
+
+    quote = app.get_quote(MASTER_A, "EURUSD")
+
+    assert quote == {"symbol": "EURUSD", "bid": None, "ask": None}
+
+
+def test_get_quote_rejects_unknown_symbols_and_accounts(repo, token_store):
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    _seed_symbol_cache(repo, [MASTER_A])
+
+    with pytest.raises(ValueError):
+        app.get_quote(MASTER_A, "NOPEUSD")
+    with pytest.raises(ValueError):
+        app.get_quote(424242, "EURUSD")
+
+
 # ---------- reconciler_for / resync ----------
 
 def test_reconciler_for_returns_the_orgs_engine_and_raises_without_one(db, fernet_key):

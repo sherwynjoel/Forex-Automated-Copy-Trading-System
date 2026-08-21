@@ -11,6 +11,7 @@ it is for /details and /history), so this check is the only thing standing
 between one desk and another desk's broker data.
 """
 from typing import Any, Dict, List
+from urllib.parse import quote as _urlquote
 
 import psycopg
 from fastapi import APIRouter, Depends, Query, Request
@@ -52,7 +53,27 @@ def create_insights_router() -> APIRouter:
         return await _proxy_to_copier(
             client,
             f"{cfg.copier_control_url}/margin-estimate"
-            f"?account_id={account_id}&symbol={symbol}&volume_lots={volume_lots}",
+            f"?account_id={account_id}&symbol={_urlquote(symbol, safe='')}"
+            f"&volume_lots={volume_lots}",
+            method="GET",
+        )
+
+    @router.get("/accounts/{account_id}/quote", response_model=dict)
+    async def quote(
+        account_id: int,
+        http_request: Request,
+        symbol: str,
+        ctx: OrgContext = Depends(require_org_role("viewer")),
+        conn: psycopg.Connection = Depends(get_conn),
+        cfg: ApiConfig = Depends(ApiConfig.from_env),
+    ) -> dict:
+        """Live bid/ask for the trade ticket (null before the first tick)."""
+        require_account_in_org(conn, ctx.org_id, account_id)
+        client = http_request.app.state.http
+        return await _proxy_to_copier(
+            client,
+            f"{cfg.copier_control_url}/quote"
+            f"?account_id={account_id}&symbol={_urlquote(symbol, safe='')}",
             method="GET",
         )
 
@@ -74,8 +95,8 @@ def create_insights_router() -> APIRouter:
         return await _proxy_to_copier(
             client,
             f"{cfg.copier_control_url}/trendbars"
-            f"?account_id={account_id}&symbol={symbol}&period={period}"
-            f"&from={from_ms}&to={to_ms}",
+            f"?account_id={account_id}&symbol={_urlquote(symbol, safe='')}"
+            f"&period={period}&from={from_ms}&to={to_ms}",
             method="GET",
         )
 
