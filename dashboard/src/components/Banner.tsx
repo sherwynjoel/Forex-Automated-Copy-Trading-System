@@ -3,11 +3,14 @@ import type { ReactNode } from 'react'
 /**
  * The desk's one banner vocabulary. `error` announces via role="alert",
  * everything else via role="status"; pass onDismiss for page-local banners.
+ * Pass announce={false} when the banner sits inside an always-mounted live
+ * region of its own (a conditionally-mounted role="status" is unreliable).
  */
-export default function Banner({ kind, children, onDismiss }: {
+export default function Banner({ kind, children, onDismiss, announce = true }: {
   kind: 'error' | 'notice' | 'warn'
   children: ReactNode
   onDismiss?: () => void
+  announce?: boolean
 }) {
   const styles =
     kind === 'error' ? 'border-loss/30 bg-loss-wash text-loss-deep'
@@ -15,7 +18,7 @@ export default function Banner({ kind, children, onDismiss }: {
     : 'border-line bg-brand-wash text-ink'
   return (
     <div
-      role={kind === 'error' ? 'alert' : 'status'}
+      role={announce ? (kind === 'error' ? 'alert' : 'status') : undefined}
       className={`rounded border px-4 py-3 text-sm flex justify-between items-start gap-3 ${styles}`}
     >
       <div className="min-w-0">{children}</div>

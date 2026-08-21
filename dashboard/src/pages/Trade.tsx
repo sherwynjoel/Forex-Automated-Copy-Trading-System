@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { orgApi } from '../lib/api'
 import { useOrg } from '../lib/org'
 import { can } from '../lib/roles'
@@ -7,7 +7,10 @@ import type {
   Account, AccountDetails, MarginEstimate, OpenPosition, TradeSymbol,
   Trendbars, WorkingOrder,
 } from '../lib/types'
+import { Link } from 'react-router-dom'
+import Banner from '../components/Banner'
 import ConfirmDialog from '../components/ConfirmDialog'
+import SearchSelect from '../components/SearchSelect'
 import { CandleChart, PriceLine } from '../components/charts'
 
 const CHART_PERIODS = ['M5', 'M15', 'H1', 'H4', 'D1'] as const
@@ -44,20 +47,26 @@ function accountLabel(account: Account): string {
 
 export default function Trade() {
   const { orgId, role } = useOrg()
-  const [accounts, setAccounts] = useState<Account[]>([])
+  // null = not loaded yet; [] = loaded and genuinely empty (onboarding state).
+  const [accounts, setAccounts] = useState<Account[] | null>(null)
   const [accountId, setAccountId] = useState<number | null>(null)
+  const accountIdRef = useRef<number | null>(null)
+  useEffect(() => {
+    accountIdRef.current = accountId
+  }, [accountId])
   const [symbols, setSymbols] = useState<TradeSymbol[]>([])
   const [details, setDetails] = useState<AccountDetails | null>(null)
   const [ticket, setTicket] = useState<TicketState>(EMPTY_TICKET)
-  const [reviewOpen, setReviewOpen] = useState(false)
   const [closing, setClosing] = useState<OpenPosition | null>(null)
   const [partialLots, setPartialLots] = useState('')
   const [cancelling, setCancelling] = useState<WorkingOrder | null>(null)
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [symbolQuery, setSymbolQuery] = useState('')
-  const [symbolOpen, setSymbolOpen] = useState(false)
+  // Order failures live apart from page-load errors: background refreshes
+  // clear `error` on success, but only the user dismisses an order failure.
+  const [orderError, setOrderError] = useState<string | null>(null)
+  const [quote, setQuote] = useState<{ bid: number | null; ask: number | null } | null>(null)
   const [margin, setMargin] = useState<MarginEstimate | null>(null)
   const [chartPeriod, setChartPeriod] = useState<string>('H1')
   const [chart, setChart] = useState<Trendbars | null>(null)
@@ -85,6 +94,10 @@ export default function Trade() {
         orgApi<TradeSymbol[]>(orgId, `accounts/${accountId}/symbols`),
         orgApi<AccountDetails>(orgId, `accounts/${accountId}/details`),
       ])
+      // The account may have changed while this request was in flight
+      // (routine with the 5s poll): never paint one account's book under
+      // another account's header.
+      if (accountIdRef.current !== accountId) return
       setSymbols(syms)
       setDetails(det)
       setTicket((t) => (t.symbol && syms.some((s) => s.name === t.symbol)
@@ -101,7 +114,40 @@ export default function Trade() {
 
   useLiveRefresh(loadAccountData, orgId)
 
-  const selected = accounts.find((a) => a.ctid_trader_account_id === accountId)
+  // Poll fallback: if the websocket drops, positions/orders/balance must not
+  // freeze silently on the one page where the user acts on them.
+  useEffect(() => {
+    if (accountId == null) return
+    const interval = setInterval(loadAccountData, 5000)
+    return () => clearInterval(interval)
+  }, [accountId, loadAccountData])
+
+  // Live bid/ask for the ticket symbol. Asking also subscribes the symbol
+  // on the copier's feed, so the first poll may answer nulls and the next
+  // one ticks.
+  useEffect(() => {
+    setQuote(null)
+    if (accountId == null || !ticket.symbol) return
+    let cancelled = false
+    const pull = async () => {
+      try {
+        const q = await orgApi<{ bid: number | null; ask: number | null }>(
+          orgId,
+          `accounts/${accountId}/quote?symbol=${encodeURIComponent(ticket.symbol)}`)
+        if (!cancelled) setQuote(q)
+      } catch {
+        // A quote is a nicety; the next poll retries.
+      }
+    }
+    pull()
+    const interval = setInterval(pull, 2000)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [orgId, accountId, ticket.symbol])
+
+  const selected = accounts?.find((a) => a.ctid_trader_account_id === accountId)
 
   // Pre-trade margin estimate, debounced against typing in the volume box.
   useEffect(() => {
@@ -177,6 +223,7 @@ export default function Trade() {
     if (!selected) return
     try {
       setBusy(true)
+      setOrderError(null)
       const body: Record<string, unknown> = {
         account_id: selected.ctid_trader_account_id,
         symbol: ticket.symbol,
@@ -194,12 +241,10 @@ export default function Trade() {
         `Order sent: ${ticket.side} ${ticket.volumeLots} ${ticket.symbol} ` +
         `${ticket.orderType.toLowerCase()} on ${selected.nickname || selected.trader_login}. ` +
         'The fill shows up in Positions within a couple of seconds.')
-      setReviewOpen(false)
       setError(null)
       setTimeout(loadAccountData, 1500)
     } catch (err) {
-      setReviewOpen(false)
-      setError(`Order failed: ${err instanceof Error ? err.message : 'unknown error'}`)
+      setOrderError(`Order failed: ${err instanceof Error ? err.message : 'unknown error'}`)
     } finally {
       setBusy(false)
     }
@@ -246,22 +291,38 @@ export default function Trade() {
     }
   }
 
-  const sideButton = (side: Side) => (
-    <button
-      key={side}
-      type="button"
-      onClick={() => setTicket({ ...ticket, side })}
-      className={`flex-1 py-2 text-sm font-semibold rounded transition-colors ${
-        ticket.side === side
-          ? side === 'BUY'
-            ? 'bg-profit text-white'
-            : 'bg-loss text-white'
-          : 'bg-paper text-ink-soft hover:text-ink border border-line'
-      }`}
-    >
-      {side === 'BUY' ? 'Buy' : 'Sell'}
-    </button>
-  )
+  const priceDigits = selectedSymbol?.digits ?? 5
+  // Only this symbol's bars may stand in as a reference price: right after a
+  // symbol switch, `chart` still holds the previous symbol for a moment.
+  const lastClose = chart?.symbol === ticket.symbol && chart.bars?.length
+    ? chart.bars[chart.bars.length - 1].close
+    : null
+  const liveQuote = quote?.bid != null && quote?.ask != null
+
+  // Category-standard ticket: the sell button carries the bid, buy the ask.
+  const sideButton = (side: Side) => {
+    const price = side === 'BUY' ? quote?.ask : quote?.bid
+    return (
+      <button
+        key={side}
+        type="button"
+        onClick={() => setTicket({ ...ticket, side })}
+        className={`flex-1 py-2 text-sm font-semibold rounded transition-colors ${
+          ticket.side === side
+            ? side === 'BUY'
+              ? 'bg-profit text-white'
+              : 'bg-loss text-white'
+            : 'bg-paper text-ink-soft hover:text-ink border border-line'
+        }`}
+      >
+        <span className="block">{side === 'BUY' ? 'Buy' : 'Sell'}</span>
+        {/* Always rendered so an arriving quote never shifts the layout. */}
+        <span className="num block text-[11px] font-medium opacity-90">
+          {price != null ? price.toFixed(priceDigits) : ' '}
+        </span>
+      </button>
+    )
+  }
 
   // The whole order ticket is a trade-level action; the nav link is already
   // hidden below this role, but the page is still reachable by URL, so this
@@ -283,31 +344,50 @@ export default function Trade() {
     <div className="space-y-6 max-w-5xl">
       <header>
         <h1 className="page-title">Trade</h1>
-        <p className="text-sm text-ink-soft mt-1">
+        <p className="text-sm text-ink-soft mt-1 max-w-prose">
           Place orders on any connected account. Master orders replicate to
           every slave; slave orders stay where you put them.
         </p>
       </header>
 
-      {notice && (
-        <div className="rounded border border-line bg-brand-wash px-4 py-3 text-sm text-ink flex justify-between items-center">
-          <span>{notice}</span>
-          <button onClick={() => setNotice(null)} className="text-xs font-medium text-ink-soft hover:text-ink">
-            Dismiss
-          </button>
-        </div>
+      {/* Permanently mounted so screen readers reliably announce notices. */}
+      <div role="status" className={notice ? undefined : 'sr-only'}>
+        {notice && (
+          <Banner kind="notice" announce={false} onDismiss={() => setNotice(null)}>
+            {notice}
+          </Banner>
+        )}
+      </div>
+      {orderError && (
+        <Banner kind="error" onDismiss={() => setOrderError(null)}>{orderError}</Banner>
       )}
-      {error && (
-        <div role="alert" className="rounded border border-loss/30 bg-loss-wash px-4 py-3 text-sm text-loss-deep">
-          {error}
-        </div>
-      )}
+      {error && <Banner kind="error">{error}</Banner>}
 
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
         {/* Order ticket */}
         <section className="lg:col-span-2 bg-card rounded-lg border border-line p-5 space-y-4 h-fit">
           <h2 className="desk-label">Order ticket</h2>
 
+          {accounts == null ? (
+            <p className="text-sm text-ink-faint">Loading accounts…</p>
+          ) : accounts.length === 0 ? (
+            <div className="py-4 text-center space-y-3">
+              <p className="text-sm text-ink-soft">
+                No trading accounts are connected yet.
+              </p>
+              <Link
+                to={`/org/${orgId}/accounts`}
+                className="inline-block px-4 py-2.5 bg-brand text-white text-sm font-semibold rounded hover:bg-brand-deep transition-colors"
+              >
+                Connect a cTrader account
+              </Link>
+              <p className="text-xs text-ink-faint">
+                One grant covers every account under your cTrader ID; orders on
+                the master replicate to every enabled slave.
+              </p>
+            </div>
+          ) : (
+          <>
           <div>
             <label htmlFor="ticket-account" className="desk-label block mb-1">Account</label>
             <select
@@ -335,56 +415,19 @@ export default function Trade() {
             )}
           </div>
 
-          <div className="relative">
+          <div>
             <label htmlFor="ticket-symbol" className="desk-label block mb-1">Symbol</label>
-            <input
+            <SearchSelect
               id="ticket-symbol"
-              type="text"
-              role="combobox"
-              aria-expanded={symbolOpen}
-              aria-controls="ticket-symbol-list"
-              autoComplete="off"
+              mono
+              options={symbols.map((s) => ({ value: s.name, label: s.name }))}
+              value={ticket.symbol}
+              onChange={(name) => setTicket((t) => ({ ...t, symbol: name }))}
               placeholder="Search symbols…"
-              value={symbolOpen ? symbolQuery : ticket.symbol}
-              onFocus={() => { setSymbolOpen(true); setSymbolQuery('') }}
-              onChange={(e) => setSymbolQuery(e.target.value)}
-              onBlur={() => setTimeout(() => setSymbolOpen(false), 150)}
-              className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card"
+              emptyMessage={symbols.length === 0
+                ? 'No symbols on this account yet.'
+                : 'No symbols match.'}
             />
-            {symbolOpen && (
-              <ul
-                id="ticket-symbol-list"
-                role="listbox"
-                className="absolute z-20 mt-1 w-full max-h-56 overflow-y-auto rounded border border-line bg-card shadow-lg"
-              >
-                {symbols
-                  .filter((s) => s.name.toLowerCase().includes(symbolQuery.toLowerCase()))
-                  .slice(0, 60)
-                  .map((s) => (
-                    <li key={s.symbol_id}>
-                      <button
-                        type="button"
-                        role="option"
-                        aria-selected={s.name === ticket.symbol}
-                        onMouseDown={(e) => e.preventDefault()}
-                        onClick={() => {
-                          setTicket((t) => ({ ...t, symbol: s.name }))
-                          setSymbolOpen(false)
-                        }}
-                        className={`num w-full text-left px-3 py-1.5 text-sm hover:bg-paper ${
-                          s.name === ticket.symbol ? 'text-brand font-semibold' : 'text-ink'
-                        }`}
-                      >
-                        {s.name}
-                      </button>
-                    </li>
-                  ))}
-                {symbols.filter((s) =>
-                  s.name.toLowerCase().includes(symbolQuery.toLowerCase())).length === 0 && (
-                  <li className="px-3 py-2 text-sm text-ink-faint">No symbols match.</li>
-                )}
-              </ul>
-            )}
           </div>
 
           <div className="flex gap-2">{sideButton('BUY')}{sideButton('SELL')}</div>
@@ -472,15 +515,77 @@ export default function Trade() {
             </p>
           )}
           {ticketProblem && (
-            <p className="text-xs font-medium text-ink-soft">{ticketProblem}</p>
+            <p className="text-xs font-medium text-warn-deep">{ticketProblem}</p>
+          )}
+          {!ticketProblem && selected && (
+            <div
+              role="note"
+              aria-label="Order summary"
+              className="text-xs bg-paper border border-line rounded px-3 py-2 space-y-1"
+            >
+              <div className="flex justify-between gap-2">
+                <span className="desk-label">Account</span>
+                <span className="num text-right">{accountLabel(selected)}</span>
+              </div>
+              <div className="flex justify-between gap-2">
+                <span className="desk-label">Order</span>
+                <span className="text-right">
+                  <span className={ticket.side === 'BUY' ? 'text-profit font-semibold' : 'text-loss font-semibold'}>
+                    {ticket.side}
+                  </span>{' '}
+                  <span className="num">{ticket.volumeLots}</span> lots{' '}
+                  <span className="num">{ticket.symbol}</span> · {ticket.orderType}
+                </span>
+              </div>
+              {liveQuote ? (
+                <div className="flex justify-between gap-2">
+                  <span className="desk-label">Price now</span>
+                  <span className="num">
+                    {quote!.bid!.toFixed(priceDigits)} / {quote!.ask!.toFixed(priceDigits)}
+                  </span>
+                </div>
+              ) : lastClose != null ? (
+                <div className="flex justify-between gap-2">
+                  <span className="desk-label">Reference</span>
+                  <span className="num">
+                    {`Last close ${lastClose.toFixed(priceDigits)} · indicative`}
+                  </span>
+                </div>
+              ) : null}
+              {ticket.orderType === 'LIMIT' && (
+                <div className="flex justify-between gap-2">
+                  <span className="desk-label">Limit price</span>
+                  <span className="num">{ticket.limitPrice}</span>
+                </div>
+              )}
+              {ticket.orderType === 'STOP' && (
+                <div className="flex justify-between gap-2">
+                  <span className="desk-label">Stop price</span>
+                  <span className="num">{ticket.stopPrice}</span>
+                </div>
+              )}
+              {(ticket.stopLoss || ticket.takeProfit) && (
+                <div className="flex justify-between gap-2">
+                  <span className="desk-label">SL / TP</span>
+                  <span className="num">{ticket.stopLoss || '—'} / {ticket.takeProfit || '—'}</span>
+                </div>
+              )}
+              {selected.is_live && (
+                <p className="text-loss-deep font-medium">
+                  Live account — real money moves when you place this order.
+                </p>
+              )}
+            </div>
           )}
           <button
-            onClick={() => setReviewOpen(true)}
+            onClick={submitOrder}
             disabled={Boolean(ticketProblem) || busy}
             className="w-full py-2.5 rounded bg-brand text-white text-sm font-semibold hover:bg-brand-deep transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            Review order
+            {busy ? 'Placing…' : 'Place order'}
           </button>
+          </>
+          )}
         </section>
 
         {/* Chart + live positions + working orders for the selected account */}
@@ -495,7 +600,7 @@ export default function Trade() {
                   <button
                     key={p}
                     onClick={() => setChartPeriod(p)}
-                    className={`px-2 py-1 text-xs rounded transition-colors ${
+                    className={`min-h-11 min-w-11 md:min-h-0 md:min-w-0 px-2 py-1 text-xs rounded transition-colors ${
                       chartPeriod === p
                         ? 'bg-brand text-white font-semibold'
                         : 'text-ink-soft hover:text-ink'
@@ -573,7 +678,7 @@ export default function Trade() {
                         <td className="px-3 py-2.5 text-right">
                           <button
                             onClick={() => { setClosing(pos); setPartialLots('') }}
-                            className="px-3 py-1 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-white transition-colors"
+                            className="px-3 py-2.5 md:py-1 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-white transition-colors"
                           >
                             Close
                           </button>
@@ -624,7 +729,7 @@ export default function Trade() {
                         <td className="px-3 py-2.5 text-right">
                           <button
                             onClick={() => setCancelling(order)}
-                            className="px-3 py-1 text-xs font-semibold rounded border border-line-strong text-ink-soft hover:text-ink hover:border-ink transition-colors"
+                            className="px-3 py-2.5 md:py-1 text-xs font-semibold rounded border border-line-strong text-ink-soft hover:text-ink hover:border-ink transition-colors"
                           >
                             Cancel order
                           </button>
@@ -638,61 +743,6 @@ export default function Trade() {
           </div>
         </section>
       </div>
-
-      {/* Order review */}
-      <ConfirmDialog
-        open={reviewOpen}
-        title="Review order"
-        confirmLabel="Place order"
-        busy={busy}
-        onConfirm={submitOrder}
-        onCancel={() => setReviewOpen(false)}
-      >
-        <dl className="space-y-1.5">
-          <div className="flex justify-between">
-            <dt className="desk-label">Account</dt>
-            <dd className="num">{selected ? accountLabel(selected) : ''}</dd>
-          </div>
-          <div className="flex justify-between">
-            <dt className="desk-label">Order</dt>
-            <dd>
-              <span className={ticket.side === 'BUY' ? 'text-profit font-semibold' : 'text-loss font-semibold'}>
-                {ticket.side}
-              </span>{' '}
-              <span className="num">{ticket.volumeLots}</span> lots{' '}
-              <span className="num">{ticket.symbol}</span> · {ticket.orderType}
-            </dd>
-          </div>
-          {ticket.orderType === 'LIMIT' && (
-            <div className="flex justify-between">
-              <dt className="desk-label">Limit price</dt>
-              <dd className="num">{ticket.limitPrice}</dd>
-            </div>
-          )}
-          {ticket.orderType === 'STOP' && (
-            <div className="flex justify-between">
-              <dt className="desk-label">Stop price</dt>
-              <dd className="num">{ticket.stopPrice}</dd>
-            </div>
-          )}
-          {(ticket.stopLoss || ticket.takeProfit) && (
-            <div className="flex justify-between">
-              <dt className="desk-label">SL / TP</dt>
-              <dd className="num">{ticket.stopLoss || '—'} / {ticket.takeProfit || '—'}</dd>
-            </div>
-          )}
-        </dl>
-        {selected?.role === 'master' && (
-          <p className="text-xs">
-            This order fills on the master and is copied to every enabled slave.
-          </p>
-        )}
-        {selected?.is_live && (
-          <p className="text-xs text-loss-deep font-medium">
-            This is a live account. Real money moves when you place this order.
-          </p>
-        )}
-      </ConfirmDialog>
 
       {/* Close position */}
       <ConfirmDialog

@@ -2,6 +2,7 @@ import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi, afterEach } from 'vitest'
+import { act } from 'react'
 import Trade from './Trade'
 import type { Role } from '../lib/roles'
 import { mockUseOrg } from '../test/orgMock'
@@ -54,13 +55,21 @@ const details = {
   ],
 }
 
-function mockRoutes() {
+function mockRoutes(overrides: Record<string, unknown | (() => Response)> = {}) {
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input)
     const respond = (payload: unknown) =>
       new Response(JSON.stringify(payload), {
         status: 200, headers: { 'Content-Type': 'application/json' },
       })
+    for (const [fragment, payload] of Object.entries(overrides)) {
+      if (url.includes(fragment)) {
+        return typeof payload === 'function' ? (payload as () => Response)() : respond(payload)
+      }
+    }
+    if (url.includes('/quote')) {
+      return respond({ symbol: 'EURUSD', bid: 1.08423, ask: 1.08431 })
+    }
     if (url.includes('/margin-estimate')) {
       return respond({ symbol: 'EURUSD', volume: 5000000, volume_lots: '0.50',
                        buy_margin: 13.75, sell_margin: 13.75 })
@@ -160,7 +169,7 @@ test('renders the price chart for the selected symbol', async () => {
   })
 })
 
-test('placing a market order confirms then POSTs /api/orgs/1/orders', async () => {
+test('placing a market order POSTs /api/orgs/1/orders in one click, no dialog', async () => {
   setRole('trader')
   const fetchMock = mockRoutes()
   renderTrade()
@@ -172,12 +181,19 @@ test('placing a market order confirms then POSTs /api/orgs/1/orders', async () =
   await userEvent.clear(screen.getByLabelText(/volume/i))
   await userEvent.type(screen.getByLabelText(/volume/i), '0.5')
   await userEvent.click(screen.getByRole('button', { name: /^sell/i }))
-  await userEvent.click(screen.getByRole('button', { name: /review order/i }))
 
-  // Confirmation dialog summarises, then submits on confirm
-  const dialog = await screen.findByRole('dialog')
-  expect(within(dialog).getByText(/sell/i)).toBeInTheDocument()
-  await userEvent.click(within(dialog).getByRole('button', { name: /place order/i }))
+  // The ticket itself summarises the order inline — no review dialog step.
+  const summary = screen.getByRole('note', { name: /order summary/i })
+  expect(within(summary).getByText('SELL')).toBeInTheDocument()
+  expect(within(summary).getByText('EURUSD')).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /review order/i })).not.toBeInTheDocument()
+
+  // The success live region is mounted BEFORE the order, so the
+  // announcement actually fires for screen readers.
+  expect(screen.getByRole('status')).toBeEmptyDOMElement()
+
+  await userEvent.click(screen.getByRole('button', { name: /place order/i }))
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
 
   await waitFor(() => {
     const call = fetchMock.mock.calls.find(([u, init]) =>
@@ -189,6 +205,7 @@ test('placing a market order confirms then POSTs /api/orgs/1/orders', async () =
       order_type: 'MARKET', volume_lots: 0.5,
     })
   })
+  expect(await screen.findByRole('status')).toHaveTextContent(/order sent/i)
 })
 
 test('limit order includes the limit price', async () => {
@@ -204,9 +221,7 @@ test('limit order includes the limit price', async () => {
   await userEvent.type(screen.getByLabelText(/limit price/i), '1.0950')
   await userEvent.clear(screen.getByLabelText(/volume/i))
   await userEvent.type(screen.getByLabelText(/volume/i), '1')
-  await userEvent.click(screen.getByRole('button', { name: /review order/i }))
-  const dialog = await screen.findByRole('dialog')
-  await userEvent.click(within(dialog).getByRole('button', { name: /place order/i }))
+  await userEvent.click(screen.getByRole('button', { name: /place order/i }))
 
   await waitFor(() => {
     const call = fetchMock.mock.calls.find(([u, init]) =>
@@ -215,6 +230,128 @@ test('limit order includes the limit price', async () => {
     expect(body.order_type).toBe('LIMIT')
     expect(body.limit_price).toBe(1.095)
   })
+})
+
+test('live bid/ask lands on the Sell/Buy buttons and in the order summary', async () => {
+  setRole('trader')
+  mockRoutes()
+  renderTrade()
+
+  await screen.findByLabelText(/symbol/i)
+  const sellButton = await screen.findByRole('button', { name: /^sell/i })
+  await waitFor(() => {
+    expect(sellButton).toHaveTextContent('1.08423')
+  })
+  expect(screen.getByRole('button', { name: /^buy/i })).toHaveTextContent('1.08431')
+  // The summary card repeats the reference price at the commit moment.
+  const summary = await screen.findByRole('note', { name: /order summary/i })
+  expect(within(summary).getByText(/1\.08423/)).toBeInTheDocument()
+})
+
+test('without a live tick yet, the last close is shown as indicative', async () => {
+  setRole('trader')
+  mockRoutes({ '/quote': { symbol: 'EURUSD', bid: null, ask: null } })
+  renderTrade()
+
+  await screen.findByLabelText(/symbol/i)
+  // Last close from the H1 candles fixture is 1.11.
+  expect(await screen.findByText(/last close/i)).toHaveTextContent('1.11000')
+  expect(screen.getByText(/indicative/i)).toBeInTheDocument()
+})
+
+test('symbol picker is fully keyboard operable', async () => {
+  setRole('trader')
+  mockRoutes()
+  renderTrade()
+
+  const symbolBox = await screen.findByLabelText(/symbol/i)
+  await waitFor(() => {
+    expect((symbolBox as HTMLInputElement).value).toBe('EURUSD')
+  })
+
+  await userEvent.click(symbolBox)
+  await userEvent.keyboard('{ArrowDown}{ArrowDown}{Enter}')
+  expect((symbolBox as HTMLInputElement).value).toBe('GBPUSD')
+})
+
+test('order failure survives background refreshes and clears only on dismiss', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  try {
+    setRole('trader')
+    mockRoutes()
+    // Overrides cannot see the HTTP method, so wrap the stub for the POST:
+    const base = global.fetch
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url === '/api/orgs/1/orders' && init?.method === 'POST') {
+        return new Response(JSON.stringify({ detail: 'MARKET_CLOSED' }), { status: 502 })
+      }
+      return (base as typeof fetch)(input, init)
+    }))
+    renderTrade()
+
+    await waitFor(() => {
+      expect((screen.getByLabelText(/symbol/i) as HTMLInputElement).value).toBe('EURUSD')
+    })
+    await userEvent.click(screen.getByRole('button', { name: /place order/i }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(/order failed/i)
+
+    // Background refreshes (5s poll, websocket bursts) must not wipe it.
+    await act(async () => {
+      vi.advanceTimersByTime(6000)
+    })
+    expect(screen.getByRole('alert')).toHaveTextContent(/order failed/i)
+
+    await userEvent.click(within(screen.getByRole('alert')).getByRole('button', { name: /dismiss/i }))
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+test('account data re-polls every 5 seconds as a websocket fallback', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  try {
+    setRole('trader')
+    const fetchMock = mockRoutes()
+    renderTrade()
+
+    await screen.findByLabelText(/symbol/i)
+    const countDetails = () =>
+      fetchMock.mock.calls.filter(([u]) => String(u).includes('/details')).length
+    const before = countDetails()
+    await act(async () => {
+      vi.advanceTimersByTime(5500)
+    })
+    await waitFor(() => {
+      expect(countDetails()).toBeGreaterThan(before)
+    })
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+test('zero connected accounts turns the ticket into a teaching empty state', async () => {
+  setRole('trader')
+  mockRoutes({ '/api/orgs/1/accounts': [] })
+  renderTrade()
+
+  expect(await screen.findByText(/connect a ctrader account/i)).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: /connect/i }))
+    .toHaveAttribute('href', '/org/1/accounts')
+  expect(screen.queryByRole('button', { name: /place order/i })).not.toBeInTheDocument()
+})
+
+test('an account with no symbols yet says so instead of "no matches"', async () => {
+  setRole('trader')
+  mockRoutes({ '/symbols': [] })
+  renderTrade()
+
+  const symbolBox = await screen.findByLabelText(/symbol/i)
+  await userEvent.click(symbolBox)
+  expect(await screen.findByText(/no symbols on this account yet/i)).toBeInTheDocument()
 })
 
 test('shows a not-copied note when a slave account is selected', async () => {
@@ -283,7 +420,7 @@ test('viewer (below trade) sees a notice instead of the order ticket', async () 
 
   expect(await screen.findByText(/your role does not allow placing orders/i)).toBeInTheDocument()
   expect(screen.queryByLabelText(/account/i)).not.toBeInTheDocument()
-  expect(screen.queryByRole('button', { name: /review order/i })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /place order/i })).not.toBeInTheDocument()
   expect(screen.queryByRole('button', { name: /^close$/i })).not.toBeInTheDocument()
   expect(screen.queryByRole('button', { name: /cancel order/i })).not.toBeInTheDocument()
   // The margin estimate lives inside the ticket, so it goes with it.
@@ -296,6 +433,6 @@ test('trader (trade+) sees the full order ticket', async () => {
   renderTrade()
 
   expect(await screen.findByLabelText(/account/i)).toBeInTheDocument()
-  expect(screen.getByRole('button', { name: /review order/i })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: /place order/i })).toBeInTheDocument()
   expect(screen.queryByText(/your role does not allow placing orders/i)).not.toBeInTheDocument()
 })

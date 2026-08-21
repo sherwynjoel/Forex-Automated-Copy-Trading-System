@@ -15,10 +15,12 @@ interface SearchSelectProps {
   placeholder?: string
   /** Render values in the desk's tabular mono (symbols, numbers). */
   mono?: boolean
+  /** Shown when the filter (or the option list itself) comes up empty. */
+  emptyMessage?: string
 }
 
 export default function SearchSelect({
-  id, options, value, onChange, placeholder, mono = false,
+  id, options, value, onChange, placeholder, mono = false, emptyMessage,
 }: SearchSelectProps) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
@@ -135,7 +137,7 @@ export default function SearchSelect({
         >
           {filtered.length === 0 && (
             <li className="px-3 py-2 text-sm text-ink-soft" aria-disabled="true">
-              No matches
+              {emptyMessage ?? 'No matches'}
             </li>
           )}
           {filtered.map((option, index) => (
