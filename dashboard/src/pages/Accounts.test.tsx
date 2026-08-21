@@ -467,6 +467,148 @@ test('flatten button confirms then POSTs the per-account kill switch', async () 
   expect(await screen.findByText(/closed 3 position/i)).toBeInTheDocument()
 })
 
+test('flatten closes the dialog immediately and marks the row button Flattening… while in flight', async () => {
+  setRole('admin')
+  let resolveCloseAll!: (value: Response) => void
+  const pendingCloseAll = new Promise<Response>((res) => { resolveCloseAll = res })
+  mockRoutes({
+    'POST /api/orgs/1/control/close-all': () => pendingCloseAll as unknown as Response,
+  })
+  renderAccounts()
+
+  await waitFor(() => {
+    expect(screen.getByText('12346')).toBeInTheDocument()
+  })
+
+  const flattenButtons = screen.getAllByRole('button', { name: /^flatten$/i })
+  await userEvent.click(flattenButtons[flattenButtons.length - 1])
+  const dialog = await screen.findByRole('dialog')
+  await userEvent.click(within(dialog).getByRole('button', { name: /close everything here/i }))
+
+  // The dialog goes away at once; progress lives on the row button instead.
+  await waitFor(() => {
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+  const busyButton = screen.getByRole('button', { name: /flattening/i })
+  // aria-disabled (not disabled) keeps the button focusable so keyboard focus
+  // is not stranded when the dialog closes.
+  expect(busyButton).toHaveAttribute('aria-disabled', 'true')
+  // The other row's button is untouched.
+  expect(screen.getAllByRole('button', { name: /^flatten$/i })).toHaveLength(1)
+
+  resolveCloseAll(jsonResponse({
+    status: 'flattened', paused: false,
+    accounts: [{ account_id: 2, positions_closed: 1, orders_cancelled: 0, error: null }],
+  }))
+  expect(await screen.findByRole('button', { name: /flattened/i })).toBeInTheDocument()
+  // The outcome notice is announced to assistive tech and names the account.
+  expect(screen.getByRole('status')).toHaveTextContent(/on account 12346/i)
+})
+
+test('the Flattened ✓ confirmation reverts to Flatten after a few seconds', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  try {
+    setRole('admin')
+    mockRoutes({
+      'POST /api/orgs/1/control/close-all': () =>
+        jsonResponse({
+          status: 'flattened', paused: false,
+          accounts: [{ account_id: 2, positions_closed: 2, orders_cancelled: 0, error: null }],
+        }),
+    })
+    renderAccounts()
+
+    await waitFor(() => {
+      expect(screen.getByText('12346')).toBeInTheDocument()
+    })
+
+    const flattenButtons = screen.getAllByRole('button', { name: /^flatten$/i })
+    await userEvent.click(flattenButtons[flattenButtons.length - 1])
+    const dialog = await screen.findByRole('dialog')
+    await userEvent.click(within(dialog).getByRole('button', { name: /close everything here/i }))
+    expect(await screen.findByRole('button', { name: /flattened/i })).toBeInTheDocument()
+
+    act(() => {
+      vi.advanceTimersByTime(6000)
+    })
+    expect(screen.queryByRole('button', { name: /flattened/i })).not.toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: /^flatten$/i })).toHaveLength(2)
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+test('the outcome live region is mounted before any flatten so announcements fire', async () => {
+  setRole('admin')
+  mockRoutes()
+  renderAccounts()
+
+  await waitFor(() => {
+    expect(screen.getByText('12346')).toBeInTheDocument()
+  })
+  // A live region only announces reliably if it exists BEFORE its text changes.
+  expect(screen.getByRole('status')).toBeEmptyDOMElement()
+})
+
+test('a successful retry clears the earlier flatten failure banner', async () => {
+  setRole('admin')
+  let closeAllCalls = 0
+  mockRoutes({
+    'POST /api/orgs/1/control/close-all': () => {
+      closeAllCalls += 1
+      return closeAllCalls === 1
+        ? jsonResponse({ detail: 'copier unreachable' }, 502)
+        : jsonResponse({
+            status: 'flattened', paused: false,
+            accounts: [{ account_id: 2, positions_closed: 1, orders_cancelled: 0, error: null }],
+          })
+    },
+  })
+  renderAccounts()
+
+  await waitFor(() => {
+    expect(screen.getByText('12346')).toBeInTheDocument()
+  })
+
+  const flattenButtons = screen.getAllByRole('button', { name: /^flatten$/i })
+  await userEvent.click(flattenButtons[flattenButtons.length - 1])
+  await userEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: /close everything here/i }))
+
+  const retryButton = await screen.findByRole('button', { name: /failed/i })
+  expect(screen.getByText(/flatten failed on account 12346/i)).toBeInTheDocument()
+
+  await userEvent.click(retryButton)
+  await userEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: /close everything here/i }))
+
+  expect(await screen.findByRole('button', { name: /flattened/i })).toBeInTheDocument()
+  // The stale failure alert must not contradict the fresh success notice.
+  expect(screen.queryByText(/flatten failed on account 12346/i)).not.toBeInTheDocument()
+})
+
+test('flatten failure flags the row button and names the account in the error', async () => {
+  setRole('admin')
+  mockRoutes({
+    'POST /api/orgs/1/control/close-all': () => jsonResponse({ detail: 'copier unreachable' }, 502),
+  })
+  renderAccounts()
+
+  await waitFor(() => {
+    expect(screen.getByText('12346')).toBeInTheDocument()
+  })
+
+  const flattenButtons = screen.getAllByRole('button', { name: /^flatten$/i })
+  await userEvent.click(flattenButtons[flattenButtons.length - 1])
+  const dialog = await screen.findByRole('dialog')
+  await userEvent.click(within(dialog).getByRole('button', { name: /close everything here/i }))
+
+  const retryButton = await screen.findByRole('button', { name: /failed/i })
+  expect(screen.getByText(/flatten failed on account 12346/i)).toBeInTheDocument()
+
+  // The failed button is a retry: clicking it reopens the confirmation.
+  await userEvent.click(retryButton)
+  expect(await screen.findByRole('dialog')).toBeInTheDocument()
+})
+
 // ---------- Task 17: role gating ----------
 
 test('viewer (below control) gets read-only rows: no editors, no disconnect, no connect link', async () => {

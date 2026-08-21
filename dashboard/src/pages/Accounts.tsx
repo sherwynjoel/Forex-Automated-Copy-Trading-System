@@ -5,6 +5,9 @@ import { can } from '../lib/roles'
 import type { Account, AccountDetails, CloseAllResult } from '../lib/types'
 import ConfirmDialog from '../components/ConfirmDialog'
 
+// How long the green "Flattened ✓" confirmation stays on a row button.
+const FLATTEN_DONE_MS = 5000
+
 function formatDate(iso: string | undefined): string {
   if (!iso) return '—'
   return new Date(iso).toLocaleDateString('en-GB', {
@@ -33,6 +36,7 @@ export default function Accounts() {
   const [cutoffDrafts, setCutoffDrafts] = useState<Record<number, string>>({})
   const [disconnecting, setDisconnecting] = useState<Account | null>(null)
   const [flattening, setFlattening] = useState<Account | null>(null)
+  const [flattenStatus, setFlattenStatus] = useState<Record<number, 'busy' | 'done' | 'error'>>({})
   const [detailsFor, setDetailsFor] = useState<Account | null>(null)
   const [details, setDetails] = useState<AccountDetails | null>(null)
   const [detailsError, setDetailsError] = useState<string | null>(null)
@@ -205,9 +209,14 @@ export default function Accounts() {
 
   const handleFlatten = async () => {
     if (!flattening) return
-    const accountId = flattening.ctid_trader_account_id
+    const account = flattening
+    const accountId = account.ctid_trader_account_id
+    // Close the dialog right away; progress and outcome live on the row button
+    // so it is always clear WHICH account is being flattened.
+    setFlattening(null)
+    setError(null)
+    setFlattenStatus((prev) => ({ ...prev, [accountId]: 'busy' }))
     try {
-      setBusy(true)
       const result = await orgApi<CloseAllResult>(orgId, 'control/close-all', {
         method: 'POST',
         body: JSON.stringify({ account_id: accountId }),
@@ -216,13 +225,20 @@ export default function Accounts() {
       setNotice(
         `Closed ${summary.positions_closed} position${summary.positions_closed === 1 ? '' : 's'} ` +
         `and cancelled ${summary.orders_cancelled} order${summary.orders_cancelled === 1 ? '' : 's'} ` +
-        `on account ${flattening.trader_login}.`)
-      setFlattening(null)
+        `on account ${account.trader_login}.`)
+      setFlattenStatus((prev) => ({ ...prev, [accountId]: 'done' }))
+      window.setTimeout(() => {
+        setFlattenStatus((prev) => {
+          if (prev[accountId] !== 'done') return prev
+          const next = { ...prev }
+          delete next[accountId]
+          return next
+        })
+      }, FLATTEN_DONE_MS)
     } catch (err) {
-      setFlattening(null)
-      setError(`Flatten failed: ${err instanceof Error ? err.message : 'unknown error'}`)
-    } finally {
-      setBusy(false)
+      setFlattenStatus((prev) => ({ ...prev, [accountId]: 'error' }))
+      setError(`Flatten failed on account ${account.trader_login}: ` +
+        `${err instanceof Error ? err.message : 'unknown error'}`)
     }
   }
 
@@ -264,14 +280,22 @@ export default function Accounts() {
         )}
       </header>
 
-      {notice && (
-        <div className="rounded border border-line bg-brand-wash px-4 py-3 text-sm text-ink flex justify-between items-center">
-          <span>{notice}</span>
-          <button onClick={() => setNotice(null)} className="text-xs font-medium text-ink-soft hover:text-ink">
-            Dismiss
-          </button>
-        </div>
-      )}
+      {/* Permanently mounted so screen readers reliably announce new notices. */}
+      <div
+        role="status"
+        className={notice
+          ? 'rounded border border-line bg-brand-wash px-4 py-3 text-sm text-ink flex justify-between items-center'
+          : 'sr-only'}
+      >
+        {notice && (
+          <>
+            <span>{notice}</span>
+            <button onClick={() => setNotice(null)} className="text-xs font-medium text-ink-soft hover:text-ink">
+              Dismiss
+            </button>
+          </>
+        )}
+      </div>
       {error && (
         <div role="alert" className="rounded border border-loss/30 bg-loss-wash px-4 py-3 text-sm text-loss-deep">
           {error}
@@ -392,14 +416,24 @@ export default function Accounts() {
                     </td>
                     <td data-label="Enabled" className="px-3 py-3">
                       {can(role, 'control') ? (
-                        <input
-                          type="checkbox"
-                          aria-label={`Copying enabled for account ${account.trader_login}`}
-                          checked={account.enabled}
-                          onChange={() => handleEnabledToggle(id, account.enabled)}
-                          disabled={isPending}
-                          className="w-4 h-4 accent-brand disabled:opacity-50"
-                        />
+                        <label className="relative inline-flex items-center cursor-pointer has-[:disabled]:cursor-default align-middle">
+                          <input
+                            type="checkbox"
+                            aria-label={`Copying enabled for account ${account.trader_login}`}
+                            checked={account.enabled}
+                            onChange={() => handleEnabledToggle(id, account.enabled)}
+                            disabled={isPending}
+                            className="peer sr-only"
+                          />
+                          <span
+                            aria-hidden="true"
+                            className="h-5 w-9 rounded-full bg-ink-faint transition-colors peer-checked:bg-brand peer-disabled:opacity-50 peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-brand"
+                          />
+                          <span
+                            aria-hidden="true"
+                            className="pointer-events-none absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-card shadow-sm transition-transform peer-checked:translate-x-4"
+                          />
+                        </label>
                       ) : (
                         <span className="text-ink">{account.enabled ? 'Yes' : 'No'}</span>
                       )}
@@ -447,15 +481,38 @@ export default function Accounts() {
                             Re-grant access
                           </button>
                         )}
-                        {can(role, 'control') && (
+                        {can(role, 'control') && (flattenStatus[id] === 'busy' ? (
                           <button
-                            onClick={() => setFlattening(account)}
-                            disabled={isPending}
-                            className="px-2.5 py-1 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-white transition-colors disabled:opacity-50"
+                            aria-disabled="true"
+                            className="min-w-[6.5rem] px-2.5 py-1 text-xs font-semibold rounded border border-line-strong text-ink-soft animate-pulse motion-reduce:animate-none"
                           >
-                            Flatten
+                            Flattening…
                           </button>
-                        )}
+                        ) : flattenStatus[id] === 'done' ? (
+                          <button
+                            aria-disabled="true"
+                            className="min-w-[6.5rem] px-2.5 py-1 text-xs font-semibold rounded border border-profit bg-profit-wash text-profit-deep"
+                          >
+                            Flattened ✓
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => {
+                              setFlattenStatus((prev) => {
+                                const next = { ...prev }
+                                delete next[id]
+                                return next
+                              })
+                              setFlattening(account)
+                            }}
+                            disabled={isPending}
+                            className={flattenStatus[id] === 'error'
+                              ? 'min-w-[6.5rem] px-2.5 py-1 text-xs font-semibold rounded border border-loss bg-loss text-white hover:bg-loss-deep transition-colors disabled:opacity-50'
+                              : 'min-w-[6.5rem] px-2.5 py-1 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-white transition-colors disabled:opacity-50'}
+                          >
+                            {flattenStatus[id] === 'error' ? 'Failed — retry' : 'Flatten'}
+                          </button>
+                        ))}
                         {can(role, 'control') && (
                           <button
                             onClick={() => setDisconnecting(account)}
@@ -499,7 +556,6 @@ export default function Accounts() {
         title={`Flatten account ${flattening?.trader_login ?? ''}`}
         confirmLabel="Close everything here"
         danger
-        busy={busy}
         onConfirm={handleFlatten}
         onCancel={() => setFlattening(null)}
       >
