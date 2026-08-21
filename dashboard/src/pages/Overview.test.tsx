@@ -955,8 +955,10 @@ test('copier performance strip shows sparkline plus today and this-week trade ti
     ...copierAnalytics,
     equity_curve: [
       { timestamp: now - 20 * 86400000, balance: 10000 },
-      { timestamp: now - 3600000, balance: 10250 },
-      { timestamp: now - 1800000, balance: 10512.5 },
+      // Pinned inside today regardless of the wall clock (relative offsets
+      // cross midnight when the suite runs in the small hours).
+      { timestamp: new Date(new Date().setHours(0, 5, 0, 0)).getTime(), balance: 10250 },
+      { timestamp: new Date(new Date().setHours(0, 10, 0, 0)).getTime(), balance: 10512.5 },
     ],
   }
   stubApi(routes)
@@ -980,7 +982,9 @@ test('copier performance strip shows sparkline plus today and this-week trade ti
   // Two closed trades today (both also count toward the week), P&L from the curve
   expect(screen.getByText(/today's trades/i)).toBeInTheDocument()
   expect(screen.getByText(/this week/i)).toBeInTheDocument()
-  expect(screen.getAllByText('+512.50').length).toBe(2) // today and week P&L match here
+  // Net P&L, today's window, and the week's window all resolve to +512.50
+  // with this curve (baseline is the 20-day-old point in every case).
+  expect(screen.getAllByText('+512.50').length).toBe(3)
   // Today's share-of-week magnitude bar
   expect(container.querySelectorAll('[data-chart="trade-bar"]').length).toBe(1)
 })
@@ -1139,7 +1143,13 @@ test('copier performance strip shows net P&L, activity windows, and worst trade'
   expect(screen.queryByText('70.0%')).not.toBeInTheDocument()
   expect(screen.getByText(/today's trades/i)).toBeInTheDocument()
   expect(screen.getByText(/this week/i)).toBeInTheDocument()
-  expect(screen.getByText('-120.00')).toBeInTheDocument() // worst trade stays
+  // Worst trade gave way to the composite MirrorFleet score:
+  // win rate 0.7 -> .700; win/loss 100/50=2 -> 2/3; PF 2.5 -> .714;
+  // mean = .694 -> 69/100.
+  expect(screen.queryByText(/worst trade/i)).not.toBeInTheDocument()
+  expect(screen.getByText(/mirrorfleet score/i)).toBeInTheDocument()
+  expect(screen.getByText('69')).toBeInTheDocument()
+  expect(screen.getByText('/ 100')).toBeInTheDocument()
   expect(screen.getByText(/10 trades taken · 7 won · 3 lost/)).toBeInTheDocument()
 })
 

@@ -9,7 +9,7 @@ import KillSwitch from '../components/KillSwitch'
 import StatTile from '../components/StatTile'
 import StatusDot from '../components/StatusDot'
 import Banner from '../components/Banner'
-import { Sparkline, TradeBar } from '../components/charts'
+import { Sparkline, TradeBar, MirrorScore } from '../components/charts'
 import { money, signed, formatWhen, errorText } from '../lib/format'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
 
@@ -554,8 +554,13 @@ export default function Overview() {
               </div>
             </div>
             <div>
-              <div className="desk-label">Worst trade</div>
-              <div className="num text-xl mt-0.5 text-loss">{signed(copierPerf.worst_trade)}</div>
+              <div className="desk-label">MirrorFleet score</div>
+              <MirrorScore
+                winRate={copierPerf.win_rate}
+                avgWin={copierPerf.avg_win}
+                avgLoss={copierPerf.avg_loss}
+                profitFactor={copierPerf.profit_factor}
+              />
             </div>
           </div>
         )}

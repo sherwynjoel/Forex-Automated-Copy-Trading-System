@@ -462,3 +462,71 @@ export function TradeBar({ value, max, tone }: {
     </div>
   )
 }
+
+/**
+ * Composite health score for the copier: win rate, win/loss ratio, and
+ * profit factor, each normalized to 0..1 and averaged into a 0-100 score.
+ * Rendered as a small triangle radar beside the score and a fixed
+ * red-to-green meter; the number carries the value, the color is a
+ * reinforcement (never the only encoding).
+ */
+export function MirrorScore({ winRate, avgWin, avgLoss, profitFactor }: {
+  winRate: number | null
+  avgWin: number | null
+  avgLoss: number | null
+  profitFactor: number | null
+}) {
+  const wl = avgWin != null && avgLoss != null && avgLoss !== 0
+    ? (avgWin / Math.abs(avgLoss)) / (1 + avgWin / Math.abs(avgLoss))
+    : null
+  const pf = profitFactor != null ? profitFactor / (1 + profitFactor) : null
+  const axes = [winRate, wl, pf]
+  if (axes.some((v) => v == null)) {
+    return <div className="num text-xl mt-0.5 text-ink">—</div>
+  }
+  const vals = axes as number[]
+  const score = Math.round((vals.reduce((a, b) => a + b, 0) / 3) * 100)
+  const toneClass = score >= 70 ? 'text-profit' : score >= 40 ? 'text-ink' : 'text-loss'
+
+  // Equilateral radar: apex up, then bottom-right, bottom-left.
+  const cx = 60
+  const cy = 44
+  const R = 26
+  const angles = [-90, 30, 150].map((deg) => (deg * Math.PI) / 180)
+  const point = (angle: number, r: number) =>
+    `${(cx + r * Math.cos(angle)).toFixed(1)},${(cy + r * Math.sin(angle)).toFixed(1)}`
+  const outer = angles.map((a) => point(a, R)).join(' ')
+  const inner = angles.map((a, i) => point(a, Math.max(vals[i], 0.08) * R)).join(' ')
+
+  return (
+    <div
+      className="mt-0.5 flex items-center gap-3"
+      role="img"
+      aria-label={`MirrorFleet score ${score} of 100: win rate ${Math.round(vals[0] * 100)}%, win/loss ${Math.round(vals[1] * 100)}%, profit factor ${Math.round(vals[2] * 100)}% of scale`}
+    >
+      <svg viewBox="0 0 120 88" className="h-14 w-20 shrink-0" aria-hidden="true">
+        <polygon points={outer} fill="none" stroke={LINE_STRONG} strokeWidth={1.5} />
+        <polygon points={inner} fill={BRAND_WASH} stroke={BRAND} strokeWidth={2}
+                 strokeLinejoin="round" />
+        <text x={cx} y={12} textAnchor="middle" fontSize={9} fill={INK_SOFT}>Win %</text>
+        <text x={cx + R + 4} y={cy + R * 0.62} textAnchor="middle" fontSize={9} fill={INK_SOFT}>PF</text>
+        <text x={cx - R - 6} y={cy + R * 0.62} textAnchor="middle" fontSize={9} fill={INK_SOFT}>W/L</text>
+      </svg>
+      <div>
+        <div className="num text-xl font-semibold tracking-tight">
+          <span className={toneClass}>{score}</span>
+          <span className="text-ink-soft text-sm font-medium"> / 100</span>
+        </div>
+        <div
+          className="relative mt-1.5 h-1.5 w-24 rounded-full"
+          style={{ background: 'linear-gradient(to right, #d6344b, #e7b54e, #15803d)' }}
+        >
+          <span
+            className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 h-3 w-3 rounded-full bg-card border-2 border-ink"
+            style={{ left: `${score}%` }}
+          />
+        </div>
+      </div>
+    </div>
+  )
+}
