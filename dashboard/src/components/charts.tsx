@@ -1,5 +1,6 @@
 import { ReactNode, useEffect, useRef, useState } from 'react'
 import { signed as signedFmt } from '../lib/format'
+import type { SeriesPoint } from '../lib/perf'
 
 /**
  * Hand-rolled SVG charts in the MirrorFleet design system.
@@ -389,80 +390,6 @@ export function CandleChart({ bars, lines = [], height = 300, digits = 5 }: {
   )
 }
 
-/* ---------------------------------------------------------------------------
-   Micro-visualizations for stat tiles.  Same token palette as the big
-   charts; small enough to sit under a number without shouting.
---------------------------------------------------------------------------- */
-
-/** Tiny trend line for a stat tile — brand hue, no axes, no grid. */
-export function Sparkline({ points, label }: {
-  points: { timestamp: number; balance: number }[]
-  label: string
-}) {
-  if (points.length < 2) return null
-  const W = 160
-  const H = 36
-  const PAD = 3
-  const values = points.map((pt) => pt.balance)
-  const min = Math.min(...values)
-  const max = Math.max(...values)
-  const span = max - min || 1
-  const x = (i: number) => PAD + (i / (points.length - 1)) * (W - 2 * PAD)
-  const y = (v: number) => H - PAD - ((v - min) / span) * (H - 2 * PAD)
-  const d = values.map((v, i) => `${i === 0 ? 'M' : 'L'}${x(i).toFixed(2)},${y(v).toFixed(2)}`).join(' ')
-  const last = values[values.length - 1]
-  return (
-    <svg
-      role="img"
-      aria-label={label}
-      viewBox={`0 0 ${W} ${H}`}
-      preserveAspectRatio="none"
-      className="w-full h-9"
-    >
-      <path d={d} fill="none" stroke={BRAND} strokeWidth={2}
-            strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
-      <circle cx={x(values.length - 1)} cy={y(last)} r={3} fill={BRAND}
-              stroke="var(--color-card)" strokeWidth={1.5} />
-    </svg>
-  )
-}
-
-/** Single-ratio meter: profit fill on a quiet track. Not a pie of two. */
-export function WinRateMeter({ wins, losses }: { wins: number; losses: number }) {
-  const total = wins + losses
-  if (total === 0) return null
-  const pct = (wins / total) * 100
-  return (
-    <div
-      data-chart="win-meter"
-      role="img"
-      aria-label={`Win rate ${pct.toFixed(1)}%: ${wins} wins, ${losses} losses`}
-      className="mt-2 h-1.5 rounded-full bg-line overflow-hidden"
-    >
-      <div className="h-full rounded-full bg-profit" style={{ width: `${pct}%` }} />
-    </div>
-  )
-}
-
-/** Magnitude bar for one figure of a labeled pair sharing `max` as scale. */
-export function TradeBar({ value, max, tone }: {
-  value: number | null
-  max: number
-  tone: 'profit' | 'loss'
-}) {
-  if (value == null || max <= 0) return null
-  const pct = Math.min((Math.abs(value) / max) * 100, 100)
-  return (
-    <div data-chart="trade-bar" aria-hidden="true"
-         className="mt-2 h-1.5 rounded-full bg-line overflow-hidden">
-      <div
-        className={`h-full rounded-full ${tone === 'profit' ? 'bg-profit' : 'bg-loss'}`}
-        style={{ width: `${pct}%` }}
-      />
-    </div>
-  )
-}
-
 /**
  * Composite health score for the copier: win rate, win/loss ratio, and
  * profit factor, each normalized to 0..1 and averaged into a 0-100 score.
@@ -470,11 +397,12 @@ export function TradeBar({ value, max, tone }: {
  * red-to-green meter; the number carries the value, the color is a
  * reinforcement (never the only encoding).
  */
-export function MirrorScore({ winRate, avgWin, avgLoss, profitFactor }: {
+export function MirrorScore({ winRate, avgWin, avgLoss, profitFactor, large = false }: {
   winRate: number | null
   avgWin: number | null
   avgLoss: number | null
   profitFactor: number | null
+  large?: boolean
 }) {
   const wl = avgWin != null && avgLoss != null && avgLoss !== 0
     ? (avgWin / Math.abs(avgLoss)) / (1 + avgWin / Math.abs(avgLoss))
@@ -489,44 +417,263 @@ export function MirrorScore({ winRate, avgWin, avgLoss, profitFactor }: {
   const toneClass = score >= 70 ? 'text-profit' : score >= 40 ? 'text-ink' : 'text-loss'
 
   // Equilateral radar: apex up, then bottom-right, bottom-left.
-  const cx = 60
-  const cy = 44
-  const R = 26
+  const cx = large ? 100 : 60
+  const cy = large ? 88 : 52
+  const R = large ? 58 : 32
+  const labelSize = large ? 13 : 12
   const angles = [-90, 30, 150].map((deg) => (deg * Math.PI) / 180)
-  const point = (angle: number, r: number) =>
-    `${(cx + r * Math.cos(angle)).toFixed(1)},${(cy + r * Math.sin(angle)).toFixed(1)}`
-  const outer = angles.map((a) => point(a, R)).join(' ')
-  const inner = angles.map((a, i) => point(a, Math.max(vals[i], 0.08) * R)).join(' ')
+  const coords = (angle: number, r: number): [number, number] =>
+    [cx + r * Math.cos(angle), cy + r * Math.sin(angle)]
+  const point = (angle: number, r: number) => {
+    const [x, y] = coords(angle, r)
+    return `${x.toFixed(1)},${y.toFixed(1)}`
+  }
+  // The large card gets concentric grid rings; the compact strip just the rim.
+  const gridRs = large ? [R, (R * 2) / 3, R / 3] : [R]
+  const innerPts = angles.map((a, i) => coords(a, Math.max(vals[i], 0.1) * R))
+  const inner = innerPts.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(' ')
+  const aria = `MirrorFleet score ${score} of 100: win rate ${Math.round(vals[0] * 100)}%, win/loss ${Math.round(vals[1] * 100)}%, profit factor ${Math.round(vals[2] * 100)}% of scale`
 
-  return (
+  const radar = (viewBox: string, cls: string) => (
+    <svg viewBox={viewBox} className={cls} aria-hidden="true">
+      {gridRs.map((r) => (
+        <polygon key={r} points={angles.map((a) => point(a, r)).join(' ')}
+                 fill="none" stroke={LINE_STRONG} strokeWidth={r === R ? 1.5 : 1} />
+      ))}
+      <polygon points={inner} fill={BRAND} fillOpacity={0.18} stroke={BRAND}
+               strokeWidth={2.5} strokeLinejoin="round" />
+      {innerPts.map(([x, y], i) => (
+        <circle key={i} cx={x} cy={y} r={3} fill={BRAND} stroke="var(--color-card)" strokeWidth={1.5} />
+      ))}
+      <text x={cx} y={cy - R - 8} textAnchor="middle" fontSize={labelSize} fontWeight={600} fill={INK_SOFT}>Win %</text>
+      <text x={cx + R + 2} y={cy + R * 0.68 + 12} textAnchor="middle" fontSize={labelSize} fontWeight={600} fill={INK_SOFT}>PF</text>
+      <text x={cx - R - 2} y={cy + R * 0.68 + 12} textAnchor="middle" fontSize={labelSize} fontWeight={600} fill={INK_SOFT}>W/L</text>
+    </svg>
+  )
+  const meter = (
     <div
-      className="mt-0.5 flex items-center gap-3"
-      role="img"
-      aria-label={`MirrorFleet score ${score} of 100: win rate ${Math.round(vals[0] * 100)}%, win/loss ${Math.round(vals[1] * 100)}%, profit factor ${Math.round(vals[2] * 100)}% of scale`}
+      className="relative h-1.5 w-full rounded-full"
+      style={{ background: 'linear-gradient(to right, #d6344b, #e7b54e, #15803d)' }}
     >
-      <svg viewBox="0 0 120 88" className="h-14 w-20 shrink-0" aria-hidden="true">
-        <polygon points={outer} fill="none" stroke={LINE_STRONG} strokeWidth={1.5} />
-        <polygon points={inner} fill={BRAND_WASH} stroke={BRAND} strokeWidth={2}
-                 strokeLinejoin="round" />
-        <text x={cx} y={12} textAnchor="middle" fontSize={9} fill={INK_SOFT}>Win %</text>
-        <text x={cx + R + 4} y={cy + R * 0.62} textAnchor="middle" fontSize={9} fill={INK_SOFT}>PF</text>
-        <text x={cx - R - 6} y={cy + R * 0.62} textAnchor="middle" fontSize={9} fill={INK_SOFT}>W/L</text>
-      </svg>
-      <div>
+      <span
+        className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 h-3 w-3 rounded-full bg-card border-2 border-ink"
+        style={{ left: `${score}%` }}
+      />
+    </div>
+  )
+
+  if (large) {
+    return (
+      <div className="flex h-full flex-col" role="img" aria-label={aria}>
+        {radar('0 0 200 152', 'w-full max-w-60 mx-auto h-auto')}
+        <div className="mt-auto flex items-center gap-3 pt-3">
+          <div className="num text-2xl font-semibold tracking-tight shrink-0">
+            <span className={toneClass}>{score}</span>
+            <span className="text-ink-soft text-sm font-medium"> / 100</span>
+          </div>
+          <div className="min-w-0 flex-1">{meter}</div>
+        </div>
+      </div>
+    )
+  }
+  return (
+    <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1" role="img" aria-label={aria}>
+      {radar('0 0 120 100', 'h-20 w-24 shrink-0')}
+      <div className="min-w-0 flex-1 max-w-32">
         <div className="num text-xl font-semibold tracking-tight">
           <span className={toneClass}>{score}</span>
           <span className="text-ink-soft text-sm font-medium"> / 100</span>
         </div>
-        <div
-          className="relative mt-1.5 h-1.5 w-24 rounded-full"
-          style={{ background: 'linear-gradient(to right, #d6344b, #e7b54e, #15803d)' }}
-        >
-          <span
-            className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 h-3 w-3 rounded-full bg-card border-2 border-ink"
-            style={{ left: `${score}%` }}
-          />
-        </div>
+        <div className="mt-1.5 max-w-24">{meter}</div>
       </div>
+    </div>
+  )
+}
+
+const tickFmt = (v: number) => {
+  if (Math.abs(v) < 1e-9) v = 0 // clamp float dust so the axis never says -0.00
+  return Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(1)}k`
+    : Math.abs(v) >= 100 ? v.toFixed(0)
+    : v.toFixed(2)
+}
+
+/**
+ * Card line chart with a labeled y-axis (four hairline gridlines), first/last
+ * date labels, and the standard hover readout — used for cumulative P&L and
+ * drawdown curves.
+ */
+export function PerfLine({ points, tone = 'brand', label, chart, height = 150 }: {
+  points: SeriesPoint[]
+  tone?: 'brand' | 'loss'
+  label: string
+  chart: string
+  height?: number
+}) {
+  const [ref, width] = useElementWidth()
+  const [tip, setTip] = useState<TooltipState | null>(null)
+  if (points.length < 2) {
+    return (
+      <div data-chart={chart} className="flex h-24 items-center justify-center text-xs text-ink-faint">
+        Not enough closed trades yet.
+      </div>
+    )
+  }
+  const pad = { left: 46, right: 10, top: 10, bottom: 22 }
+  const plotW = Math.max(width - pad.left - pad.right, 10)
+  const plotH = height - pad.top - pad.bottom
+  const vs = points.map((p) => p.v)
+  let vmin = Math.min(...vs)
+  let vmax = Math.max(...vs)
+  if (vmax - vmin < 1e-9) {
+    vmin -= 1
+    vmax += 1
+  }
+  const span = vmax - vmin
+  const t0 = points[0].t
+  const t1 = points[points.length - 1].t
+  const xOf = (t: number) =>
+    pad.left + (t1 === t0 ? plotW / 2 : ((t - t0) / (t1 - t0)) * plotW)
+  const yOf = (v: number) => pad.top + ((vmax - v) / span) * plotH
+  const ticks = [vmax, vmin + (span * 2) / 3, vmin + span / 3, vmin]
+  const path = points.map((p, i) => `${i ? 'L' : 'M'}${xOf(p.t).toFixed(1)},${yOf(p.v).toFixed(1)}`).join(' ')
+  const stroke = tone === 'loss' ? LOSS : BRAND
+  const last = points[points.length - 1]
+
+  const onMove = (e: React.MouseEvent<SVGRectElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect()
+    const mx = e.clientX - rect.left + pad.left
+    let nearest = points[0]
+    let best = Infinity
+    for (const p of points) {
+      const d = Math.abs(xOf(p.t) - mx)
+      if (d < best) { best = d; nearest = p }
+    }
+    setTip({
+      x: xOf(nearest.t), y: yOf(nearest.v),
+      content: (
+        <div>
+          <div className="text-ink-soft">{shortDate(nearest.t)}</div>
+          <div className="num text-ink">{signedFmt(nearest.v)}</div>
+        </div>
+      ),
+    })
+  }
+
+  return (
+    <div ref={ref} className="relative" data-chart={chart}>
+      <svg width={width} height={height} role="img" aria-label={label}>
+        {ticks.map((v, i) => (
+          <g key={i}>
+            <line x1={pad.left} x2={pad.left + plotW} y1={yOf(v)} y2={yOf(v)}
+                  stroke={LINE} strokeDasharray="2 3" />
+            <text x={pad.left - 6} y={yOf(v) + 3} textAnchor="end" fontSize={10}
+                  fill={INK_FAINT} fontFamily={MONO}>
+              {tickFmt(v)}
+            </text>
+          </g>
+        ))}
+        <path d={path} fill="none" stroke={stroke} strokeWidth={2}
+              strokeLinejoin="round" strokeLinecap="round" />
+        <circle cx={xOf(last.t)} cy={yOf(last.v)} r={3} fill={stroke} />
+        {tip && (
+          <circle cx={tip.x} cy={tip.y} r={4} fill={stroke} stroke="var(--color-card)" strokeWidth={2} />
+        )}
+        <text x={pad.left} y={height - 6} fontSize={10} fontFamily={MONO} fill={INK_FAINT}>
+          {shortDate(t0)}
+        </text>
+        <text x={pad.left + plotW} y={height - 6} textAnchor="end" fontSize={10}
+              fontFamily={MONO} fill={INK_FAINT}>
+          {shortDate(t1)}
+        </text>
+        <rect x={pad.left} y={pad.top} width={plotW} height={plotH} fill="transparent"
+              onMouseMove={onMove} onMouseLeave={() => setTip(null)} />
+      </svg>
+      <Tooltip tip={tip} />
+    </div>
+  )
+}
+
+/**
+ * Card bar chart: one bar per trading day diverging around a drawn zero
+ * baseline (sign is position, not just color), labeled y-axis, dates, and
+ * the standard hover readout.
+ */
+export function PerfBars({ bars, label, chart, height = 150 }: {
+  bars: SeriesPoint[]
+  label: string
+  chart: string
+  height?: number
+}) {
+  const [ref, width] = useElementWidth()
+  const [tip, setTip] = useState<TooltipState | null>(null)
+  if (!bars.length) {
+    return (
+      <div data-chart={chart} className="flex h-24 items-center justify-center text-xs text-ink-faint">
+        Not enough closed trades yet.
+      </div>
+    )
+  }
+  const pad = { left: 46, right: 10, top: 10, bottom: 22 }
+  const plotW = Math.max(width - pad.left - pad.right, 10)
+  const plotH = height - pad.top - pad.bottom
+  const vs = bars.map((b) => b.v)
+  let vmin = Math.min(0, ...vs)
+  let vmax = Math.max(0, ...vs)
+  if (vmax - vmin < 1e-9) vmax += 1
+  const span = vmax - vmin
+  const yOf = (v: number) => pad.top + ((vmax - v) / span) * plotH
+  const ticks = [vmax, vmin + (span * 2) / 3, vmin + span / 3, vmin]
+  const slot = plotW / bars.length
+  const bw = Math.min(slot * 0.6, 22)
+
+  const onMove = (e: React.MouseEvent<SVGRectElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect()
+    const mx = e.clientX - rect.left
+    const idx = Math.min(bars.length - 1, Math.max(0, Math.floor(mx / slot)))
+    const bar = bars[idx]
+    setTip({
+      x: pad.left + slot * idx + slot / 2, y: yOf(Math.max(bar.v, 0)),
+      content: (
+        <div>
+          <div className="text-ink-soft">{shortDate(bar.t)}</div>
+          <div className="num text-ink">{signedFmt(bar.v)}</div>
+        </div>
+      ),
+    })
+  }
+
+  return (
+    <div ref={ref} className="relative" data-chart={chart}>
+      <svg width={width} height={height} role="img" aria-label={label}>
+        {ticks.map((v, i) => (
+          <g key={i}>
+            <line x1={pad.left} x2={pad.left + plotW} y1={yOf(v)} y2={yOf(v)}
+                  stroke={LINE} strokeDasharray="2 3" />
+            <text x={pad.left - 6} y={yOf(v) + 3} textAnchor="end" fontSize={10}
+                  fill={INK_FAINT} fontFamily={MONO}>
+              {tickFmt(v)}
+            </text>
+          </g>
+        ))}
+        <line x1={pad.left} x2={pad.left + plotW} y1={yOf(0)} y2={yOf(0)} stroke={LINE_STRONG} />
+        {bars.map((b, i) => (
+          <path key={b.t}
+                d={roundedBarPath(pad.left + slot * i + (slot - bw) / 2, bw, yOf(0), yOf(b.v), 2)}
+                fill={b.v < 0 ? LOSS : PROFIT} />
+        ))}
+        {bars.length > 1 && (
+          <text x={pad.left} y={height - 6} fontSize={10} fontFamily={MONO} fill={INK_FAINT}>
+            {shortDate(bars[0].t)}
+          </text>
+        )}
+        <text x={pad.left + plotW} y={height - 6} textAnchor="end" fontSize={10}
+              fontFamily={MONO} fill={INK_FAINT}>
+          {shortDate(bars[bars.length - 1].t)}
+        </text>
+        <rect x={pad.left} y={pad.top} width={plotW} height={plotH} fill="transparent"
+              onMouseMove={onMove} onMouseLeave={() => setTip(null)} />
+      </svg>
+      <Tooltip tip={tip} />
     </div>
   )
 }

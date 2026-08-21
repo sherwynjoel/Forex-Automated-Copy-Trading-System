@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi, afterEach } from 'vitest'
@@ -947,7 +947,7 @@ function statsRoutes(state: unknown = mockState) {
   }
 }
 
-test('copier performance strip shows sparkline plus today and this-week trade tiles', async () => {
+test('copier performance section shows activity stats plus four analytics cards', async () => {
   setRole('owner')
   const now = Date.now()
   const routes = statsRoutes()
@@ -970,23 +970,32 @@ test('copier performance strip shows sparkline plus today and this-week trade ti
   )
 
   await screen.findByText(/copier performance/i)
-  // Net P&L trend sparkline stays
+  // Tradesyncer-style analytics cards replace the sparkline strip.
   await waitFor(() => {
-    expect(container.querySelector('[data-chart="perf-sparkline"] svg')).toBeTruthy()
+    expect(container.querySelector('[data-chart="cumulative-pnl"] svg')).toBeTruthy()
   })
-  // Win rate / best trade tiles are replaced by activity tiles
-  expect(screen.queryByText(/win rate/i)).not.toBeInTheDocument()
-  expect(screen.queryByText(/best trade/i)).not.toBeInTheDocument()
-  expect(container.querySelector('[data-chart="win-meter"]')).toBeNull()
+  expect(container.querySelector('[data-chart="daily-pnl"] svg')).toBeTruthy()
+  expect(container.querySelector('[data-chart="perf-sparkline"]')).toBeNull()
+  expect(screen.getByText(/cumulative p&l/i)).toBeInTheDocument()
+  expect(screen.getByText(/p&l by day/i)).toBeInTheDocument()
+  // The equity curve only ever rises here, so instead of a fabricated flat
+  // red chart the drawdown card states the (good) news plainly.
+  expect(screen.getByText(/no drawdown in this window/i)).toBeInTheDocument()
+  expect(container.querySelector('[data-chart="drawdown"] svg')).toBeNull()
+  expect(screen.getByText(/current/i)).toHaveTextContent('0.00')
 
-  // Two closed trades today (both also count toward the week), P&L from the curve
+  // Hovering the cumulative chart reads out the nearest trade's value.
+  const hitRect = container.querySelector('[data-chart="cumulative-pnl"] rect[fill="transparent"]')!
+  expect(hitRect).toBeTruthy()
+  fireEvent.mouseMove(hitRect, { clientX: 0, clientY: 0 })
+  expect(screen.getByText('+0.00')).toBeInTheDocument()
+
+  // The activity stats the strip already had stay on.
   expect(screen.getByText(/today's trades/i)).toBeInTheDocument()
   expect(screen.getByText(/this week/i)).toBeInTheDocument()
   // Net P&L, today's window, and the week's window all resolve to +512.50
   // with this curve (baseline is the 20-day-old point in every case).
   expect(screen.getAllByText('+512.50').length).toBe(3)
-  // Today's share-of-week magnitude bar
-  expect(container.querySelectorAll('[data-chart="trade-bar"]').length).toBe(1)
 })
 
 test('portfolio row aggregates equity and compares to yesterday', async () => {
@@ -1056,6 +1065,70 @@ test('the Accounts Connected tile expands a fleet status list, accordion-style',
   expect(within(panel).getAllByText(/slave/i).length).toBeGreaterThanOrEqual(2)
   expect(within(panel).getByText(/master/i)).toBeInTheDocument()
   expect(within(panel).getByText(/degraded/i)).toBeInTheDocument()
+})
+
+test('each open contract row can be closed through a confirm dialog', async () => {
+  setRole('owner')
+  const routes = statsRoutes()
+  routes['/api/orgs/1/positions/close'] = { status: 'submitted' }
+  const fetchMock = stubApi(routes)
+  const { within } = await import('@testing-library/react')
+
+  render(
+    <MemoryRouter>
+      <Overview />
+    </MemoryRouter>
+  )
+
+  await screen.findByText('Copying Status')
+  await userEvent.click(screen.getByRole('button', { name: /open p&l/i }))
+  const panel = screen.getByText(/open contracts/i).closest('section')!
+
+  const closeButtons = within(panel).getAllByRole('button', { name: /^close$/i })
+  expect(closeButtons.length).toBe(2) // one per contract row
+
+  await userEvent.click(closeButtons[0])
+  const dialog = await screen.findByRole('dialog')
+  await userEvent.click(within(dialog).getByRole('button', { name: /close position/i }))
+
+  await waitFor(() => {
+    const call = fetchMock.mock.calls.find(([u]) => String(u).includes('/positions/close'))
+    expect(call).toBeTruthy()
+    const body = JSON.parse((call![1] as RequestInit).body as string)
+    expect(body).toMatchObject({ account_id: 1, position_id: 101 })
+  })
+})
+
+test('the panel close-all button closes every listed contract after confirm', async () => {
+  setRole('owner')
+  const routes = statsRoutes()
+  routes['/api/orgs/1/positions/close'] = { status: 'submitted' }
+  const fetchMock = stubApi(routes)
+  const { within } = await import('@testing-library/react')
+
+  render(
+    <MemoryRouter>
+      <Overview />
+    </MemoryRouter>
+  )
+
+  await screen.findByText('Copying Status')
+  await userEvent.click(screen.getByRole('button', { name: /open p&l/i }))
+  const panel = screen.getByText(/open contracts/i).closest('section')!
+
+  await userEvent.click(within(panel).getByRole('button', { name: /close all shown/i }))
+  const dialog = await screen.findByRole('dialog')
+  await userEvent.click(within(dialog).getByRole('button', { name: /close 2 contracts/i }))
+
+  await waitFor(() => {
+    const calls = fetchMock.mock.calls.filter(([u]) => String(u).includes('/positions/close'))
+    expect(calls.length).toBe(2)
+    const bodies = calls.map(([, init]) => JSON.parse((init as RequestInit).body as string))
+    expect(bodies).toEqual(expect.arrayContaining([
+      expect.objectContaining({ account_id: 1, position_id: 101 }),
+      expect.objectContaining({ account_id: 2, position_id: 102 }),
+    ]))
+  })
 })
 
 test("the Copied Today tile expands the list of today's copy fills", async () => {

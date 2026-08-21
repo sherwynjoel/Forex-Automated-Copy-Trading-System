@@ -2,15 +2,18 @@ import { useState, useEffect, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import { orgApi } from '../lib/api'
 import { useOrg } from '../lib/org'
+import { can } from '../lib/roles'
 import type {
-  Account, Analytics, ApiState, OverviewStats, Settings, StateSnapshot,
+  Account, Analytics, ApiState, OverviewStats, PositionData, Settings, StateSnapshot,
 } from '../lib/types'
 import KillSwitch from '../components/KillSwitch'
+import ConfirmDialog from '../components/ConfirmDialog'
 import StatTile from '../components/StatTile'
 import StatusDot from '../components/StatusDot'
 import Banner from '../components/Banner'
-import { Sparkline, TradeBar, MirrorScore } from '../components/charts'
+import { MirrorScore, PerfLine, PerfBars } from '../components/charts'
 import { money, signed, formatWhen, errorText } from '../lib/format'
+import { cumulativeSeries, drawdownSeries, dailyPnl } from '../lib/perf'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
 
 /**
@@ -45,7 +48,7 @@ async function loadState(
 // Shared desk primitives: one tile, one banner, one formatter set app-wide.
 
 export default function Overview() {
-  const { orgId } = useOrg()
+  const { orgId, role } = useOrg()
   const [accounts, setAccounts] = useState<Account[]>([])
   const [settings, setSettings] = useState<Settings | null>(null)
   const [state, setState] = useState<StateSnapshot>({})
@@ -135,6 +138,58 @@ export default function Overview() {
     }
   }
 
+  type ContractRow = { accountId: number; accountLabel: string; pos: PositionData }
+  const [closingContract, setClosingContract] = useState<ContractRow | null>(null)
+  const [closingAll, setClosingAll] = useState(false)
+  const [closeBusy, setCloseBusy] = useState(false)
+
+  const closeOne = async (row: ContractRow) => {
+    await orgApi(orgId, 'positions/close', {
+      method: 'POST',
+      body: JSON.stringify({ account_id: row.accountId, position_id: row.pos.position_id }),
+    })
+  }
+
+  const submitCloseContract = async () => {
+    if (!closingContract) return
+    try {
+      setCloseBusy(true)
+      setActionError(null)
+      await closeOne(closingContract)
+    } catch (err) {
+      setActionError(`Close failed: ${errorText(err, 'the copier did not respond')}`)
+    } finally {
+      setClosingContract(null)
+      setCloseBusy(false)
+      await refreshState()
+    }
+  }
+
+  const submitCloseAllContracts = async (rows: ContractRow[]) => {
+    try {
+      setCloseBusy(true)
+      setActionError(null)
+      const failures: string[] = []
+      // Sequential on purpose: master closes replicate to slave copies, so a
+      // copy may already be gone by the time its own close is attempted --
+      // treat those errors as per-row outcomes, not a batch abort.
+      for (const row of rows) {
+        try {
+          await closeOne(row)
+        } catch (err) {
+          failures.push(`${row.pos.symbol ?? row.pos.position_id}: ${errorText(err, 'failed')}`)
+        }
+      }
+      if (failures.length) {
+        setActionError(`Some contracts did not close: ${failures.join(' · ')}`)
+      }
+    } finally {
+      setClosingAll(false)
+      setCloseBusy(false)
+      await refreshState()
+    }
+  }
+
   const handleSettingsUpdate = (newSettings: Settings) => {
     setSettings(newSettings)
   }
@@ -211,6 +266,8 @@ export default function Overview() {
   }
   const today = windowStats(dayStart.getTime())
   const thisWeek = windowStats(monday.getTime())
+  const ddSeries = drawdownSeries(curve)
+  const currentDrawdown = ddSeries.length ? ddSeries[ddSeries.length - 1].v : 0
 
   // Live P&L per master position, for estimating each active copy's P&L.
   const masterPnlByPosition = new Map<number, { pnl: number | null; volume: number }>()
@@ -324,7 +381,15 @@ export default function Overview() {
                       <td data-label="Account" className="px-5 py-2.5">
                         {a.nickname || `Account ${a.trader_login}`}
                       </td>
-                      <td data-label="Role" className="px-3 py-2.5 text-ink-soft">{a.role}</td>
+                      <td data-label="Role" className="px-3 py-2.5">
+                        <span className={`text-xs font-semibold px-2 py-0.5 rounded ${
+                          a.role === 'master'
+                            ? 'bg-profit-wash text-profit-deep'
+                            : 'bg-line text-ink-soft'
+                        }`}>
+                          {a.role}
+                        </span>
+                      </td>
                       <td data-label="Balance" className="tnum px-3 py-2.5 text-right">{money(snap?.balance)}</td>
                       <td data-label="Equity" className="tnum px-3 py-2.5 text-right">{money(snap?.equity)}</td>
                       <td data-label="Open P&L" className="tnum px-5 py-2.5 text-right">
@@ -373,7 +438,15 @@ export default function Overview() {
                       <td data-label="Account" className="px-5 py-2.5">
                         {a.nickname || `Account ${a.trader_login}`}
                       </td>
-                      <td data-label="Role" className="px-3 py-2.5 text-ink-soft">{a.role}</td>
+                      <td data-label="Role" className="px-3 py-2.5">
+                        <span className={`text-xs font-semibold px-2 py-0.5 rounded ${
+                          a.role === 'master'
+                            ? 'bg-profit-wash text-profit-deep'
+                            : 'bg-line text-ink-soft'
+                        }`}>
+                          {a.role}
+                        </span>
+                      </td>
                       <td data-label="Health" className="px-3 py-2.5">
                         <span className="inline-flex items-center gap-1.5">
                           <StatusDot tone={degraded ? 'degraded' : 'ok'} />
@@ -456,14 +529,24 @@ export default function Overview() {
       {/* Live open contracts, expanded in place from the Open P&L tile */}
       {expandedKpi === 'contracts' && (
         <section className="rounded-lg border border-line bg-card">
-          <div className="px-5 pt-4 pb-3 flex items-baseline justify-between">
+          <div className="px-5 pt-4 pb-3 flex items-center justify-between gap-3 flex-wrap">
             <h2 className="desk-label">Open contracts · live</h2>
-            <Link
-              to={`/org/${orgId}/positions`}
-              className="text-xs font-medium text-brand-deep hover:underline"
-            >
-              Full positions view
-            </Link>
+            <div className="flex items-center gap-3">
+              {can(role, 'trade') && openContracts.length > 0 && (
+                <button
+                  onClick={() => setClosingAll(true)}
+                  className="px-3 py-1 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-white transition-colors"
+                >
+                  Close all shown
+                </button>
+              )}
+              <Link
+                to={`/org/${orgId}/positions`}
+                className="text-xs font-medium text-brand-deep hover:underline"
+              >
+                Full positions view
+              </Link>
+            </div>
           </div>
           {openContracts.length === 0 ? (
             <p className="px-5 pb-5 text-sm text-ink-faint">
@@ -479,6 +562,7 @@ export default function Overview() {
                     <th className="desk-label px-3 py-2 font-semibold">Side</th>
                     <th className="desk-label px-3 py-2 font-semibold text-right">Entry</th>
                     <th className="desk-label px-5 py-2 font-semibold text-right">Live P&L</th>
+                    {can(role, 'trade') && <th className="px-3 py-2" />}
                   </tr>
                 </thead>
                 <tbody>
@@ -495,6 +579,16 @@ export default function Overview() {
                           {signed(row.pos.pnl_quote)}
                         </span>
                       </td>
+                      {can(role, 'trade') && (
+                        <td className="px-3 py-2.5 text-right">
+                          <button
+                            onClick={() => setClosingContract(row)}
+                            className="px-3 py-1 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-white transition-colors"
+                          >
+                            Close
+                          </button>
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>
@@ -504,9 +598,9 @@ export default function Overview() {
         </section>
       )}
 
-      {/* Copier performance strip (master's realized results, last 4 weeks) */}
-      <section className="rounded-lg border border-line bg-card p-4">
-        <div className="flex items-baseline justify-between mb-3">
+      {/* Copier performance (master's realized results, last 4 weeks) */}
+      <section className="space-y-3">
+        <div className="flex items-baseline justify-between">
           <h2 className="desk-label">Copier performance · last 4 weeks</h2>
           {copierPerf && (
             <span className="text-xs text-ink-faint">
@@ -515,54 +609,93 @@ export default function Overview() {
           )}
         </div>
         {!copierPerf ? (
-          <p className="text-sm text-ink-faint">
-            Performance loads once the copier has served deal history.
-          </p>
+          <div className="rounded-lg border border-line bg-card p-4">
+            <p className="text-sm text-ink-faint">
+              Performance loads once the copier has served deal history.
+            </p>
+          </div>
         ) : (
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <div>
-              <div className="desk-label">Net P&L</div>
-              <div className={`num text-xl mt-0.5 ${copierPerf.net_pnl < 0 ? 'text-loss' : 'text-profit'}`}>
-                {signed(copierPerf.net_pnl)}
+          <>
+            <div className="rounded-lg border border-line bg-card p-4 grid grid-cols-3 gap-3">
+              <div className="min-w-0">
+                <div className="desk-label">Net P&L</div>
+                <div className={`num text-lg md:text-xl mt-0.5 ${copierPerf.net_pnl < 0 ? 'text-loss' : 'text-profit'}`}>
+                  {signed(copierPerf.net_pnl)}
+                </div>
               </div>
-              <div data-chart="perf-sparkline" className="mt-2">
-                <Sparkline
-                  points={copierPerf.equity_curve}
-                  label={`Balance trend across ${copierPerf.closed_trades} closed trades`}
+              <div className="min-w-0">
+                <div className="desk-label">Today's trades</div>
+                <div className="num text-lg md:text-xl mt-0.5 text-ink">{today.count}</div>
+                <div className="text-xs mt-0.5">
+                  <span className={today.pnl < 0 ? 'text-loss' : 'text-profit'}>{signed(today.pnl)}</span>
+                  <span className="text-ink-soft"> P&L</span>
+                </div>
+              </div>
+              <div className="min-w-0">
+                <div className="desk-label">This week</div>
+                <div className="num text-lg md:text-xl mt-0.5 text-ink">{thisWeek.count}</div>
+                <div className="text-xs mt-0.5">
+                  <span className={thisWeek.pnl < 0 ? 'text-loss' : 'text-profit'}>{signed(thisWeek.pnl)}</span>
+                  <span className="text-ink-soft"> P&L</span>
+                </div>
+              </div>
+            </div>
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+              <div className="rounded-lg border border-line bg-card p-4 flex flex-col">
+                <h3 className="desk-label mb-2">MirrorFleet score</h3>
+                <MirrorScore
+                  large
+                  winRate={copierPerf.win_rate}
+                  avgWin={copierPerf.avg_win}
+                  avgLoss={copierPerf.avg_loss}
+                  profitFactor={copierPerf.profit_factor}
                 />
               </div>
-            </div>
-            <div>
-              <div className="desk-label">Today's trades</div>
-              <div className="num text-xl mt-0.5 text-ink">{today.count}</div>
-              <div className="text-xs mt-0.5">
-                <span className={today.pnl < 0 ? 'text-loss' : 'text-profit'}>{signed(today.pnl)}</span>
-                <span className="text-ink-soft"> P&L</span>
+              <div className="rounded-lg border border-line bg-card p-4 flex flex-col">
+                <h3 className="desk-label mb-2">Cumulative P&L</h3>
+                <div className="my-auto">
+                  <PerfLine
+                    points={cumulativeSeries(curve)}
+                    label={`Cumulative P&L across ${copierPerf.closed_trades} closed trades`}
+                    chart="cumulative-pnl"
+                  />
+                </div>
               </div>
-              <TradeBar
-                value={today.count}
-                max={Math.max(thisWeek.count, 1)}
-                tone={today.pnl < 0 ? 'loss' : 'profit'}
-              />
-            </div>
-            <div>
-              <div className="desk-label">This week</div>
-              <div className="num text-xl mt-0.5 text-ink">{thisWeek.count}</div>
-              <div className="text-xs mt-0.5">
-                <span className={thisWeek.pnl < 0 ? 'text-loss' : 'text-profit'}>{signed(thisWeek.pnl)}</span>
-                <span className="text-ink-soft"> P&L</span>
+              <div className="rounded-lg border border-line bg-card p-4 flex flex-col">
+                <h3 className="desk-label mb-2">Drawdown</h3>
+                <div className="my-auto">
+                  {ddSeries.some((p) => p.v < 0) ? (
+                    <PerfLine
+                      points={ddSeries}
+                      tone="loss"
+                      label="Drawdown below the running balance peak"
+                      chart="drawdown"
+                    />
+                  ) : (
+                    <div data-chart="drawdown" className="flex h-24 items-center justify-center text-xs text-ink-faint">
+                      No drawdown in this window.
+                    </div>
+                  )}
+                  <div className="text-xs mt-1.5 text-ink-soft">
+                    Current{' '}
+                    <span className={`num ${currentDrawdown < 0 ? 'text-loss' : 'text-ink'}`}>
+                      {money(currentDrawdown)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+              <div className="rounded-lg border border-line bg-card p-4 flex flex-col">
+                <h3 className="desk-label mb-2">P&L by day</h3>
+                <div className="my-auto">
+                  <PerfBars
+                    bars={dailyPnl(curve)}
+                    label="Net P&L per trading day"
+                    chart="daily-pnl"
+                  />
+                </div>
               </div>
             </div>
-            <div>
-              <div className="desk-label">MirrorFleet score</div>
-              <MirrorScore
-                winRate={copierPerf.win_rate}
-                avgWin={copierPerf.avg_win}
-                avgLoss={copierPerf.avg_loss}
-                profitFactor={copierPerf.profit_factor}
-              />
-            </div>
-          </div>
+          </>
         )}
       </section>
 
@@ -786,6 +919,42 @@ export default function Overview() {
       {slaveAccounts.length === 0 && (
         <div className="text-center py-12 text-ink-faint">No slave accounts configured</div>
       )}
+
+      {/* Close one contract */}
+      <ConfirmDialog
+        open={closingContract != null}
+        title={`Close position ${closingContract?.pos.position_id ?? ''}`}
+        confirmLabel="Close position"
+        danger
+        busy={closeBusy}
+        onConfirm={submitCloseContract}
+        onCancel={() => setClosingContract(null)}
+      >
+        <p>
+          {closingContract?.pos.side}{' '}
+          <span className="num">{closingContract?.pos.symbol ?? closingContract?.pos.symbol_id}</span>{' '}
+          on {closingContract?.accountLabel} closes at market.
+          {closingContract?.accountLabel.includes('master') &&
+            ' Closing a master position also closes its copies on every slave.'}
+        </p>
+      </ConfirmDialog>
+
+      {/* Close every listed contract */}
+      <ConfirmDialog
+        open={closingAll}
+        title="Close every open contract"
+        confirmLabel={`Close ${openContracts.length} contract${openContracts.length === 1 ? '' : 's'}`}
+        danger
+        busy={closeBusy}
+        onConfirm={() => submitCloseAllContracts(openContracts)}
+        onCancel={() => setClosingAll(false)}
+      >
+        <p>
+          Every contract listed here closes at market — master positions first
+          replicate their close to their slave copies. Copying itself stays
+          running; this does not pause the copier.
+        </p>
+      </ConfirmDialog>
     </div>
   )
 }
