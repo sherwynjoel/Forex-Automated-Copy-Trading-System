@@ -52,6 +52,13 @@ interface MasterGroup {
 
 const roundCents = (v: number) => Math.round(v * 100) / 100
 
+/** cTrader throttles history payloads hard; explain its enum when it leaks. */
+function withBrokerHint(message: string): string {
+  return /BLOCKED_PAYLOAD_TYPE/.test(message)
+    ? `${message} — the broker rate-limits history requests; wait a few seconds and retry.`
+    : message
+}
+
 /** Aggregate an account's closing deals per position (a position may close
  * across several partial deals). */
 function closedPositionsOf(deals: Deal[]) {
@@ -123,6 +130,8 @@ export default function History() {
   // the first time the tab opens (N accounts x 2 requests).
   const [fleet, setFleet] = useState<Record<number, { deals: Deal[]; orders: HistoricalOrder[] }> | null>(null)
   const [fleetLoading, setFleetLoading] = useState(false)
+  const [fleetFailed, setFleetFailed] = useState<string[]>([])
+  const [fleetReloadKey, setFleetReloadKey] = useState(0)
   const seqRef = useRef(0)
   const drillSeqRef = useRef(0)
   const drillCloseRef = useRef<HTMLButtonElement>(null)
@@ -189,7 +198,7 @@ export default function History() {
       setFetchedAt(Date.now())
     } catch (err) {
       if (seq !== seqRef.current) return
-      setError(errorText(err, 'the copier did not respond'))
+      setError(withBrokerHint(errorText(err, 'the copier did not respond')))
     } finally {
       if (seq === seqRef.current) setLoading(false)
     }
@@ -204,26 +213,34 @@ export default function History() {
     let cancelled = false
     const load = async () => {
       setFleetLoading(true)
-      try {
-        const query = `from=${windowEnd - windowMs}&to=${windowEnd}`
-        const entries = await Promise.all(accounts.map(async (a) => {
-          const id = a.ctid_trader_account_id
-          const [d, o] = await Promise.all([
-            orgApi<{ deals: Deal[] }>(orgId, `accounts/${id}/history/deals?${query}`),
-            orgApi<{ orders: HistoricalOrder[] }>(orgId, `accounts/${id}/history/orders?${query}`),
-          ])
-          return [id, { deals: d.deals, orders: o.orders }] as const
-        }))
-        if (!cancelled) setFleet(Object.fromEntries(entries))
-      } catch (err) {
-        if (!cancelled) setError(errorText(err, 'the copier did not respond'))
-      } finally {
-        if (!cancelled) setFleetLoading(false)
+      // SEQUENTIAL on purpose: cTrader throttles history payloads, and a
+      // whole-fleet burst answers BLOCKED_PAYLOAD_TYPE (seen live on prod).
+      // One account at a time keeps the copier's send queue calm; a single
+      // failing account costs its rows, never the whole view.
+      const query = `from=${windowEnd - windowMs}&to=${windowEnd}`
+      const result: Record<number, { deals: Deal[]; orders: HistoricalOrder[] }> = {}
+      const failed: string[] = []
+      for (const account of accounts) {
+        if (cancelled) return
+        const id = account.ctid_trader_account_id
+        try {
+          const d = await orgApi<{ deals: Deal[] }>(
+            orgId, `accounts/${id}/history/deals?${query}`)
+          const o = await orgApi<{ orders: HistoricalOrder[] }>(
+            orgId, `accounts/${id}/history/orders?${query}`)
+          result[id] = { deals: d.deals, orders: o.orders }
+        } catch {
+          failed.push(accountLabel(account))
+        }
       }
+      if (cancelled) return
+      setFleet(result)
+      setFleetFailed(failed)
+      setFleetLoading(false)
     }
     load()
     return () => { cancelled = true }
-  }, [tab, orgId, accounts, windowEnd, windowMs])
+  }, [tab, orgId, accounts, windowEnd, windowMs, fleetReloadKey])
 
   const closingDeals = deals.filter((d) => d.close != null)
   const from = windowEnd - windowMs
@@ -580,6 +597,10 @@ export default function History() {
                 <MasterGroupsView
                   groups={masterGroups}
                   loading={fleetLoading && fleet == null}
+                  masterLoaded={fleet != null && masterAccountId != null
+                    && fleet[masterAccountId] != null}
+                  failedAccounts={fleetFailed}
+                  onRetryFleet={() => { setFleet(null); setFleetReloadKey((k) => k + 1) }}
                   digitsFor={digitsFor}
                   windowNoun={windowNoun}
                   onDrill={openDrill}
@@ -697,9 +718,15 @@ export default function History() {
   )
 }
 
-function MasterGroupsView({ groups, loading, digitsFor, windowNoun, onDrill, masterAccountId }: {
+function MasterGroupsView({
+  groups, loading, masterLoaded, failedAccounts, onRetryFleet,
+  digitsFor, windowNoun, onDrill, masterAccountId,
+}: {
   groups: MasterGroup[]
   loading: boolean
+  masterLoaded: boolean
+  failedAccounts: string[]
+  onRetryFleet: () => void
   digitsFor: (symbol: string | null | undefined) => number
   windowNoun: string
   onDrill: (positionId: number, forAccountId?: number) => void
@@ -708,15 +735,53 @@ function MasterGroupsView({ groups, loading, digitsFor, windowNoun, onDrill, mas
   if (loading) {
     return <p className="text-sm text-ink-soft py-8">Loading the fleet's history…</p>
   }
+  const retryButton = (
+    <button
+      onClick={onRetryFleet}
+      className="px-4 py-2 text-sm font-semibold rounded bg-brand text-white hover:bg-brand-deep transition-colors"
+    >
+      Retry fleet
+    </button>
+  )
+  if (!masterLoaded) {
+    // Without the master's rows there is nothing to group under: say so —
+    // never render this as a confident "no positions" claim.
+    return (
+      <div className="space-y-3 py-4">
+        <Banner kind="error">
+          The master account's history could not be loaded
+          {failedAccounts.length > 0
+            ? ' — the broker rate-limits history requests; wait a few seconds and retry.'
+            : '.'}
+        </Banner>
+        {retryButton}
+      </div>
+    )
+  }
+  const partialWarning = failedAccounts.length > 0 && (
+    <div className="space-y-3">
+      <Banner kind="warn">
+        Could not load {failedAccounts.length} account
+        {failedAccounts.length === 1 ? '' : 's'}: {failedAccounts.join(', ')}.
+        Their copies are missing from this view — the broker rate-limits
+        history requests; wait a few seconds and retry.
+      </Banner>
+      {retryButton}
+    </div>
+  )
   if (groups.length === 0) {
     return (
-      <p className="text-sm text-ink-soft py-8">
-        No master positions were closed in this {windowNoun}. Page back to look earlier.
-      </p>
+      <div className="space-y-4">
+        {partialWarning}
+        <p className="text-sm text-ink-soft py-8">
+          No master positions were closed in this {windowNoun}. Page back to look earlier.
+        </p>
+      </div>
     )
   }
   return (
     <div className="space-y-4">
+      {partialWarning}
       {groups.map((group) => {
         const digits = digitsFor(group.symbol)
         return (

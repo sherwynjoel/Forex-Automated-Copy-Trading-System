@@ -488,3 +488,46 @@ test('a master trade with no copies in the window says so', async () => {
   expect(await screen.findByText('#21')).toBeInTheDocument()
   expect(screen.getByText(/no slave copies in this week/i)).toBeInTheDocument()
 })
+
+test('By-master survives one slave failing and says which copies are missing', async () => {
+  mockRoutes({
+    '/accounts/101/history/deals': () =>
+      new Response(JSON.stringify({ detail: 'BLOCKED_PAYLOAD_TYPE' }), { status: 502 }),
+  })
+  renderHistory()
+  await screen.findAllByText('+20.00')
+
+  await userEvent.click(screen.getByRole('tab', { name: /by master/i }))
+
+  // The master's groups still render...
+  expect(await screen.findByText('#21')).toBeInTheDocument()
+  // ...with an honest warning about the failed slave, and a way to retry.
+  expect(screen.getByText(/could not load/i)).toHaveTextContent(/Second · 90101/)
+  expect(screen.getByRole('button', { name: /retry fleet/i })).toBeInTheDocument()
+})
+
+test('By-master shows an error, never a fake empty, when the master load fails', async () => {
+  let masterDealCalls = 0
+  const inner = mockRoutes()
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input)
+    if (url.includes('/accounts/100/history/deals')) {
+      masterDealCalls += 1
+      // First call = the per-account tab load (succeeds); later fleet calls fail.
+      if (masterDealCalls > 1) {
+        return new Response(JSON.stringify({ detail: 'BLOCKED_PAYLOAD_TYPE' }), { status: 502 })
+      }
+    }
+    return inner(input, init)
+  }))
+  renderHistory()
+  await screen.findAllByText('+20.00')
+
+  await userEvent.click(screen.getByRole('tab', { name: /by master/i }))
+
+  expect(await screen.findByText(/master account's history could not be loaded/i)).toBeInTheDocument()
+  // The broker's rate-limit enum is explained, not left raw and unexplained.
+  expect(screen.getByText(/rate-limits history/i)).toBeInTheDocument()
+  expect(screen.queryByText(/no master positions were closed/i)).not.toBeInTheDocument()
+  expect(screen.getByRole('button', { name: /retry fleet/i })).toBeInTheDocument()
+})
