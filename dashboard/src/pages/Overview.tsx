@@ -14,6 +14,7 @@ import Banner from '../components/Banner'
 import { MirrorScore, PerfLine, PerfBars } from '../components/charts'
 import { money, signed, formatWhen, errorText } from '../lib/format'
 import { cumulativeSeries, drawdownSeries, dailyPnl } from '../lib/perf'
+import { actionBurst } from '../lib/refresh'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
 
 /**
@@ -140,6 +141,7 @@ export default function Overview() {
 
   type ContractRow = { accountId: number; accountLabel: string; pos: PositionData }
   const [closingContract, setClosingContract] = useState<ContractRow | null>(null)
+  const [closingIds, setClosingIds] = useState<Set<number>>(new Set())
   const [closingAll, setClosingAll] = useState(false)
   const [closeBusy, setCloseBusy] = useState(false)
 
@@ -152,16 +154,24 @@ export default function Overview() {
 
   const submitCloseContract = async () => {
     if (!closingContract) return
+    const positionId = closingContract.pos.position_id
+    setClosingIds((prev) => new Set([...prev, positionId]))
     try {
       setCloseBusy(true)
       setActionError(null)
       await closeOne(closingContract)
     } catch (err) {
+      setClosingIds((prev) => {
+        const next = new Set(prev)
+        next.delete(positionId)
+        return next
+      })
       setActionError(`Close failed: ${errorText(err, 'the copier did not respond')}`)
     } finally {
       setClosingContract(null)
       setCloseBusy(false)
       await refreshState()
+      actionBurst(refreshState)
     }
   }
 
@@ -187,6 +197,7 @@ export default function Overview() {
       setClosingAll(false)
       setCloseBusy(false)
       await refreshState()
+      actionBurst(refreshState)
     }
   }
 
@@ -581,12 +592,18 @@ export default function Overview() {
                       </td>
                       {can(role, 'trade') && (
                         <td className="px-3 py-2.5 text-right">
+                          {closingIds.has(row.pos.position_id) ? (
+                            <span className="px-3 py-1 text-xs font-semibold text-ink-faint animate-pulse motion-reduce:animate-none">
+                              Closing…
+                            </span>
+                          ) : (
                           <button
                             onClick={() => setClosingContract(row)}
                             className="px-3 py-1 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-white transition-colors"
                           >
                             Close
                           </button>
+                          )}
                         </td>
                       )}
                     </tr>

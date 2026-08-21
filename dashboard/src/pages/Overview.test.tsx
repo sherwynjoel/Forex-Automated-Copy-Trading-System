@@ -1,4 +1,4 @@
-import { render, screen, waitFor, fireEvent } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent, within, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi, afterEach } from 'vitest'
@@ -1265,3 +1265,35 @@ test('the new stats reads are org-scoped', async () => {
   })
 })
 
+
+test('closing a contract acknowledges instantly and keeps refreshing', async () => {
+  setRole('owner')
+  const routes = statsRoutes(stateWithMasterPosition)
+  routes['/api/orgs/1/positions/close'] = { status: 'submitted' }
+  const fetchMock = stubApi(routes)
+  render(
+    <MemoryRouter>
+      <Overview />
+    </MemoryRouter>
+  )
+
+  const openTile = await screen.findByRole('button', { name: /open p&l/i })
+  await userEvent.click(openTile)
+  const closeButtons = await screen.findAllByRole('button', { name: /^close$/i })
+  await userEvent.click(closeButtons[0])
+  const dialog = await screen.findByRole('dialog')
+  await userEvent.click(within(dialog).getByRole('button', { name: /close position/i }))
+
+  // Instant row acknowledgment...
+  expect(await screen.findByText(/closing…/i)).toBeInTheDocument()
+
+  // ...and the follow-up burst catches the copier's resync (beyond the one
+  // immediate refetch), so the row vanishes without a manual reload. The
+  // first burst tick fires at ~350ms real time.
+  const countState = () =>
+    fetchMock.mock.calls.filter(([u]) => String(u).includes('/api/orgs/1/state')).length
+  const soonAfter = countState()
+  await waitFor(() => {
+    expect(countState()).toBeGreaterThan(soonAfter)
+  }, { timeout: 2000 })
+})

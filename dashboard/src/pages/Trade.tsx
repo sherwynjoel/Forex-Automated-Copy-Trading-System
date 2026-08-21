@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { orgApi } from '../lib/api'
+import { actionBurst } from '../lib/refresh'
 import { useOrg } from '../lib/org'
 import { can } from '../lib/roles'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
@@ -58,6 +59,9 @@ export default function Trade() {
   const [details, setDetails] = useState<AccountDetails | null>(null)
   const [ticket, setTicket] = useState<TicketState>(EMPTY_TICKET)
   const [closing, setClosing] = useState<OpenPosition | null>(null)
+  // Rows acknowledged instantly while the broker works.
+  const [closingIds, setClosingIds] = useState<Set<number>>(new Set())
+  const [cancellingIds, setCancellingIds] = useState<Set<number>>(new Set())
   const [partialLots, setPartialLots] = useState('')
   const [cancelling, setCancelling] = useState<WorkingOrder | null>(null)
   const [busy, setBusy] = useState(false)
@@ -242,7 +246,7 @@ export default function Trade() {
         `${ticket.orderType.toLowerCase()} on ${selected.nickname || selected.trader_login}. ` +
         'The fill shows up in Positions within a couple of seconds.')
       setError(null)
-      setTimeout(loadAccountData, 1500)
+      actionBurst(loadAccountData)
     } catch (err) {
       setOrderError(`Order failed: ${err instanceof Error ? err.message : 'unknown error'}`)
     } finally {
@@ -252,6 +256,8 @@ export default function Trade() {
 
   const submitClose = async () => {
     if (!closing || accountId == null) return
+    const positionId = closing.position_id
+    setClosingIds((prev) => new Set([...prev, positionId]))
     try {
       setBusy(true)
       const body: Record<string, unknown> = {
@@ -263,9 +269,14 @@ export default function Trade() {
       setNotice(`Close sent for position ${closing.position_id}.`)
       setClosing(null)
       setPartialLots('')
-      setTimeout(loadAccountData, 1500)
+      actionBurst(loadAccountData)
     } catch (err) {
       setClosing(null)
+      setClosingIds((prev) => {
+        const next = new Set(prev)
+        next.delete(positionId)
+        return next
+      })
       setError(`Close failed: ${err instanceof Error ? err.message : 'unknown error'}`)
     } finally {
       setBusy(false)
@@ -274,6 +285,8 @@ export default function Trade() {
 
   const submitCancel = async () => {
     if (!cancelling || accountId == null) return
+    const orderId = cancelling.order_id
+    setCancellingIds((prev) => new Set([...prev, orderId]))
     try {
       setBusy(true)
       await orgApi(orgId, 'orders/cancel', {
@@ -282,9 +295,14 @@ export default function Trade() {
       })
       setNotice(`Cancel sent for order ${cancelling.order_id}.`)
       setCancelling(null)
-      setTimeout(loadAccountData, 1500)
+      actionBurst(loadAccountData)
     } catch (err) {
       setCancelling(null)
+      setCancellingIds((prev) => {
+        const next = new Set(prev)
+        next.delete(orderId)
+        return next
+      })
       setError(`Cancel failed: ${err instanceof Error ? err.message : 'unknown error'}`)
     } finally {
       setBusy(false)
@@ -676,12 +694,18 @@ export default function Trade() {
                           {pos.stop_loss ?? '—'} / {pos.take_profit ?? '—'}
                         </td>
                         <td className="px-3 py-2.5 text-right">
+                          {closingIds.has(pos.position_id) ? (
+                            <span className="px-3 py-2.5 md:py-1 text-xs font-semibold text-ink-faint animate-pulse motion-reduce:animate-none">
+                              Closing…
+                            </span>
+                          ) : (
                           <button
                             onClick={() => { setClosing(pos); setPartialLots('') }}
                             className="px-3 py-2.5 md:py-1 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-white transition-colors"
                           >
                             Close
                           </button>
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -727,12 +751,18 @@ export default function Trade() {
                           {order.limit_price ?? order.stop_price ?? '—'}
                         </td>
                         <td className="px-3 py-2.5 text-right">
+                          {cancellingIds.has(order.order_id) ? (
+                            <span className="px-3 py-2.5 md:py-1 text-xs font-semibold text-ink-faint animate-pulse motion-reduce:animate-none">
+                              Cancelling…
+                            </span>
+                          ) : (
                           <button
                             onClick={() => setCancelling(order)}
                             className="px-3 py-2.5 md:py-1 text-xs font-semibold rounded border border-line-strong text-ink-soft hover:text-ink hover:border-ink transition-colors"
                           >
                             Cancel order
                           </button>
+                          )}
                         </td>
                       </tr>
                     ))}

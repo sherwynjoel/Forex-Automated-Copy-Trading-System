@@ -436,3 +436,45 @@ test('trader (trade+) sees the full order ticket', async () => {
   expect(screen.getByRole('button', { name: /place order/i })).toBeInTheDocument()
   expect(screen.queryByText(/your role does not allow placing orders/i)).not.toBeInTheDocument()
 })
+
+test('placing an order refreshes the book fast, not after a fixed 1.5s', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  try {
+    setRole('trader')
+    const fetchMock = mockRoutes()
+    renderTrade()
+    await waitFor(() => {
+      expect((screen.getByLabelText(/symbol/i) as HTMLInputElement).value).toBe('EURUSD')
+    })
+    const countDetails = () =>
+      fetchMock.mock.calls.filter(([u]) => String(u).includes('/details')).length
+    const before = countDetails()
+
+    await userEvent.click(screen.getByRole('button', { name: /place order/i }))
+    await act(async () => {
+      vi.advanceTimersByTime(600)
+    })
+    await waitFor(() => {
+      expect(countDetails()).toBeGreaterThan(before)
+    })
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+test('closing a position marks its row instantly', async () => {
+  setRole('trader')
+  mockRoutes()
+  renderTrade()
+  await waitFor(() => {
+    expect((screen.getByLabelText(/symbol/i) as HTMLInputElement).value).toBe('EURUSD')
+  })
+
+  await userEvent.click(screen.getByRole('button', { name: /^close$/i }))
+  const dialog = await screen.findByRole('dialog')
+  await userEvent.click(within(dialog).getByRole('button', { name: /close position/i }))
+
+  // The row acknowledges IMMEDIATELY -- no waiting for the copier's resync.
+  expect(screen.getByText(/closing…/i)).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /^close$/i })).not.toBeInTheDocument()
+})
