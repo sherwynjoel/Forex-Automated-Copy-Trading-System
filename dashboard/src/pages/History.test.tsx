@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { render, screen, waitFor, within, fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi, afterEach } from 'vitest'
@@ -62,13 +62,23 @@ const orders = {
   has_more: false,
 }
 
-function mockRoutes() {
+function mockRoutes(overrides: Record<string, unknown | (() => Response)> = {}) {
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input)
     const respond = (payload: unknown) =>
       new Response(JSON.stringify(payload), {
         status: 200, headers: { 'Content-Type': 'application/json' },
       })
+    for (const [fragment, payload] of Object.entries(overrides)) {
+      if (url.includes(fragment)) {
+        return typeof payload === 'function' ? (payload as () => Response)() : respond(payload)
+      }
+    }
+    if (url.includes('/symbols')) {
+      return respond([
+        { name: 'EURUSD', symbol_id: 1, digits: 5, min_volume_lots: 0.01, step_volume_lots: 0.01 },
+      ])
+    }
     if (url.includes('/history/deals')) return respond(deals)
     if (url.includes('/history/orders')) return respond(orders)
     if (url.includes('/history/cashflow')) {
@@ -119,7 +129,7 @@ test('closed positions tab shows realized P&L from closing deals', async () => {
   renderHistory()
 
   // Default tab: closed positions -- only the deal with a close detail.
-  expect(await screen.findByText('+20.00')).toBeInTheDocument()
+  expect(await screen.findAllByText('+20.00')).toHaveLength(2)  // row + totals
   expect(screen.getByText('1.10000 → 1.12000')).toBeInTheDocument()
 })
 
@@ -127,8 +137,8 @@ test('deals tab lists every fill', async () => {
   mockRoutes()
   renderHistory()
 
-  await screen.findByText('+20.00')
-  await userEvent.click(screen.getByRole('button', { name: /^deals/i }))
+  await screen.findAllByText('+20.00')
+  await userEvent.click(screen.getByRole('tab', { name: /^deals/i }))
 
   // Both fills visible: the opening BUY at 1.10 and the closing SELL at 1.12
   expect(await screen.findByText('1.10000')).toBeInTheDocument()
@@ -141,8 +151,8 @@ test('orders tab fetches and lists order history', async () => {
   mockRoutes()
   renderHistory()
 
-  await screen.findByText('+20.00')
-  await userEvent.click(screen.getByRole('button', { name: /^orders/i }))
+  await screen.findAllByText('+20.00')
+  await userEvent.click(screen.getByRole('tab', { name: /^orders/i }))
 
   expect(await screen.findByText('manual')).toBeInTheDocument()
   expect(screen.getByText('LIMIT')).toBeInTheDocument()
@@ -152,7 +162,7 @@ test('switching account refetches its history', async () => {
   const fetchMock = mockRoutes()
   renderHistory()
 
-  await screen.findByText('+20.00')
+  await screen.findAllByText('+20.00')
   await userEvent.selectOptions(await screen.findByLabelText(/account/i), '101')
 
   await waitFor(() => {
@@ -165,7 +175,7 @@ test('previous week button pages the window back', async () => {
   const fetchMock = mockRoutes()
   renderHistory()
 
-  await screen.findByText('+20.00')
+  await screen.findAllByText('+20.00')
   const firstCall = fetchMock.mock.calls.find(([u]) => String(u).includes('/history/deals'))
   const firstFrom = Number(new URLSearchParams(String(firstCall![0]).split('?')[1]).get('from'))
 
@@ -184,8 +194,8 @@ test('cash flow tab lists deposits and withdrawals', async () => {
   mockRoutes()
   renderHistory()
 
-  await screen.findByText('+20.00')
-  await userEvent.click(screen.getByRole('button', { name: /cash flow/i }))
+  await screen.findAllByText('+20.00')
+  await userEvent.click(screen.getByRole('tab', { name: /cash flow/i }))
 
   expect(await screen.findByText('DEPOSIT')).toBeInTheDocument()
   expect(screen.getByText('WITHDRAW')).toBeInTheDocument()
@@ -198,7 +208,7 @@ test('clicking a closed position opens its deal lifecycle', async () => {
   const fetchMock = mockRoutes()
   renderHistory()
 
-  await screen.findByText('+20.00')
+  await screen.findAllByText('+20.00')
   await userEvent.click(screen.getByRole('button', { name: /view position 21/i }))
 
   await waitFor(() => {
@@ -207,7 +217,274 @@ test('clicking a closed position opens its deal lifecycle', async () => {
   })
   // Drawer shows both legs of the position
   expect(await screen.findByText(/position 21/i)).toBeInTheDocument()
-  const drawer = screen.getByRole('complementary')
+  const drawer = screen.getByRole('dialog')
   expect(within(drawer).getByText('1.10000')).toBeInTheDocument()
   expect(within(drawer).getByText('1.12000')).toBeInTheDocument()
+})
+test('a failed history fetch shows a friendly error with retry, never a fake empty state', async () => {
+  let fail = true
+  mockRoutes({
+    '/history/deals': () => fail
+      ? new Response(JSON.stringify({ detail: 'deal history failed: INVALID_REQUEST' }), { status: 400 })
+      : new Response(JSON.stringify(deals), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+  })
+  renderHistory()
+
+  const alert = await screen.findByRole('alert')
+  expect(alert).toHaveTextContent(/deal history failed/i)
+  // errorText() strips the status-code prefix; no raw "400:" reaches the user.
+  expect(alert).not.toHaveTextContent('400:')
+  // An error must never coexist with a confident "no trades" claim.
+  expect(screen.queryByText(/no positions were closed/i)).not.toBeInTheDocument()
+
+  fail = false
+  await userEvent.click(screen.getByRole('button', { name: /retry/i }))
+  expect(await screen.findByText('21')).toBeInTheDocument()
+})
+
+test('closed positions get a net column and a week-totals row', async () => {
+  mockRoutes()
+  renderHistory()
+
+  await screen.findByText('21')
+  expect(screen.getByText('Net')).toBeInTheDocument()
+  // net = gross 20 + swap -0.12 + commission -0.7 = 19.18, in the row AND the totals row
+  expect(screen.getAllByText('+19.18')).toHaveLength(2)
+  expect(screen.getByText(/week total/i)).toBeInTheDocument()
+})
+
+test('a slave copy links back to its master position', async () => {
+  const fetchMock = mockRoutes({
+    '/accounts/101/history/orders': {
+      orders: [{ ...orders.orders[0], label: 'copy:m42', position_id: 21 }],
+      has_more: false,
+    },
+  })
+  renderHistory()
+  await screen.findByText('21')
+
+  await userEvent.selectOptions(screen.getByLabelText(/account/i), '101')
+  const chip = await screen.findByRole('button', { name: /copy of #42/i })
+  await userEvent.click(chip)
+
+  // The drill fetch goes to the MASTER account (100), not the selected slave.
+  await waitFor(() => {
+    expect(fetchMock.mock.calls.some(([u]) =>
+      String(u).includes('/accounts/100/positions/42/deals'))).toBe(true)
+  })
+  expect(await screen.findByText(/position 42/i)).toBeInTheDocument()
+})
+
+test('Later is disabled on the current window and enables after paging back', async () => {
+  mockRoutes()
+  renderHistory()
+  await screen.findByText('21')
+
+  const later = screen.getByRole('button', { name: /later/i })
+  expect(later).toBeDisabled()
+  await userEvent.click(screen.getByRole('button', { name: /earlier/i }))
+  expect(later).toBeEnabled()
+})
+
+test('refresh refetches and stamps the fetch time', async () => {
+  const fetchMock = mockRoutes()
+  renderHistory()
+  await screen.findByText('21')
+
+  const countDeals = () =>
+    fetchMock.mock.calls.filter(([u]) => String(u).includes('/history/deals')).length
+  const before = countDeals()
+  await userEvent.click(screen.getByRole('button', { name: /refresh/i }))
+  await waitFor(() => {
+    expect(countDeals()).toBeGreaterThan(before)
+  })
+  expect(screen.getByText(/as of/i)).toBeInTheDocument()
+})
+
+test('Escape closes the drill drawer', async () => {
+  mockRoutes()
+  renderHistory()
+  await screen.findByText('21')
+
+  await userEvent.click(screen.getByRole('button', { name: /view position 21/i }))
+  expect(await screen.findByRole('dialog')).toBeInTheDocument()
+  await userEvent.keyboard('{Escape}')
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+})
+
+test('day view narrows the window and the truncation note is actionable', async () => {
+  const fetchMock = mockRoutes({
+    '/history/deals': { ...deals, has_more: true },
+  })
+  renderHistory()
+  await screen.findByText('21')
+
+  // The old copy told users to "narrow the range" with no control to do so.
+  expect(screen.getByText(/switch to day view/i)).toBeInTheDocument()
+  expect(screen.queryByText(/narrow the range/i)).not.toBeInTheDocument()
+
+  await userEvent.click(screen.getByRole('button', { name: /^day$/i }))
+  await waitFor(() => {
+    const last = fetchMock.mock.calls.filter(([u]) => String(u).includes('/history/deals')).pop()
+    const url = new URL(String(last![0]), 'http://x')
+    const from = Number(url.searchParams.get('from'))
+    const to = Number(url.searchParams.get('to'))
+    expect(to - from).toBe(24 * 3600 * 1000)
+  })
+  // The totals caption follows the window size.
+  expect(await screen.findByText(/day total/i)).toBeInTheDocument()
+  expect(screen.queryByText(/week total/i)).not.toBeInTheDocument()
+})
+
+test('the date picker jumps the window to that day', async () => {
+  const fetchMock = mockRoutes()
+  renderHistory()
+  await screen.findByText('21')
+
+  fireEvent.change(screen.getByLabelText(/jump to date/i), { target: { value: '2026-08-01' } })
+  await waitFor(() => {
+    const last = fetchMock.mock.calls.filter(([u]) => String(u).includes('/history/deals')).pop()
+    const url = new URL(String(last![0]), 'http://x')
+    const to = Number(url.searchParams.get('to'))
+    expect(to).toBe(new Date(2026, 7, 2).getTime())
+  })
+})
+
+test('prices render with the symbol own digits, not a hardcoded five', async () => {
+  mockRoutes({
+    '/symbols': [{ name: 'EURUSD', symbol_id: 1, digits: 3, min_volume_lots: 0.01, step_volume_lots: 0.01 }],
+  })
+  renderHistory()
+
+  await screen.findByText('21')
+  expect(screen.getByText('1.100 → 1.120')).toBeInTheDocument()
+  expect(screen.queryByText('1.10000 → 1.12000')).not.toBeInTheDocument()
+})
+
+test('the account label does not repeat the login when there is no nickname', async () => {
+  mockRoutes()
+  renderHistory()
+  await screen.findByText('21')
+
+  expect(screen.getByRole('option', { name: 'Account 90100 · Demo' })).toBeInTheDocument()
+  expect(screen.queryByRole('option', { name: /90100 · 90100/ })).not.toBeInTheDocument()
+})
+
+test('retry recovers when the accounts list itself failed to load', async () => {
+  let failAccounts = true
+  const inner = mockRoutes()
+  // Only the accounts LIST fails; history URLs also contain "/accounts/" so
+  // an includes-override would poison them too.
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input).split('?')[0]
+    if (failAccounts && /\/api\/orgs\/1\/accounts$/.test(url)) {
+      return new Response(JSON.stringify({ detail: 'accounts unavailable' }), { status: 502 })
+    }
+    return inner(input, init)
+  }))
+  renderHistory()
+
+  await screen.findByRole('alert')
+  failAccounts = false
+  await userEvent.click(screen.getByRole('button', { name: /retry/i }))
+  // Retry reloads the ACCOUNTS list, then history follows.
+  expect(await screen.findAllByText('+20.00')).toHaveLength(2)
+})
+
+test('a refresh failure keeps the rows that were already on screen', async () => {
+  let fail = false
+  mockRoutes({
+    '/history/deals': () => fail
+      ? new Response(JSON.stringify({ detail: 'broker hiccup' }), { status: 502 })
+      : new Response(JSON.stringify(deals), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+  })
+  renderHistory()
+  await screen.findAllByText('+20.00')
+
+  fail = true
+  await userEvent.click(screen.getByRole('button', { name: /refresh/i }))
+
+  const alert = await screen.findByRole('alert')
+  expect(alert).toHaveTextContent(/broker hiccup/i)
+  // The last good rows stay visible under the error instead of vanishing.
+  expect(screen.getAllByText('+20.00')).toHaveLength(2)
+})
+
+test('tabs move with arrow keys', async () => {
+  mockRoutes()
+  renderHistory()
+  await screen.findAllByText('+20.00')
+
+  const closedTab = screen.getByRole('tab', { name: /closed positions/i })
+  closedTab.focus()
+  await userEvent.keyboard('{ArrowRight}')
+  expect(screen.getByRole('tab', { name: /by master/i })).toHaveAttribute('aria-selected', 'true')
+  expect(screen.getByRole('tab', { name: /by master/i })).toHaveFocus()
+})
+
+test('closing the drill drawer returns focus to the position that opened it', async () => {
+  mockRoutes()
+  renderHistory()
+  await screen.findAllByText('+20.00')
+
+  const opener = screen.getByRole('button', { name: /view position 21/i })
+  await userEvent.click(opener)
+  expect(await screen.findByRole('dialog')).toBeInTheDocument()
+  await userEvent.keyboard('{Escape}')
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  expect(opener).toHaveFocus()
+})
+
+const slaveDeals = {
+  deals: [
+    {
+      deal_id: 51, order_id: 99, position_id: 31, symbol_id: 1, symbol: 'EURUSD',
+      side: 'SELL', volume: 100000, filled_volume: 100000, volume_lots: '0.01',
+      execution_price: 1.1195, status: 'FILLED', commission: -0.6,
+      create_timestamp: 1700100000500, execution_timestamp: 1700100000500,
+      close: {
+        entry_price: 1.1005, gross_profit: 19, swap: 0, commission: -0.6,
+        balance: 5019, closed_volume: 100000, closed_volume_lots: '0.01',
+      },
+    },
+  ],
+  has_more: false,
+}
+
+test('the By-master tab nests slave copies under their master trade', async () => {
+  const fetchMock = mockRoutes({
+    '/accounts/101/history/deals': slaveDeals,
+    '/accounts/101/history/orders': {
+      orders: [{ ...orders.orders[0], order_id: 99, position_id: 31, label: 'copy:m21' }],
+      has_more: false,
+    },
+  })
+  renderHistory()
+  await screen.findAllByText('+20.00')
+
+  await userEvent.click(screen.getByRole('tab', { name: /by master/i }))
+
+  // Master group header: position #21 with its aggregate net (20 - 0.12 - 0.7).
+  expect(await screen.findByText('#21')).toBeInTheDocument()
+  expect(screen.getAllByText('+19.18').length).toBeGreaterThan(0)
+  // The slave's copied execution sits beneath it, named and drillable.
+  const panel = screen.getByRole('tabpanel')
+  expect(await within(panel).findByText(/Second · 90101/)).toBeInTheDocument()
+  expect(within(panel).getByText('31')).toBeInTheDocument()
+  // The fleet load fetched the SLAVE account's history too.
+  expect(fetchMock.mock.calls.some(([u]) =>
+    String(u).includes('/accounts/101/history/deals'))).toBe(true)
+})
+
+test('a master trade with no copies in the window says so', async () => {
+  mockRoutes({
+    '/accounts/101/history/deals': { deals: [], has_more: false },
+    '/accounts/101/history/orders': { orders: [], has_more: false },
+  })
+  renderHistory()
+  await screen.findAllByText('+20.00')
+
+  await userEvent.click(screen.getByRole('tab', { name: /by master/i }))
+  expect(await screen.findByText('#21')).toBeInTheDocument()
+  expect(screen.getByText(/no slave copies in this week/i)).toBeInTheDocument()
 })
