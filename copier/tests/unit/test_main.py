@@ -1775,6 +1775,61 @@ def test_periodic_resync_skips_overlap_no_engine_and_survives_failure(db, fernet
     assert len(calls) == 4
 
 
+def test_request_resync_scopes_to_the_events_org(db, fernet_key):
+    """An execution event names its org; the near-immediate resync must fan
+    ProtoOAReconcileReq out over THAT org's accounts only -- a fleet-wide
+    sweep on every fill is what made fills take seconds to appear."""
+    org_a = seed_db(db, fernet_key)
+    repo = Repo(db)
+    token_store = TokenStore(db, fernet_key)
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+
+    clock = Clock()
+    app.clock = clock
+    calls = []
+    app.resync = lambda org_id=None: (calls.append(org_id), defer.succeed(None))[1]
+
+    app.request_resync(org_a)
+    clock.advance(main.RESYNC_DEBOUNCE_S)
+    assert calls == [org_a]
+
+
+def test_request_resync_debounces_per_org_not_across_kinds(db, fernet_key):
+    """A burst for one org collapses; an org-scoped request and a fleet-wide
+    one are different keys and both fire."""
+    org_a = seed_db(db, fernet_key)
+    repo = Repo(db)
+    token_store = TokenStore(db, fernet_key)
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+
+    clock = Clock()
+    app.clock = clock
+    org_calls = []
+    sweep_calls = []
+    app.resync = lambda org_id=None: (org_calls.append(org_id), defer.succeed(None))[1]
+    app.periodic_resync = lambda: sweep_calls.append(1)
+
+    app.request_resync(org_a)
+    app.request_resync(org_a)   # same org: coalesced
+    app.request_resync()        # fleet-wide: its own key
+    clock.advance(main.RESYNC_DEBOUNCE_S)
+    assert org_calls == [org_a]
+    assert sweep_calls == [1]
+
+
+def test_service_notify_passes_the_org_through(db, fernet_key):
+    """The service tells the app WHICH org's positions changed."""
+    org_a = seed_db(db, fernet_key)
+    repo = Repo(db)
+    token_store = TokenStore(db, fernet_key)
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+
+    seen = []
+    app.service.on_positions_changed = lambda org_id=None: seen.append(org_id)
+    app.service._notify_positions_changed(org_a)
+    assert seen == [org_a]
+
+
 def test_request_resync_debounces_a_burst_into_one_resync(db, fernet_key):
     """request_resync collapses the burst a single trade produces (master
     fill + one fill per slave) into ONE near-immediate resync, and a later

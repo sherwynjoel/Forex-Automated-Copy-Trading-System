@@ -81,7 +81,7 @@ TOKEN_REFRESH_INTERVAL_S = 86400.0  # once per day
 # and it never touches the instant-write trade path.
 BALANCE_REFRESH_INTERVAL_S = 60.0
 RESYNC_INTERVAL_S = 60.0
-RESYNC_DEBOUNCE_S = 0.5
+RESYNC_DEBOUNCE_S = 0.2
 # Admin-set account cutoffs: remind this many calendar days before the date.
 # The scan is one cheap SQL query, so hourly keeps the reminder prompt
 # without waiting up to a day like the token-refresh cadence would.
@@ -146,7 +146,9 @@ class CopierApp:
         self._clients_by_account = clients_by_account
         self.clock = clock
         self._resync_in_flight = False
-        self._resync_requested = False
+        # Debounce keys: an org id, or None for the fleet-wide sweep.
+        self._resync_requested: set = set()
+        self._org_resync_in_flight: set = set()
 
     def reconciler_for(self, org_id: int) -> Reconciler:
         """The org's engine, or ValueError if it has none (no master)."""
@@ -504,21 +506,39 @@ class CopierApp:
             org_id=org_id)
         log.info("dry-run for org %s: %s", org_id, "enabled" if enabled else "disabled")
 
-    def request_resync(self) -> None:
+    def request_resync(self, org_id: int | None = None) -> None:
         """Schedule a near-immediate resync in response to a position-
-        changing event, so /state reflects a fill within ~1s instead of
-        waiting for the next RESYNC_INTERVAL_S tick. Debounced: the burst
-        a single trade produces (master fill + one fill per slave)
-        collapses into one resync, and periodic_resync's in-flight guard
-        still applies on top.
+        changing event, so /state reflects a fill fast instead of waiting
+        for the next RESYNC_INTERVAL_S tick. Debounced PER ORG: the burst a
+        single trade produces (master fill + one fill per slave) collapses
+        into one resync of THAT org's accounts only -- a fleet-wide
+        ProtoOAReconcileReq sweep on every fill is what made fills take
+        seconds to show up. org_id=None keeps the old whole-fleet sweep.
         """
-        if self._resync_requested:
+        if org_id in self._resync_requested:
             return
-        self._resync_requested = True
+        self._resync_requested.add(org_id)
 
         def _fire():
-            self._resync_requested = False
-            self.periodic_resync()
+            self._resync_requested.discard(org_id)
+            if org_id is None:
+                self.periodic_resync()
+                return
+            if org_id in self._org_resync_in_flight:
+                return
+            self._org_resync_in_flight.add(org_id)
+            d = defer.maybeDeferred(self.resync, org_id)
+
+            def _clear(result):
+                self._org_resync_in_flight.discard(org_id)
+                return None
+
+            def _swallow(failure):
+                self._org_resync_in_flight.discard(org_id)
+                log.error("org resync failed: %s", failure)
+                return None
+
+            d.addCallbacks(_clear, _swallow)
 
         clock = self.clock
         if clock is None:
