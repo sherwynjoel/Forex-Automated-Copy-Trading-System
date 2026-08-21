@@ -107,7 +107,7 @@ test('desk strip shows paused state when copying is disabled', async () => {
   })
 })
 
-test('close-all requires typing CLOSE ALL before the request is sent', async () => {
+test('close-all confirms with a single click — no typed phrase required', async () => {
   useOrgMock.mockReturnValue(makeOrgValue('owner'))
   const fetchMock = mockRoutes()
   renderLayout()
@@ -115,15 +115,14 @@ test('close-all requires typing CLOSE ALL before the request is sent', async () 
   const openButton = await screen.findByRole('button', { name: /close all positions/i })
   await userEvent.click(openButton)
 
-  // Dialog open; the confirm button is disabled until the phrase matches.
+  // Dialog open with its consequence copy; nothing sent yet, no input field.
   const confirmButton = screen.getByRole('button', { name: /^close every position$/i })
-  expect(confirmButton).toBeDisabled()
+  expect(confirmButton).toBeEnabled()
+  expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
   expect(
     fetchMock.mock.calls.some(([u]) => String(u).includes('/control/close-all'))
   ).toBe(false)
 
-  await userEvent.type(screen.getByRole('textbox'), 'CLOSE ALL')
-  expect(confirmButton).toBeEnabled()
   await userEvent.click(confirmButton)
 
   await waitFor(() => {

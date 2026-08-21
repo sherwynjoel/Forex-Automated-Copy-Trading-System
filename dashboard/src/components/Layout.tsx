@@ -254,7 +254,6 @@ function DeskStrip() {
           title="Close every position, everywhere"
           confirmLabel="Close every position"
           danger
-          typeToConfirm="CLOSE ALL"
           busy={busy}
           onConfirm={handleCloseAll}
           onCancel={() => setDialogOpen(false)}
