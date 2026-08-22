@@ -1,5 +1,7 @@
 import { render, screen, waitFor } from '@testing-library/react'
-import { MemoryRouter, Routes, Route, useParams } from 'react-router-dom'
+import {
+  MemoryRouter, Routes, Route, useParams, useSearchParams,
+} from 'react-router-dom'
 import { expect, test, vi, afterEach } from 'vitest'
 import Join from './Join'
 
@@ -10,12 +12,19 @@ function OrgLanding() {
   return <div>org home {orgId}</div>
 }
 
+function RegisterLanding() {
+  const [params] = useSearchParams()
+  return <div>register carrying {params.get('invite')}</div>
+}
+
 function renderJoin(token: string) {
   return render(
     <MemoryRouter initialEntries={[`/join/${token}`]}>
       <Routes>
         <Route path="/join/:token" element={<Join />} />
         <Route path="/org/:orgId" element={<OrgLanding />} />
+        <Route path="/register" element={<RegisterLanding />} />
+        <Route path="/welcome" element={<div>welcome</div>} />
       </Routes>
     </MemoryRouter>
   )
@@ -72,4 +81,26 @@ test('shows an invalid/expired message on 410', async () => {
   await waitFor(() => {
     expect(screen.getByText(/invalid.*expired/i)).toBeInTheDocument()
   })
+})
+
+test('a visitor with no account is sent to sign up, carrying the invite', async () => {
+  // 401 is the NORMAL first step for an invited person: they have no
+  // account yet. The old code let api() bounce them to /login, throwing the
+  // token away and making invites unusable -- this pins that it survives.
+  stubFetch({ me: new Response('Unauthorized', { status: 401 }) })
+
+  renderJoin('fresh-token')
+
+  expect(await screen.findByText(/register carrying fresh-token/i))
+    .toBeInTheDocument()
+})
+
+test('an existing member is offered a way into the app, not a dead end', async () => {
+  stubFetch({ join: new Response('Conflict', { status: 409 }) })
+
+  renderJoin('already-token')
+
+  expect(await screen.findByText(/already a member/i)).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: /open mirrorfleet/i }))
+    .toHaveAttribute('href', '/welcome')
 })

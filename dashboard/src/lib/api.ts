@@ -18,7 +18,8 @@ function getCsrfToken(): string | null {
  */
 export async function api<T>(
   path: string,
-  init?: RequestInit
+  init?: RequestInit,
+  opts?: { redirectOn401?: boolean },
 ): Promise<T> {
   const headers = { ...init?.headers } as Record<string, string>
 
@@ -43,8 +44,12 @@ export async function api<T>(
   })
 
   // Redirect to login on 401, but only for non-login endpoints
-  // (login endpoint 401 should propagate as inline error)
-  if (response.status === 401 && path !== '/api/login') {
+  // (login endpoint 401 should propagate as inline error), and only when
+  // the caller has not said it will handle 401 itself -- the invite flow
+  // must keep its token instead of being bounced to a login page it
+  // cannot use.
+  if (response.status === 401 && path !== '/api/login'
+      && opts?.redirectOn401 !== false) {
     window.location.href = '/login'
     throw new Error('Unauthorized')
   }

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { api } from '../lib/api'
 import { errorText } from '../lib/format'
 import Banner from '../components/Banner'
@@ -12,6 +12,10 @@ export default function Register() {
   const [error, setError] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const navigate = useNavigate()
+  // An invite token authorizes signup even when open registration is off,
+  // and names the organization to join once the account exists.
+  const [params] = useSearchParams()
+  const invite = params.get('invite')
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -22,8 +26,27 @@ export default function Register() {
       await api('/api/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password, display_name: displayName }),
+        body: JSON.stringify({
+          email, password, display_name: displayName,
+          ...(invite ? { invite_token: invite } : {}),
+        }),
       })
+      if (invite) {
+        // Registration signed us in; redeem the invite so the new member
+        // lands inside the workspace they were invited to rather than on
+        // an empty welcome screen.
+        try {
+          const joined = await api<{ org_id: number }>('/api/orgs/join', {
+            method: 'POST',
+            body: JSON.stringify({ token: invite }),
+          })
+          navigate(`/org/${joined.org_id}`, { replace: true })
+          return
+        } catch {
+          // The account exists either way; let them in and they can retry
+          // the link.
+        }
+      }
       navigate('/welcome')
     } catch (err) {
       setError(errorText(err, 'Registration failed'))
@@ -37,7 +60,11 @@ export default function Register() {
       <div className="w-full max-w-md">
         <div className="text-center mb-8">
           <h1 className="flex justify-center"><Logo size={38} textClass="text-3xl" /></h1>
-          <p className="mt-2 text-sm text-ink-soft">Create an account to open the desk</p>
+          <p className="mt-2 text-sm text-ink-soft">
+            {invite
+              ? 'Create your account to accept the invitation'
+              : 'Create an account to open the desk'}
+          </p>
         </div>
         <form
           className="bg-card rounded-lg border border-line p-8 space-y-5"
