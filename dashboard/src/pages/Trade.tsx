@@ -402,7 +402,7 @@ export default function Trade() {
   }
 
   return (
-    <div className="space-y-6 max-w-5xl">
+    <div className="space-y-6">
       <header>
         <h1 className="page-title">Trade</h1>
         <p className="text-sm text-ink-soft mt-1 max-w-prose">
@@ -424,9 +424,9 @@ export default function Trade() {
       )}
       {error && <Banner kind="error">{error}</Banner>}
 
-      <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Order ticket */}
-        <section className="lg:col-span-2 bg-card rounded-lg border border-line p-5 space-y-4 h-fit">
+        <section className="lg:col-span-1 bg-card rounded-lg border border-line p-5 space-y-4 h-fit">
           <h2 className="desk-label">Order ticket</h2>
 
           {accounts == null ? (
@@ -676,7 +676,7 @@ export default function Trade() {
         </section>
 
         {/* Chart + live positions + working orders for the selected account */}
-        <section className="lg:col-span-3 space-y-6">
+        <section className="lg:col-span-2 space-y-6">
           <div className="bg-card rounded-lg border border-line">
             <div className="px-5 py-3 border-b border-line flex items-baseline justify-between">
               <h2 className="desk-label">Open positions</h2>
@@ -702,8 +702,8 @@ export default function Trade() {
                       <th className="desk-label px-3 py-2 font-semibold text-right">Lots</th>
                       <th className="desk-label px-3 py-2 font-semibold text-right">Entry</th>
                       <th className="desk-label px-3 py-2 font-semibold text-right">Current</th>
-                      <th className="desk-label px-3 py-2 font-semibold text-right">Live P&L</th>
-                      <th className="desk-label px-3 py-2 font-semibold text-right">SL / TP</th>
+                      <th className="desk-label px-3 py-2 font-semibold text-right whitespace-nowrap">Live P&L</th>
+                      <th className="desk-label px-3 py-2 font-semibold text-right whitespace-nowrap">SL / TP</th>
                       <th className="px-3 py-2" />
                     </tr>
                   </thead>
@@ -730,7 +730,7 @@ export default function Trade() {
                             ? (livePnl[pos.position_id]! >= 0 ? '+' : '') + livePnl[pos.position_id]!.toFixed(2)
                             : '—'}
                         </td>
-                        <td data-label="SL / TP" className="num px-3 py-2.5 text-right text-ink-soft">
+                        <td data-label="SL / TP" className="num px-3 py-2.5 text-right text-ink-soft whitespace-nowrap">
                           {pos.stop_loss ?? '—'} / {pos.take_profit ?? '—'}
                         </td>
                         <td className="px-3 py-2.5 text-right">
