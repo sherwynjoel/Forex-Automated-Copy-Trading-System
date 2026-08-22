@@ -177,8 +177,12 @@ export default function Positions() {
             <table className="stack-table w-full border-collapse">
               <thead>
                 <tr>
+                  <th className="desk-label p-3 text-left border-b border-line">ID</th>
                   <th className="desk-label p-3 text-left border-b border-line">Symbol</th>
-                  <th className="desk-label p-3 text-right border-b border-line">Volume (units)</th>
+                  <th className="desk-label p-3 text-left border-b border-line">Type</th>
+                  <th className="desk-label p-3 text-left border-b border-line">Side</th>
+                  <th className="desk-label p-3 text-right border-b border-line">Lots</th>
+                  <th className="desk-label p-3 text-right border-b border-line">Price</th>
                 </tr>
               </thead>
               <tbody>
@@ -293,12 +297,22 @@ function OrderRow({
   return (
     <>
       <tr className="border-b border-line last:border-0 hover:bg-line">
+        <td data-label="ID" className="num p-3 text-ink-soft">{order.order_id}</td>
         <td data-label="Symbol" className="num p-3">{order.symbol || `ID:${order.symbol_id}`}</td>
-        <td data-label="Volume (units)" className="num p-3 text-right">{order.volume_lots || order.volume}</td>
+        <td data-label="Type" className="num p-3">{order.order_type ?? '—'}</td>
+        <td data-label="Side" className={`p-3 font-medium ${
+          order.side === 'BUY' ? 'text-profit' : order.side === 'SELL' ? 'text-loss' : ''
+        }`}>
+          {order.side ?? '—'}
+        </td>
+        <td data-label="Lots" className="num p-3 text-right">{order.volume_lots || order.volume}</td>
+        <td data-label="Price" className="num p-3 text-right font-medium text-brand">
+          {order.price ?? '—'}
+        </td>
       </tr>
       {order.copies.length > 0 && (
         <tr className="bg-paper border-b border-line">
-          <td colSpan={2} className="p-4">
+          <td colSpan={6} className="p-4">
             <div className="ml-4 space-y-2">
               <h4 className="desk-label mb-2">Slave Copies</h4>
               <table className="w-full text-sm">

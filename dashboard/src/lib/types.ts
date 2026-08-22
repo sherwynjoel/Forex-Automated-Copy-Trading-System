@@ -259,6 +259,10 @@ export interface PendingOrder {
   order_id: number
   symbol_id: number
   symbol?: string | null
+  side?: string | null
+  order_type?: string | null
+  /** Trigger price the order is waiting for (limit or stop). */
+  price?: number | null
   volume: number
   label: string
   volume_lots?: string | null

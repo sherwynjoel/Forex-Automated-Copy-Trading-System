@@ -1078,3 +1078,28 @@ class TestStalePendingDrift:
         assert len(stale_items) == 1
         assert stale_items[0].order_id == 900
         assert "order 900" in stale_items[0].detail
+
+
+def test_reconcile_keeps_the_order_side_type_and_trigger_price():
+    """The broker's reconcile payload already describes a working order
+    fully; dropping side/type/price left the Positions screen unable to say
+    anything useful about one."""
+    from copier.engine.reconcile import _order_type_name, _trigger_price
+    from ctrader_open_api.messages.OpenApiModelMessages_pb2 import ProtoOAOrderType
+
+    assert _order_type_name(ProtoOAOrderType.LIMIT) == "LIMIT"
+    assert _order_type_name(ProtoOAOrderType.STOP) == "STOP"
+    assert _order_type_name(0) is None  # unset enum: say nothing
+
+    class FakeOrder:
+        limitPrice = 0.0
+        stopPrice = 0.0
+
+    order = FakeOrder()
+    # Protobuf reports an unset numeric as 0, which is not a price.
+    assert _trigger_price(order) is None
+    order.stopPrice = 1.2345
+    assert _trigger_price(order) == 1.2345
+    # A LIMIT price wins when both are present.
+    order.limitPrice = 1.1111
+    assert _trigger_price(order) == 1.1111

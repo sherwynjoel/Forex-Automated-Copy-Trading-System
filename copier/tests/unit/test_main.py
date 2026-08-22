@@ -2086,3 +2086,40 @@ def test_manual_order_records_who_placed_it(repo, token_store):
             "WHERE payload->>'action' = 'manual_order' ORDER BY id DESC LIMIT 1"
         ).fetchone()
     assert row == ("ada@example.com", ORG_A)
+
+
+def test_get_state_describes_pending_orders_fully(repo, token_store):
+    """The Positions screen shows working orders next to positions, so a
+    pending order has to say what it IS -- side, type and the price it is
+    waiting for -- not just its symbol and size."""
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    symbol = _seed_symbol_cache(repo, [MASTER_A])
+    app.master_symbols_by_org[ORG_A][symbol.symbol_id] = symbol
+    app.reconcilers[ORG_A].master_orders = [
+        OrderSnapshot(order_id=7, symbol_id=symbol.symbol_id, volume=2_500_000,
+                      label="", side=Side.SELL, order_type="LIMIT",
+                      price=1.10950),
+    ]
+
+    order = app.get_state(ORG_A)["pending_orders"][0]
+
+    assert order["side"] == "SELL"
+    assert order["order_type"] == "LIMIT"
+    assert order["price"] == pytest.approx(1.10950)
+    assert order["volume_lots"] == "0.25"
+
+
+def test_pending_order_fields_are_null_when_the_broker_omits_them(repo, token_store):
+    """An order snapshot without side/type/price reports nulls rather than
+    inventing a side -- the dashboard shows a dash."""
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    symbol = _seed_symbol_cache(repo, [MASTER_A])
+    app.master_symbols_by_org[ORG_A][symbol.symbol_id] = symbol
+    app.reconcilers[ORG_A].master_orders = [
+        OrderSnapshot(order_id=8, symbol_id=symbol.symbol_id, volume=100_000, label=""),
+    ]
+
+    order = app.get_state(ORG_A)["pending_orders"][0]
+    assert order["side"] is None
+    assert order["order_type"] is None
+    assert order["price"] is None

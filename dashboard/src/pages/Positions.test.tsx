@@ -340,3 +340,39 @@ test('master rows and copy rows show the live current price', async () => {
   // The live value stands out in the brand tone.
   expect(screen.getByText('1.10000').className).toContain('text-brand')
 })
+
+test('pending orders describe themselves like the Trade page does', async () => {
+  setRole('owner')
+  const stateWithOrder: ApiState = {
+    ...mockApiState,
+    pending_orders: [
+      {
+        order_id: 9001, symbol_id: 1, symbol: 'EURUSD', side: 'SELL',
+        order_type: 'LIMIT', price: 1.1095, volume: 250000,
+        volume_lots: '0.25', label: '', copies: [],
+      },
+      // A snapshot the broker described only partially: dashes, not guesses.
+      {
+        order_id: 9002, symbol_id: 1, symbol: 'EURUSD', volume: 100000,
+        volume_lots: '0.10', label: '', copies: [],
+      },
+    ],
+  }
+  vi.spyOn(apiModule, 'orgApi').mockResolvedValue(stateWithOrder)
+
+  render(
+    <MemoryRouter>
+      <Positions />
+    </MemoryRouter>
+  )
+
+  expect(await screen.findByText('9001')).toBeInTheDocument()
+  expect(screen.getByText('LIMIT')).toBeInTheDocument()
+  expect(screen.getByText('SELL')).toBeInTheDocument()
+  expect(screen.getByText('1.1095')).toBeInTheDocument()
+
+  const partial = screen.getByText('9002').closest('tr')!
+  expect(partial.querySelector('td[data-label="Type"]')!.textContent).toBe('—')
+  expect(partial.querySelector('td[data-label="Side"]')!.textContent).toBe('—')
+  expect(partial.querySelector('td[data-label="Price"]')!.textContent).toBe('—')
+})

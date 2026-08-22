@@ -22,7 +22,8 @@ from typing import Callable
 from twisted.internet import defer
 
 from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOAReconcileReq
-from ctrader_open_api.messages.OpenApiModelMessages_pb2 import ProtoOATradeSide
+from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
+    ProtoOAOrderType, ProtoOATradeSide)
 from ctrader_open_api import Protobuf
 
 from copier.domain.models import Side
@@ -53,13 +54,40 @@ class PositionSnapshot:
     label: str
 
 
+def _order_type_name(order_type: int) -> str | None:
+    """Broker order-type enum -> its name, or None for values we have no
+    name for (better an honest blank than a bare number in the UI)."""
+    return ProtoOAOrderType.Name(order_type) if order_type else None
+
+
+def _trigger_price(order) -> float | None:
+    """The price a pending order is waiting for. LIMIT orders carry
+    limitPrice, STOP orders stopPrice; protobuf reports an unset numeric
+    field as 0, which is not a price."""
+    for field in ("limitPrice", "stopPrice"):
+        value = getattr(order, field, 0) or 0
+        if value:
+            return float(value)
+    return None
+
+
 @dataclass(frozen=True)
 class OrderSnapshot:
-    """Immutable snapshot of a broker pending order from reconcile response."""
+    """Immutable snapshot of a broker pending order from reconcile response.
+
+    side/order_type/price come straight off the same payload; they were
+    simply being discarded, which left the Positions screen unable to say
+    anything about a working order beyond its symbol and size.
+    """
     order_id: int
     symbol_id: int
     volume: int
     label: str
+    side: Side | None = None
+    # "LIMIT" / "STOP" / ... as the broker enum names it; None if unknown.
+    order_type: str | None = None
+    # The order's trigger price: limitPrice for LIMIT, stopPrice for STOP.
+    price: float | None = None
 
 
 @dataclass(frozen=True)
@@ -428,6 +456,10 @@ class Reconciler:
                     symbol_id=o.tradeData.symbolId,
                     volume=o.tradeData.volume,
                     label=o.tradeData.label,
+                    side=(Side.BUY if o.tradeData.tradeSide == ProtoOATradeSide.BUY
+                          else Side.SELL),
+                    order_type=_order_type_name(o.orderType),
+                    price=_trigger_price(o),
                 )
                 for o in reconcile_res.order
             ]
