@@ -29,9 +29,7 @@ export default function Accounts() {
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [roleErrors, setRoleErrors] = useState<Record<number, string>>({})
-  const [multiplierErrors, setMultiplierErrors] = useState<Record<number, string>>({})
   const [pendingRows, setPendingRows] = useState<Set<number>>(new Set())
-  const [multiplierDrafts, setMultiplierDrafts] = useState<Record<number, string>>({})
   const [nicknameDrafts, setNicknameDrafts] = useState<Record<number, string>>({})
   const [cutoffDrafts, setCutoffDrafts] = useState<Record<number, string>>({})
   const [disconnecting, setDisconnecting] = useState<Account | null>(null)
@@ -48,7 +46,6 @@ export default function Accounts() {
     try {
       const data = await orgApi<Account[]>(orgId, 'accounts')
       setAccounts(data || [])
-      setMultiplierDrafts({})
       setNicknameDrafts({})
       setError(null)
     } catch (err) {
@@ -120,41 +117,6 @@ export default function Accounts() {
         setError(`Failed to update enabled status (${err instanceof Error ? err.message : 'unknown'})`)
       }
     })
-
-  const handleMultiplierBlur = (accountId: number) => {
-    const draft = multiplierDrafts[accountId]
-    if (draft === undefined) return
-    const multiplier = parseFloat(draft)
-    if (isNaN(multiplier) || multiplier <= 0) {
-      setMultiplierErrors((prev) => ({ ...prev, [accountId]: 'Multiplier must be greater than 0' }))
-      setMultiplierDrafts((prev) => {
-        const next = { ...prev }
-        delete next[accountId]
-        return next
-      })
-      return
-    }
-    withPending(accountId, async () => {
-      try {
-        setMultiplierErrors((prev) => ({ ...prev, [accountId]: '' }))
-        await orgApi(orgId, `accounts/${accountId}`, {
-          method: 'PATCH',
-          body: JSON.stringify({ multiplier }),
-        })
-        await fetchAccounts()
-      } catch (err) {
-        const errorCode = err instanceof Error ? err.message : 'Unknown error'
-        setMultiplierErrors((prev) => ({
-          ...prev, [accountId]: `Failed to update multiplier (${errorCode})`,
-        }))
-        setMultiplierDrafts((prev) => {
-          const next = { ...prev }
-          delete next[accountId]
-          return next
-        })
-      }
-    })
-  }
 
   const handleNicknameBlur = (account: Account) => {
     const draft = nicknameDrafts[account.ctid_trader_account_id]
@@ -269,7 +231,7 @@ export default function Accounts() {
           <h1 className="page-title">Accounts</h1>
           <p className="text-sm text-ink-soft mt-1">
             One cTrader ID grant covers every account under it. Roles,
-            multipliers, nicknames, and cutoff dates apply per account.
+            nicknames, and cutoff dates apply per account.
           </p>
         </div>
         {can(role, 'control') && (
@@ -320,7 +282,6 @@ export default function Accounts() {
                 <th className="desk-label px-3 py-2.5 font-semibold">Nickname</th>
                 <th className="desk-label px-3 py-2.5 font-semibold">Env</th>
                 <th className="desk-label px-3 py-2.5 font-semibold">Role</th>
-                <th className="desk-label px-3 py-2.5 font-semibold">Multiplier</th>
                 <th className="desk-label px-3 py-2.5 font-semibold">Enabled</th>
                 <th className="desk-label px-3 py-2.5 font-semibold">Cutoff</th>
                 <th className="desk-label px-3 py-2.5 font-semibold">Grant</th>
@@ -390,33 +351,6 @@ export default function Accounts() {
                       )}
                       {roleErrors[id] && (
                         <div className="text-loss text-xs mt-1">{roleErrors[id]}</div>
-                      )}
-                    </td>
-                    <td data-label="Multiplier" className="px-3 py-3">
-                      {account.role === 'slave' ? (
-                        can(role, 'control') ? (
-                          <div>
-                            <input
-                              type="number"
-                              step="0.01"
-                              min="0.01"
-                              aria-label={`Multiplier for account ${account.trader_login}`}
-                              value={multiplierDrafts[id] ?? String(account.multiplier)}
-                              onChange={(e) =>
-                                setMultiplierDrafts((prev) => ({ ...prev, [id]: e.target.value }))}
-                              onBlur={() => handleMultiplierBlur(id)}
-                              disabled={isPending}
-                              className="num w-20 rounded border border-line-strong px-2 py-1 text-sm disabled:opacity-50"
-                            />
-                            {multiplierErrors[id] && (
-                              <div className="text-loss text-xs mt-1 max-w-36">{multiplierErrors[id]}</div>
-                            )}
-                          </div>
-                        ) : (
-                          <span className="num text-ink">{account.multiplier}</span>
-                        )
-                      ) : (
-                        <span className="text-ink-faint">—</span>
                       )}
                     </td>
                     <td data-label="Enabled" className="px-3 py-3">
@@ -667,11 +601,6 @@ export default function Accounts() {
                   <h3 className="desk-label mb-2">Copy settings</h3>
                   <dl className="space-y-1.5 text-sm">
                     <DetailRow label="Role" value={details.role ?? detailsFor.role} />
-                    <DetailRow
-                      label="Multiplier"
-                      value={String(details.multiplier ?? detailsFor.multiplier)}
-                      mono
-                    />
                     <DetailRow
                       label="Enabled"
                       value={(details.enabled ?? detailsFor.enabled) ? 'Yes' : 'No'}

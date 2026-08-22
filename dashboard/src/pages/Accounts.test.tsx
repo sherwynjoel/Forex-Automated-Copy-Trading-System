@@ -236,74 +236,6 @@ test('cancelling the master confirmation changes nothing', async () => {
   expect((screen.getByLabelText(/role for account 12346/i) as HTMLSelectElement).value).toBe('slave')
 })
 
-test('multiplier edit PATCHes multiplier', async () => {
-  setRole('admin')
-  const fetchMock = mockRoutes()
-  renderAccounts()
-
-  await waitFor(() => {
-    expect(screen.getByText('12346')).toBeInTheDocument()
-  })
-
-  const multiplierInput = screen.getByLabelText(/multiplier for account 12346/i)
-  await userEvent.clear(multiplierInput)
-  await userEvent.type(multiplierInput, '3.5')
-  await userEvent.tab()
-
-  await waitFor(() => {
-    expect(fetchMock).toHaveBeenCalledWith(
-      '/api/orgs/1/accounts/2',
-      expect.objectContaining({
-        method: 'PATCH',
-        body: JSON.stringify({ multiplier: 3.5 }),
-      })
-    )
-  })
-})
-
-test('multiplier validation: rejects values <= 0', async () => {
-  setRole('admin')
-  const fetchMock = mockRoutes()
-  renderAccounts()
-
-  await waitFor(() => {
-    expect(screen.getByText('12346')).toBeInTheDocument()
-  })
-
-  const multiplierInput = screen.getByLabelText(/multiplier for account 12346/i)
-  await userEvent.clear(multiplierInput)
-  await userEvent.type(multiplierInput, '0')
-  await userEvent.tab()
-
-  await waitFor(() => {
-    expect(screen.getByText(/multiplier must be greater than 0/i)).toBeInTheDocument()
-  })
-  expect(
-    fetchMock.mock.calls.some(([, init]) => (init as RequestInit)?.method === 'PATCH')
-  ).toBe(false)
-})
-
-test('multiplier 400 error shows inline error', async () => {
-  setRole('admin')
-  mockRoutes({
-    'PATCH /api/orgs/1/accounts/2': () => new Response('Invalid multiplier', { status: 400 }),
-  })
-  renderAccounts()
-
-  await waitFor(() => {
-    expect(screen.getByText('12346')).toBeInTheDocument()
-  })
-
-  const multiplierInput = screen.getByLabelText(/multiplier for account 12346/i)
-  await userEvent.clear(multiplierInput)
-  await userEvent.type(multiplierInput, '5.0')
-  await userEvent.tab()
-
-  await waitFor(() => {
-    expect(screen.getByText(/failed to update multiplier/i)).toBeInTheDocument()
-  })
-})
-
 test('enabled toggle PATCHes enabled field (not role)', async () => {
   setRole('admin')
   const fetchMock = mockRoutes()
@@ -648,7 +580,7 @@ test('viewer (below control) gets read-only rows: no editors, no disconnect, no 
     expect(screen.getByText('12345')).toBeInTheDocument()
   })
 
-  // Role, multiplier, enabled and nickname editors are all gone.
+  // Role, enabled and nickname editors are all gone.
   expect(screen.queryByLabelText(/role for account/i)).not.toBeInTheDocument()
   expect(screen.queryByLabelText(/multiplier for account/i)).not.toBeInTheDocument()
   expect(screen.queryByLabelText(/copying enabled for account/i)).not.toBeInTheDocument()
@@ -692,7 +624,6 @@ test('admin (control) sees editors, disconnect, the connect link, flatten, and r
   })
 
   expect(screen.getByLabelText(/role for account 12345/i)).toBeInTheDocument()
-  expect(screen.getByLabelText(/multiplier for account 12346/i)).toBeInTheDocument()
   expect(screen.getByLabelText(/copying enabled for account 12345/i)).toBeInTheDocument()
   expect(screen.getByLabelText(/nickname for account 12345/i)).toBeInTheDocument()
   expect(screen.getAllByRole('button', { name: /disconnect/i }).length).toBeGreaterThan(0)
