@@ -761,7 +761,9 @@ export default function Trade() {
                         </td>
                         <td data-label="Lots" className="num px-3 py-2.5 text-right">{pos.volume_lots ?? pos.volume}</td>
                         <td data-label="Entry" className="num px-3 py-2.5 text-right">{pos.price}</td>
-                        <td data-label="Current" className="num px-3 py-2.5 text-right">
+                        <td data-label="Current" className={`num px-3 py-2.5 text-right font-medium ${
+                          livePrice[pos.position_id] != null ? 'text-brand' : 'text-ink-faint'
+                        }`}>
                           {livePrice[pos.position_id] ?? '\u2014'}
                         </td>
                         <td data-label="Live P&L" className={`num px-3 py-2.5 text-right font-medium ${

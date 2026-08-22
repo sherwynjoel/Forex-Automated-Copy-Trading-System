@@ -335,4 +335,8 @@ test('master rows and copy rows show the live current price', async () => {
   const dashRow = screen.getByText('2002').closest('tr')!
   const dashCell = dashRow.querySelector('td[data-label="Current"]')!
   expect(dashCell.textContent).toBe('—')
+  expect(dashCell.className).toContain('text-ink-faint')
+
+  // The live value stands out in the brand tone.
+  expect(screen.getByText('1.10000').className).toContain('text-brand')
 })

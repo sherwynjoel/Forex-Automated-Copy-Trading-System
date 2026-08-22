@@ -586,7 +586,9 @@ export default function Overview() {
                         {row.pos.side}
                       </td>
                       <td data-label="Entry" className="tnum px-3 py-2.5 text-right">{row.pos.entry_price}</td>
-                      <td data-label="Current" className="tnum px-3 py-2.5 text-right">
+                      <td data-label="Current" className={`tnum px-3 py-2.5 text-right font-medium ${
+                        row.pos.current_price != null ? 'text-brand' : 'text-ink-faint'
+                      }`}>
                         {row.pos.current_price ?? '\u2014'}
                       </td>
                       <td data-label="Live P&L" className="tnum px-5 py-2.5 text-right">

@@ -227,7 +227,9 @@ function PositionRow({
         <td data-label="Side" className="num p-3">{position.side}</td>
         <td data-label="Volume (units)" className="num p-3 text-right">{position.volume_lots || position.volume}</td>
         <td data-label="Entry Price" className="num p-3 text-right">{position.price.toFixed(5)}</td>
-        <td data-label="Current" className="num p-3 text-right">
+        <td data-label="Current" className={`num p-3 text-right font-medium ${
+          position.current_price != null ? 'text-brand' : 'text-ink-faint'
+        }`}>
           {position.current_price != null ? position.current_price.toFixed(5) : '\u2014'}
         </td>
         <td data-label="P&L" className={`num p-3 text-right font-medium ${
@@ -341,7 +343,9 @@ function CopyRow({
       <td data-label="Status" className="num p-2">{copy.status}</td>
       <td data-label="Fill Price" className="num p-2 text-right">{fillPriceDisplay}</td>
       <td data-label="Slippage (pts)" className="num p-2 text-right">{slippageDisplay}</td>
-      <td data-label="Current" className="num p-2 text-right">
+      <td data-label="Current" className={`num p-2 text-right font-medium ${
+        livePrice != null ? 'text-brand' : 'text-ink-faint'
+      }`}>
         {livePrice != null ? livePrice.toFixed(5) : '\u2014'}
       </td>
       <td data-label="Live P&L" className={`num p-2 text-right font-medium ${
