@@ -1,6 +1,7 @@
 services:
   postgres:
     image: postgres:16
+    restart: unless-stopped
     environment:
       POSTGRES_USER: copytrader
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-copytrader}
@@ -24,6 +25,7 @@ services:
 
   copier:
     build: { context: ., dockerfile: copier/Dockerfile }
+    restart: unless-stopped
     env_file: .env
     environment:
       POSTGRES_DSN: postgresql://copytrader:${POSTGRES_PASSWORD:-copytrader}@postgres:5432/copytrader
@@ -33,6 +35,7 @@ services:
 
   api:
     build: { context: ., dockerfile: api/Dockerfile }
+    restart: unless-stopped
     env_file: .env
     ports:
       # LOOPBACK ONLY, like postgres above (N7). A bare "8000:8000" binds
