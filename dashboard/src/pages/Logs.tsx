@@ -75,6 +75,10 @@ export default function Logs() {
       ws.onmessage = (event) => {
         try {
           const newEvent = JSON.parse(event.data) as EventResponse
+          // The socket also carries the quotes price stream (and any future
+          // relay frames): only DATABASE events -- which always have an id
+          // and timestamp -- belong in the audit trail.
+          if (newEvent.id == null || newEvent.ts == null) return
           // Only add if it matches current filters (account_id, severity, category).
           // Note: 'since' filters history; live events are "now" so we don't filter by since.
           if (

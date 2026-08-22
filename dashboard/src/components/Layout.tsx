@@ -197,7 +197,7 @@ function DeskStrip() {
         {can(role, 'control') && (
           <button
             onClick={() => setDialogOpen(true)}
-            className="order-3 ml-auto md:order-5 md:ml-0 px-3 py-1.5 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-on-accent transition-colors"
+            className="order-3 ml-auto md:order-5 md:ml-0 min-h-11 md:min-h-0 px-3 py-1.5 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-on-accent transition-colors"
           >
             Close all positions
           </button>

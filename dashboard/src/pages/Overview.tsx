@@ -682,7 +682,11 @@ export default function Overview() {
                 </div>
               </div>
             </div>
-            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            {/* min-w-0 on every card: the chart SVGs measure 600px before
+                their ResizeObserver fires, and a grid item's default
+                min-width:auto would lock the whole track at that width --
+                off the right edge of a phone. */}
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4 *:min-w-0">
               <div className="rounded-lg border border-line bg-card p-4 flex flex-col">
                 <h3 className="desk-label mb-2">MirrorFleet score</h3>
                 <MirrorScore

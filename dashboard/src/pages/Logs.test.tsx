@@ -277,3 +277,24 @@ test('live rows respect current severity filter', async () => {
     expect(screen.getByText('position_close')).toBeInTheDocument()
   })
 })
+
+test('relay frames without id/ts (the quotes stream) never enter the log', async () => {
+  render(
+    <MemoryRouter>
+      <Logs />
+    </MemoryRouter>
+  )
+  await waitFor(() => {
+    expect(apiModule.eventsSocket).toHaveBeenCalled()
+  })
+
+  // A quotes price frame rides the same socket but is NOT an audit event.
+  MockWebSocket.instance?.emit({
+    category: 'quotes',
+    org_id: 1,
+    payload: { quotes: { BTCUSD: { bid: 1, ask: 2 } }, accounts: {} },
+  })
+
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  expect(screen.queryByText('quotes')).not.toBeInTheDocument()
+})

@@ -182,7 +182,7 @@ export default function Performance() {
             )}
           </section>
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 *:min-w-0">
             {/* Weekly P&L */}
             <section className="rounded-lg border border-line bg-card p-5">
               <h2 className="desk-label mb-3">Weekly gross P&L</h2>

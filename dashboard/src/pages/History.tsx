@@ -448,7 +448,7 @@ export default function History() {
       aria-controls="history-tabpanel"
       tabIndex={tab === key ? 0 : -1}
       onClick={() => setTab(key)}
-      className={`px-4 py-2 text-sm rounded-t border-b-2 transition-colors whitespace-nowrap ${
+      className={`min-h-11 md:min-h-0 px-4 py-2 text-sm rounded-t border-b-2 transition-colors whitespace-nowrap ${
         tab === key
           ? 'border-brand text-brand font-semibold'
           : 'border-transparent text-ink-soft hover:text-ink'
