@@ -102,6 +102,9 @@ def app_client(db):
     os.environ["SESSION_SECRET"] = "test-secret"
     os.environ["COPIER_CONTROL_URL"] = "http://copier.test"
     os.environ["COOKIE_SECURE"] = "false"  # Disable Secure flag in tests
+    # The suite creates its users through POST /api/register, which is
+    # gated off by default in production.
+    os.environ["REGISTRATION_ENABLED"] = "true"
     os.environ["CTRADER_CLIENT_ID"] = "test-client-id"
     os.environ["CTRADER_CLIENT_SECRET"] = "test-client-secret"
     os.environ["CTRADER_REDIRECT_URI"] = "http://localhost:8000/api/oauth/callback"
@@ -150,6 +153,9 @@ def app_client_with_lifespan(db):
     os.environ["SESSION_SECRET"] = "test-secret"
     os.environ["COPIER_CONTROL_URL"] = "http://copier.test"
     os.environ["COOKIE_SECURE"] = "false"  # Disable Secure flag in tests
+    # The suite creates its users through POST /api/register, which is
+    # gated off by default in production.
+    os.environ["REGISTRATION_ENABLED"] = "true"
     os.environ["CTRADER_CLIENT_ID"] = "test-client-id"
     os.environ["CTRADER_CLIENT_SECRET"] = "test-client-secret"
     os.environ["CTRADER_REDIRECT_URI"] = "http://localhost:8000/api/oauth/callback"
@@ -196,6 +202,7 @@ def _set_live_test_env(db: str) -> None:
     os.environ["SESSION_SECRET"] = "test-secret"
     os.environ["COPIER_CONTROL_URL"] = "http://copier.test"
     os.environ["COOKIE_SECURE"] = "false"
+    os.environ["REGISTRATION_ENABLED"] = "true"
     os.environ["CTRADER_CLIENT_ID"] = "test-client-id"
     os.environ["CTRADER_CLIENT_SECRET"] = "test-client-secret"
     os.environ["CTRADER_REDIRECT_URI"] = "http://localhost:8000/api/oauth/callback"

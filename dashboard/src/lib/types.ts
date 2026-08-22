@@ -185,6 +185,8 @@ export interface EventResponse {
   severity: string
   latency_ms?: number | null
   payload: Record<string, unknown>
+  /** Operator who requested the action; absent for autonomous copier work. */
+  actor_email?: string | null
 }
 
 export type DriftKind =

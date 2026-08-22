@@ -298,3 +298,29 @@ test('relay frames without id/ts (the quotes stream) never enter the log', async
   await new Promise((resolve) => setTimeout(resolve, 100))
   expect(screen.queryByText('quotes')).not.toBeInTheDocument()
 })
+
+test('the log names who performed an operator action, and says system otherwise', async () => {
+  const events = [
+    {
+      id: 1, ts: '2026-08-22T10:00:00Z', account_id: 123,
+      category: 'control', severity: 'warning', latency_ms: null,
+      payload: { action: 'kill_switch' }, actor_email: 'ada@example.com',
+    },
+    {
+      id: 2, ts: '2026-08-22T10:00:01Z', account_id: 123,
+      category: 'slave_action', severity: 'info', latency_ms: 12,
+      payload: { action: 'copy_fill' }, actor_email: null,
+    },
+  ]
+  vi.spyOn(apiModule, 'orgApi').mockResolvedValue(events)
+
+  render(
+    <MemoryRouter>
+      <Logs />
+    </MemoryRouter>
+  )
+
+  expect(await screen.findByText('ada@example.com')).toBeInTheDocument()
+  // The copier acting on its own is not attributed to a person.
+  expect(screen.getByText('system')).toBeInTheDocument()
+})

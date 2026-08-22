@@ -65,6 +65,7 @@ class Repo:
         account_id: int | None = None,
         latency_ms: int | None = None,
         org_id: int | None = None,
+        actor: str | None = None,
     ) -> int:
         """Log an event and return its ID.
 
@@ -76,6 +77,9 @@ class Repo:
             latency_ms: Optional latency in milliseconds
             org_id: Optional org ID (events.org_id is nullable -- the audit log
                 must survive org deletion, so some events are org-less)
+            actor: Email of the human who requested this action, forwarded by
+                the api. None for autonomous copier activity (copy fills,
+                reconnects) -- only operator-initiated actions have an actor.
 
         Returns:
             The new event ID
@@ -83,11 +87,13 @@ class Repo:
         with psycopg.connect(self.dsn, autocommit=True) as conn:
             (event_id,) = conn.execute(
                 """
-                INSERT INTO events (account_id, org_id, category, severity, latency_ms, payload)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                INSERT INTO events (account_id, org_id, category, severity,
+                                    latency_ms, payload, actor_email)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
-                (account_id, org_id, category, severity, latency_ms, Jsonb(payload)),
+                (account_id, org_id, category, severity, latency_ms,
+                 Jsonb(payload), actor),
             ).fetchone()
         return event_id
 

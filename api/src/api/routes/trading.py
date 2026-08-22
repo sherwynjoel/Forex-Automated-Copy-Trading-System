@@ -28,6 +28,17 @@ def _required_account_id(body: Dict[str, Any]) -> int:
         raise HTTPException(status_code=400, detail="account_id must be an integer")
 
 
+def _with_actor(body: Dict[str, Any], ctx) -> Dict[str, Any]:
+    """Copy of the caller's body carrying WHO asked for it.
+
+    The copier stamps `actor_email` onto the audit event it writes, so a
+    money-moving action is attributable to a person and not just an org.
+    Overwrites any client-supplied value: attribution comes from the
+    session, never from the request body.
+    """
+    return {**body, "actor_email": ctx.user_email}
+
+
 def create_trading_router() -> APIRouter:
     """Router for manual trading actions and the kill switch."""
     router = APIRouter(prefix="/api/orgs/{org_id}", tags=["trading"])
@@ -44,7 +55,8 @@ def create_trading_router() -> APIRouter:
         require_account_in_org(conn, ctx.org_id, _required_account_id(body))
         client = http_request.app.state.http
         return await _proxy_to_copier(
-            client, f"{cfg.copier_control_url}/order", method="POST", json=body)
+            client, f"{cfg.copier_control_url}/order", method="POST",
+            json=_with_actor(body, ctx))
 
     @router.post("/positions/close", response_model=Dict[str, Any])
     async def close_position(
@@ -59,7 +71,7 @@ def create_trading_router() -> APIRouter:
         client = http_request.app.state.http
         return await _proxy_to_copier(
             client, f"{cfg.copier_control_url}/positions/close",
-            method="POST", json=body)
+            method="POST", json=_with_actor(body, ctx))
 
     @router.post("/orders/cancel", response_model=Dict[str, Any])
     async def cancel_order(
@@ -74,7 +86,7 @@ def create_trading_router() -> APIRouter:
         client = http_request.app.state.http
         return await _proxy_to_copier(
             client, f"{cfg.copier_control_url}/orders/cancel",
-            method="POST", json=body)
+            method="POST", json=_with_actor(body, ctx))
 
     @router.post("/control/close-all", response_model=Dict[str, Any])
     async def close_all(
@@ -97,7 +109,7 @@ def create_trading_router() -> APIRouter:
         client = http_request.app.state.http
         return await _proxy_to_copier(
             client, f"{cfg.copier_control_url}/close-all",
-            method="POST", json=forward,
+            method="POST", json={**forward, "actor_email": ctx.user_email},
             timeout=COPIER_SLOW_COMMAND_TIMEOUT_S)
 
     return router

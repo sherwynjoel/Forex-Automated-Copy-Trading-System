@@ -2,9 +2,12 @@ services:
   postgres:
     image: postgres:16
     restart: unless-stopped
+    # No process in these containers ever needs to gain privileges; denying
+    # setuid escalation is the cheapest half of container hardening.
+    security_opt: [no-new-privileges:true]
     environment:
       POSTGRES_USER: copytrader
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-copytrader}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: copytrader
     ports:
       - "127.0.0.1:5433:5432"
@@ -18,17 +21,19 @@ services:
 
   migrate:
     build: { context: ., dockerfile: db/Dockerfile }
+    security_opt: [no-new-privileges:true]
     environment:
-      POSTGRES_DSN: postgresql://copytrader:${POSTGRES_PASSWORD:-copytrader}@postgres:5432/copytrader
+      POSTGRES_DSN: postgresql://copytrader:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/copytrader
     depends_on:
       postgres: { condition: service_healthy }
 
   copier:
     build: { context: ., dockerfile: copier/Dockerfile }
     restart: unless-stopped
+    security_opt: [no-new-privileges:true]
     env_file: .env
     environment:
-      POSTGRES_DSN: postgresql://copytrader:${POSTGRES_PASSWORD:-copytrader}@postgres:5432/copytrader
+      POSTGRES_DSN: postgresql://copytrader:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/copytrader
     depends_on:
       migrate: { condition: service_completed_successfully }
     # control port 8080 is intentionally NOT published — internal network only (spec §8)
@@ -36,6 +41,7 @@ services:
   api:
     build: { context: ., dockerfile: api/Dockerfile }
     restart: unless-stopped
+    security_opt: [no-new-privileges:true]
     env_file: .env
     ports:
       # LOOPBACK ONLY, like postgres above (N7). A bare "8000:8000" binds
@@ -47,7 +53,7 @@ services:
       # "Deploying to a VPS" section.
       - "127.0.0.1:8000:8000"
     environment:
-      POSTGRES_DSN: postgresql://copytrader:${POSTGRES_PASSWORD:-copytrader}@postgres:5432/copytrader
+      POSTGRES_DSN: postgresql://copytrader:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/copytrader
       COPIER_CONTROL_URL: http://copier:8080
       # Optional bootstrap pair (spec §3). BOTH empty on a fresh install --
       # the first operator registers through the UI. Setting both claims a

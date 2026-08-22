@@ -87,7 +87,8 @@ def test_settings_dry_run_forwards_the_requested_value(org_client, db):
     assert response.json()["dry_run"] is True
     assert response.json()["dry_run_applied"] is True
 
-    assert dry_run_bodies == [{"org_id": org_id, "enabled": True}], dry_run_bodies
+    assert dry_run_bodies == [{"org_id": org_id, "enabled": True,
+                               "actor_email": "admin@example.com"}], dry_run_bodies
     # The end state the operator is actually relying on.
     assert settings_after_proxy["dry_run"] is True
     with psycopg.connect(db, autocommit=True) as conn:
@@ -116,7 +117,7 @@ def test_settings_dry_run_off_forwards_false(org_client):
         f"/api/orgs/{org_id}/settings", json={"dry_run": False}, headers=_csrf(client),
     )
     assert response.status_code == 200
-    assert bodies == [{"org_id": org_id, "enabled": False}]
+    assert bodies == [{"org_id": org_id, "enabled": False, "actor_email": "admin@example.com"}]
 
 
 def test_settings_dry_run_triggers_copier_calls(org_client):
@@ -537,10 +538,15 @@ def test_drift_action_forwards_the_request_body(org_client):
 
     assert len(received) == 3
     by_action = {r["url"].rsplit("/", 1)[-1]: r["body"] for r in received}
-    assert by_action["close-orphan"] == {"id": "item-for-close-orphan", "org_id": org_id}
-    assert by_action["dismiss"] == {"id": "item-for-dismiss", "org_id": org_id}
+    assert by_action["close-orphan"] == {
+        "id": "item-for-close-orphan", "org_id": org_id,
+        "actor_email": "admin@example.com"}
+    assert by_action["dismiss"] == {
+        "id": "item-for-dismiss", "org_id": org_id,
+        "actor_email": "admin@example.com"}
     assert by_action["adopt"] == {
         "id": "item-for-adopt", "master_position_id": 987654, "org_id": org_id,
+        "actor_email": "admin@example.com",
     }
 
 

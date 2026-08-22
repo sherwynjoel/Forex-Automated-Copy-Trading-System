@@ -15,6 +15,9 @@ class OrgContext:
     org_id: int
     user_id: int
     role: str
+    # Who is acting, for the audit trail. Resolved in the same round trip as
+    # the membership check so attribution costs nothing extra.
+    user_email: str = ""
 
 
 def require_org_role(min_role: str):
@@ -32,14 +35,17 @@ def require_org_role(min_role: str):
         conn: psycopg.Connection = Depends(get_conn),
     ) -> OrgContext:
         row = conn.execute(
-            "SELECT role FROM org_memberships WHERE org_id = %s AND user_id = %s",
+            "SELECT m.role, u.email FROM org_memberships m "
+            "JOIN users u ON u.id = m.user_id "
+            "WHERE m.org_id = %s AND m.user_id = %s",
             (org_id, user_id),
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Not found")
         if ROLE_RANK[row[0]] < ROLE_RANK[min_role]:
             raise HTTPException(status_code=403, detail="Insufficient role")
-        return OrgContext(org_id=org_id, user_id=user_id, role=row[0])
+        return OrgContext(org_id=org_id, user_id=user_id, role=row[0],
+                          user_email=row[1])
 
     return dependency
 

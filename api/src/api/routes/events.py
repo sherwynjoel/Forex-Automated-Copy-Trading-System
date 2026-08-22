@@ -19,6 +19,9 @@ class EventResponse(BaseModel):
     severity: str
     latency_ms: Optional[int]
     payload: dict
+    # Who asked for it, for operator-initiated actions. None for everything
+    # the copier does on its own (copy fills, reconnects, drift).
+    actor_email: Optional[str] = None
 
 
 def create_events_router() -> APIRouter:
@@ -65,7 +68,8 @@ def create_events_router() -> APIRouter:
         # Build query. org_id is a mandatory clause -- every request is
         # scoped to the path's org, and NULL-org (infrastructure) events
         # are never visible through this endpoint.
-        query_parts = ["SELECT id, ts, account_id, category, severity, latency_ms, payload FROM events"]
+        query_parts = ["SELECT id, ts, account_id, category, severity, "
+                       "latency_ms, payload, actor_email FROM events"]
         where_clauses = ["org_id = %s"]
         params = [ctx.org_id]
 
@@ -105,6 +109,7 @@ def create_events_router() -> APIRouter:
                 severity=row[4],
                 latency_ms=row[5],
                 payload=row[6],
+                actor_email=row[7],
             )
             for row in rows
         ]

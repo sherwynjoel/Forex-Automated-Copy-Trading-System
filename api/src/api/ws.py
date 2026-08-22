@@ -1,6 +1,7 @@
 """WebSocket handlers and event broadcaster."""
 import asyncio
 import json
+from urllib.parse import urlsplit
 import logging
 
 import psycopg
@@ -10,7 +11,7 @@ from fastapi import APIRouter
 from fastapi.websockets import WebSocket
 from starlette.websockets import WebSocketState
 
-from .auth import user_id_from_session_cookie
+from .auth import session_identity, session_version_matches
 from .config import ApiConfig
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,37 @@ class EventBroadcaster:
         # listener's startup (asyncio.create_task only *schedules* the coroutine;
         # it does not wait for LISTEN to be issued).
         self.listening = False
+
+    @staticmethod
+    def origin_allowed(origin: str | None, public_origin: str,
+                       host: str | None = None) -> bool:
+        """Whether a handshake's Origin may open a socket.
+
+        A missing Origin is a non-browser client (curl, a test) and is
+        allowed -- the session cookie is still required. A present Origin
+        must match either PUBLIC_ORIGIN (comma-separated when the site
+        answers on several names) or, when that is not configured, the Host
+        the request was addressed to -- i.e. plain same-origin.
+
+        The same-origin fallback is what makes this safe to ship without
+        touching any .env: a cross-site page's Origin is its own domain and
+        can never equal our Host, while the real dashboard always matches.
+        Requiring configuration here would have meant rejecting every real
+        browser on a deployment that forgot the variable. Defense in depth
+        behind SameSite=Lax, which already withholds the cookie cross-site.
+        """
+        if origin is None:
+            return True
+        origin_host = urlsplit(origin).netloc.lower()
+        if not origin_host:
+            return False
+        if public_origin:
+            allowed = {urlsplit(o.strip().rstrip("/")).netloc.lower()
+                       for o in public_origin.split(",") if o.strip()}
+            return origin_host in allowed
+        # Compare hosts, not raw strings: the page is https:// while the
+        # Host header carries no scheme.
+        return bool(host) and origin_host == host.strip().lower()
 
     async def connect(self, ws: WebSocket, org_id: int, user_id: int):
         """Register a WebSocket connection under its org, accepting it first
@@ -104,6 +136,23 @@ class EventBroadcaster:
                 logger.warning(f"Failed to close socket for revoked member: {e}")
             self.connections.get(org_id, {}).pop(ws, None)
 
+    async def close_for_user(self, user_id: int):
+        """Close every socket this user holds, in every org.
+
+        Sessions are re-checked only at handshake, so bumping
+        session_version alone would leave an already-open stream running --
+        exactly the case "sign out everywhere" exists for.
+        """
+        for org_id, socks in list(self.connections.items()):
+            for ws, uid in list(socks.items()):
+                if uid != user_id:
+                    continue
+                try:
+                    await ws.close(code=4401, reason="Session ended")
+                except Exception as e:
+                    logger.warning("Failed to close socket on session end: %s", e)
+                self.connections.get(org_id, {}).pop(ws, None)
+
     async def close_org(self, org_id: int):
         """Close and discard every socket open for this org (e.g. the org
         was just deleted)."""
@@ -146,7 +195,7 @@ class EventBroadcaster:
                     async with self.query_connection.cursor() as cur:
                         await cur.execute(
                             """SELECT id, ts, account_id, category, severity, latency_ms,
-                                      payload, org_id
+                                      payload, org_id, actor_email
                                FROM events WHERE id = %s""",
                             (event_id,)
                         )
@@ -162,6 +211,7 @@ class EventBroadcaster:
                             "latency_ms": row[5],
                             "payload": row[6],
                             "org_id": row[7],
+                            "actor_email": row[8],
                         }
                         logger.debug(f"Broadcasting event: {event['id']}")
                         await self.broadcast(row[7], event)
@@ -284,11 +334,20 @@ def create_ws_router() -> APIRouter:
         org_id query parameter is required.
         """
         cfg = ApiConfig.from_env()
+        # Cross-site WebSocket hijacking guard. SameSite=Lax already
+        # withholds the session cookie cross-origin; this makes the feed's
+        # safety independent of that one cookie attribute.
+        if not EventBroadcaster.origin_allowed(
+                ws.headers.get("origin"), cfg.public_origin,
+                ws.headers.get("host")):
+            await ws.close(code=4403, reason="Forbidden origin")
+            return
         session = ws.cookies.get("session")
-        user_id = user_id_from_session_cookie(session, cfg) if session else None
-        if user_id is None:
+        identity = session_identity(session, cfg) if session else None
+        if identity is None:
             await ws.close(code=4401, reason="Unauthorized")
             return
+        user_id, session_ver = identity
 
         raw_org = ws.query_params.get("org_id")
         try:
@@ -298,6 +357,11 @@ def create_ws_router() -> APIRouter:
             return
 
         with psycopg.connect(cfg.postgres_dsn, autocommit=True) as conn:
+            # One read covers both gates: the cookie must still be current
+            # (not disowned by a password change) AND grant this org.
+            if not session_version_matches(conn, user_id, session_ver):
+                await ws.close(code=4401, reason="Unauthorized")
+                return
             member = conn.execute(
                 "SELECT 1 FROM org_memberships WHERE org_id = %s AND user_id = %s",
                 (org_id, user_id),

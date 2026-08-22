@@ -2008,3 +2008,81 @@ def test_get_ticks_serves_quotes_and_marks_from_memory(repo, token_store):
     assert pos["pnl_quote"] == pytest.approx(100.0)
 
     assert app.get_ticks(999999) == {"quotes": {}, "accounts": {}}
+
+
+# ---------- trading safety guards (security review, 2026-08-22) ----------
+
+def test_manual_order_rejects_a_fat_finger_volume(repo, token_store, monkeypatch):
+    """A mistyped volume on the MASTER fans out to every slave, so the
+    manual path carries a hard ceiling that copied trades never see."""
+    monkeypatch.setattr(main, "MAX_MANUAL_ORDER_LOTS", 5.0)
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    symbol = _seed_symbol_cache(repo, [MASTER_A])
+    app.master_symbols_by_org[ORG_A][symbol.symbol_id] = symbol
+
+    with pytest.raises(ValueError, match="exceeds the manual-order limit"):
+        app.place_order({"account_id": MASTER_A, "symbol": symbol.name,
+                         "side": "BUY", "order_type": "MARKET",
+                         "volume_lots": 100})
+
+    # The ceiling is the only thing rejecting it: one lot goes through.
+    result = app.place_order({"account_id": MASTER_A, "symbol": symbol.name,
+                              "side": "BUY", "order_type": "MARKET",
+                              "volume_lots": 1})
+    assert result["status"] == "submitted"
+
+
+def test_manual_order_rejects_non_finite_numbers(repo, token_store):
+    """NaN and inf pass every > 0 comparison and reach the broker as
+    garbage; they must die at the boundary."""
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    symbol = _seed_symbol_cache(repo, [MASTER_A])
+    app.master_symbols_by_org[ORG_A][symbol.symbol_id] = symbol
+
+    base = {"account_id": MASTER_A, "symbol": symbol.name, "side": "BUY",
+            "order_type": "MARKET"}
+    with pytest.raises(ValueError, match="finite"):
+        app.place_order({**base, "volume_lots": float("nan")})
+    with pytest.raises(ValueError, match="finite"):
+        app.place_order({**base, "volume_lots": float("inf")})
+    with pytest.raises(ValueError, match="finite"):
+        app.place_order({**base, "volume_lots": 1, "stop_loss": float("inf")})
+
+
+def test_manual_order_is_blocked_while_the_org_is_in_dry_run(repo, token_store):
+    """Dry-run is the safe-mode gate: copied trades are simulated, so a
+    manual order slipping through would put real money on the wire the
+    operator believes is idle -- and desync master from slaves."""
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    symbol = _seed_symbol_cache(repo, [MASTER_A])
+    app.master_symbols_by_org[ORG_A][symbol.symbol_id] = symbol
+    repo.set_org_setting(ORG_A, "dry_run", True)
+
+    with pytest.raises(ValueError, match="dry-run"):
+        app.place_order({"account_id": MASTER_A, "symbol": symbol.name,
+                         "side": "BUY", "order_type": "MARKET",
+                         "volume_lots": 1})
+
+    repo.set_org_setting(ORG_A, "dry_run", False)
+    assert app.place_order({"account_id": MASTER_A, "symbol": symbol.name,
+                            "side": "BUY", "order_type": "MARKET",
+                            "volume_lots": 1})["status"] == "submitted"
+
+
+def test_manual_order_records_who_placed_it(repo, token_store):
+    """Audit attribution: the api forwards the acting user's email and the
+    event carries it, so a fleet-wide order is traceable to a person."""
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    symbol = _seed_symbol_cache(repo, [MASTER_A])
+    app.master_symbols_by_org[ORG_A][symbol.symbol_id] = symbol
+
+    app.place_order({"account_id": MASTER_A, "symbol": symbol.name,
+                     "side": "BUY", "order_type": "MARKET", "volume_lots": 1,
+                     "actor_email": "ada@example.com"})
+
+    with psycopg.connect(repo.dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT actor_email, org_id FROM events "
+            "WHERE payload->>'action' = 'manual_order' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    assert row == ("ada@example.com", ORG_A)

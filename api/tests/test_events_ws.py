@@ -683,3 +683,64 @@ class TestQuotesTicker:
 
         asyncio.run(run())
         assert client.calls >= 3  # kept retrying, never died
+
+
+class TestOriginGuard:
+    """The WebSocket handshake's cross-site guard. It must protect the feed
+    WITHOUT needing configuration -- an unset PUBLIC_ORIGIN that rejected
+    every real browser would take the live feed down platform-wide."""
+
+    def test_same_origin_is_allowed_with_no_configuration(self):
+        from api.ws import EventBroadcaster
+        allowed = EventBroadcaster.origin_allowed
+        assert allowed("https://mirrorfleet.com", "", "mirrorfleet.com")
+        assert allowed("http://localhost:8000", "", "localhost:8000")
+
+    def test_cross_site_origins_are_rejected(self):
+        from api.ws import EventBroadcaster
+        allowed = EventBroadcaster.origin_allowed
+        assert not allowed("https://evil.com", "", "mirrorfleet.com")
+        # Suffix tricks must not pass: a prefix/substring check would.
+        assert not allowed("https://mirrorfleet.com.evil.com", "", "mirrorfleet.com")
+        assert not allowed("http://localhost.evil.com", "", "localhost:8000")
+
+    def test_public_origin_allows_a_configured_list(self):
+        from api.ws import EventBroadcaster
+        allowed = EventBroadcaster.origin_allowed
+        cfg = "https://mirrorfleet.com, https://www.mirrorfleet.com"
+        assert allowed("https://www.mirrorfleet.com", cfg, "anything")
+        assert allowed("https://mirrorfleet.com", cfg, "anything")
+        # Configured list wins over the Host fallback.
+        assert not allowed("https://other.com", cfg, "other.com")
+
+    def test_absent_origin_is_a_non_browser_client(self):
+        from api.ws import EventBroadcaster
+        # curl and the test suite send none; the session cookie still gates.
+        assert EventBroadcaster.origin_allowed(None, "", "mirrorfleet.com")
+
+
+def test_close_for_user_hangs_up_only_that_users_sockets():
+    """Sign-out-everywhere must cut live streams: the session version is
+    only checked at handshake, so an open socket would otherwise outlive
+    the revocation it was supposed to end."""
+    import asyncio
+    from api.ws import EventBroadcaster
+
+    closed = []
+
+    class FakeWS:
+        def __init__(self, tag):
+            self.tag = tag
+
+        async def close(self, code=1000, reason=""):
+            closed.append((self.tag, code))
+
+    victim, bystander = FakeWS("victim"), FakeWS("bystander")
+    b = EventBroadcaster()
+    b.connections = {1: {victim: 7, bystander: 8}}
+
+    asyncio.run(b.close_for_user(7))
+
+    assert closed == [("victim", 4401)]
+    assert bystander in b.connections[1]
+    assert victim not in b.connections[1]

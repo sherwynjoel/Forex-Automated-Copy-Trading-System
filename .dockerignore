@@ -45,3 +45,8 @@ README.md
 # Docker
 Dockerfile
 docker-compose.yml
+
+# The real secrets file. Nothing COPYs it today, but shipping it to the
+# build daemon on every build is one careless `COPY . .` from baking
+# SESSION_SECRET and the broker credentials into an image layer.
+.env

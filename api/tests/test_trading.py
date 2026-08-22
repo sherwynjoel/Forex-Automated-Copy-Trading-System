@@ -126,7 +126,9 @@ def test_close_all_global_proxies(org_client):
     assert data["paused"] is True
     assert data["accounts"][0]["positions_closed"] == 2
     url, sent = next(c for c in calls if "/close-all" in c[0])
-    assert json.loads(sent) == {"org_id": org_id}
+    # The org bound AND the human who fired the kill switch: audit
+    # attribution travels with every money-moving command.
+    assert json.loads(sent) == {"org_id": org_id, "actor_email": "admin@example.com"}
 
 
 def test_close_all_single_account_proxies(org_client):
@@ -224,7 +226,7 @@ def test_close_all_forwards_org_id(org_client):
     r = client.post(f"/api/orgs/{org_id}/control/close-all", json={},
                     headers=_csrf(client))
     assert r.status_code == 200
-    assert captured["body"] == {"org_id": org_id}
+    assert captured["body"] == {"org_id": org_id, "actor_email": "admin@example.com"}
 
 
 def test_trader_can_order_but_not_close_all(org_client, make_user, login_as, db):

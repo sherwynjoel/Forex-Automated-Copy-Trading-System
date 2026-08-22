@@ -1,10 +1,12 @@
 """Settings and control proxy endpoints."""
+import logging
 from typing import Optional, Dict, Any
 import httpx
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 import psycopg
+from psycopg.types.json import Jsonb
 
 from ..config import ApiConfig
 from ..db import get_conn
@@ -20,6 +22,8 @@ from ..rbac import OrgContext, require_org_role, require_account_in_org
 # completion. Applied ONLY to those two: the shared AsyncClient stays on the
 # default so the dashboard's 5s /state poll still fails fast against a
 # half-dead copier (see main.create_app).
+logger = logging.getLogger(__name__)
+
 COPIER_SLOW_COMMAND_TIMEOUT_S = 60.0
 
 
@@ -109,6 +113,25 @@ async def _proxy_to_copier(
         raise HTTPException(status_code=502, detail="copier unreachable")
 
 
+def audit(conn: psycopg.Connection, org_id: int, actor: str, action: str,
+          detail: Dict[str, Any], account_id: Optional[int] = None) -> None:
+    """Write a control-category audit row for something the API did itself.
+
+    Actions the copier performs log themselves; these are the ones it never
+    sees -- settings writes and account edits that go straight to Postgres.
+    Best-effort: an audit failure must not fail the operation the user asked
+    for, but it is logged so the gap is visible.
+    """
+    try:
+        conn.execute(
+            "INSERT INTO events (org_id, account_id, category, severity, "
+            "payload, actor_email) VALUES (%s, %s, 'control', 'info', %s, %s)",
+            (org_id, account_id, Jsonb({"action": action, **detail}), actor),
+        )
+    except Exception:
+        logger.exception("failed to write audit event for %s", action)
+
+
 def create_settings_control_router() -> APIRouter:
     """Create router for settings and control endpoints."""
     router = APIRouter(prefix="/api/orgs/{org_id}", tags=["settings", "control"])
@@ -151,9 +174,26 @@ def create_settings_control_router() -> APIRouter:
             updates.append("dry_run = %s")
             params.append(request_data.dry_run)
 
+        before = conn.execute(
+            "SELECT copying_enabled, dry_run FROM orgs WHERE id = %s", (ctx.org_id,)
+        ).fetchone()
+
         if updates:
             update_sql = f"UPDATE orgs SET {', '.join(updates)} WHERE id = %s"
             conn.execute(update_sql, params + [ctx.org_id])
+            # Copying and dry-run decide whether real money moves; a change
+            # to either must be attributable, and the copier never sees the
+            # settings write (only the reload that follows it).
+            changed = {}
+            if request_data.copying_enabled is not None and before and \
+                    before[0] != request_data.copying_enabled:
+                changed["copying_enabled"] = {
+                    "from": before[0], "to": request_data.copying_enabled}
+            if request_data.dry_run is not None and before and \
+                    before[1] != request_data.dry_run:
+                changed["dry_run"] = {"from": before[1], "to": request_data.dry_run}
+            if changed:
+                audit(conn, ctx.org_id, ctx.user_email, "settings_changed", changed)
 
         # Get updated settings
         row = conn.execute(
@@ -200,7 +240,8 @@ def create_settings_control_router() -> APIRouter:
                             client,
                             f"{cfg.copier_control_url}/dry-run",
                             method="POST",
-                            json={"org_id": ctx.org_id, "enabled": request_data.dry_run},
+                            json={"org_id": ctx.org_id, "enabled": request_data.dry_run,
+                                  "actor_email": ctx.user_email},
                         )
                         result["dry_run_applied"] = True
                     except HTTPException:
@@ -228,7 +269,8 @@ def create_settings_control_router() -> APIRouter:
             client,
             url,
             method="POST",
-            json={"org_id": ctx.org_id, "account_id": request.account_id},
+            json={"org_id": ctx.org_id, "account_id": request.account_id,
+                  "actor_email": ctx.user_email},
         )
 
     @router.post("/control/resume", response_model=Dict[str, Any])
@@ -248,7 +290,8 @@ def create_settings_control_router() -> APIRouter:
             client,
             url,
             method="POST",
-            json={"org_id": ctx.org_id, "account_id": request.account_id},
+            json={"org_id": ctx.org_id, "account_id": request.account_id,
+                  "actor_email": ctx.user_email},
         )
 
     @router.post("/control/resync", response_model=Dict[str, Any])
@@ -261,7 +304,8 @@ def create_settings_control_router() -> APIRouter:
         client = http_request.app.state.http
         url = f"{cfg.copier_control_url}/resync"
         return await _proxy_to_copier(
-            client, url, method="POST", json={"org_id": ctx.org_id},
+            client, url, method="POST",
+            json={"org_id": ctx.org_id, "actor_email": ctx.user_email},
             timeout=COPIER_SLOW_COMMAND_TIMEOUT_S)
 
     return router
@@ -314,7 +358,8 @@ def create_state_router() -> APIRouter:
         url = f"{cfg.copier_control_url}/drift/{action}"
         return await _proxy_to_copier(
             client, url, method="POST",
-            json={**request.model_dump(exclude_none=True), "org_id": ctx.org_id},
+            json={**request.model_dump(exclude_none=True), "org_id": ctx.org_id,
+                  "actor_email": ctx.user_email},
         )
 
     return router

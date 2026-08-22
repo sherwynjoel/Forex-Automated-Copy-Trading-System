@@ -34,6 +34,7 @@ client factory, calls boot(), and runs the reactor forever.
 """
 
 import logging
+import math
 import os
 import time
 from dataclasses import dataclass
@@ -99,6 +100,26 @@ CUTOFF_REMINDER_DAYS = 2
 CUTOFF_REMINDER_INTERVAL_S = 3600.0
 CONTROL_PORT = 8080
 _SIDE_BY_NAME = {"BUY": ProtoOATradeSide.BUY, "SELL": ProtoOATradeSide.SELL}
+
+# Fat-finger ceiling for MANUAL orders (the trade ticket). A manual order on
+# the master fans out to every slave scaled by each one's multiplier, so a
+# mistyped 100 instead of 1.00 moves the whole fleet's real money. Copied
+# trades are NOT subject to this -- they mirror whatever the master did.
+def _max_manual_lots() -> float:
+    """Never let a mistyped guard value take the trading engine down: a bad
+    MAX_MANUAL_ORDER_LOTS falls back to the default and says so."""
+    raw = os.environ.get("MAX_MANUAL_ORDER_LOTS", "10")
+    try:
+        value = float(raw)
+        if value > 0:
+            return value
+    except (TypeError, ValueError):
+        pass
+    log.warning("MAX_MANUAL_ORDER_LOTS=%r is not a positive number; using 10", raw)
+    return 10.0
+
+
+MAX_MANUAL_ORDER_LOTS = _max_manual_lots()
 _ORDER_TYPE_BY_NAME = {
     "MARKET": ProtoOAOrderType.MARKET,
     "LIMIT": ProtoOAOrderType.LIMIT,
@@ -498,46 +519,51 @@ class CopierApp:
 
     # ---------- control operations ----------
 
-    def pause(self, org_id: int, account_id: int | None = None) -> defer.Deferred:
+    def pause(self, org_id: int, account_id: int | None = None,
+              actor: str | None = None) -> defer.Deferred:
         """Pause copying for one org, or one of its slaves, then reload."""
         self.repo.get_org(org_id)  # raises for a missing (or None) org
         if account_id is None:
             self.repo.set_org_setting(org_id, "copying_enabled", False)
-            self.repo.log_event('control', 'info', {'action': 'pause_org'}, org_id=org_id)
+            self.repo.log_event('control', 'info', {'action': 'pause_org'},
+                                org_id=org_id, actor=actor)
             log.info("copying paused for org %s", org_id)
         else:
             self._require_account_in_org(org_id, account_id)
             self.repo.set_account_status(account_id, 'paused')
             self.repo.log_event(
                 'control', 'info', {'action': 'pause_slave', 'account_id': account_id},
-                account_id=account_id, org_id=org_id,
+                account_id=account_id, org_id=org_id, actor=actor,
             )
             log.info("slave %s paused", account_id)
         return self.reload()
 
-    def resume(self, org_id: int, account_id: int | None = None) -> defer.Deferred:
+    def resume(self, org_id: int, account_id: int | None = None,
+               actor: str | None = None) -> defer.Deferred:
         """Resume copying for one org, or one of its slaves, then reload."""
         self.repo.get_org(org_id)  # raises for a missing (or None) org
         if account_id is None:
             self.repo.set_org_setting(org_id, "copying_enabled", True)
-            self.repo.log_event('control', 'info', {'action': 'resume_org'}, org_id=org_id)
+            self.repo.log_event('control', 'info', {'action': 'resume_org'},
+                                org_id=org_id, actor=actor)
             log.info("copying resumed for org %s", org_id)
         else:
             self._require_account_in_org(org_id, account_id)
             self.repo.set_account_status(account_id, 'ok')
             self.repo.log_event(
                 'control', 'info', {'action': 'resume_slave', 'account_id': account_id},
-                account_id=account_id, org_id=org_id,
+                account_id=account_id, org_id=org_id, actor=actor,
             )
             log.info("slave %s resumed", account_id)
         return self.reload()
 
-    def set_dry_run(self, org_id: int, enabled: bool) -> None:
+    def set_dry_run(self, org_id: int, enabled: bool,
+                    actor: str | None = None) -> None:
         self.repo.get_org(org_id)  # raises for a missing (or None) org
         self.repo.set_org_setting(org_id, "dry_run", enabled)
         self.repo.log_event(
             'control', 'info', {'action': 'set_dry_run', 'enabled': enabled},
-            org_id=org_id)
+            org_id=org_id, actor=actor)
         log.info("dry-run for org %s: %s", org_id, "enabled" if enabled else "disabled")
 
     def request_resync(self, org_id: int | None = None) -> None:
@@ -947,8 +973,16 @@ class CopierApp:
             volume_lots = float(params.get("volume_lots"))
         except (TypeError, ValueError):
             raise ValueError("volume_lots must be a number")
+        # NaN/inf pass every comparison below and reach the broker as garbage.
+        if not math.isfinite(volume_lots):
+            raise ValueError("volume_lots must be a finite number")
         if volume_lots <= 0:
             raise ValueError("volume_lots must be greater than 0")
+        if volume_lots > MAX_MANUAL_ORDER_LOTS:
+            raise ValueError(
+                f"volume {volume_lots} lots exceeds the manual-order limit of "
+                f"{MAX_MANUAL_ORDER_LOTS} lots (fat-finger guard; raise "
+                f"MAX_MANUAL_ORDER_LOTS to change it)")
 
         limit_price = params.get("limit_price")
         stop_price = params.get("stop_price")
@@ -956,9 +990,30 @@ class CopierApp:
             raise ValueError("limit_price required for LIMIT orders")
         if type_name == "STOP" and stop_price is None:
             raise ValueError("stop_price required for STOP orders")
+        for field in ("limit_price", "stop_price", "stop_loss", "take_profit"):
+            raw = params.get(field)
+            if raw is None:
+                continue
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                raise ValueError(f"{field} must be a number")
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{field} must be a positive, finite price")
 
         # Resolves the client too, so an unknown account fails here.
         self._query_context(account_id)
+
+        # Dry-run is the rollout safety gate: while it is on, copied trades
+        # are simulated, so letting a MANUAL order through would put real
+        # money on the wire the operator believes is in safe mode -- and
+        # desynchronize master from slaves, whose copies stay simulated.
+        # Closing risk is never blocked; only opening it.
+        org_id = self._org_for_account(account_id)
+        if org_id is not None and self.repo.get_org(org_id).dry_run:
+            raise ValueError(
+                "this workspace is in dry-run: manual orders are disabled "
+                "until dry-run is turned off")
 
         symbol_name = params.get("symbol")
         sym = self.repo.load_symbol_cache(account_id).get(symbol_name)
@@ -997,12 +1052,13 @@ class CopierApp:
         self.repo.log_event(
             'control', 'info',
             {'action': 'manual_order', **{k: v for k, v in summary.items() if k != 'status'}},
-            account_id=account_id,
+            account_id=account_id, org_id=org_id, actor=params.get("actor_email"),
         )
         return summary
 
     @defer.inlineCallbacks
-    def close_position(self, account_id: int, position_id: int, volume_lots=None):
+    def close_position(self, account_id: int, position_id: int, volume_lots=None,
+                       actor: str | None = None):
         """Close (or partially close) one position on any account.
 
         Reads the position's CURRENT volume fresh from the broker
@@ -1037,12 +1093,14 @@ class CopierApp:
         self.repo.log_event(
             'control', 'info',
             {'action': 'manual_close', 'position_id': position_id, 'volume': volume},
-            account_id=account_id,
+            account_id=account_id, org_id=self._org_for_account(account_id),
+            actor=actor,
         )
         return {"status": "submitted", "account_id": account_id,
                 "position_id": position_id, "volume": volume}
 
-    def cancel_order(self, account_id: int, order_id: int) -> defer.Deferred:
+    def cancel_order(self, account_id: int, order_id: int,
+                     actor: str | None = None) -> defer.Deferred:
         """Cancel one working order on any account."""
         def _send(_ctx):
             req = ProtoOACancelOrderReq()
@@ -1052,7 +1110,8 @@ class CopierApp:
             self.repo.log_event(
                 'control', 'info',
                 {'action': 'manual_cancel', 'order_id': order_id},
-                account_id=account_id,
+                account_id=account_id, org_id=self._org_for_account(account_id),
+                actor=actor,
             )
             return {"status": "submitted", "account_id": account_id,
                     "order_id": order_id}
@@ -1062,7 +1121,8 @@ class CopierApp:
         return d
 
     @defer.inlineCallbacks
-    def close_all(self, org_id: int, account_id: int | None = None):
+    def close_all(self, org_id: int, account_id: int | None = None,
+                  actor: str | None = None):
         """Kill switch for ONE org: flatten one of its accounts, or
         (account_id=None) every enabled, non-paused account in the org --
         master included.
@@ -1142,7 +1202,7 @@ class CopierApp:
             'control', 'warning',
             {'action': 'kill_switch', 'org_wide': account_id is None,
              'copying_paused': paused, 'accounts': results},
-            account_id=account_id, org_id=org_id,
+            account_id=account_id, org_id=org_id, actor=actor,
         )
         return {"status": "flattened", "paused": paused, "accounts": results}
 

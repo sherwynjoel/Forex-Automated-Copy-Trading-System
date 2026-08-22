@@ -204,13 +204,24 @@ class TicksResource(_JsonResource):
         return self.app.get_ticks(org_id)
 
 
+def _actor_from(body: dict) -> str | None:
+    """Email of the human behind a control request, as forwarded by the api.
+
+    The copier has no session of its own, so attribution is only as good as
+    the caller -- which is exactly why the control port must stay internal.
+    Absent for anything the copier does autonomously.
+    """
+    actor = body.get("actor_email")
+    return str(actor)[:320] if actor else None
+
+
 class PauseResource(_JsonResource):
     """POST /pause: pause copying for an org, or one of its slaves."""
 
     def _handle(self, request, body):
         org_id = _org_id_from(body)
         account_id = body.get("account_id")
-        d = self.app.pause(org_id, account_id=account_id)
+        d = self.app.pause(org_id, account_id=account_id, actor=_actor_from(body))
         d.addCallback(lambda _: {"status": "paused", "org_id": org_id,
                                  "account_id": account_id})
         return d
@@ -222,7 +233,7 @@ class ResumeResource(_JsonResource):
     def _handle(self, request, body):
         org_id = _org_id_from(body)
         account_id = body.get("account_id")
-        d = self.app.resume(org_id, account_id=account_id)
+        d = self.app.resume(org_id, account_id=account_id, actor=_actor_from(body))
         d.addCallback(lambda _: {"status": "resumed", "org_id": org_id,
                                  "account_id": account_id})
         return d
@@ -253,7 +264,7 @@ class DryRunResource(_JsonResource):
     def _handle(self, request, body):
         org_id = _org_id_from(body)
         enabled = bool(body.get("enabled", False))
-        self.app.set_dry_run(org_id, enabled)
+        self.app.set_dry_run(org_id, enabled, actor=_actor_from(body))
         return {"status": "ok", "dry_run": enabled}
 
 
@@ -340,7 +351,8 @@ class ClosePositionResource(_JsonResource):
         if account_id is None or position_id is None:
             raise ValueError("account_id and position_id required")
         return self.app.close_position(
-            int(account_id), int(position_id), body.get("volume_lots"))
+            int(account_id), int(position_id), body.get("volume_lots"),
+            actor=_actor_from(body))
 
 
 class CancelOrderResource(_JsonResource):
@@ -354,7 +366,8 @@ class CancelOrderResource(_JsonResource):
         order_id = body.get("order_id")
         if account_id is None or order_id is None:
             raise ValueError("account_id and order_id required")
-        return self.app.cancel_order(int(account_id), int(order_id))
+        return self.app.cancel_order(int(account_id), int(order_id),
+                                     actor=_actor_from(body))
 
 
 class CloseAllResource(_JsonResource):
@@ -370,7 +383,8 @@ class CloseAllResource(_JsonResource):
         org_id = _org_id_from(body)
         account_id = body.get("account_id")
         return self.app.close_all(
-            org_id, int(account_id) if account_id is not None else None)
+            org_id, int(account_id) if account_id is not None else None,
+            actor=_actor_from(body))
 
 
 class PositionsResource(resource.Resource):

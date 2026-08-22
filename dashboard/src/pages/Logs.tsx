@@ -235,6 +235,9 @@ export default function Logs() {
                   Account
                 </th>
                 <th className="desk-label px-6 py-3 text-left">
+                  Who
+                </th>
+                <th className="desk-label px-6 py-3 text-left">
                   Category
                 </th>
                 <th className="desk-label px-6 py-3 text-left">
@@ -251,14 +254,14 @@ export default function Logs() {
             <tbody className="bg-card divide-y divide-line">
               {loading && (
                 <tr>
-                  <td colSpan={6} className="px-6 py-4 text-center text-ink-faint">
+                  <td colSpan={7} className="px-6 py-4 text-center text-ink-faint">
                     Loading...
                   </td>
                 </tr>
               )}
               {!loading && events.length === 0 && (
                 <tr>
-                  <td colSpan={6} className="px-6 py-4 text-center text-ink-faint">
+                  <td colSpan={7} className="px-6 py-4 text-center text-ink-faint">
                     No events found
                   </td>
                 </tr>
@@ -270,6 +273,12 @@ export default function Logs() {
                   </td>
                   <td data-label="Account" className="num px-6 py-4 whitespace-nowrap text-sm text-ink">
                     {event.account_id || '-'}
+                  </td>
+                  <td data-label="Who" className="px-6 py-4 whitespace-nowrap text-sm text-ink-soft">
+                    {/* Operator-initiated actions name the person; the
+                        copier's own work (copy fills, reconnects) is the
+                        system acting, not a user. */}
+                    {event.actor_email ?? <span className="text-ink-faint">system</span>}
                   </td>
                   <td data-label="Category" className="px-6 py-4 whitespace-nowrap text-sm text-ink">
                     {event.category}

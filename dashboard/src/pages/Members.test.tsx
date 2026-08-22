@@ -247,3 +247,48 @@ test('owner sees delete-org with type-to-confirm; others do not', async () => {
   expect(screen.queryByRole('button', { name: /delete organization/i })).not.toBeInTheDocument()
   expect(screen.queryByText('Organization')).not.toBeInTheDocument()
 })
+
+
+// ---------- account security (session revocation, migration 010) ----------
+
+test('every member can change their own password', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('viewer'))
+  const fetchMock = mockRoutes({
+    'POST /api/me/password': () => jsonResponse(null, 204),
+  })
+  renderMembers()
+
+  await userEvent.type(
+    await screen.findByLabelText(/current password/i), 'old-password-x')
+  await userEvent.type(screen.getByLabelText(/new password/i), 'new-password-y')
+  await userEvent.click(screen.getByRole('button', { name: /change password/i }))
+
+  await waitFor(() => {
+    const call = fetchMock.mock.calls.find(
+      ([u, init]) => String(u) === '/api/me/password'
+        && (init as RequestInit)?.method === 'POST')
+    expect(call).toBeTruthy()
+    expect(JSON.parse(String((call![1] as RequestInit).body))).toEqual({
+      current_password: 'old-password-x', new_password: 'new-password-y',
+    })
+  })
+  // The user is told the blast radius: other devices were signed out.
+  expect(await screen.findByText(/signed out/i)).toBeInTheDocument()
+})
+
+test('sign out everywhere calls the revocation endpoint', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('viewer'))
+  const fetchMock = mockRoutes({
+    'POST /api/me/logout-all': () => jsonResponse(null, 204),
+  })
+  renderMembers()
+
+  await userEvent.click(
+    await screen.findByRole('button', { name: /sign out everywhere/i }))
+
+  await waitFor(() => {
+    expect(fetchMock.mock.calls.some(
+      ([u, init]) => String(u) === '/api/me/logout-all'
+        && (init as RequestInit)?.method === 'POST')).toBe(true)
+  })
+})

@@ -1,10 +1,12 @@
 """Accounts management endpoints."""
+import logging
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Optional, List, Any
 
 import httpx
 import psycopg
+from psycopg.types.json import Jsonb
 from psycopg import errors
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -38,6 +40,13 @@ class AccountResponse(BaseModel):
     connection_status: str = "active"
     nickname: Optional[str] = None
     cutoff_date: Optional[date] = None
+
+
+# Upper bound on an account's copy multiplier. Scaling beyond this is
+# almost always a typo rather than an intent (see patch_account).
+logger = logging.getLogger(__name__)
+
+MAX_MULTIPLIER = Decimal("10")
 
 
 def create_accounts_router() -> APIRouter:
@@ -100,6 +109,13 @@ def create_accounts_router() -> APIRouter:
                 multiplier_decimal = Decimal(str(request.multiplier))
                 if multiplier_decimal <= 0:
                     raise HTTPException(status_code=400, detail="multiplier must be greater than 0")
+                # Fat-finger guard: the multiplier scales EVERY copied trade
+                # on this account, so a typo of 100 for 1.0 multiplies the
+                # slave's real exposure a hundredfold.
+                if multiplier_decimal > MAX_MULTIPLIER:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"multiplier must be {MAX_MULTIPLIER} or less")
                 validated_multiplier = multiplier_decimal
             except (InvalidOperation, ValueError, TypeError):
                 raise HTTPException(status_code=400, detail="multiplier must be a valid positive number")
@@ -219,6 +235,29 @@ def create_accounts_router() -> APIRouter:
         }
         if demoted:
             result["demoted_to_slave"] = demoted
+
+        # Role, multiplier and enabled decide how much money moves and
+        # where; these writes never reach the copier's own event log, so
+        # the audit row is written here with the acting user.
+        audited = {k: v for k, v in {
+            "role": request.role,
+            "multiplier": (float(validated_multiplier)
+                           if validated_multiplier is not None else None),
+            "enabled": request.enabled,
+        }.items() if v is not None}
+        if audited:
+            if demoted:
+                audited["demoted_to_slave"] = demoted
+            try:
+                conn.execute(
+                    "INSERT INTO events (org_id, account_id, category, severity, "
+                    "payload, actor_email) VALUES (%s, %s, 'control', 'info', %s, %s)",
+                    (ctx.org_id, account_id,
+                     Jsonb({"action": "account_changed", **audited}),
+                     ctx.user_email),
+                )
+            except Exception:
+                logger.exception("failed to audit account change for %s", account_id)
 
         # If role was changed, trigger copier reload
         if request.role is not None:

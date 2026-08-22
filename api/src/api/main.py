@@ -27,6 +27,58 @@ from .telegram import TelegramNotifier
 from .ws import create_ws_router, broadcaster
 
 
+from starlette.middleware.base import BaseHTTPMiddleware
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Baseline browser-side defenses on every response.
+
+    CSP is deliberately strict but compatible with the built SPA: the bundle
+    is self-hosted, styles come from Google Fonts (which the page links), and
+    the dashboard opens a WebSocket to its own origin. `frame-ancestors 'none'`
+    is the modern clickjacking control; X-Frame-Options repeats it for old
+    browsers. HSTS is only meaningful over TLS, so it rides on the same flag
+    that marks cookies Secure.
+    """
+
+    def __init__(self, app, hsts: bool = True):
+        super().__init__(app)
+        self.hsts = hsts
+
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        headers = response.headers
+        headers.setdefault("X-Content-Type-Options", "nosniff")
+        headers.setdefault("X-Frame-Options", "DENY")
+        headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        headers.setdefault(
+            "Permissions-Policy",
+            "geolocation=(), microphone=(), camera=(), payment=()")
+        headers.setdefault("Content-Security-Policy", "; ".join([
+            "default-src 'self'",
+            "base-uri 'self'",
+            "object-src 'none'",
+            "frame-ancestors 'none'",
+            "form-action 'self'",
+            # index.html carries a small inline theme bootstrap.
+            "script-src 'self' 'unsafe-inline'",
+            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+            "font-src 'self' https://fonts.gstatic.com data:",
+            "img-src 'self' data:",
+            # 'self' covering a same-host wss:// is a CSP3 refinement; say
+            # it outright rather than bet the live feed on browser support.
+            "connect-src 'self' wss: ws:",
+        ]))
+        # No includeSubDomains: this process cannot know whether every
+        # sibling subdomain speaks HTTPS, and a wrong guess is cached by
+        # browsers for the full max-age with no server-side undo. Caddy
+        # sets its own HSTS too; this is the belt to its braces.
+        if self.hsts and os.environ.get(
+                "COOKIE_SECURE", "true").lower() in ("true", "1", "yes"):
+            headers.setdefault("Strict-Transport-Security", "max-age=31536000")
+        return response
+
+
 def create_app(http_transport: Optional[httpx.BaseTransport] = None) -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -86,6 +138,7 @@ def create_app(http_transport: Optional[httpx.BaseTransport] = None) -> FastAPI:
 
     # Add CSRF middleware
     app.add_middleware(CSRFMiddleware)
+    app.add_middleware(SecurityHeadersMiddleware)
 
     # Include auth router
     auth_router = create_auth_router(rate_limiter)
@@ -145,7 +198,10 @@ def create_app(http_transport: Optional[httpx.BaseTransport] = None) -> FastAPI:
             # Make sure the path is within static_dir (security check)
             file_path = os.path.normpath(file_path)
             static_dir_norm = os.path.normpath(static_dir)
-            if not file_path.startswith(static_dir_norm):
+            # Trailing separator matters: a bare startswith also accepts a
+            # SIBLING directory sharing the prefix (static-old/ vs static/).
+            if not (file_path == static_dir_norm
+                    or file_path.startswith(static_dir_norm + os.sep)):
                 from fastapi import HTTPException
                 raise HTTPException(status_code=404, detail="Not found")
 

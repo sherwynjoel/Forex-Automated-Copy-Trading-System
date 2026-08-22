@@ -127,33 +127,43 @@ def test_patch_invalid_role_400(org_client):
     assert "role" in response.json().get("detail", "").lower()
 
 
-def test_second_master_409(org_client):
-    """Setting a second master returns 409 with clear message."""
+def test_promoting_a_master_demotes_the_previous_one(org_client):
+    """Choosing a master is a single click, not an error: the incoming
+    account becomes master and every other account in the org becomes a
+    slave (the desk can only mirror one book at a time)."""
     client, org_id, seed = org_client
     seed(12345, role="master", is_live=True)
     seed(12346, role="slave", is_live=False)
 
-    # Try to set second account as master
     response = client.patch(
         f"/api/orgs/{org_id}/accounts/12346",
         json={"role": "master"},
         headers=_csrf(client),
     )
-    assert response.status_code == 409
-    data = response.json()
-    assert "master already exists" in data.get("detail", "").lower()
+    assert response.status_code == 200, response.text
+    assert response.json()["demoted_to_slave"] == [12345]
+
+    roles = {a["ctid_trader_account_id"]: a["role"]
+             for a in client.get(f"/api/orgs/{org_id}/accounts").json()}
+    assert roles == {12345: "slave", 12346: "master"}
 
 
-def test_patch_role_master_conflict_is_per_org(org_client):
-    """The single-master constraint is per-org: a conflict in one org must
-    not be triggered or masked by another org's master."""
+def test_promotion_demotes_ignored_accounts_too(org_client):
+    """Every OTHER account converts, whatever its current role -- an
+    'ignored' account left behind would silently sit outside the fleet."""
     client, org_id, seed = org_client
     seed(100, role="master")
     seed(101, role="slave")
+    seed(102, role="ignored")
+
     r = client.patch(f"/api/orgs/{org_id}/accounts/101",
                      json={"role": "master"}, headers=_csrf(client))
-    assert r.status_code == 409
-    assert "master already exists" in r.json()["detail"]
+    assert r.status_code == 200, r.text
+    assert sorted(r.json()["demoted_to_slave"]) == [100, 102]
+
+    roles = {a["ctid_trader_account_id"]: a["role"]
+             for a in client.get(f"/api/orgs/{org_id}/accounts").json()}
+    assert roles == {100: "slave", 101: "master", 102: "slave"}
 
 
 def test_role_change_triggers_copier_reload(org_client):

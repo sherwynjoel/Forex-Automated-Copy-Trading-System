@@ -42,6 +42,7 @@ class _ActionApp:
 
     def __init__(self):
         self.calls = []
+        self.actors = []
 
     def place_order(self, params):
         self.calls.append(("place_order", params))
@@ -49,16 +50,21 @@ class _ActionApp:
             raise ValueError("side must be BUY or SELL")
         return {"status": "submitted", "account_id": params["account_id"]}
 
-    def close_position(self, account_id, position_id, volume_lots=None):
+    # `actor` is the audit attribution the api forwards; the routes pass it
+    # to every money-moving call, so the stubs record it too.
+    def close_position(self, account_id, position_id, volume_lots=None, actor=None):
         self.calls.append(("close_position", account_id, position_id, volume_lots))
+        self.actors.append(actor)
         return defer.succeed({"status": "submitted", "position_id": position_id})
 
-    def cancel_order(self, account_id, order_id):
+    def cancel_order(self, account_id, order_id, actor=None):
         self.calls.append(("cancel_order", account_id, order_id))
+        self.actors.append(actor)
         return defer.succeed({"status": "submitted", "order_id": order_id})
 
-    def close_all(self, org_id, account_id=None):
+    def close_all(self, org_id, account_id=None, actor=None):
         self.calls.append(("close_all", org_id, account_id))
+        self.actors.append(actor)
         return defer.succeed({"status": "flattened", "paused": account_id is None,
                               "accounts": []})
 
@@ -129,3 +135,27 @@ def test_close_all_route_org_wide_when_no_account():
 
     assert app.calls == [("close_all", 7, None)]
     assert _written_json(request)["paused"] is True
+
+
+def test_money_moving_routes_carry_the_actor_to_the_app():
+    """The api stamps actor_email on every command it proxies; the control
+    routes must hand it to the app so it lands on the audit event."""
+    app = _ActionApp()
+    _post(ClosePositionResource(app), [b"positions", b"close"],
+          {"account_id": 100, "position_id": 7001,
+           "actor_email": "ada@example.com"})
+    _post(CancelOrderResource(app), [b"orders", b"cancel"],
+          {"account_id": 100, "order_id": 9001,
+           "actor_email": "ada@example.com"})
+    _post(CloseAllResource(app), [b"close-all"],
+          {"org_id": 1, "actor_email": "ada@example.com"})
+
+    assert app.actors == ["ada@example.com"] * 3
+
+
+def test_actor_is_absent_when_the_caller_supplies_none():
+    """Autonomous or unattributed calls record no actor rather than a
+    fabricated one."""
+    app = _ActionApp()
+    _post(CloseAllResource(app), [b"close-all"], {"org_id": 1})
+    assert app.actors == [None]

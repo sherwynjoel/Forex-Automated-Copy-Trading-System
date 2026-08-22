@@ -96,7 +96,7 @@ def create_insights_router() -> APIRouter:
             client,
             f"{cfg.copier_control_url}/trendbars"
             f"?account_id={account_id}&symbol={_urlquote(symbol, safe='')}"
-            f"&period={period}&from={from_ms}&to={to_ms}",
+            f"&period={_urlquote(period, safe='')}&from={from_ms}&to={to_ms}",
             method="GET",
         )
 

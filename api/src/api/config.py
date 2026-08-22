@@ -19,6 +19,14 @@ class ApiConfig:
     ctrader_auth_url: str
     ctrader_token_url: str
     fernet_key: str
+    # True when a reverse proxy (Caddy) terminates TLS in front of us: only
+    # then may X-Forwarded-For be believed for rate-limit keys.
+    trust_proxy: bool
+    # Public origin of the site, used to validate WebSocket handshakes.
+    public_origin: str
+    # Self-service signup. Off by default: this platform moves real money
+    # and every account is created by an operator or an invite.
+    registration_enabled: bool
 
     @classmethod
     def from_env(cls) -> "ApiConfig":
@@ -59,4 +67,8 @@ class ApiConfig:
             ctrader_auth_url=ctrader_auth_url,
             ctrader_token_url=ctrader_token_url,
             fernet_key=fernet_key,
+            trust_proxy=os.environ.get("TRUST_PROXY", "false").lower() in ("true", "1", "yes"),
+            public_origin=os.environ.get("PUBLIC_ORIGIN", "").rstrip("/"),
+            registration_enabled=os.environ.get(
+                "REGISTRATION_ENABLED", "false").lower() in ("true", "1", "yes"),
         )
