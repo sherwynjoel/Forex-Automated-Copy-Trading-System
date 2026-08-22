@@ -214,6 +214,9 @@ class _FailingClient:
     def on_trader_updated(self, cb):
         pass
 
+    def on_order_error(self, cb):
+        pass
+
     def on_margin_call(self, cb):
         pass
 
@@ -1103,6 +1106,36 @@ def test_get_state_reports_null_enrichment_rather_than_inventing_values(repo, to
     assert master_position["pnl_quote"] is None
     assert master_position["copies"][0]["fill_price"] is None
     assert master_position["copies"][0]["volume_lots"] is None
+
+
+# ---------- order rejections ----------
+
+def test_order_rejections_become_visible_events(db, fernet_key):
+    """A broker order rejection must land in the events log, org-resolved:
+    the ws pushes it to the dashboard and the Logs page keeps it. A weekend
+    MARKET_CLOSED order used to look exactly like success."""
+    from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOAOrderErrorEvent
+
+    org_a = seed_db(db, fernet_key)
+    repo = Repo(db)
+    token_store = TokenStore(db, fernet_key)
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+
+    evt = ProtoOAOrderErrorEvent()
+    evt.ctidTraderAccountId = MASTER_A
+    evt.errorCode = 'MARKET_CLOSED'
+    app._on_order_rejected(evt)
+
+    with psycopg.connect(db, autocommit=True) as conn:
+        row = conn.execute(
+            """SELECT payload, account_id, org_id FROM events
+               WHERE category = 'control' AND payload->>'action' = 'order_rejected'
+               ORDER BY id DESC LIMIT 1"""
+        ).fetchone()
+    assert row is not None
+    assert row[0]['error_code'] == 'MARKET_CLOSED'
+    assert row[1] == MASTER_A
+    assert row[2] == org_a
 
 
 # ---------- get_quote ----------

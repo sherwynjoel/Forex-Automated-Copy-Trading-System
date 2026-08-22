@@ -14,9 +14,21 @@ const REFRESH_CATEGORIES = new Set(['master_event', 'slave_action', 'drift', 'co
  * refreshed its position list. Bursts of events collapse into one such
  * pair. The regular polling stays as the fallback when the socket is down.
  */
-export function useLiveRefresh(refetch: () => void, orgId: number) {
+export interface LiveEvent {
+  category?: string
+  account_id?: number | null
+  payload?: Record<string, unknown>
+}
+
+export function useLiveRefresh(
+  refetch: () => void,
+  orgId: number,
+  onEvent?: (evt: LiveEvent) => void,
+) {
   const refetchRef = useRef(refetch)
   refetchRef.current = refetch
+  const onEventRef = useRef(onEvent)
+  onEventRef.current = onEvent
 
   useEffect(() => {
     let ws: WebSocket | null = null
@@ -45,7 +57,8 @@ export function useLiveRefresh(refetch: () => void, orgId: number) {
       }
       ws.onmessage = (event) => {
         try {
-          const evt = JSON.parse(event.data) as { category?: string }
+          const evt = JSON.parse(event.data) as LiveEvent
+          onEventRef.current?.(evt)
           if (evt.category && REFRESH_CATEGORIES.has(evt.category)) {
             scheduleRefetch()
           }

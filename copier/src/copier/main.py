@@ -202,6 +202,30 @@ class CopierApp:
         client.on_tokens_invalidated(lambda _ids: self.refresh_due_tokens())
         client.on_trader_updated(self._on_trader_updated)
         client.on_margin_call(self._on_margin_call)
+        client.on_order_error(self._on_order_rejected)
+
+    def _on_order_rejected(self, evt) -> None:
+        """A broker order rejection becomes a visible warning event: the
+        events NOTIFY pushes it over the ws, the Trade page surfaces it as
+        the order-failure banner, and the Logs page keeps it. Before this,
+        a weekend MARKET_CLOSED order looked exactly like success."""
+        account_id = getattr(evt, 'ctidTraderAccountId', None)
+        account = next(
+            (a for a in self.repo.load_accounts() if a.account_id == account_id),
+            None)
+        try:
+            self.repo.log_event(
+                'control', 'warning',
+                {
+                    'action': 'order_rejected',
+                    'error_code': str(getattr(evt, 'errorCode', '') or 'UNKNOWN'),
+                    'order_id': getattr(evt, 'orderId', 0) or None,
+                },
+                account_id=account_id,
+                org_id=account.org_id if account else None,
+            )
+        except Exception:
+            log.exception("order-rejection event logging failed")
 
     def _on_trader_updated(self, evt) -> None:
         """Pushed balance change: apply immediately, no waiting for the poll.

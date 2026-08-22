@@ -230,6 +230,7 @@ class CTraderClient:
         self._spot_cbs: list[Callable] = []
         self._trader_updated_cbs: list[Callable] = []
         self._margin_call_cbs: list[Callable] = []
+        self._order_error_cbs: list[Callable] = []
         self._conn_lost_cbs: list[Callable] = []
         self.ready: defer.Deferred = defer.Deferred()
         self._hb = task.LoopingCall(self._heartbeat)
@@ -402,6 +403,7 @@ class CTraderClient:
     def on_spot(self, cb) -> None: self._spot_cbs.append(cb)
     def on_trader_updated(self, cb) -> None: self._trader_updated_cbs.append(cb)
     def on_margin_call(self, cb) -> None: self._margin_call_cbs.append(cb)
+    def on_order_error(self, cb) -> None: self._order_error_cbs.append(cb)
 
     # ---- internals ----
 
@@ -589,3 +591,13 @@ class CTraderClient:
             # cause (e.g. a rejected trade for reasons other than auth).
             log.error("server rejected a request: %s (account %s)",
                       payload.errorCode, getattr(payload, 'ctidTraderAccountId', None))
+            # Order rejections specifically (MARKET_CLOSED on a weekend,
+            # NOT_ENOUGH_MONEY...) get a typed callback so the dashboard can
+            # tell the trader; generic ProtoOAErrorRes stays log-only (a
+            # closed-market margin-estimate poll must not flood the events).
+            if isinstance(payload, ProtoOAOrderErrorEvent):
+                for cb in self._order_error_cbs:
+                    try:
+                        cb(payload)
+                    except Exception:
+                        log.exception("order error callback raised")

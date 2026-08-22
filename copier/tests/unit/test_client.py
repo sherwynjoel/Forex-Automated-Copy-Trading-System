@@ -209,6 +209,31 @@ def test_trader_updated_and_margin_call_events_are_routed():
     assert margin_calls[0].marginCall.marginLevelThreshold == 50.0
 
 
+def test_order_rejections_reach_their_typed_callback():
+    """A ProtoOAOrderErrorEvent (the broker refusing a trade: MARKET_CLOSED
+    on a weekend, NOT_ENOUGH_MONEY...) must reach a typed callback so the
+    dashboard can tell the trader, instead of dying as a log line."""
+    from ctrader_open_api.messages.OpenApiCommonMessages_pb2 import ProtoMessage
+    from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOAOrderErrorEvent
+
+    sdk, _, client = make()
+    rejections = []
+    client.on_order_error(lambda evt: rejections.append(evt))
+    sdk.connect()
+
+    evt = ProtoOAOrderErrorEvent()
+    evt.ctidTraderAccountId = 1001
+    evt.errorCode = 'MARKET_CLOSED'
+    # Delivered as the raw wire envelope, exactly as the SDK hands it over
+    # (order errors are not on the pre-extracted fast path).
+    sdk.deliver(ProtoMessage(
+        payloadType=evt.payloadType,
+        payload=evt.SerializeToString()))
+
+    assert len(rejections) == 1
+    assert rejections[0].errorCode == 'MARKET_CLOSED'
+
+
 def test_ready_fires_after_first_app_auth():
     sdk, _, client = make()
     fired = []

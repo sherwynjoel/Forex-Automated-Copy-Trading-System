@@ -10,6 +10,22 @@ import { mockUseOrg } from '../test/orgMock'
 const { useOrgMock } = vi.hoisted(() => ({ useOrgMock: vi.fn() }))
 vi.mock('../lib/org', () => ({ useOrg: useOrgMock }))
 
+// Capture the events socket so tests can stream events into the page.
+const { fakeSockets } = vi.hoisted(() => ({
+  fakeSockets: [] as Array<{ onmessage: ((e: { data: string }) => void) | null }>,
+}))
+vi.mock('../lib/api', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('../lib/api')>()
+  return {
+    ...mod,
+    eventsSocket: () => {
+      const ws = { onmessage: null, onclose: null, onerror: null, close: () => {} }
+      fakeSockets.push(ws as never)
+      return ws
+    },
+  }
+})
+
 function setRole(role: Role) {
   useOrgMock.mockReturnValue(mockUseOrg(role))
 }
@@ -477,4 +493,24 @@ test('closing a position marks its row instantly', async () => {
   // The row acknowledges IMMEDIATELY -- no waiting for the copier's resync.
   expect(screen.getByText(/closing…/i)).toBeInTheDocument()
   expect(screen.queryByRole('button', { name: /^close$/i })).not.toBeInTheDocument()
+})
+
+test('a broker order rejection streams into the order-error banner', async () => {
+  setRole('trader')
+  mockRoutes()
+  renderTrade()
+  await screen.findByLabelText(/symbol/i)
+
+  const ws = fakeSockets[fakeSockets.length - 1]
+  act(() => {
+    ws.onmessage?.({
+      data: JSON.stringify({
+        category: 'control',
+        payload: { action: 'order_rejected', error_code: 'MARKET_CLOSED' },
+      }),
+    })
+  })
+
+  const alert = await screen.findByRole('alert')
+  expect(alert).toHaveTextContent(/market is closed/i)
 })

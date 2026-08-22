@@ -116,7 +116,16 @@ export default function Trade() {
     loadAccountData()
   }, [loadAccountData])
 
-  useLiveRefresh(loadAccountData, orgId)
+  // Broker order rejections stream in as control events; without this a
+  // weekend MARKET_CLOSED order looked exactly like success.
+  useLiveRefresh(loadAccountData, orgId, (evt) => {
+    if (evt?.category === 'control' && evt?.payload?.action === 'order_rejected') {
+      const code = String(evt.payload.error_code ?? 'UNKNOWN')
+      setOrderError(code === 'MARKET_CLOSED'
+        ? 'Order rejected: the market is closed. Forex and metals reopen when the trading week starts.'
+        : `Order rejected by the broker: ${code}`)
+    }
+  })
 
   // Poll fallback: if the websocket drops, positions/orders/balance must not
   // freeze silently on the one page where the user acts on them.
