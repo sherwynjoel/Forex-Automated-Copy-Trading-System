@@ -948,57 +948,6 @@ function statsRoutes(state: unknown = mockState) {
   }
 }
 
-test('copier performance section shows activity stats plus four analytics cards', async () => {
-  setRole('owner')
-  const now = Date.now()
-  const routes = statsRoutes()
-  routes['/api/orgs/1/accounts/1/analytics?weeks=4'] = {
-    ...copierAnalytics,
-    equity_curve: [
-      { timestamp: now - 20 * 86400000, balance: 10000 },
-      // Pinned inside today regardless of the wall clock (relative offsets
-      // cross midnight when the suite runs in the small hours).
-      { timestamp: new Date(new Date().setHours(0, 5, 0, 0)).getTime(), balance: 10250 },
-      { timestamp: new Date(new Date().setHours(0, 10, 0, 0)).getTime(), balance: 10512.5 },
-    ],
-  }
-  stubApi(routes)
-
-  const { container } = render(
-    <MemoryRouter>
-      <Overview />
-    </MemoryRouter>
-  )
-
-  await screen.findByText(/copier performance/i)
-  // Tradesyncer-style analytics cards replace the sparkline strip.
-  await waitFor(() => {
-    expect(container.querySelector('[data-chart="cumulative-pnl"] svg')).toBeTruthy()
-  })
-  expect(container.querySelector('[data-chart="daily-pnl"] svg')).toBeTruthy()
-  expect(container.querySelector('[data-chart="perf-sparkline"]')).toBeNull()
-  expect(screen.getByText(/cumulative p&l/i)).toBeInTheDocument()
-  expect(screen.getByText(/p&l by day/i)).toBeInTheDocument()
-  // The equity curve only ever rises here, so instead of a fabricated flat
-  // red chart the drawdown card states the (good) news plainly.
-  expect(screen.getByText(/no drawdown in this window/i)).toBeInTheDocument()
-  expect(container.querySelector('[data-chart="drawdown"] svg')).toBeNull()
-  expect(screen.getByText(/current/i)).toHaveTextContent('0.00')
-
-  // Hovering the cumulative chart reads out the nearest trade's value.
-  const hitRect = container.querySelector('[data-chart="cumulative-pnl"] rect[fill="transparent"]')!
-  expect(hitRect).toBeTruthy()
-  fireEvent.mouseMove(hitRect, { clientX: 0, clientY: 0 })
-  expect(screen.getByText('+0.00')).toBeInTheDocument()
-
-  // The activity stats the strip already had stay on.
-  expect(screen.getByText(/today's trades/i)).toBeInTheDocument()
-  expect(screen.getByText(/this week/i)).toBeInTheDocument()
-  // Net P&L, today's window, and the week's window all resolve to +512.50
-  // with this curve (baseline is the 20-day-old point in every case).
-  expect(screen.getAllByText('+512.50').length).toBe(3)
-})
-
 test('portfolio row aggregates equity and compares to yesterday', async () => {
   setRole('owner')
   stubApi(statsRoutes(stateWithMasterPosition))
@@ -1203,31 +1152,6 @@ test('the Open P&L tile expands a live open-contracts panel in place', async () 
   expect(screen.queryByText('+200.00')).not.toBeInTheDocument()
 })
 
-test('copier performance strip shows net P&L, activity windows, and worst trade', async () => {
-  setRole('owner')
-  stubApi(statsRoutes())
-
-  render(
-    <MemoryRouter>
-      <Overview />
-    </MemoryRouter>
-  )
-
-  expect(await screen.findByText('+512.50')).toBeInTheDocument() // net P&L
-  // Win rate / best trade tiles were replaced by activity windows.
-  expect(screen.queryByText('70.0%')).not.toBeInTheDocument()
-  expect(screen.getByText(/today's trades/i)).toBeInTheDocument()
-  expect(screen.getByText(/this week/i)).toBeInTheDocument()
-  // Worst trade gave way to the composite MirrorFleet score:
-  // win rate 0.7 -> .700; win/loss 100/50=2 -> 2/3; PF 2.5 -> .714;
-  // mean = .694 -> 69/100.
-  expect(screen.queryByText(/worst trade/i)).not.toBeInTheDocument()
-  expect(screen.getByText(/mirrorfleet score/i)).toBeInTheDocument()
-  expect(screen.getByText('69')).toBeInTheDocument()
-  expect(screen.getByText('/ 100')).toBeInTheDocument()
-  expect(screen.getByText(/10 trades taken · 7 won · 3 lost/)).toBeInTheDocument()
-})
-
 test('copy log lists copies with estimated P&L and failure reasons', async () => {
   setRole('owner')
   stubApi(statsRoutes(stateWithMasterPosition))
@@ -1247,9 +1171,9 @@ test('copy log lists copies with estimated P&L and failure reasons', async () =>
 })
 
 test('the new stats reads are org-scoped', async () => {
-  // The overview stats block and the master-analytics fetch must both go
-  // through THIS org's prefix -- an unscoped read would put another desk's
-  // fleet size, copy volume and performance on this desk's front page.
+  // The overview stats block must go through THIS org's prefix -- an
+  // unscoped read would put another desk's fleet size and copy volume on
+  // this desk's front page.
   setRole('owner')
   const fetchMock = stubApi(statsRoutes())
 
@@ -1262,7 +1186,6 @@ test('the new stats reads are org-scoped', async () => {
   await waitFor(() => {
     const urls = fetchMock.mock.calls.map(([u]) => String(u))
     expect(urls).toContain('/api/orgs/1/overview')
-    expect(urls).toContain('/api/orgs/1/accounts/1/analytics?weeks=4')
     expect(urls.some((u) => u === '/api/overview')).toBe(false)
   })
 })
@@ -1298,4 +1221,27 @@ test('closing a contract acknowledges instantly and keeps refreshing', async () 
   await waitFor(() => {
     expect(countState()).toBeGreaterThan(soonAfter)
   }, { timeout: 2000 })
+})
+
+test('the copier-performance analytics live on Performance, not Overview', async () => {
+  setRole('owner')
+  const fetchMock = stubApi(statsRoutes())
+
+  const { container } = render(
+    <MemoryRouter>
+      <Overview />
+    </MemoryRouter>
+  )
+
+  await screen.findByText(/portfolio value/i)
+  // The four analytics cards and their heading moved to the Performance
+  // page; Overview is the live desk, not the results review.
+  expect(screen.queryByText(/copier performance/i)).not.toBeInTheDocument()
+  expect(screen.queryByText(/mirrorfleet score/i)).not.toBeInTheDocument()
+  expect(container.querySelector('[data-chart="cumulative-pnl"]')).toBeNull()
+  expect(container.querySelector('[data-chart="drawdown"]')).toBeNull()
+  expect(container.querySelector('[data-chart="daily-pnl"]')).toBeNull()
+  // ...and the analytics fetch that fed them is gone with it.
+  expect(fetchMock.mock.calls.map(([u]) => String(u))
+    .some((u) => u.includes('/analytics'))).toBe(false)
 })

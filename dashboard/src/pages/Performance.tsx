@@ -1,10 +1,13 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { orgApi } from '../lib/api'
 import { useOrg } from '../lib/org'
 import type { Account, Analytics } from '../lib/types'
-import { EquityCurve, PnlBars } from '../components/charts'
+import {
+  EquityCurve, MirrorScore, PerfBars, PerfLine, PnlBars,
+} from '../components/charts'
 import StatTile from '../components/StatTile'
-import { signed } from '../lib/format'
+import { money, signed } from '../lib/format'
+import { cumulativeSeries, drawdownSeries, dailyPnl } from '../lib/perf'
 
 function accountLabel(account: Account): string {
   const name = account.nickname || `Account ${account.trader_login}`
@@ -65,6 +68,40 @@ export default function Performance() {
   }, [loadAnalytics])
 
   const a = analytics
+
+  // Derived once per analytics payload: each of these builds an SVG, and
+  // recomputing them on unrelated renders would rebuild all three.
+  const curve = useMemo(() => analytics?.equity_curve ?? [], [analytics])
+  const cumSeries = useMemo(() => cumulativeSeries(curve), [curve])
+  const ddSeries = useMemo(() => drawdownSeries(curve), [curve])
+  const dailySeries = useMemo(() => dailyPnl(curve), [curve])
+  const currentDrawdown = ddSeries.length ? ddSeries[ddSeries.length - 1].v : 0
+
+  // Trading activity in absolute windows (today, this week) rather than
+  // the selected range. Window P&L = last balance minus the balance
+  // before the window's first trade; when the window opens the curve, the
+  // first trade's own P&L is unknowable from balance-after alone and is
+  // excluded.
+  const activity = useMemo(() => {
+    const dayStart = new Date()
+    dayStart.setHours(0, 0, 0, 0)
+    const monday = new Date(dayStart)
+    monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7))
+    const windowStats = (fromMs: number) => {
+      const firstIdx = curve.findIndex((pt) => pt.timestamp >= fromMs)
+      if (firstIdx === -1) return { count: 0, pnl: 0 }
+      const baseline = firstIdx > 0
+        ? curve[firstIdx - 1].balance : curve[firstIdx].balance
+      return {
+        count: curve.length - firstIdx,
+        pnl: curve[curve.length - 1].balance - baseline,
+      }
+    }
+    return {
+      today: windowStats(dayStart.getTime()),
+      thisWeek: windowStats(monday.getTime()),
+    }
+  }, [curve])
 
   return (
     <div className="space-y-6 max-w-6xl">
@@ -168,6 +205,76 @@ export default function Performance() {
               tone="loss"
               sub={`${(a.max_drawdown_pct * 100).toFixed(1)}% from peak`}
             />
+            <StatTile
+              label="Today's trades"
+              value={String(activity.today.count)}
+              sub={`${signed(activity.today.pnl)} P&L`}
+            />
+            <StatTile
+              label="This week"
+              value={String(activity.thisWeek.count)}
+              sub={`${signed(activity.thisWeek.pnl)} P&L`}
+            />
+          </div>
+
+          {/* min-w-0 on every card: the chart SVGs measure 600px before
+              their ResizeObserver fires, and a grid item's default
+              min-width:auto would lock the whole track at that width --
+              off the right edge of a phone. */}
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4 *:min-w-0">
+            <div className="rounded-lg border border-line bg-card p-4 flex flex-col">
+              <h3 className="desk-label mb-2">MirrorFleet score</h3>
+              <MirrorScore
+                large
+                winRate={a.win_rate}
+                avgWin={a.avg_win}
+                avgLoss={a.avg_loss}
+                profitFactor={a.profit_factor}
+              />
+            </div>
+            <div className="rounded-lg border border-line bg-card p-4 flex flex-col">
+              <h3 className="desk-label mb-2">Cumulative P&L</h3>
+              <div className="my-auto">
+                <PerfLine
+                  points={cumSeries}
+                  label={`Cumulative P&L across ${a.closed_trades} closed trades`}
+                  chart="cumulative-pnl"
+                />
+              </div>
+            </div>
+            <div className="rounded-lg border border-line bg-card p-4 flex flex-col">
+              <h3 className="desk-label mb-2">Drawdown</h3>
+              <div className="my-auto">
+                {ddSeries.some((pt) => pt.v < 0) ? (
+                  <PerfLine
+                    points={ddSeries}
+                    tone="loss"
+                    label="Drawdown below the running balance peak"
+                    chart="drawdown"
+                  />
+                ) : (
+                  <div data-chart="drawdown" className="flex h-24 items-center justify-center text-xs text-ink-faint">
+                    No drawdown in this window.
+                  </div>
+                )}
+                <div className="text-xs mt-1.5 text-ink-soft">
+                  Current{' '}
+                  <span className={`num ${currentDrawdown < 0 ? 'text-loss' : 'text-ink'}`}>
+                    {money(currentDrawdown)}
+                  </span>
+                </div>
+              </div>
+            </div>
+            <div className="rounded-lg border border-line bg-card p-4 flex flex-col">
+              <h3 className="desk-label mb-2">P&L by day</h3>
+              <div className="my-auto">
+                <PerfBars
+                  bars={dailySeries}
+                  label="Net P&L per trading day"
+                  chart="daily-pnl"
+                />
+              </div>
+            </div>
           </div>
 
           {/* Equity curve */}

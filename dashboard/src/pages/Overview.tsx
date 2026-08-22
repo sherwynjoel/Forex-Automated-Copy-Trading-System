@@ -1,19 +1,17 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import { orgApi } from '../lib/api'
 import { useOrg } from '../lib/org'
 import { can } from '../lib/roles'
 import type {
-  Account, Analytics, ApiState, OverviewStats, PositionData, Settings, StateSnapshot,
+  Account, ApiState, OverviewStats, PositionData, Settings, StateSnapshot,
 } from '../lib/types'
 import KillSwitch from '../components/KillSwitch'
 import ConfirmDialog from '../components/ConfirmDialog'
 import StatTile from '../components/StatTile'
 import StatusDot from '../components/StatusDot'
 import Banner from '../components/Banner'
-import { MirrorScore, PerfLine, PerfBars } from '../components/charts'
 import { money, signed, formatWhen, errorText } from '../lib/format'
-import { cumulativeSeries, drawdownSeries, dailyPnl } from '../lib/perf'
 import { actionBurst } from '../lib/refresh'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
 import { mergeTicksIntoSnapshot, TicksPayload } from '../lib/ticks'
@@ -56,7 +54,6 @@ export default function Overview() {
   const [state, setState] = useState<StateSnapshot>({})
   const [envelope, setEnvelope] = useState<ApiState | null>(null)
   const [stats, setStats] = useState<OverviewStats | null>(null)
-  const [copierPerf, setCopierPerf] = useState<Analytics | null>(null)
   const [loading, setLoading] = useState(true)
   const [actionError, setActionError] = useState<string | null>(null)
   type KpiPanel = 'portfolio' | 'accounts' | 'contracts' | 'fills'
@@ -123,27 +120,6 @@ export default function Overview() {
       return merged === base ? prev : { ...prev, accounts: merged }
     })
   })
-
-  // The chart inputs only change when the analytics payload does; the
-  // quotes stream re-renders this page ~2x/sec, so deriving them without
-  // memo would rebuild three SVG charts per tick for nothing.
-  const curve = useMemo(() => copierPerf?.equity_curve ?? [], [copierPerf])
-  const cumSeries = useMemo(() => cumulativeSeries(curve), [curve])
-  const ddSeries = useMemo(() => drawdownSeries(curve), [curve])
-  const dailySeries = useMemo(() => dailyPnl(curve), [curve])
-
-  // This desk's copier performance = ITS master's realized results (that is
-  // what its slaves mirror). Fetched once per mount; heavier than /state.
-  useEffect(() => {
-    const master = accounts.find((a) => a.role === 'master')
-    if (!master) return
-    let cancelled = false
-    orgApi<Analytics>(
-      orgId, `accounts/${master.ctid_trader_account_id}/analytics?weeks=4`)
-      .then((a) => { if (!cancelled) setCopierPerf(a) })
-      .catch(() => { /* strip shows placeholders */ })
-    return () => { cancelled = true }
-  }, [orgId, accounts])
 
   const handlePauseResume = async (accountId: number, isPaused: boolean) => {
     try {
@@ -277,27 +253,6 @@ export default function Overview() {
       pos,
     }))
   })
-
-  // Trading-activity windows for the performance strip, derived from the
-  // analytics equity curve (one point per closed trade, balance-after).
-  // Window P&L = last balance minus the balance before the window's first
-  // trade; when the window opens the curve, the first trade's own P&L is
-  // unknowable from balance-after alone and is excluded.
-  const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0)
-  const monday = new Date(dayStart)
-  monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7))
-  const windowStats = (fromMs: number) => {
-    const firstIdx = curve.findIndex((pt) => pt.timestamp >= fromMs)
-    if (firstIdx === -1) return { count: 0, pnl: 0 }
-    const baseline = curve[firstIdx - 1]?.balance ?? curve[firstIdx].balance
-    return {
-      count: curve.length - firstIdx,
-      pnl: curve[curve.length - 1].balance - baseline,
-    }
-  }
-  const today = windowStats(dayStart.getTime())
-  const thisWeek = windowStats(monday.getTime())
-  const currentDrawdown = ddSeries.length ? ddSeries[ddSeries.length - 1].v : 0
 
   // Live P&L per master position, for estimating each active copy's P&L.
   const masterPnlByPosition = new Map<number, { pnl: number | null; volume: number }>()
@@ -639,111 +594,6 @@ export default function Overview() {
           )}
         </section>
       )}
-
-      {/* Copier performance (master's realized results, last 4 weeks) */}
-      <section className="space-y-3">
-        <div className="flex items-baseline justify-between">
-          <h2 className="desk-label">Copier performance · last 4 weeks</h2>
-          {copierPerf && (
-            <span className="text-xs text-ink-faint">
-              {copierPerf.closed_trades} trades taken · {copierPerf.wins} won · {copierPerf.losses} lost
-            </span>
-          )}
-        </div>
-        {!copierPerf ? (
-          <div className="rounded-lg border border-line bg-card p-4">
-            <p className="text-sm text-ink-faint">
-              Performance loads once the copier has served deal history.
-            </p>
-          </div>
-        ) : (
-          <>
-            <div className="rounded-lg border border-line bg-card p-4 grid grid-cols-3 gap-3">
-              <div className="min-w-0">
-                <div className="desk-label">Net P&L</div>
-                <div className={`num text-lg md:text-xl mt-0.5 ${copierPerf.net_pnl < 0 ? 'text-loss' : 'text-profit'}`}>
-                  {signed(copierPerf.net_pnl)}
-                </div>
-              </div>
-              <div className="min-w-0">
-                <div className="desk-label">Today's trades</div>
-                <div className="num text-lg md:text-xl mt-0.5 text-ink">{today.count}</div>
-                <div className="text-xs mt-0.5">
-                  <span className={today.pnl < 0 ? 'text-loss' : 'text-profit'}>{signed(today.pnl)}</span>
-                  <span className="text-ink-soft"> P&L</span>
-                </div>
-              </div>
-              <div className="min-w-0">
-                <div className="desk-label">This week</div>
-                <div className="num text-lg md:text-xl mt-0.5 text-ink">{thisWeek.count}</div>
-                <div className="text-xs mt-0.5">
-                  <span className={thisWeek.pnl < 0 ? 'text-loss' : 'text-profit'}>{signed(thisWeek.pnl)}</span>
-                  <span className="text-ink-soft"> P&L</span>
-                </div>
-              </div>
-            </div>
-            {/* min-w-0 on every card: the chart SVGs measure 600px before
-                their ResizeObserver fires, and a grid item's default
-                min-width:auto would lock the whole track at that width --
-                off the right edge of a phone. */}
-            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4 *:min-w-0">
-              <div className="rounded-lg border border-line bg-card p-4 flex flex-col">
-                <h3 className="desk-label mb-2">MirrorFleet score</h3>
-                <MirrorScore
-                  large
-                  winRate={copierPerf.win_rate}
-                  avgWin={copierPerf.avg_win}
-                  avgLoss={copierPerf.avg_loss}
-                  profitFactor={copierPerf.profit_factor}
-                />
-              </div>
-              <div className="rounded-lg border border-line bg-card p-4 flex flex-col">
-                <h3 className="desk-label mb-2">Cumulative P&L</h3>
-                <div className="my-auto">
-                  <PerfLine
-                    points={cumSeries}
-                    label={`Cumulative P&L across ${copierPerf.closed_trades} closed trades`}
-                    chart="cumulative-pnl"
-                  />
-                </div>
-              </div>
-              <div className="rounded-lg border border-line bg-card p-4 flex flex-col">
-                <h3 className="desk-label mb-2">Drawdown</h3>
-                <div className="my-auto">
-                  {ddSeries.some((p) => p.v < 0) ? (
-                    <PerfLine
-                      points={ddSeries}
-                      tone="loss"
-                      label="Drawdown below the running balance peak"
-                      chart="drawdown"
-                    />
-                  ) : (
-                    <div data-chart="drawdown" className="flex h-24 items-center justify-center text-xs text-ink-faint">
-                      No drawdown in this window.
-                    </div>
-                  )}
-                  <div className="text-xs mt-1.5 text-ink-soft">
-                    Current{' '}
-                    <span className={`num ${currentDrawdown < 0 ? 'text-loss' : 'text-ink'}`}>
-                      {money(currentDrawdown)}
-                    </span>
-                  </div>
-                </div>
-              </div>
-              <div className="rounded-lg border border-line bg-card p-4 flex flex-col">
-                <h3 className="desk-label mb-2">P&L by day</h3>
-                <div className="my-auto">
-                  <PerfBars
-                    bars={dailySeries}
-                    label="Net P&L per trading day"
-                    chart="daily-pnl"
-                  />
-                </div>
-              </div>
-            </div>
-          </>
-        )}
-      </section>
 
       {/* Kill Switch and Status Bar */}
       <div className="bg-card p-6 rounded-lg border border-line flex items-center justify-between flex-wrap gap-4">

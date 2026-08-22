@@ -174,3 +174,42 @@ test('empty analytics shows a helpful empty state', async () => {
 
   expect(await screen.findByText(/no closed trades/i)).toBeInTheDocument()
 })
+
+test('the analytics cards moved here from Overview render for the selected account', async () => {
+  useOrgMock.mockReturnValue(mockUseOrg('owner'))
+  mockRoutes()
+
+  const { container } = render(
+    <MemoryRouter>
+      <Performance />
+    </MemoryRouter>
+  )
+
+  await waitFor(() => {
+    expect(screen.getByText(/mirrorfleet score/i)).toBeInTheDocument()
+  })
+  expect(container.querySelector('[data-chart="cumulative-pnl"] svg')).toBeTruthy()
+  expect(container.querySelector('[data-chart="daily-pnl"] svg')).toBeTruthy()
+  // This curve dips 10100 -> 9800, so the drawdown card draws rather than
+  // reporting a clean window.
+  expect(container.querySelector('[data-chart="drawdown"] svg')).toBeTruthy()
+  expect(screen.getByText(/p&l by day/i)).toBeInTheDocument()
+})
+
+test('activity windows appear as tiles without repeating Net P&L', async () => {
+  useOrgMock.mockReturnValue(mockUseOrg('owner'))
+  mockRoutes()
+
+  render(
+    <MemoryRouter>
+      <Performance />
+    </MemoryRouter>
+  )
+
+  await waitFor(() => {
+    expect(screen.getByText(/today's trades/i)).toBeInTheDocument()
+  })
+  expect(screen.getByText(/this week/i)).toBeInTheDocument()
+  // Net P&L already had a tile here; the move must not duplicate it.
+  expect(screen.getAllByText(/^Net P&L$/i)).toHaveLength(1)
+})
