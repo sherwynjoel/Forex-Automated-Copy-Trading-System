@@ -40,11 +40,27 @@ function cutoffDaysPhrase(cutoff: string): string {
  * kill switch — present on every page, because the moment it's needed is
  * never the moment you're on the right page.
  */
+/** One live price chip per open-contract symbol (master book). A symbol
+ * with several positions shows once -- the mark is the same quote. */
+function contractPrices(
+  positions?: { symbol?: string | null; current_price?: number | null }[],
+): { symbol: string; price: number | null }[] {
+  const out = new Map<string, number | null>()
+  for (const p of positions ?? []) {
+    if (!p.symbol) continue
+    if (!out.has(p.symbol) || p.current_price != null) {
+      out.set(p.symbol, p.current_price ?? null)
+    }
+  }
+  return [...out.entries()].map(([symbol, price]) => ({ symbol, price }))
+}
+
 function DeskStrip() {
   const { orgId, role } = useOrg()
   const [settings, setSettings] = useState<Settings | null>(null)
   const [masterState, setMasterState] = useState<{ equity?: number | null; open_pnl?: number } | null>(null)
   const masterIdRef = useRef<number | null>(null)
+  const [contracts, setContracts] = useState<{ symbol: string; price: number | null }[]>([])
   const [dialogOpen, setDialogOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<{ kind: 'notice' | 'error'; text: string } | null>(null)
@@ -63,8 +79,10 @@ function DeskStrip() {
       setSettings(sett)
       const master = accounts.find((a) => a.role === 'master')
       masterIdRef.current = master?.ctid_trader_account_id ?? null
-      setMasterState(
-        master ? state.accounts?.[String(master.ctid_trader_account_id)] ?? null : null)
+      const masterSnap = master
+        ? state.accounts?.[String(master.ctid_trader_account_id)] ?? null : null
+      setMasterState(masterSnap)
+      setContracts(contractPrices(masterSnap?.positions))
     } catch {
       // The strip is a passenger; pages surface their own errors.
     }
@@ -110,7 +128,10 @@ function DeskStrip() {
     if (evt?.category !== 'quotes' || masterIdRef.current == null) return
     const snap = (evt.payload as TicksPayload | undefined)
       ?.accounts?.[String(masterIdRef.current)]
-    if (snap) setMasterState({ equity: snap.equity, open_pnl: snap.open_pnl })
+    if (snap) {
+      setMasterState({ equity: snap.equity, open_pnl: snap.open_pnl })
+      setContracts(contractPrices(snap.positions))
+    }
   })
 
   const handleCloseAll = async () => {
@@ -182,6 +203,17 @@ function DeskStrip() {
           </button>
         )}
         <div className="order-4 w-full flex items-center justify-between gap-x-4 md:w-auto md:ml-auto md:justify-start md:gap-6">
+          {contracts.slice(0, 3).map((c) => (
+            <div key={c.symbol} className="hidden md:flex items-baseline gap-2">
+              <span className="desk-label">{c.symbol}</span>
+              <span className="num font-semibold text-brand">
+                {c.price != null ? c.price : '\u2014'}
+              </span>
+            </div>
+          ))}
+          {contracts.length > 3 && (
+            <span className="hidden md:inline desk-label">+{contracts.length - 3}</span>
+          )}
           <div className="flex items-baseline gap-2">
             <span className="desk-label">Master equity</span>
             <span className="num font-semibold text-ink">{money(masterState?.equity)}</span>

@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
 import { expect, test, vi, afterEach } from 'vitest'
@@ -11,6 +11,21 @@ const { useOrgMock, navigateMock } = vi.hoisted(() => ({
 }))
 
 vi.mock('../lib/org', () => ({ useOrg: useOrgMock }))
+
+const { fakeSockets } = vi.hoisted(() => ({
+  fakeSockets: [] as Array<{ onmessage: ((e: { data: string }) => void) | null }>,
+}))
+vi.mock('../lib/api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../lib/api')>()
+  return {
+    ...actual,
+    eventsSocket: () => {
+      const ws = { onmessage: null, onclose: null, onerror: null, close: () => {} }
+      fakeSockets.push(ws as never)
+      return ws as unknown as WebSocket
+    },
+  }
+})
 
 vi.mock('react-router-dom', async (importOriginal) => {
   const actual = await importOriginal<typeof import('react-router-dom')>()
@@ -372,4 +387,50 @@ test('the sidebar theme toggle switches to dark mode', async () => {
 afterEach(() => {
   delete document.documentElement.dataset.theme
   localStorage.clear()
+})
+
+test('the desk strip shows each open contract with its live price', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  mockRoutes({
+    state: {
+      accounts: {
+        '1': {
+          balance: 10000, open_pnl: -4.23, equity: 9995.77,
+          positions: [
+            { position_id: 42, symbol_id: 1, symbol: 'BTCUSD', side: 'BUY',
+              volume: 100, entry_price: 78140.89, pnl_quote: -4.23,
+              current_price: 77717.95 },
+          ],
+        },
+      },
+      master_positions: [], pending_orders: [], drift: [],
+    },
+  })
+  renderLayout()
+
+  expect(await screen.findByText('BTCUSD')).toBeInTheDocument()
+  expect(screen.getByText('77717.95')).toBeInTheDocument()
+
+  // A quotes frame moves the strip price live, no refetch involved.
+  const ws = fakeSockets[fakeSockets.length - 1]
+  act(() => {
+    ws.onmessage?.({
+      data: JSON.stringify({
+        category: 'quotes',
+        payload: {
+          quotes: {},
+          accounts: {
+            '1': {
+              equity: 9999.9, open_pnl: 0.1,
+              positions: [{ position_id: 42, symbol: 'BTCUSD',
+                            current_price: 77801.5, pnl_quote: 0.1 }],
+            },
+          },
+        },
+      }),
+    })
+  })
+
+  expect(await screen.findByText('77801.5')).toBeInTheDocument()
+  expect(screen.getByText('9,999.90')).toBeInTheDocument()
 })
