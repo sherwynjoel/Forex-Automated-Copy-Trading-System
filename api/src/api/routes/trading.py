@@ -73,6 +73,23 @@ def create_trading_router() -> APIRouter:
             client, f"{cfg.copier_control_url}/positions/close",
             method="POST", json=_with_actor(body, ctx))
 
+    @router.post("/positions/amend", response_model=Dict[str, Any])
+    async def amend_position(
+        body: Dict[str, Any],
+        http_request: Request,
+        ctx: OrgContext = Depends(require_org_role("trader")),
+        conn: psycopg.Connection = Depends(get_conn),
+        cfg: ApiConfig = Depends(ApiConfig.from_env),
+    ) -> Dict[str, Any]:
+        """Set or clear the stop loss / take profit on an open position of
+        THIS org. Amending the master's protection propagates to every
+        slave copy through the normal copy path."""
+        require_account_in_org(conn, ctx.org_id, _required_account_id(body))
+        client = http_request.app.state.http
+        return await _proxy_to_copier(
+            client, f"{cfg.copier_control_url}/positions/amend",
+            method="POST", json=_with_actor(body, ctx))
+
     @router.post("/orders/cancel", response_model=Dict[str, Any])
     async def cancel_order(
         body: Dict[str, Any],

@@ -355,6 +355,24 @@ class ClosePositionResource(_JsonResource):
             actor=_actor_from(body))
 
 
+class AmendPositionResource(_JsonResource):
+    """POST /positions/amend: set or clear SL/TP on an open position.
+
+    Body: {account_id, position_id, stop_loss?, take_profit?} -- an omitted
+    protection is REMOVED (see CopierApp.amend_position_sltp).
+    """
+
+    def _handle(self, request, body):
+        account_id = body.get("account_id")
+        position_id = body.get("position_id")
+        if account_id is None or position_id is None:
+            raise ValueError("account_id and position_id required")
+        return self.app.amend_position_sltp(
+            int(account_id), int(position_id),
+            stop_loss=body.get("stop_loss"), take_profit=body.get("take_profit"),
+            actor=_actor_from(body))
+
+
 class CancelOrderResource(_JsonResource):
     """POST /orders/cancel: cancel one working order.
 
@@ -394,6 +412,7 @@ class PositionsResource(resource.Resource):
         super().__init__()
         self.app = app
         self.putChild(b"close", ClosePositionResource(app))
+        self.putChild(b"amend", AmendPositionResource(app))
 
 
 class OrdersResource(resource.Resource):

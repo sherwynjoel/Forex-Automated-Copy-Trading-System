@@ -2123,3 +2123,69 @@ def test_pending_order_fields_are_null_when_the_broker_omits_them(repo, token_st
     assert order["side"] is None
     assert order["order_type"] is None
     assert order["price"] is None
+
+
+def test_amend_position_sltp_sends_both_protections_and_attributes_it(repo, token_store):
+    """Setting SL/TP on an open position: one amend carrying both values,
+    logged against the account, the org, and the person who asked."""
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    sent = []
+    app.dispatcher.send_direct = lambda acct, req: sent.append((acct, req))
+
+    result = app.amend_position_sltp(
+        MASTER_A, 4242, stop_loss=1.0950, take_profit=1.1150,
+        actor="ada@example.com")
+
+    assert result == {"status": "submitted", "account_id": MASTER_A,
+                      "position_id": 4242, "stop_loss": 1.0950,
+                      "take_profit": 1.1150}
+    (acct, req) = sent[0]
+    assert acct == MASTER_A
+    assert req.positionId == 4242
+    assert req.stopLoss == pytest.approx(1.0950)
+    assert req.takeProfit == pytest.approx(1.1150)
+
+    with psycopg.connect(repo.dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT actor_email, org_id, payload->>'action' FROM events "
+            "ORDER BY id DESC LIMIT 1").fetchone()
+    assert row == ("ada@example.com", ORG_A, "amend_sltp")
+
+
+def test_amend_position_sltp_treats_an_empty_value_as_removal(repo, token_store):
+    """An omitted protection is cleared, not left alone -- that is what the
+    broker's amend does, and the response says so plainly."""
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    sent = []
+    app.dispatcher.send_direct = lambda acct, req: sent.append((acct, req))
+
+    result = app.amend_position_sltp(MASTER_A, 99, stop_loss=1.10, take_profit="")
+
+    assert result["take_profit"] is None
+    assert result["stop_loss"] == pytest.approx(1.10)
+    assert sent[0][1].takeProfit == 0  # unset on the wire
+
+
+def test_amend_position_sltp_rejects_nonsense_prices(repo, token_store):
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    for bad in (0, -1, float("nan"), float("inf"), "abc"):
+        with pytest.raises(ValueError):
+            app.amend_position_sltp(MASTER_A, 1, stop_loss=bad)
+
+
+def test_get_state_names_the_master_account_and_its_protection(repo, token_store):
+    """The desk amends against the position's OWN account; inferring it
+    from a copy row would name a slave."""
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    symbol = _seed_symbol_cache(repo, [MASTER_A])
+    app.master_symbols_by_org[ORG_A][symbol.symbol_id] = symbol
+    app.reconcilers[ORG_A].master_positions = [
+        PositionSnapshot(position_id=42, symbol_id=symbol.symbol_id, side=Side.BUY,
+                         volume=10_000_000, price=1.105, label="",
+                         stop_loss=1.0950, take_profit=1.1150),
+    ]
+
+    pos = app.get_state(ORG_A)["master_positions"][0]
+    assert pos["account_id"] == MASTER_A
+    assert pos["stop_loss"] == pytest.approx(1.0950)
+    assert pos["take_profit"] == pytest.approx(1.1150)

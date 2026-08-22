@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi, afterEach } from 'vitest'
@@ -375,4 +375,62 @@ test('pending orders describe themselves like the Trade page does', async () => 
   expect(partial.querySelector('td[data-label="Type"]')!.textContent).toBe('—')
   expect(partial.querySelector('td[data-label="Side"]')!.textContent).toBe('—')
   expect(partial.querySelector('td[data-label="Price"]')!.textContent).toBe('—')
+})
+
+test('a trader can set stop loss and take profit on a master position', async () => {
+  setRole('trader')
+  const stateWithProtection: ApiState = {
+    ...mockApiState,
+    master_positions: mockApiState.master_positions.map((p) => ({
+      ...p, account_id: 1001, stop_loss: 1.09, take_profit: null,
+    })),
+  }
+  const orgApiMock = vi.spyOn(apiModule, 'orgApi')
+    .mockImplementation(async (_org, path) =>
+      (path === 'state' ? stateWithProtection : {}) as never)
+
+  render(
+    <MemoryRouter>
+      <Positions />
+    </MemoryRouter>
+  )
+
+  // The row states the current protection, "—" for the half that is unset.
+  const row = (await screen.findByText('EURUSD')).closest('tr')!
+  expect(row.querySelector('td[data-label="SL / TP"]')!.textContent)
+    .toBe('1.09 / —')
+
+  await userEvent.click(within(row).getByRole('button', { name: /sl \/ tp/i }))
+
+  // Pre-filled from the position: editing one must not clear the other.
+  const sl = screen.getByLabelText('Stop loss') as HTMLInputElement
+  const tp = screen.getByLabelText('Take profit') as HTMLInputElement
+  expect(sl.value).toBe('1.09')
+  expect(tp.value).toBe('')
+
+  await userEvent.type(tp, '1.15')
+  await userEvent.click(screen.getByRole('button', { name: /update protection/i }))
+
+  await waitFor(() => {
+    const call = orgApiMock.mock.calls.find(([, path]) => path === 'positions/amend')
+    expect(call).toBeTruthy()
+    // Targets the MASTER account that owns the position, not a copy.
+    expect(JSON.parse(String((call![2] as RequestInit).body))).toEqual({
+      account_id: 1001, position_id: 1001, stop_loss: 1.09, take_profit: 1.15,
+    })
+  })
+})
+
+test('a viewer gets no SL/TP editor', async () => {
+  setRole('viewer')
+  vi.spyOn(apiModule, 'orgApi').mockResolvedValue(mockApiState)
+
+  render(
+    <MemoryRouter>
+      <Positions />
+    </MemoryRouter>
+  )
+
+  await screen.findByText('EURUSD')
+  expect(screen.queryByRole('button', { name: /sl \/ tp/i })).not.toBeInTheDocument()
 })

@@ -5,6 +5,8 @@ import { useOrg } from '../lib/org'
 import Banner from '../components/Banner'
 import { can } from '../lib/roles'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
+import ConfirmDialog from '../components/ConfirmDialog'
+import { actionBurst } from '../lib/refresh'
 import { mergeTicksIntoApiState, TicksPayload } from '../lib/ticks'
 
 export default function Positions() {
@@ -32,6 +34,43 @@ export default function Positions() {
   }, [orgId])
 
   // Refetch immediately when a trade event streams in (5s poll is fallback)
+  // The position whose protection is being edited, and the draft values.
+  const [editing, setEditing] = useState<MasterPosition | null>(null)
+  const [slDraft, setSlDraft] = useState('')
+  const [tpDraft, setTpDraft] = useState('')
+  const [amendBusy, setAmendBusy] = useState(false)
+
+  // Pre-fill from the position: the broker's amend replaces BOTH values,
+  // so editing one must not silently clear the other.
+  useEffect(() => {
+    setSlDraft(editing?.stop_loss != null ? String(editing.stop_loss) : '')
+    setTpDraft(editing?.take_profit != null ? String(editing.take_profit) : '')
+  }, [editing])
+
+  const submitAmend = async () => {
+    if (!editing) return
+    setAmendBusy(true)
+    setError(null)
+    try {
+      await orgApi(orgId, 'positions/amend', {
+        method: 'POST',
+        body: JSON.stringify({
+          account_id: editing.account_id,
+          position_id: editing.position_id,
+          stop_loss: slDraft.trim() === '' ? null : Number(slDraft),
+          take_profit: tpDraft.trim() === '' ? null : Number(tpDraft),
+        }),
+      })
+      setEditing(null)
+      await fetchState()
+      actionBurst(fetchState)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not update SL/TP')
+    } finally {
+      setAmendBusy(false)
+    }
+  }
+
   useLiveRefresh(fetchState, orgId, (evt) => {
     // Quotes ticks update marks and P&L in place; structural changes
     // still arrive through the refetch path above.
@@ -140,7 +179,9 @@ export default function Positions() {
                   <th className="desk-label p-3 text-right border-b border-line">Volume (units)</th>
                   <th className="desk-label p-3 text-right border-b border-line">Entry Price</th>
                   <th className="desk-label p-3 text-right border-b border-line">Current</th>
+                  <th className="desk-label p-3 text-right border-b border-line whitespace-nowrap">SL / TP</th>
                   <th className="desk-label p-3 text-right border-b border-line">P&L</th>
+                  {can(role, 'trade') && <th className="p-3 border-b border-line" />}
                   
                 </tr>
               </thead>
@@ -154,6 +195,8 @@ export default function Positions() {
                       const found = snap?.positions?.find((p) => p.position_id === positionId)
                       return found?.pnl_quote ?? null
                     }}
+                    canTrade={can(role, 'trade')}
+                    onEdit={() => setEditing(pos)}
                     priceFor={(accountId, positionId) => {
                       const snap = state.accounts?.[String(accountId)]
                       const found = snap?.positions?.find((p) => p.position_id === positionId)
@@ -198,6 +241,50 @@ export default function Positions() {
         )}
       </section>
 
+      <ConfirmDialog
+        open={editing != null}
+        title={`Stop loss / take profit · ${editing?.symbol ?? ''}`}
+        confirmLabel="Update protection"
+        busy={amendBusy}
+        onConfirm={submitAmend}
+        onCancel={() => setEditing(null)}
+      >
+        <p>
+          Applies to the master position and, through the normal copy path,
+          to every slave copy of it.
+        </p>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label htmlFor="amend-sl" className="desk-label block mb-1">Stop loss</label>
+            <input
+              id="amend-sl"
+              type="number"
+              step="0.00001"
+              value={slDraft}
+              onChange={(e) => setSlDraft(e.target.value)}
+              placeholder="none"
+              className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink"
+            />
+          </div>
+          <div>
+            <label htmlFor="amend-tp" className="desk-label block mb-1">Take profit</label>
+            <input
+              id="amend-tp"
+              type="number"
+              step="0.00001"
+              value={tpDraft}
+              onChange={(e) => setTpDraft(e.target.value)}
+              placeholder="none"
+              className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink"
+            />
+          </div>
+        </div>
+        <p className="text-xs text-ink-faint">
+          Leaving a field empty removes that protection — the broker replaces
+          both together.
+        </p>
+      </ConfirmDialog>
+
       {/* Drift/Orphan Section */}
       <section>
         <h2 className="font-display text-xl text-ink mb-4">Drift Items</h2>
@@ -227,10 +314,14 @@ function PositionRow({
   position,
   pnlFor,
   priceFor,
+  canTrade,
+  onEdit,
 }: {
   position: MasterPosition
   pnlFor: (accountId: number, positionId: number | null | undefined) => number | null
   priceFor: (accountId: number, positionId: number | null | undefined) => number | null
+  canTrade: boolean
+  onEdit: () => void
 }) {
   return (
     <>
@@ -244,6 +335,9 @@ function PositionRow({
         }`}>
           {position.current_price != null ? position.current_price.toFixed(5) : '\u2014'}
         </td>
+        <td data-label="SL / TP" className="num p-3 text-right text-ink-soft whitespace-nowrap">
+          {position.stop_loss ?? '—'} / {position.take_profit ?? '—'}
+        </td>
         <td data-label="P&L" className={`num p-3 text-right font-medium ${
           position.pnl_quote == null ? '' : position.pnl_quote < 0 ? 'text-loss' : 'text-profit'
         }`}>
@@ -251,10 +345,20 @@ function PositionRow({
             ? (position.pnl_quote >= 0 ? '+' : '') + position.pnl_quote.toFixed(2)
             : '-'}
         </td>
+        {canTrade && (
+          <td className="p-3 text-right">
+            <button
+              onClick={onEdit}
+              className="min-h-11 md:min-h-0 px-3 py-1 text-xs font-semibold rounded border border-line-strong text-ink hover:bg-line transition-colors"
+            >
+              SL / TP
+            </button>
+          </td>
+        )}
       </tr>
       {position.copies.length > 0 && (
         <tr className="bg-paper border-b border-line">
-          <td colSpan={6} className="p-4">
+          <td colSpan={8} className="p-4">
             <div className="ml-4 space-y-2">
               <h4 className="desk-label mb-2">Slave Copies</h4>
               <table className="stack-table w-full text-sm">

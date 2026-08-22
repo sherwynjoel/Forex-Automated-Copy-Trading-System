@@ -249,6 +249,10 @@ export interface MasterPosition {
   volume: number
   price: number
   label: string
+  /** The master account this position lives on -- amend targets it. */
+  account_id: number
+  stop_loss?: number | null
+  take_profit?: number | null
   pnl_quote?: number | null
   current_price?: number | null
   volume_lots?: string | null

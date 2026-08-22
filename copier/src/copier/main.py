@@ -44,7 +44,7 @@ from typing import Callable
 from twisted.internet import defer, task
 from ctrader_open_api import Protobuf
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
-    ProtoOACancelOrderReq, ProtoOAClosePositionReq, ProtoOAErrorRes,
+    ProtoOACancelOrderReq, ProtoOAAmendPositionSLTPReq, ProtoOAClosePositionReq, ProtoOAErrorRes,
     ProtoOAGetAccountListByAccessTokenReq, ProtoOANewOrderReq,
     ProtoOARefreshTokenReq, ProtoOAReconcileReq,
 )
@@ -1099,6 +1099,61 @@ class CopierApp:
         return {"status": "submitted", "account_id": account_id,
                 "position_id": position_id, "volume": volume}
 
+    def amend_position_sltp(self, account_id: int, position_id: int,
+                            stop_loss=None, take_profit=None,
+                            actor: str | None = None) -> dict:
+        """Set (or clear) the stop loss and take profit on an open position.
+
+        Both protections are sent together, which is what the broker's
+        amend means: a value omitted here is REMOVED from the position, not
+        left alone. The caller therefore always states the full intent --
+        the dashboard pre-fills the current values so an edit to one does
+        not silently drop the other.
+
+        On the MASTER this needs no special handling to reach the fleet:
+        the broker's execution event arrives as MasterPositionSLTPAmended
+        and the decision engine already fans an AmendPositionSLTP out to
+        every mapped slave copy.
+        """
+        account_id = int(account_id)
+        position_id = int(position_id)
+
+        def _price(name, raw):
+            if raw is None or raw == "":
+                return None
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                raise ValueError(f"{name} must be a number")
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be a positive, finite price")
+            return value
+
+        sl = _price("stop_loss", stop_loss)
+        tp = _price("take_profit", take_profit)
+
+        # Resolves the client too, so an unknown account fails here.
+        self._query_context(account_id)
+
+        req = ProtoOAAmendPositionSLTPReq()
+        req.ctidTraderAccountId = account_id
+        req.positionId = position_id
+        if sl is not None:
+            req.stopLoss = sl
+        if tp is not None:
+            req.takeProfit = tp
+        self.dispatcher.send_direct(account_id, req)
+
+        self.repo.log_event(
+            'control', 'info',
+            {'action': 'amend_sltp', 'position_id': position_id,
+             'stop_loss': sl, 'take_profit': tp},
+            account_id=account_id, org_id=self._org_for_account(account_id),
+            actor=actor,
+        )
+        return {"status": "submitted", "account_id": account_id,
+                "position_id": position_id, "stop_loss": sl, "take_profit": tp}
+
     def cancel_order(self, account_id: int, order_id: int,
                      actor: str | None = None) -> defer.Deferred:
         """Cancel one working order on any account."""
@@ -1514,12 +1569,17 @@ class CopierApp:
                 symbol_name = sym.name if sym is not None else None
                 master_positions.append({
                     'position_id': pos.position_id,
+                    # Whose book this is: the desk amends/closes against it,
+                    # and inferring it from a copy row would name a SLAVE.
+                    'account_id': reconciler.master_account_id,
                     'symbol_id': pos.symbol_id,
                     'symbol': symbol_name,
                     'side': pos.side.value,
                     'volume': pos.volume,
                     'volume_lots': lots(pos.volume, sym.lot_size if sym is not None else None),
                     'price': pos.price,
+                    'stop_loss': pos.stop_loss,
+                    'take_profit': pos.take_profit,
                     'pnl_quote': master_pnl_by_position.get(pos.position_id),
                     'current_price': master_px_by_position.get(pos.position_id),
                     'label': pos.label,

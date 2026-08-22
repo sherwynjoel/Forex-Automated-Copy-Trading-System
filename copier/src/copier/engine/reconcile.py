@@ -45,13 +45,20 @@ STALE_PENDING_AFTER_S = 300.0
 
 @dataclass(frozen=True)
 class PositionSnapshot:
-    """Immutable snapshot of a broker position from reconcile response."""
+    """Immutable snapshot of a broker position from reconcile response.
+
+    stop_loss/take_profit are the position's live protection; None means
+    none is set (protobuf reports an unset price as 0, which is not a
+    price). They ride along so the desk can show and amend them.
+    """
     position_id: int
     symbol_id: int
     side: Side
     volume: int
     price: float
     label: str
+    stop_loss: float | None = None
+    take_profit: float | None = None
 
 
 def _order_type_name(order_type: int) -> str | None:
@@ -447,6 +454,8 @@ class Reconciler:
                     volume=p.tradeData.volume,
                     price=p.price,
                     label=p.tradeData.label,
+                    stop_loss=float(p.stopLoss) if p.stopLoss else None,
+                    take_profit=float(p.takeProfit) if p.takeProfit else None,
                 )
                 for p in reconcile_res.position
             ]
