@@ -102,7 +102,7 @@ test('renders master positions with lots and pnl', async () => {
   expect(pnlElement).toBeInTheDocument()
 })
 
-test('expanding a row shows per-slave copy status with slippage', async () => {
+test('per-slave copy status with slippage is always visible', async () => {
   setRole('owner')
   vi.spyOn(apiModule, 'orgApi').mockResolvedValue(mockApiState)
 
@@ -116,8 +116,6 @@ test('expanding a row shows per-slave copy status with slippage', async () => {
     expect(screen.getByText(/EURUSD/i)).toBeInTheDocument()
   })
 
-  const expandButton = screen.getByRole('button', { name: /show copies/i })
-  await userEvent.click(expandButton)
 
   await waitFor(() => {
     // The table should show the slave account ID
@@ -143,8 +141,6 @@ test('failed copy shows error text', async () => {
     expect(screen.getByText(/EURUSD/i)).toBeInTheDocument()
   })
 
-  const expandButton = screen.getByRole('button', { name: /show copies/i })
-  await userEvent.click(expandButton)
 
   await waitFor(() => {
     expect(screen.getByText(/Insufficient margin/)).toBeInTheDocument()
@@ -298,7 +294,6 @@ test('slave copy rows show their own live P&L from the state snapshot', async ()
   )
 
   await screen.findByText('EURUSD')
-  await userEvent.click(screen.getByRole('button', { name: /show copies/i }))
 
   // The filled copy carries its live P&L; the failed one shows a dash.
   expect(await screen.findByText('+12.34')).toBeInTheDocument()

@@ -11,8 +11,6 @@ export default function Positions() {
   const [state, setState] = useState<ApiState | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [expandedPositions, setExpandedPositions] = useState<Set<number>>(new Set())
-  const [expandedOrders, setExpandedOrders] = useState<Set<number>>(new Set())
 
   const fetchState = async () => {
     try {
@@ -91,26 +89,6 @@ export default function Positions() {
     }
   }
 
-  const togglePositionExpanded = (positionId: number) => {
-    const newSet = new Set(expandedPositions)
-    if (newSet.has(positionId)) {
-      newSet.delete(positionId)
-    } else {
-      newSet.add(positionId)
-    }
-    setExpandedPositions(newSet)
-  }
-
-  const toggleOrderExpanded = (orderId: number) => {
-    const newSet = new Set(expandedOrders)
-    if (newSet.has(orderId)) {
-      newSet.delete(orderId)
-    } else {
-      newSet.add(orderId)
-    }
-    setExpandedOrders(newSet)
-  }
-
   if (loading && !state) {
     return <div className="p-6">Loading positions...</div>
   }
@@ -154,7 +132,7 @@ export default function Positions() {
                   <th className="desk-label p-3 text-right border-b border-line">Volume (units)</th>
                   <th className="desk-label p-3 text-right border-b border-line">Entry Price</th>
                   <th className="desk-label p-3 text-right border-b border-line">P&L</th>
-                  <th className="desk-label p-3 text-center border-b border-line">Actions</th>
+                  
                 </tr>
               </thead>
               <tbody>
@@ -162,8 +140,6 @@ export default function Positions() {
                   <PositionRow
                     key={pos.position_id}
                     position={pos}
-                    isExpanded={expandedPositions.has(pos.position_id)}
-                    onToggleExpand={() => togglePositionExpanded(pos.position_id)}
                     pnlFor={(accountId, positionId) => {
                       const snap = state.accounts?.[String(accountId)]
                       const found = snap?.positions?.find((p) => p.position_id === positionId)
@@ -189,7 +165,6 @@ export default function Positions() {
                 <tr>
                   <th className="desk-label p-3 text-left border-b border-line">Symbol</th>
                   <th className="desk-label p-3 text-right border-b border-line">Volume (units)</th>
-                  <th className="desk-label p-3 text-center border-b border-line">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -197,8 +172,6 @@ export default function Positions() {
                   <OrderRow
                     key={order.order_id}
                     order={order}
-                    isExpanded={expandedOrders.has(order.order_id)}
-                    onToggleExpand={() => toggleOrderExpanded(order.order_id)}
                   />
                 ))}
               </tbody>
@@ -234,13 +207,9 @@ export default function Positions() {
 
 function PositionRow({
   position,
-  isExpanded,
-  onToggleExpand,
   pnlFor,
 }: {
   position: MasterPosition
-  isExpanded: boolean
-  onToggleExpand: () => void
   pnlFor: (accountId: number, positionId: number | null | undefined) => number | null
 }) {
   return (
@@ -257,18 +226,10 @@ function PositionRow({
             ? (position.pnl_quote >= 0 ? '+' : '') + position.pnl_quote.toFixed(2)
             : '-'}
         </td>
-        <td className="p-3 text-center">
-          <button
-            onClick={onToggleExpand}
-            className="px-3 py-1 text-xs font-medium rounded border border-line-strong text-ink-soft hover:text-ink hover:border-ink transition-colors"
-          >
-            {isExpanded ? 'Hide' : 'Show'} Copies
-          </button>
-        </td>
       </tr>
-      {isExpanded && position.copies.length > 0 && (
+      {position.copies.length > 0 && (
         <tr className="bg-paper border-b border-line">
-          <td colSpan={6} className="p-4">
+          <td colSpan={5} className="p-4">
             <div className="ml-4 space-y-2">
               <h4 className="desk-label mb-2">Slave Copies</h4>
               <table className="stack-table w-full text-sm">
@@ -303,32 +264,18 @@ function PositionRow({
 
 function OrderRow({
   order,
-  isExpanded,
-  onToggleExpand,
 }: {
   order: PendingOrder
-  isExpanded: boolean
-  onToggleExpand: () => void
 }) {
   return (
     <>
       <tr className="border-b border-line last:border-0 hover:bg-line">
         <td data-label="Symbol" className="num p-3">{order.symbol || `ID:${order.symbol_id}`}</td>
         <td data-label="Volume (units)" className="num p-3 text-right">{order.volume_lots || order.volume}</td>
-        <td className="p-3 text-center">
-          {order.copies.length > 0 && (
-            <button
-              onClick={onToggleExpand}
-              className="px-3 py-1 text-xs font-medium rounded border border-line-strong text-ink-soft hover:text-ink hover:border-ink transition-colors"
-            >
-              {isExpanded ? 'Hide' : 'Show'} Copies
-            </button>
-          )}
-        </td>
       </tr>
-      {isExpanded && order.copies.length > 0 && (
+      {order.copies.length > 0 && (
         <tr className="bg-paper border-b border-line">
-          <td colSpan={3} className="p-4">
+          <td colSpan={2} className="p-4">
             <div className="ml-4 space-y-2">
               <h4 className="desk-label mb-2">Slave Copies</h4>
               <table className="w-full text-sm">
