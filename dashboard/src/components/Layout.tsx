@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom'
 import { api, orgApi } from '../lib/api'
 import { useOrg } from '../lib/org'
+import { useTheme } from '../hooks/useTheme'
 import { can, type Role } from '../lib/roles'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
 import type { Account, ApiState, CloseAllResult, EventResponse, Settings } from '../lib/types'
@@ -165,7 +166,7 @@ function DeskStrip() {
         {can(role, 'control') && (
           <button
             onClick={() => setDialogOpen(true)}
-            className="order-3 ml-auto md:order-5 md:ml-0 px-3 py-1.5 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-white transition-colors"
+            className="order-3 ml-auto md:order-5 md:ml-0 px-3 py-1.5 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-on-accent transition-colors"
           >
             Close all positions
           </button>
@@ -191,7 +192,7 @@ function DeskStrip() {
       {marginCall && marginCall.id !== dismissedRiskId && (
         <div
           role="alert"
-          className="px-6 py-2.5 bg-loss text-white text-sm flex items-center justify-between"
+          className="px-6 py-2.5 bg-loss text-on-accent text-sm flex items-center justify-between"
         >
           <span>
             <strong>Margin call</strong>
@@ -203,7 +204,7 @@ function DeskStrip() {
           </span>
           <button
             onClick={() => setDismissedRiskId(marginCall.id)}
-            className="text-white hover:underline text-xs font-medium ml-4"
+            className="text-on-accent hover:underline text-xs font-medium ml-4"
           >
             Dismiss
           </button>
@@ -270,6 +271,7 @@ function DeskStrip() {
 }
 
 export default function Layout() {
+  const { theme, toggle: toggleTheme } = useTheme()
   const location = useLocation()
   const navigate = useNavigate()
   const { orgId, role, me } = useOrg()
@@ -347,6 +349,13 @@ export default function Layout() {
       </nav>
 
       <div className="border-t border-line p-4">
+        <button
+          onClick={toggleTheme}
+          aria-label={theme === 'dark' ? 'Switch to day mode' : 'Switch to dark mode'}
+          className="w-full text-left px-2 py-2 text-sm text-ink-soft hover:text-ink transition-colors"
+        >
+          {theme === 'dark' ? '☀ Day mode' : '☾ Dark mode'}
+        </button>
         <button
           onClick={handleLogout}
           className="w-full text-left px-2 py-2 text-sm text-ink-soft hover:text-ink transition-colors"

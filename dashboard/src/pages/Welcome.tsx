@@ -54,7 +54,7 @@ export default function Welcome() {
           <button
             type="submit"
             disabled={creating}
-            className="w-full py-2.5 rounded bg-brand text-white text-sm font-semibold hover:bg-brand-deep transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            className="w-full py-2.5 rounded bg-brand text-on-accent text-sm font-semibold hover:bg-brand-deep transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {creating ? 'Creating…' : 'Create organization'}
           </button>

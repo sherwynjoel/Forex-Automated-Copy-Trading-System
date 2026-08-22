@@ -335,3 +335,16 @@ test('Escape closes the mobile navigation drawer', async () => {
     expect(screen.queryByRole('dialog', { name: /navigation/i })).not.toBeInTheDocument()
   })
 })
+
+test('the sidebar theme toggle switches to dark mode', async () => {
+  renderLayout()
+  const toggle = await screen.findAllByRole('button', { name: /switch to dark mode/i })
+  await userEvent.click(toggle[0])
+  expect(document.documentElement.dataset.theme).toBe('dark')
+  expect(await screen.findAllByRole('button', { name: /switch to day mode/i })).not.toHaveLength(0)
+})
+
+afterEach(() => {
+  delete document.documentElement.dataset.theme
+  localStorage.clear()
+})

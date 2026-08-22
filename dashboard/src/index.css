@@ -30,6 +30,9 @@
   --color-warn: #9a6700;
   --color-warn-deep: #7a5200;
   --color-warn-wash: #fbf0da;
+  /* Text on accent-colored surfaces (buttons, chips): white in day mode,
+     near-black ink in dark mode where the accents lighten. */
+  --color-on-accent: #ffffff;
 
   --font-sans: "Rubik", "Helvetica Neue", Arial, sans-serif;
   --font-mono: "JetBrains Mono", "SFMono-Regular", Menlo, monospace;
@@ -39,6 +42,41 @@
 /* Native widgets follow the light ground. */
 :root {
   color-scheme: light;
+}
+
+/* ---------------------------------------------------------------------------
+   Dark theme.  Same token vocabulary, night values — every pair proven
+   >= WCAG AA by scripts/dark_palette_check (accents lighten, so text on
+   them flips to ink via --color-on-accent).  Applied via data-theme on
+   <html>, set pre-paint by index.html and toggled from the sidebar.
+--------------------------------------------------------------------------- */
+[data-theme="dark"] {
+  color-scheme: dark;
+  --color-paper: #131118;
+  --color-card: #1c1926;
+  --color-ink: #eeeaf4;
+  --color-ink-soft: #aca3bf;
+  --color-ink-faint: #8b81a0;
+  --color-line: #2b2738;
+  --color-line-strong: #443e57;
+  --color-brand: #9d90ec;
+  --color-brand-deep: #bcb2f6;
+  --color-brand-wash: #2b2542;
+  --color-profit: #43c07a;
+  --color-profit-deep: #7edfa6;
+  --color-profit-wash: #152b1e;
+  --color-loss: #f26a80;
+  --color-loss-deep: #fda4b0;
+  --color-loss-wash: #3a1c24;
+  --color-warn: #d09a3e;
+  --color-warn-deep: #e9c37c;
+  --color-warn-wash: #332708;
+  --color-on-accent: #17141f;
+}
+
+/* The select chevron follows the brand tone per theme. */
+[data-theme="dark"] select.bg-card {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 6l4 4 4-4' fill='none' stroke='%239d90ec' stroke-width='1.5'/%3E%3C/svg%3E");
 }
 
 body {

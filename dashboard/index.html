@@ -4,6 +4,23 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpolygon points='14,38 38,26 38,50' fill='%236c5fc7'/%3E%3Cpolygon points='42,30 62,20 62,40' fill='%238b7fd7'/%3E%3Cpolygon points='66,23 82,15 82,31' fill='%23a99ff0'/%3E%3Cline x1='10' y1='54' x2='90' y2='54' stroke='%23cfc9dc' stroke-width='2'/%3E%3Cg opacity='0.35'%3E%3Cpolygon points='14,70 38,82 38,58' fill='%236c5fc7'/%3E%3Cpolygon points='42,78 62,88 62,68' fill='%238b7fd7'/%3E%3Cpolygon points='66,85 82,93 82,77' fill='%23a99ff0'/%3E%3C/g%3E%3C/svg%3E" />
     <meta name="theme-color" content="#f8f8fa" />
+    <script>
+      // Apply the saved (or OS) theme before first paint - no white flash.
+      // Storage gets its own guard so a blocked localStorage (private mode)
+      // still falls through to the OS preference instead of aborting.
+      var t = null;
+      try { t = localStorage.getItem('mf.theme'); } catch (e) { /* blocked */ }
+      if (t !== 'light' && t !== 'dark') {
+        try {
+          t = window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        } catch (e) { t = 'light'; }
+      }
+      document.documentElement.dataset.theme = t;
+      if (t === 'dark') {
+        var m = document.querySelector('meta[name="theme-color"]');
+        if (m) m.setAttribute('content', '#131118');
+      }
+    </script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />

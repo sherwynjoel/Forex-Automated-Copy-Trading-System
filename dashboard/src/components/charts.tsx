@@ -453,7 +453,7 @@ export function MirrorScore({ winRate, avgWin, avgLoss, profitFactor, large = fa
   const meter = (
     <div
       className="relative h-1.5 w-full rounded-full"
-      style={{ background: 'linear-gradient(to right, #d6344b, #e7b54e, #15803d)' }}
+      style={{ background: 'linear-gradient(to right, var(--color-loss), var(--color-warn), var(--color-profit))' }}
     >
       <span
         className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 h-3 w-3 rounded-full bg-card border-2 border-ink"

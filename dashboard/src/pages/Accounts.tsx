@@ -275,7 +275,7 @@ export default function Accounts() {
         {can(role, 'control') && (
           <button
             onClick={handleConnectOAuth}
-            className="w-full md:w-auto shrink-0 px-4 py-2.5 bg-brand text-white text-sm font-semibold rounded hover:bg-brand-deep transition-colors"
+            className="w-full md:w-auto shrink-0 px-4 py-2.5 bg-brand text-on-accent text-sm font-semibold rounded hover:bg-brand-deep transition-colors"
           >
             Connect cTrader ID
           </button>
@@ -512,8 +512,8 @@ export default function Accounts() {
                             }}
                             disabled={isPending}
                             className={flattenStatus[id] === 'error'
-                              ? 'min-w-[6.5rem] px-2.5 py-1 text-xs font-semibold rounded border border-loss bg-loss text-white hover:bg-loss-deep transition-colors disabled:opacity-50'
-                              : 'min-w-[6.5rem] px-2.5 py-1 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-white transition-colors disabled:opacity-50'}
+                              ? 'min-w-[6.5rem] px-2.5 py-1 text-xs font-semibold rounded border border-loss bg-loss text-on-accent hover:bg-loss-deep transition-colors disabled:opacity-50'
+                              : 'min-w-[6.5rem] px-2.5 py-1 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-on-accent transition-colors disabled:opacity-50'}
                           >
                             {flattenStatus[id] === 'error' ? 'Failed — retry' : 'Flatten'}
                           </button>

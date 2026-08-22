@@ -144,7 +144,7 @@ export default function Members() {
             </select>
             <button
               type="submit"
-              className="px-3 py-1.5 text-xs font-semibold rounded bg-brand text-white hover:bg-brand-deep"
+              className="px-3 py-1.5 text-xs font-semibold rounded bg-brand text-on-accent hover:bg-brand-deep"
             >
               Create invite link
             </button>
@@ -214,7 +214,7 @@ export default function Members() {
           </form>
           <button
             onClick={() => setDeleteOpen(true)}
-            className="px-3 py-1.5 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-white transition-colors"
+            className="px-3 py-1.5 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-on-accent transition-colors"
           >
             Delete organization
           </button>

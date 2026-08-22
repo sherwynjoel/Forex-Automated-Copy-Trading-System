@@ -367,8 +367,8 @@ export default function Trade() {
         className={`flex-1 py-2 text-sm font-semibold rounded transition-colors ${
           ticket.side === side
             ? side === 'BUY'
-              ? 'bg-profit text-white'
-              : 'bg-loss text-white'
+              ? 'bg-profit text-on-accent'
+              : 'bg-loss text-on-accent'
             : 'bg-paper text-ink-soft hover:text-ink border border-line'
         }`}
       >
@@ -434,7 +434,7 @@ export default function Trade() {
               </p>
               <Link
                 to={`/org/${orgId}/accounts`}
-                className="inline-block px-4 py-2.5 bg-brand text-white text-sm font-semibold rounded hover:bg-brand-deep transition-colors"
+                className="inline-block px-4 py-2.5 bg-brand text-on-accent text-sm font-semibold rounded hover:bg-brand-deep transition-colors"
               >
                 Connect a cTrader account
               </Link>
@@ -483,7 +483,7 @@ export default function Trade() {
                       setPinVersion((v) => v + 1)
                     }}
                     aria-label="Default symbol — click to clear"
-                    className="text-[11px] font-semibold text-brand-deep bg-brand-wash rounded px-1.5 py-0.5 hover:bg-brand hover:text-white transition-colors"
+                    className="text-[11px] font-semibold text-brand-deep bg-brand-wash rounded px-1.5 py-0.5 hover:bg-brand hover:text-on-accent transition-colors"
                   >
                     ★ Default
                   </button>
@@ -663,7 +663,7 @@ export default function Trade() {
           <button
             onClick={submitOrder}
             disabled={Boolean(ticketProblem) || busy}
-            className="w-full py-2.5 rounded bg-brand text-white text-sm font-semibold hover:bg-brand-deep transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            className="w-full py-2.5 rounded bg-brand text-on-accent text-sm font-semibold hover:bg-brand-deep transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {busy ? 'Placing…' : 'Place order'}
           </button>
@@ -685,7 +685,7 @@ export default function Trade() {
                     onClick={() => setChartPeriod(p)}
                     className={`min-h-11 min-w-11 md:min-h-0 md:min-w-0 px-2 py-1 text-xs rounded transition-colors ${
                       chartPeriod === p
-                        ? 'bg-brand text-white font-semibold'
+                        ? 'bg-brand text-on-accent font-semibold'
                         : 'text-ink-soft hover:text-ink'
                     }`}
                   >
@@ -775,7 +775,7 @@ export default function Trade() {
                           ) : (
                           <button
                             onClick={() => { setClosing(pos); setPartialLots('') }}
-                            className="px-3 py-2.5 md:py-1 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-white transition-colors"
+                            className="px-3 py-2.5 md:py-1 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-on-accent transition-colors"
                           >
                             Close
                           </button>

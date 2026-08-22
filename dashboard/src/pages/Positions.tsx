@@ -367,7 +367,7 @@ function DriftItemRow({
         {isOrphanSlave && canClose && (
           <button
             onClick={onCloseOrphan}
-            className="px-3 py-2 bg-loss text-white rounded hover:bg-loss-deep text-sm font-medium transition-colors"
+            className="px-3 py-2 bg-loss text-on-accent rounded hover:bg-loss-deep text-sm font-medium transition-colors"
           >
             Close Orphan
           </button>
@@ -375,7 +375,7 @@ function DriftItemRow({
         {isOrphanSlave && canRemedy && (
           <button
             onClick={onAdopt}
-            className="px-3 py-2 bg-brand text-white rounded hover:bg-brand-deep text-sm font-medium transition-colors"
+            className="px-3 py-2 bg-brand text-on-accent rounded hover:bg-brand-deep text-sm font-medium transition-colors"
           >
             Adopt
           </button>

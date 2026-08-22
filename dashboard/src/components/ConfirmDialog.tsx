@@ -126,7 +126,7 @@ export default function ConfirmDialog({
           <button
             onClick={onConfirm}
             disabled={blocked || busy}
-            className={`px-4 py-2 text-sm font-semibold rounded text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+            className={`px-4 py-2 text-sm font-semibold rounded text-on-accent transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
               danger ? 'bg-loss hover:bg-loss-deep' : 'bg-brand hover:bg-brand-deep'
             }`}
           >

@@ -103,7 +103,7 @@ export default function KillSwitch({ settings, onUpdate }: KillSwitchProps) {
         disabled={isLoading}
         className={`px-4 py-2 text-sm font-semibold rounded border transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
           settings.dry_run
-            ? 'bg-warn text-white border-warn hover:opacity-90'
+            ? 'bg-warn text-on-accent border-warn hover:opacity-90'
             : 'bg-card hover:bg-brand-wash text-ink border-line-strong'
         }`}
       >
@@ -112,7 +112,7 @@ export default function KillSwitch({ settings, onUpdate }: KillSwitchProps) {
       <button
         onClick={handleToggleCopying}
         disabled={isLoading}
-        className={`px-5 py-2 text-sm text-white font-bold rounded ${buttonColor} disabled:opacity-50 disabled:cursor-not-allowed transition-colors`}
+        className={`px-5 py-2 text-sm text-on-accent font-bold rounded ${buttonColor} disabled:opacity-50 disabled:cursor-not-allowed transition-colors`}
       >
         {buttonText}
       </button>

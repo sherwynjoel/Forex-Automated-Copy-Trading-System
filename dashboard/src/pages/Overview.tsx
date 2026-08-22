@@ -301,7 +301,7 @@ export default function Overview() {
         <div
           data-testid="refresh-failed-banner"
           role="alert"
-          className="bg-loss text-white p-4 rounded-lg flex items-start gap-3"
+          className="bg-loss text-on-accent p-4 rounded-lg flex items-start gap-3"
         >
           <svg aria-hidden="true" viewBox="0 0 20 20" className="h-6 w-6 shrink-0 mt-0.5">
             <path d="M10 2 1.5 17h17L10 2z" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
@@ -313,7 +313,7 @@ export default function Overview() {
               Token refresh failed for account{refreshFailedAccounts.length > 1 ? 's' : ''}:{' '}
               {refreshFailedAccounts.map((a) => a.trader_login).join(', ')}
             </p>
-            <p className="text-sm mt-1 text-white">
+            <p className="text-sm mt-1 text-on-accent">
               Copying for these accounts will stop when the token expires. Reconnect via
               Accounts &rarr; Connect cTrader ID.
             </p>
@@ -546,7 +546,7 @@ export default function Overview() {
               {can(role, 'trade') && openContracts.length > 0 && (
                 <button
                   onClick={() => setClosingAll(true)}
-                  className="px-3 py-1 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-white transition-colors"
+                  className="px-3 py-1 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-on-accent transition-colors"
                 >
                   Close all shown
                 </button>
@@ -599,7 +599,7 @@ export default function Overview() {
                           ) : (
                           <button
                             onClick={() => setClosingContract(row)}
-                            className="px-3 py-1 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-white transition-colors"
+                            className="px-3 py-1 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-on-accent transition-colors"
                           >
                             Close
                           </button>
@@ -920,7 +920,7 @@ export default function Overview() {
                     onClick={() => handlePauseResume(slave.ctid_trader_account_id, isPaused)}
                     className={`w-full py-2 px-4 rounded text-sm font-semibold transition-colors ${
                       isPaused
-                        ? 'bg-profit text-white hover:bg-profit-deep'
+                        ? 'bg-profit text-on-accent hover:bg-profit-deep'
                         : 'border border-brand text-brand hover:bg-brand-wash hover:text-brand-deep'
                     }`}
                   >

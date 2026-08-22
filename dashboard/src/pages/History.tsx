@@ -497,7 +497,7 @@ export default function History() {
                 onClick={() => setWindowDays(days)}
                 className={`px-3 py-2 text-sm transition-colors ${
                   windowDays === days
-                    ? 'bg-brand text-white font-semibold'
+                    ? 'bg-brand text-on-accent font-semibold'
                     : 'bg-card text-ink-soft hover:text-ink'
                 }`}
               >
@@ -560,7 +560,7 @@ export default function History() {
           <div className="flex items-center gap-3 flex-wrap">
             <button
               onClick={retry}
-              className="px-4 py-2 text-sm font-semibold rounded bg-brand text-white hover:bg-brand-deep transition-colors"
+              className="px-4 py-2 text-sm font-semibold rounded bg-brand text-on-accent hover:bg-brand-deep transition-colors"
             >
               Retry
             </button>
@@ -738,7 +738,7 @@ function MasterGroupsView({
   const retryButton = (
     <button
       onClick={onRetryFleet}
-      className="px-4 py-2 text-sm font-semibold rounded bg-brand text-white hover:bg-brand-deep transition-colors"
+      className="px-4 py-2 text-sm font-semibold rounded bg-brand text-on-accent hover:bg-brand-deep transition-colors"
     >
       Retry fleet
     </button>
@@ -994,7 +994,7 @@ function ClosedPositionsTable({ deals, onDrill, digitsFor, copyMap, onDrillMaste
                     <button
                       onClick={() => onDrillMaster(masterId)}
                       aria-label={`Copy of #${masterId} — view the master position's deals`}
-                      className="block text-[11px] font-medium text-brand-deep bg-brand-wash rounded px-1.5 py-0.5 mt-1 hover:bg-brand hover:text-white transition-colors"
+                      className="block text-[11px] font-medium text-brand-deep bg-brand-wash rounded px-1.5 py-0.5 mt-1 hover:bg-brand hover:text-on-accent transition-colors"
                     >
                       copy of #{masterId}
                     </button>
