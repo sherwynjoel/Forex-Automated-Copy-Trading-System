@@ -762,3 +762,24 @@ def test_trader_updated_event_updates_balance_immediately():
     tracker.on_trader_updated(evt)
 
     assert tracker.snapshot()[2002]["balance"] == pytest.approx(12345.67)
+
+
+def test_live_quotes_names_symbols_and_skips_unknown_ids():
+    """live_quotes() is the ticks feed: symbol NAMES to bid/ask, straight
+    from the in-memory spot store; ids with no cached symbol are dropped
+    rather than leaking numeric ids to the dashboard."""
+    sdk, clock = StubSdk(), Clock()
+    client = CTraderClient(sdk, "cid", "csecret", clock=clock)
+    client.start()
+    sdk.connect()
+
+    class MockRepo:
+        pass
+
+    symbols = {1: SymbolInfo(symbol_id=1, name="EURUSD", digits=5,
+                            lot_size=10_000_000, min_volume=100_000, step_volume=100_000)}
+    tracker = AccountStateTracker(client, MockRepo(), 1001, symbols)
+    tracker._spots[1] = (1.10600, 1.10620)
+    tracker._spots[99] = (5.0, 6.0)  # no symbol info cached
+
+    assert tracker.live_quotes() == {"EURUSD": {"bid": 1.10600, "ask": 1.10620}}

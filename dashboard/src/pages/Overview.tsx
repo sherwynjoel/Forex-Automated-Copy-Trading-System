@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { orgApi } from '../lib/api'
 import { useOrg } from '../lib/org'
@@ -16,6 +16,7 @@ import { money, signed, formatWhen, errorText } from '../lib/format'
 import { cumulativeSeries, drawdownSeries, dailyPnl } from '../lib/perf'
 import { actionBurst } from '../lib/refresh'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
+import { mergeTicksIntoSnapshot, TicksPayload } from '../lib/ticks'
 
 /**
  * Fetch GET orgs/{orgId}/state once and hand back both the envelope and its
@@ -108,8 +109,28 @@ export default function Overview() {
     return () => clearInterval(interval)
   }, [refreshState])
 
-  // Refetch immediately when a trade event streams in (5s poll is fallback)
-  useLiveRefresh(refreshState, orgId)
+  // Refetch immediately when a trade event streams in (5s poll is
+  // fallback); quotes ticks fold into the snapshot in place instead.
+  useLiveRefresh(refreshState, orgId, (evt) => {
+    if (evt?.category !== 'quotes') return
+    const ticks = (evt.payload as TicksPayload | undefined)?.accounts
+    if (!ticks) return
+    setState((prev) => mergeTicksIntoSnapshot(prev, ticks))
+    setEnvelope((prev) => {
+      if (!prev) return prev
+      const base = prev.accounts ?? {}
+      const merged = mergeTicksIntoSnapshot(base, ticks)
+      return merged === base ? prev : { ...prev, accounts: merged }
+    })
+  })
+
+  // The chart inputs only change when the analytics payload does; the
+  // quotes stream re-renders this page ~2x/sec, so deriving them without
+  // memo would rebuild three SVG charts per tick for nothing.
+  const curve = useMemo(() => copierPerf?.equity_curve ?? [], [copierPerf])
+  const cumSeries = useMemo(() => cumulativeSeries(curve), [curve])
+  const ddSeries = useMemo(() => drawdownSeries(curve), [curve])
+  const dailySeries = useMemo(() => dailyPnl(curve), [curve])
 
   // This desk's copier performance = ITS master's realized results (that is
   // what its slaves mirror). Fetched once per mount; heavier than /state.
@@ -262,7 +283,6 @@ export default function Overview() {
   // Window P&L = last balance minus the balance before the window's first
   // trade; when the window opens the curve, the first trade's own P&L is
   // unknowable from balance-after alone and is excluded.
-  const curve = copierPerf?.equity_curve ?? []
   const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0)
   const monday = new Date(dayStart)
   monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7))
@@ -277,7 +297,6 @@ export default function Overview() {
   }
   const today = windowStats(dayStart.getTime())
   const thisWeek = windowStats(monday.getTime())
-  const ddSeries = drawdownSeries(curve)
   const currentDrawdown = ddSeries.length ? ddSeries[ddSeries.length - 1].v : 0
 
   // Live P&L per master position, for estimating each active copy's P&L.
@@ -678,7 +697,7 @@ export default function Overview() {
                 <h3 className="desk-label mb-2">Cumulative P&L</h3>
                 <div className="my-auto">
                   <PerfLine
-                    points={cumulativeSeries(curve)}
+                    points={cumSeries}
                     label={`Cumulative P&L across ${copierPerf.closed_trades} closed trades`}
                     chart="cumulative-pnl"
                   />
@@ -711,7 +730,7 @@ export default function Overview() {
                 <h3 className="desk-label mb-2">P&L by day</h3>
                 <div className="my-auto">
                   <PerfBars
-                    bars={dailyPnl(curve)}
+                    bars={dailySeries}
                     label="Net P&L per trading day"
                     chart="daily-pnl"
                   />

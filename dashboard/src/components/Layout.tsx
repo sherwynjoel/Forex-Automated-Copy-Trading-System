@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useState, useRef } from 'react'
 import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom'
 import { api, orgApi } from '../lib/api'
 import { useOrg } from '../lib/org'
 import { useTheme } from '../hooks/useTheme'
 import { can, type Role } from '../lib/roles'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
+import type { TicksPayload } from '../lib/ticks'
 import type { Account, ApiState, CloseAllResult, EventResponse, Settings } from '../lib/types'
 import ConfirmDialog from './ConfirmDialog'
 import Logo from './Logo'
@@ -43,6 +44,7 @@ function DeskStrip() {
   const { orgId, role } = useOrg()
   const [settings, setSettings] = useState<Settings | null>(null)
   const [masterState, setMasterState] = useState<{ equity?: number | null; open_pnl?: number } | null>(null)
+  const masterIdRef = useRef<number | null>(null)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<{ kind: 'notice' | 'error'; text: string } | null>(null)
@@ -60,6 +62,7 @@ function DeskStrip() {
       ])
       setSettings(sett)
       const master = accounts.find((a) => a.role === 'master')
+      masterIdRef.current = master?.ctid_trader_account_id ?? null
       setMasterState(
         master ? state.accounts?.[String(master.ctid_trader_account_id)] ?? null : null)
     } catch {
@@ -102,7 +105,13 @@ function DeskStrip() {
     return () => clearInterval(interval)
   }, [refresh])
 
-  useLiveRefresh(refresh, orgId)
+  useLiveRefresh(refresh, orgId, (evt) => {
+    // The strip's equity/open P&L tick live off the quotes stream.
+    if (evt?.category !== 'quotes' || masterIdRef.current == null) return
+    const snap = (evt.payload as TicksPayload | undefined)
+      ?.accounts?.[String(masterIdRef.current)]
+    if (snap) setMasterState({ equity: snap.equity, open_pnl: snap.open_pnl })
+  })
 
   const handleCloseAll = async () => {
     try {

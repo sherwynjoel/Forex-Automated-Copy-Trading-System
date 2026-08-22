@@ -58,7 +58,11 @@ export function useLiveRefresh(
       ws.onmessage = (event) => {
         try {
           const evt = JSON.parse(event.data) as LiveEvent
-          onEventRef.current?.(evt)
+          try {
+            onEventRef.current?.(evt)
+          } catch {
+            // A consumer handler bug must never block the refetch path.
+          }
           if (evt.category && REFRESH_CATEGORIES.has(evt.category)) {
             scheduleRefetch()
           }

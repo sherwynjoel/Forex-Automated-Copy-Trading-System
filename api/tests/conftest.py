@@ -77,6 +77,11 @@ def default_mock_callback(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json={"action": "completed"})
         elif "/dry-run" in url:
             return httpx.Response(200, json={"status": "ok"})
+        elif "/ticks" in url:
+            # Non-200 so the api's quotes ticker stays silent: a generic 200
+            # here would broadcast a bogus category='quotes' frame into every
+            # lifespan-enabled WebSocket test within 0.4s of connecting.
+            return httpx.Response(404, json={"detail": "no ticks in tests"})
         else:
             # Default copier response
             return httpx.Response(200, json={"status": "ok"})

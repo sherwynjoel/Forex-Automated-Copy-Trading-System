@@ -1,4 +1,4 @@
-import { ReactNode, useEffect, useRef, useState } from 'react'
+import { ReactNode, memo, useEffect, useRef, useState } from 'react'
 import { signed as signedFmt } from '../lib/format'
 import type { SeriesPoint } from '../lib/perf'
 
@@ -397,7 +397,7 @@ export function CandleChart({ bars, lines = [], height = 300, digits = 5 }: {
  * red-to-green meter; the number carries the value, the color is a
  * reinforcement (never the only encoding).
  */
-export function MirrorScore({ winRate, avgWin, avgLoss, profitFactor, large = false }: {
+function MirrorScoreImpl({ winRate, avgWin, avgLoss, profitFactor, large = false }: {
   winRate: number | null
   avgWin: number | null
   avgLoss: number | null
@@ -502,7 +502,7 @@ const tickFmt = (v: number) => {
  * date labels, and the standard hover readout — used for cumulative P&L and
  * drawdown curves.
  */
-export function PerfLine({ points, tone = 'brand', label, chart, height = 150 }: {
+function PerfLineImpl({ points, tone = 'brand', label, chart, height = 150 }: {
   points: SeriesPoint[]
   tone?: 'brand' | 'loss'
   label: string
@@ -598,7 +598,7 @@ export function PerfLine({ points, tone = 'brand', label, chart, height = 150 }:
  * baseline (sign is position, not just color), labeled y-axis, dates, and
  * the standard hover readout.
  */
-export function PerfBars({ bars, label, chart, height = 150 }: {
+function PerfBarsImpl({ bars, label, chart, height = 150 }: {
   bars: SeriesPoint[]
   label: string
   chart: string
@@ -677,3 +677,9 @@ export function PerfBars({ bars, label, chart, height = 150 }: {
     </div>
   )
 }
+
+// The perf charts re-render only when their (memoized) inputs change --
+// the quotes stream repaints the pages around them ~2x/sec.
+export const MirrorScore = memo(MirrorScoreImpl)
+export const PerfLine = memo(PerfLineImpl)
+export const PerfBars = memo(PerfBarsImpl)

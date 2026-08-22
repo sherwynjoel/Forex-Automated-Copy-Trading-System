@@ -531,6 +531,41 @@ test('a broker order rejection streams into the order-error banner', async () =>
   expect(alert).toHaveTextContent(/market is closed/i)
 })
 
+test('a quotes tick moves the ticket prices and position marks in place', async () => {
+  setRole('trader')
+  const fetchMock = mockRoutes()
+  renderTrade()
+  await screen.findByLabelText(/symbol/i)
+  await screen.findByText('+4.20') // the open position row rendered
+
+  const callsBefore = fetchMock.mock.calls.length
+  const ws = fakeSockets[fakeSockets.length - 1]
+  act(() => {
+    ws.onmessage?.({
+      data: JSON.stringify({
+        category: 'quotes',
+        payload: {
+          quotes: { EURUSD: { bid: 1.11101, ask: 1.11113 } },
+          accounts: {
+            '100': {
+              equity: 10009.9, open_pnl: 9.9,
+              positions: [{ position_id: 7001, symbol: 'EURUSD',
+                            current_price: 1.11101, pnl_quote: 9.9 }],
+            },
+          },
+        },
+      }),
+    })
+  })
+
+  // Ticket buttons show the streamed bid/ask; the row's Current and Live
+  // P&L move with it -- all without a single refetch.
+  expect(await screen.findByText('1.11113')).toBeInTheDocument() // buy = ask
+  expect(screen.getByText('1.11101', { selector: 'td' })).toBeInTheDocument()
+  expect(screen.getByText('+9.90')).toBeInTheDocument()
+  expect(fetchMock.mock.calls.length).toBe(callsBefore)
+})
+
 test('a pinned default symbol wins over the first cached symbol', async () => {
   localStorage.setItem('mf.defaultSymbol.1.100', 'GBPUSD')
   setRole('trader')

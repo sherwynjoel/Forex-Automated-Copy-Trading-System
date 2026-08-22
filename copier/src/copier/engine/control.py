@@ -191,6 +191,19 @@ class StateResource(_JsonResource):
         return self.app.get_state(org_id)
 
 
+class TicksResource(_JsonResource):
+    """GET /ticks?org_id=N: live quotes + per-account marks, in-memory only.
+
+    The api polls this several times a second for orgs with dashboard
+    sockets open and pushes changed payloads down the events WebSocket as
+    category='quotes' -- see api ws.EventBroadcaster.start_ticker.
+    """
+
+    def _handle(self, request, body):
+        org_id = _int_arg(request, b"org_id")
+        return self.app.get_ticks(org_id)
+
+
 class PauseResource(_JsonResource):
     """POST /pause: pause copying for an org, or one of its slaves."""
 
@@ -501,6 +514,7 @@ class RootResource(resource.Resource):
         self.app = app
         self.putChild(b"health", HealthResource(app))
         self.putChild(b"state", StateResource(app))
+        self.putChild(b"ticks", TicksResource(app))
         self.putChild(b"pause", PauseResource(app))
         self.putChild(b"resume", ResumeResource(app))
         self.putChild(b"resync", ResyncResource(app))

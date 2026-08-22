@@ -68,6 +68,10 @@ def create_app(http_transport: Optional[httpx.BaseTransport] = None) -> FastAPI:
         # Set DSN and start listener task immediately
         broadcaster.dsn = cfg.postgres_dsn
         broadcaster.listener_task = asyncio.create_task(broadcaster.start_listener(cfg.postgres_dsn))
+        # Live-price relay: pushes the copier's in-memory quotes down the
+        # same sockets as category='quotes' whenever anyone is watching.
+        broadcaster.ticker_task = asyncio.create_task(
+            broadcaster.start_ticker(cfg.copier_control_url, app.state.http))
 
         yield
 

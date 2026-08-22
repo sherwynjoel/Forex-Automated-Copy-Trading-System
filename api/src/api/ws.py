@@ -1,5 +1,6 @@
 """WebSocket handlers and event broadcaster."""
 import asyncio
+import json
 import logging
 
 import psycopg
@@ -22,12 +23,23 @@ class EventBroadcaster:
     that org's events.
     """
 
+    # How often the ticks relay polls the copier per watched org. The
+    # copier endpoint is in-memory only, so this is a couple of local HTTP
+    # round trips per second -- and zero when no dashboard socket is open.
+    TICK_INTERVAL_S = 0.4
+
     def __init__(self):
         # ws -> user_id, per org. Tracking the user per socket lets us close
         # a specific member's sockets on membership revocation (see
         # close_for) without touching the rest of the org's connections.
         self.connections: dict[int, dict[WebSocket, int]] = {}
         self.listener_task = None
+        self.ticker_task = None
+        # Last quotes frame broadcast per org (raw body). Kept on the
+        # instance so connect() can replay it: in a quiet market the ticker
+        # suppresses unchanged frames org-wide, and without the replay a
+        # late-joining socket would see no quotes at all until a price moves.
+        self._last_ticks: dict[int, str] = {}
         self.listener_connection: AsyncConnection = None
         self.query_connection: AsyncConnection = None
         self.dsn = None
@@ -50,6 +62,18 @@ class EventBroadcaster:
         if ws.application_state != WebSocketState.CONNECTED:
             await ws.accept()
         self.connections.setdefault(org_id, {})[ws] = user_id
+        # Hand the newcomer the org's current quotes immediately; the
+        # ticker only broadcasts CHANGES, which a flat market never has.
+        cached = self._last_ticks.get(org_id)
+        if cached is not None:
+            try:
+                await ws.send_json({
+                    "category": "quotes",
+                    "org_id": org_id,
+                    "payload": json.loads(cached),
+                })
+            except Exception as e:
+                logger.debug("initial quotes replay failed: %s", e)
 
     def disconnect(self, ws: WebSocket, org_id: int):
         """Remove a WebSocket connection from its org."""
@@ -177,8 +201,66 @@ class EventBroadcaster:
                 self.listener_connection = None
             self.listener_task = None
 
+    async def start_ticker(self, copier_url: str, client):
+        """Relay live prices: poll the copier's in-memory /ticks endpoint
+        for every org that currently has a dashboard socket open, and
+        broadcast each CHANGED payload as a category='quotes' message.
+
+        Unchanged payloads are suppressed (markets close, books go flat),
+        orgs nobody is watching are never polled, and copier hiccups are
+        retried on the next round rather than killing the loop. The
+        browser treats 'quotes' as an in-place update -- it never triggers
+        a refetch -- so this loop is the whole cost of live prices.
+        """
+        last = self._last_ticks
+        while True:
+            active = [org for org, socks in self.connections.items() if socks]
+            for org_id in list(last):
+                if org_id not in active:
+                    # Forget the org: nobody is watching, and connect()'s
+                    # replay must not serve a long-stale frame later.
+                    last.pop(org_id, None)
+            for org_id in active:
+                try:
+                    # Sub-second timeout: this is an in-memory read over the
+                    # local docker network, and a hung copier must not stall
+                    # every other org's freshness for httpx's default 5s.
+                    r = await client.get(
+                        f"{copier_url}/ticks", params={"org_id": org_id},
+                        timeout=1.5)
+                    if r.status_code != 200:
+                        continue
+                    body = r.text
+                    if last.get(org_id) == body:
+                        continue
+                    payload = r.json()  # parse BEFORE marking as sent
+                    await self.broadcast(org_id, {
+                        "category": "quotes",
+                        "org_id": org_id,
+                        "payload": payload,
+                    })
+                    # Only after a successful parse+send: a frame marked
+                    # sent but never delivered would be suppressed forever.
+                    last[org_id] = body
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    # Copier restarting or unreachable: retry next round,
+                    # but leave a trace so a PERSISTENT failure (bad
+                    # COPIER_CONTROL_URL) is diagnosable.
+                    logger.debug("ticks poll failed for org %s: %s", org_id, e)
+                    continue
+            await asyncio.sleep(self.TICK_INTERVAL_S)
+
     async def stop_listener(self):
-        """Stop the listener task and clean up."""
+        """Stop the listener and ticker tasks and clean up."""
+        if self.ticker_task:
+            self.ticker_task.cancel()
+            try:
+                await self.ticker_task
+            except asyncio.CancelledError:
+                pass
+            self.ticker_task = None
         if self.listener_task:
             self.listener_task.cancel()
             try:

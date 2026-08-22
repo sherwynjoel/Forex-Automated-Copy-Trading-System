@@ -5,6 +5,7 @@ import { useOrg } from '../lib/org'
 import Banner from '../components/Banner'
 import { can } from '../lib/roles'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
+import { mergeTicksIntoApiState, TicksPayload } from '../lib/ticks'
 
 export default function Positions() {
   const { orgId, role } = useOrg()
@@ -31,7 +32,14 @@ export default function Positions() {
   }, [orgId])
 
   // Refetch immediately when a trade event streams in (5s poll is fallback)
-  useLiveRefresh(fetchState, orgId)
+  useLiveRefresh(fetchState, orgId, (evt) => {
+    // Quotes ticks update marks and P&L in place; structural changes
+    // still arrive through the refetch path above.
+    if (evt?.category !== 'quotes') return
+    const ticks = (evt.payload as TicksPayload | undefined)?.accounts
+    if (!ticks) return
+    setState((prev) => (prev ? mergeTicksIntoApiState(prev, ticks) : prev))
+  })
 
   const handleCloseOrphan = async (driftId: string) => {
     if (!window.confirm('Close this orphan position?')) return

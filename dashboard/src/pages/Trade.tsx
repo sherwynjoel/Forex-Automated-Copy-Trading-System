@@ -4,6 +4,7 @@ import { actionBurst } from '../lib/refresh'
 import { useOrg } from '../lib/org'
 import { can } from '../lib/roles'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
+import type { TicksPayload } from '../lib/ticks'
 import type {
   Account, AccountDetails, ApiState, MarginEstimate, OpenPosition, TradeSymbol,
   Trendbars, WorkingOrder,
@@ -153,6 +154,28 @@ export default function Trade() {
   // Broker order rejections stream in as control events; without this a
   // weekend MARKET_CLOSED order looked exactly like success.
   useLiveRefresh(loadAccountData, orgId, (evt) => {
+    // Live quotes stream in ~2x/sec: fold them straight into the ticket
+    // quote and the per-position marks -- no refetch involved.
+    if (evt?.category === 'quotes') {
+      const payload = evt.payload as TicksPayload | undefined
+      const q = payload?.quotes?.[ticket.symbol]
+      if (q && (q.bid != null || q.ask != null)) setQuote({ bid: q.bid, ask: q.ask })
+      const snap = accountId != null ? payload?.accounts?.[String(accountId)] : undefined
+      if (snap?.positions) {
+        const ticked = snap.positions
+        setLivePnl((prev) => {
+          const next = { ...prev }
+          for (const p of ticked) next[p.position_id] = p.pnl_quote ?? null
+          return next
+        })
+        setLivePrice((prev) => {
+          const next = { ...prev }
+          for (const p of ticked) next[p.position_id] = p.current_price ?? null
+          return next
+        })
+      }
+      return
+    }
     if (evt?.category === 'control' && evt?.payload?.action === 'order_rejected') {
       const code = String(evt.payload.error_code ?? 'UNKNOWN')
       setOrderError(code === 'MARKET_CLOSED'
@@ -181,7 +204,15 @@ export default function Trade() {
         const q = await orgApi<{ bid: number | null; ask: number | null }>(
           orgId,
           `accounts/${accountId}/quote?symbol=${encodeURIComponent(ticket.symbol)}`)
-        if (!cancelled) setQuote(q)
+        if (!cancelled) {
+          // Never let a slower poll blank a price the stream just painted
+          // (a fresh subscription answers nulls for its first beat).
+          setQuote((prev) =>
+            q.bid == null && q.ask == null && prev != null
+            && (prev.bid != null || prev.ask != null)
+              ? prev
+              : q)
+        }
       } catch {
         // A quote is a nicety; the next poll retries.
       }

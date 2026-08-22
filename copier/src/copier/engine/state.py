@@ -94,6 +94,10 @@ class AccountStateTracker:
         self._balance_known: dict[int, bool] = {}  # account_id -> whether balance has been refreshed
         self._positions: dict[int, list[PositionSnapshot]] = {}  # account_id -> positions
         self._spots: dict[int, tuple[float, float]] = {}  # symbol_id -> (bid, ask)
+        # Positions already warned about for a missing symbol: snapshot()
+        # runs several times a second on the ticks path, and repeating the
+        # warning per call would be ~200k log lines a day per bad position.
+        self._warned_unknown_symbols: set[tuple[int, int]] = set()
         # Symbol ids already subscribed on the CURRENT connection. Without
         # this memory, every resync tick re-sent the full subscription and
         # the broker rejected the repeats with ALREADY_SUBSCRIBED (one per
@@ -316,6 +320,20 @@ class AccountStateTracker:
         ask = evt.ask / SPOT_PRICE_SCALE if evt.HasField('ask') else prev_ask
         self._spots[evt.symbolId] = (bid, ask)
 
+    def live_quotes(self) -> dict[str, dict[str, float]]:
+        """Live bid/ask per symbol NAME from the in-memory spot store.
+
+        This is the dashboard ticks feed: no DB, no broker round trips,
+        safe to read several times a second. Ids without a cached symbol
+        are skipped -- numeric ids mean nothing to the UI.
+        """
+        out: dict[str, dict[str, float]] = {}
+        for symbol_id, (bid, ask) in self._spots.items():
+            info = self._symbols_by_id.get(symbol_id)
+            if info is not None:
+                out[info.name] = {"bid": bid, "ask": ask}
+        return out
+
     def snapshot(self) -> dict[int, dict[str, Any]]:
         """Return current state snapshot.
 
@@ -338,11 +356,15 @@ class AccountStateTracker:
             for pos in positions:
                 # Verify symbol_id is in our symbols_by_id
                 if pos.symbol_id not in self._symbols_by_id:
-                    # Log warning but surface the position with unknown P&L
-                    log.warning(
-                        "position %s references unknown symbol_id %s; "
-                        "P&L cannot be calculated", pos.position_id, pos.symbol_id
-                    )
+                    # Log warning (once per position) but surface it with
+                    # unknown P&L
+                    warn_key = (pos.position_id, pos.symbol_id)
+                    if warn_key not in self._warned_unknown_symbols:
+                        self._warned_unknown_symbols.add(warn_key)
+                        log.warning(
+                            "position %s references unknown symbol_id %s; "
+                            "P&L cannot be calculated", pos.position_id, pos.symbol_id
+                        )
                     positions_list.append({
                         "position_id": pos.position_id,
                         "symbol_id": pos.symbol_id,

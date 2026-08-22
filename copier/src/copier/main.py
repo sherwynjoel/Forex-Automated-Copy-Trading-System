@@ -1339,6 +1339,34 @@ class CopierApp:
             })
         return {"status": "ok", "orgs": orgs}
 
+    def get_ticks(self, org_id: int) -> dict:
+        """Live quotes and per-account marks for one org: everything the
+        dashboard needs to tick prices in place between full refreshes.
+
+        In-memory reads ONLY (the spot store and the tracker snapshot):
+        no database, no broker round trips -- the api polls this several
+        times a second while dashboard sockets are open. Deliberately no
+        org validation either (unlike get_state): the api only polls orgs
+        whose sockets already passed membership auth, and a DB read here
+        would defeat the endpoint's point. Unknown org answers empty.
+        """
+        tracker = self.state_trackers.get(org_id)
+        if tracker is None:
+            return {"quotes": {}, "accounts": {}}
+        accounts = {}
+        for account_id, snap in tracker.snapshot().items():
+            accounts[str(account_id)] = {
+                "equity": snap["equity"],
+                "open_pnl": snap["open_pnl"],
+                "positions": [
+                    {"position_id": p["position_id"], "symbol": p["symbol"],
+                     "current_price": p["current_price"],
+                     "pnl_quote": p["pnl_quote"]}
+                    for p in snap["positions"]
+                ],
+            }
+        return {"quotes": tracker.live_quotes(), "accounts": accounts}
+
     def get_state(self, org_id: int) -> dict:
         """Read model behind GET /state (and, proxied, GET /api/state).
 

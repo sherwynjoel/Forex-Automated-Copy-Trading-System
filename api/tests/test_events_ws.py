@@ -556,3 +556,130 @@ class TestStaticServing:
         response = client.get("/api/login")
         # Should get a response (200 or error), not a 500
         assert response.status_code != 500
+
+
+class TestQuotesTicker:
+    """The live-price relay: poll the copier's /ticks for orgs with open
+    sockets and push CHANGED payloads as category='quotes' messages."""
+
+    def test_ticker_polls_only_watched_orgs_and_suppresses_repeats(self):
+        from api.ws import EventBroadcaster
+
+        b = EventBroadcaster()
+        b.TICK_INTERVAL_S = 0  # spin instantly in the test
+
+        sent = []
+
+        async def fake_broadcast(org_id, message):
+            sent.append((org_id, message))
+
+        b.broadcast = fake_broadcast
+        b.connections = {1: {object(): 7}, 2: {}}  # org 2: nobody watching
+
+        bodies = ['{"quotes": {"EURUSD": {"bid": 1.1, "ask": 1.2}}, "accounts": {}}',
+                  '{"quotes": {"EURUSD": {"bid": 1.1, "ask": 1.2}}, "accounts": {}}',
+                  '{"quotes": {"EURUSD": {"bid": 1.3, "ask": 1.4}}, "accounts": {}}']
+
+        class FakeResponse:
+            def __init__(self, text):
+                self.status_code = 200
+                self.text = text
+
+            def json(self):
+                return json.loads(self.text)
+
+        class FakeClient:
+            def __init__(self):
+                self.calls = []
+
+            async def get(self, url, params=None, **kwargs):
+                self.calls.append((url, dict(params)))
+                return FakeResponse(bodies[min(len(self.calls) - 1, len(bodies) - 1)])
+
+        client = FakeClient()
+
+        async def run():
+            task = asyncio.create_task(
+                b.start_ticker("http://copier:8080", client))
+            for _ in range(500):
+                await asyncio.sleep(0)
+                if len(client.calls) >= 3:
+                    break
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        asyncio.run(run())
+
+        # Only org 1 (which has a socket) was ever polled.
+        assert all(params == {"org_id": 1} for _, params in client.calls)
+        assert all(url == "http://copier:8080/ticks" for url, _ in client.calls)
+        # First payload and the changed third one broadcast; the identical
+        # second one suppressed.
+        assert len(sent) == 2
+        org_id, first = sent[0]
+        assert org_id == 1
+        assert first["category"] == "quotes"
+        assert first["payload"]["quotes"]["EURUSD"] == {"bid": 1.1, "ask": 1.2}
+        assert sent[1][1]["payload"]["quotes"]["EURUSD"] == {"bid": 1.3, "ask": 1.4}
+
+    def test_a_new_socket_replays_the_cached_quotes_frame(self):
+        from api.ws import EventBroadcaster
+        from starlette.websockets import WebSocketState
+
+        b = EventBroadcaster()
+        b._last_ticks[1] = '{"quotes": {"EURUSD": {"bid": 1.1, "ask": 1.2}}, "accounts": {}}'
+
+        received = []
+
+        class FakeWS:
+            application_state = WebSocketState.CONNECTED
+
+            async def send_json(self, message):
+                received.append(message)
+
+        asyncio.run(b.connect(FakeWS(), 1, 7))
+
+        assert len(received) == 1
+        assert received[0]["category"] == "quotes"
+        assert received[0]["payload"]["quotes"]["EURUSD"] == {"bid": 1.1, "ask": 1.2}
+
+        # An org with no cached frame stays silent on connect.
+        received.clear()
+        asyncio.run(b.connect(FakeWS(), 2, 7))
+        assert received == []
+
+    def test_ticker_survives_copier_errors(self):
+        from api.ws import EventBroadcaster
+
+        b = EventBroadcaster()
+        b.TICK_INTERVAL_S = 0
+        b.connections = {1: {object(): 7}}
+
+        class ExplodingClient:
+            def __init__(self):
+                self.calls = 0
+
+            async def get(self, url, params=None, **kwargs):
+                self.calls += 1
+                raise RuntimeError("copier restarting")
+
+        client = ExplodingClient()
+
+        async def run():
+            task = asyncio.create_task(
+                b.start_ticker("http://copier:8080", client))
+            for _ in range(500):
+                await asyncio.sleep(0)
+                if client.calls >= 3:
+                    break
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        asyncio.run(run())
+        assert client.calls >= 3  # kept retrying, never died

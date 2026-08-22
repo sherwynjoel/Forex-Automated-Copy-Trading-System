@@ -1979,3 +1979,32 @@ def test_request_resync_debounces_a_burst_into_one_resync(db, fernet_key):
     app.request_resync()
     clock.advance(main.RESYNC_DEBOUNCE_S)
     assert calls == [1, 1]                 # a later event fires again
+
+
+def test_get_ticks_serves_quotes_and_marks_from_memory(repo, token_store):
+    """get_ticks is the live feed the api polls several times a second: the
+    org's spot quotes by symbol name plus per-account equity/P&L/position
+    marks -- all from the in-memory tracker, and an unknown or engine-less
+    org answers empty rather than raising (the api only polls orgs whose
+    sockets were already authorized)."""
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    symbol = _seed_symbol_cache(repo, [MASTER_A])
+    app.master_symbols_by_org[ORG_A][symbol.symbol_id] = symbol
+    app.state_trackers[ORG_A].set_positions(MASTER_A, [
+        main.StatePositionSnapshot(position_id=42, symbol_id=1, side=Side.BUY,
+                                   volume=10_000_000, price=1.10500, label="copy:m42")
+    ])
+    app.state_trackers[ORG_A]._spots[1] = (1.10600, 1.10620)
+
+    ticks = app.get_ticks(ORG_A)
+
+    assert ticks["quotes"]["EURUSD"] == {"bid": 1.10600, "ask": 1.10620}
+    acct = ticks["accounts"][str(MASTER_A)]
+    assert acct["open_pnl"] == pytest.approx(100.0)
+    pos = acct["positions"][0]
+    assert pos["position_id"] == 42
+    assert pos["symbol"] == "EURUSD"
+    assert pos["current_price"] == pytest.approx(1.10600)
+    assert pos["pnl_quote"] == pytest.approx(100.0)
+
+    assert app.get_ticks(999999) == {"quotes": {}, "accounts": {}}
