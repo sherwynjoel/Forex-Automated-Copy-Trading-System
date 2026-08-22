@@ -191,14 +191,27 @@ test('the margin and candle reads are org-scoped', async () => {
   })
 })
 
-test('renders the price chart for the selected symbol', async () => {
+test('the trade page carries no chart', async () => {
   mockRoutes()
   const { container } = renderTrade()
 
   await screen.findByLabelText(/symbol/i)
-  await waitFor(() => {
-    expect(container.querySelector('[data-chart="candles"] svg')).toBeTruthy()
-  })
+  // The desk is the ticket and the book; the candle chart was removed.
+  expect(container.querySelector('[data-chart="candles"]')).toBeNull()
+  expect(screen.queryByRole('button', { name: /^H1$/ })).not.toBeInTheDocument()
+})
+
+test('a closed market still shows the last close as a reference price', async () => {
+  setRole('trader')
+  // No live quote: exactly the weekend case the reference exists for.
+  mockRoutes({ quote: { bid: null, ask: null } })
+  renderTrade()
+
+  await screen.findByLabelText(/symbol/i)
+  // Sourced from the last trendbar, and labelled as indicative rather
+  // than dressed up as a live price.
+  expect(await screen.findByText(/Last close 1\.11000 · indicative/))
+    .toBeInTheDocument()
 })
 
 test('placing a market order POSTs /api/orgs/1/orders in one click, no dialog', async () => {

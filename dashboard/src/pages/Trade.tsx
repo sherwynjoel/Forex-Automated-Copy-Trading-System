@@ -13,14 +13,11 @@ import { Link } from 'react-router-dom'
 import Banner from '../components/Banner'
 import ConfirmDialog from '../components/ConfirmDialog'
 import SearchSelect from '../components/SearchSelect'
-import { CandleChart, PriceLine } from '../components/charts'
 
-const CHART_PERIODS = ['M5', 'M15', 'H1', 'H4', 'D1'] as const
-const PERIOD_MS: Record<string, number> = {
-  M5: 5 * 60_000, M15: 15 * 60_000, H1: 3_600_000,
-  H4: 4 * 3_600_000, D1: 24 * 3_600_000,
-}
-const CHART_BARS = 120
+// Only used to recover a last-known price when the market is shut and no
+// live quote exists; two H1 bars is plenty.
+const LAST_CLOSE_PERIOD = 'H1'
+const LAST_CLOSE_LOOKBACK_MS = 4 * 3_600_000
 
 type Side = 'BUY' | 'SELL'
 type OrderType = 'MARKET' | 'LIMIT' | 'STOP'
@@ -87,8 +84,11 @@ export default function Trade() {
   const [orderError, setOrderError] = useState<string | null>(null)
   const [quote, setQuote] = useState<{ bid: number | null; ask: number | null } | null>(null)
   const [margin, setMargin] = useState<MarginEstimate | null>(null)
-  const [chartPeriod, setChartPeriod] = useState<string>('H1')
-  const [chart, setChart] = useState<Trendbars | null>(null)
+  // Last closed bar for the ticket's symbol, kept only as the reference
+  // price the order summary falls back to when the market is closed and
+  // there is no live quote. Carries its symbol so a stale one from the
+  // previous selection can never be shown against the new symbol.
+  const [lastBar, setLastBar] = useState<{ symbol: string; close: number } | null>(null)
   // Bumped whenever the pinned default changes, so the pin button re-renders.
   const [, setPinVersion] = useState(0)
 
@@ -251,28 +251,33 @@ export default function Trade() {
     return () => clearTimeout(timer)
   }, [orgId, accountId, ticket.symbol, ticket.volumeLots])
 
-  // Price chart for the ticket's symbol; refreshed on a slow poll.
-  const loadChart = useCallback(async () => {
+  // A closed market has no bid/ask, so the ticket would otherwise show the
+  // order summary with no price at all. One cheap lookup keeps an honest,
+  // clearly-labelled reference in front of the trader.
+  const loadLastClose = useCallback(async () => {
     if (accountId == null || !ticket.symbol) return
-    const periodMs = PERIOD_MS[chartPeriod] ?? 3_600_000
     const to = Date.now()
-    const from = to - CHART_BARS * periodMs
     try {
-      setChart(await orgApi<Trendbars>(
+      const bars = await orgApi<Trendbars>(
         orgId,
         `accounts/${accountId}/trendbars` +
-        `?symbol=${encodeURIComponent(ticket.symbol)}&period=${chartPeriod}` +
-        `&from=${from}&to=${to}`))
+        `?symbol=${encodeURIComponent(ticket.symbol)}&period=${LAST_CLOSE_PERIOD}` +
+        `&from=${to - LAST_CLOSE_LOOKBACK_MS}&to=${to}`)
+      const last = bars?.bars?.[bars.bars.length - 1]
+      // A bar without a close is not a price; say nothing rather than 0.
+      setLastBar(last?.close != null && bars.symbol
+        ? { symbol: bars.symbol, close: last.close } : null)
     } catch {
-      setChart(null)
+      setLastBar(null)
     }
-  }, [orgId, accountId, ticket.symbol, chartPeriod])
+  }, [orgId, accountId, ticket.symbol])
 
   useEffect(() => {
-    loadChart()
-    const interval = setInterval(loadChart, 15000)
+    loadLastClose()
+    // Slow on purpose: a closed market's last bar does not move.
+    const interval = setInterval(loadLastClose, 60_000)
     return () => clearInterval(interval)
-  }, [loadChart])
+  }, [loadLastClose])
   const selectedSymbol = symbols.find((s) => s.name === ticket.symbol)
 
   const numOrNull = (raw: string): number | null => {
@@ -385,9 +390,9 @@ export default function Trade() {
 
   const priceDigits = selectedSymbol?.digits ?? 5
   // Only this symbol's bars may stand in as a reference price: right after a
-  // symbol switch, `chart` still holds the previous symbol for a moment.
-  const lastClose = chart?.symbol === ticket.symbol && chart.bars?.length
-    ? chart.bars[chart.bars.length - 1].close
+  // symbol switch, `lastBar` still holds the previous symbol for a moment.
+  const lastClose = lastBar?.symbol === ticket.symbol
+    ? lastBar.close
     : null
   const liveQuote = quote?.bid != null && quote?.ask != null
 
@@ -706,7 +711,7 @@ export default function Trade() {
           )}
         </section>
 
-        {/* Chart + live positions + working orders for the selected account */}
+        {/* Live positions + working orders for the selected account */}
         <section className="lg:col-span-2 space-y-6">
           <div className="bg-card rounded-lg border border-line">
             <div className="px-5 py-3 border-b border-line flex items-baseline justify-between">
@@ -842,53 +847,7 @@ export default function Trade() {
               </div>
             )}
           </div>
-
         </section>
-      </div>
-
-      {/* The chart keeps out of the way of the desk: full width, below the fold. */}
-      <div className="bg-card rounded-lg border border-line p-5">
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="desk-label">
-            {ticket.symbol || 'Price'} · {chartPeriod}
-          </h2>
-          <div className="flex gap-1">
-            {CHART_PERIODS.map((p) => (
-              <button
-                key={p}
-                onClick={() => setChartPeriod(p)}
-                className={`min-h-11 min-w-11 md:min-h-0 md:min-w-0 px-2 py-1 text-xs rounded transition-colors ${
-                  chartPeriod === p
-                    ? 'bg-brand text-on-accent font-semibold'
-                    : 'text-ink-soft hover:text-ink'
-                }`}
-              >
-                {p}
-              </button>
-            ))}
-          </div>
-        </div>
-        {chart && chart.bars.length > 0 ? (
-          <CandleChart
-            bars={chart.bars}
-            lines={(details?.open_positions ?? [])
-              .filter((pos) => pos.symbol === ticket.symbol)
-              .flatMap((pos): PriceLine[] => {
-                const lines: PriceLine[] = [
-                  { price: pos.price, label: `entry ${pos.position_id}`, kind: 'entry' },
-                ]
-                if (pos.stop_loss != null) lines.push({ price: pos.stop_loss, label: 'SL', kind: 'sl' })
-                if (pos.take_profit != null) lines.push({ price: pos.take_profit, label: 'TP', kind: 'tp' })
-                return lines
-              })}
-            digits={symbols.find((s) => s.name === ticket.symbol)?.digits ?? 5}
-          />
-        ) : (
-          <p className="text-sm text-ink-faint py-10 text-center">
-            No candles for this symbol yet — the copier may still be
-            connecting, or the market has no bars in this range.
-          </p>
-        )}
       </div>
 
 
