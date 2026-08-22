@@ -5,7 +5,7 @@ import { useOrg } from '../lib/org'
 import { can } from '../lib/roles'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
 import type {
-  Account, AccountDetails, MarginEstimate, OpenPosition, TradeSymbol,
+  Account, AccountDetails, ApiState, MarginEstimate, OpenPosition, TradeSymbol,
   Trendbars, WorkingOrder,
 } from '../lib/types'
 import { Link } from 'react-router-dom'
@@ -68,6 +68,8 @@ export default function Trade() {
   }, [accountId])
   const [symbols, setSymbols] = useState<TradeSymbol[]>([])
   const [details, setDetails] = useState<AccountDetails | null>(null)
+  // Live per-position P&L from the copier's state snapshot, keyed by id.
+  const [livePnl, setLivePnl] = useState<Record<number, number | null>>({})
   const [ticket, setTicket] = useState<TicketState>(EMPTY_TICKET)
   const [closing, setClosing] = useState<OpenPosition | null>(null)
   // Rows acknowledged instantly while the broker works.
@@ -107,9 +109,10 @@ export default function Trade() {
   const loadAccountData = useCallback(async () => {
     if (accountId == null) return
     try {
-      const [syms, det] = await Promise.all([
+      const [syms, det, stateEnv] = await Promise.all([
         orgApi<TradeSymbol[]>(orgId, `accounts/${accountId}/symbols`),
         orgApi<AccountDetails>(orgId, `accounts/${accountId}/details`),
+        orgApi<ApiState>(orgId, 'state').catch(() => null),
       ])
       // The account may have changed while this request was in flight
       // (routine with the 5s poll): never paint one account's book under
@@ -117,6 +120,12 @@ export default function Trade() {
       if (accountIdRef.current !== accountId) return
       setSymbols(syms)
       setDetails(det)
+      const snap = stateEnv?.accounts?.[String(accountId)]
+      const pnlMap: Record<number, number | null> = {}
+      for (const p of snap?.positions ?? []) {
+        pnlMap[p.position_id] = p.pnl_quote ?? null
+      }
+      setLivePnl(pnlMap)
       // A pinned default symbol wins; otherwise keep the current pick or
       // fall back to the first cached symbol.
       const pinned = readDefaultSymbol(orgId, accountId)
@@ -732,6 +741,7 @@ export default function Trade() {
                       <th className="desk-label px-3 py-2 font-semibold">Side</th>
                       <th className="desk-label px-3 py-2 font-semibold text-right">Lots</th>
                       <th className="desk-label px-3 py-2 font-semibold text-right">Entry</th>
+                      <th className="desk-label px-3 py-2 font-semibold text-right">Live P&L</th>
                       <th className="desk-label px-3 py-2 font-semibold text-right">SL / TP</th>
                       <th className="px-3 py-2" />
                     </tr>
@@ -746,6 +756,14 @@ export default function Trade() {
                         </td>
                         <td data-label="Lots" className="num px-3 py-2.5 text-right">{pos.volume_lots ?? pos.volume}</td>
                         <td data-label="Entry" className="num px-3 py-2.5 text-right">{pos.price}</td>
+                        <td data-label="Live P&L" className={`num px-3 py-2.5 text-right font-medium ${
+                          livePnl[pos.position_id] == null ? 'text-ink-faint'
+                            : livePnl[pos.position_id]! < 0 ? 'text-loss' : 'text-profit'
+                        }`}>
+                          {livePnl[pos.position_id] != null
+                            ? (livePnl[pos.position_id]! >= 0 ? '+' : '') + livePnl[pos.position_id]!.toFixed(2)
+                            : '—'}
+                        </td>
                         <td data-label="SL / TP" className="num px-3 py-2.5 text-right text-ink-soft">
                           {pos.stop_loss ?? '—'} / {pos.take_profit ?? '—'}
                         </td>

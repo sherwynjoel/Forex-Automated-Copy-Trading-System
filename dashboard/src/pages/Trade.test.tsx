@@ -98,6 +98,20 @@ function mockRoutes(overrides: Record<string, unknown | (() => Response)> = {}) 
       ] })
     }
     if (url.includes('/symbols')) return respond(symbols)
+    if (url.endsWith('/api/orgs/1/state')) {
+      return respond({
+        accounts: {
+          '100': {
+            balance: 10000, equity: 10004.2, open_pnl: 4.2,
+            positions: [
+              { position_id: 7001, symbol_id: 1, symbol: 'EURUSD', side: 'BUY',
+                volume: 200000, entry_price: 1.105, pnl_quote: 4.2 },
+            ],
+          },
+        },
+        master_positions: [], pending_orders: [], drift: [],
+      })
+    }
     if (url.includes('/details')) return respond(details)
     if (url.includes('/api/orgs/1/accounts')) return respond(accounts)
     if (url.includes('/api/orgs/1/orders/cancel')) return respond({ status: 'submitted' })
@@ -546,4 +560,18 @@ test('set as default pins the current symbol; unpin clears it', async () => {
   await userEvent.click(pinned)
   expect(localStorage.getItem('mf.defaultSymbol.1.100')).toBeNull()
   expect(screen.getByRole('button', { name: /set as default/i })).toBeInTheDocument()
+})
+
+test('open positions on the Trade page carry live P&L', async () => {
+  setRole('trader')
+  mockRoutes()
+  renderTrade()
+
+  await waitFor(() => {
+    expect((screen.getByLabelText(/symbol/i) as HTMLInputElement).value).toBe('EURUSD')
+  })
+
+  // The row shows its own live P&L, joined from the state snapshot.
+  expect(await screen.findByText('+4.20')).toBeInTheDocument()
+  expect(screen.getByText('Live P&L')).toBeInTheDocument()
 })
