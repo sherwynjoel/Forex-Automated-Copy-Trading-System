@@ -189,11 +189,9 @@ test('role select PATCHes role', async () => {
   })
 })
 
-test('409 on second master shows inline error', async () => {
+test('choosing Master confirms, then promotes (old master demoted server-side)', async () => {
   setRole('admin')
-  mockRoutes({
-    'PATCH /api/orgs/1/accounts/2': () => new Response('Conflict', { status: 409 }),
-  })
+  const fetchMock = mockRoutes()
   renderAccounts()
 
   await waitFor(() => {
@@ -203,9 +201,39 @@ test('409 on second master shows inline error', async () => {
   const slaveSelect = screen.getByLabelText(/role for account 12346/i)
   await userEvent.selectOptions(slaveSelect, 'master')
 
+  // No PATCH yet: promoting a master re-shapes the whole fleet, so it asks.
+  const dialog = await screen.findByRole('dialog')
+  expect(dialog).toHaveTextContent(/becomes a slave/i)
+  expect(fetchMock.mock.calls.some(([u, init]) =>
+    String(u).includes('/accounts/2') && (init as RequestInit)?.method === 'PATCH')).toBe(false)
+
+  await userEvent.click(within(dialog).getByRole('button', { name: /make it the master/i }))
+
   await waitFor(() => {
-    expect(screen.getByText(/a master already exists/i)).toBeInTheDocument()
+    const call = fetchMock.mock.calls.find(([u, init]) =>
+      String(u).includes('/accounts/2') && (init as RequestInit)?.method === 'PATCH')
+    expect(call).toBeTruthy()
+    expect(JSON.parse(String((call![1] as RequestInit).body))).toEqual({ role: 'master' })
   })
+})
+
+test('cancelling the master confirmation changes nothing', async () => {
+  setRole('admin')
+  const fetchMock = mockRoutes()
+  renderAccounts()
+
+  await waitFor(() => {
+    expect(screen.getByText('12346')).toBeInTheDocument()
+  })
+
+  await userEvent.selectOptions(screen.getByLabelText(/role for account 12346/i), 'master')
+  const dialog = await screen.findByRole('dialog')
+  await userEvent.click(within(dialog).getByRole('button', { name: /^cancel$/i }))
+
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  expect(fetchMock.mock.calls.some(([u, init]) =>
+    String(u).includes('/accounts/2') && (init as RequestInit)?.method === 'PATCH')).toBe(false)
+  expect((screen.getByLabelText(/role for account 12346/i) as HTMLSelectElement).value).toBe('slave')
 })
 
 test('multiplier edit PATCHes multiplier', async () => {

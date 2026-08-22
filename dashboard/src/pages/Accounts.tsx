@@ -36,6 +36,8 @@ export default function Accounts() {
   const [cutoffDrafts, setCutoffDrafts] = useState<Record<number, string>>({})
   const [disconnecting, setDisconnecting] = useState<Account | null>(null)
   const [flattening, setFlattening] = useState<Account | null>(null)
+  // Master promotion re-shapes the whole fleet; it always confirms first.
+  const [promoting, setPromoting] = useState<Account | null>(null)
   const [flattenStatus, setFlattenStatus] = useState<Record<number, 'busy' | 'done' | 'error'>>({})
   const [detailsFor, setDetailsFor] = useState<Account | null>(null)
   const [details, setDetails] = useState<AccountDetails | null>(null)
@@ -372,7 +374,10 @@ export default function Accounts() {
                         <select
                           aria-label={`Role for account ${account.trader_login}`}
                           value={account.role}
-                          onChange={(e) => handleRoleChange(id, e.target.value)}
+                          onChange={(e) => {
+                            if (e.target.value === 'master') setPromoting(account)
+                            else handleRoleChange(id, e.target.value)
+                          }}
                           disabled={isPending}
                           className="rounded border border-line-strong px-2 py-1 text-sm bg-card disabled:opacity-50"
                         >
@@ -548,6 +553,32 @@ export default function Accounts() {
           are not touched; the copier just stops seeing these accounts.
         </p>
         <p>You can reconnect any time with Connect cTrader ID.</p>
+      </ConfirmDialog>
+
+      {/* Master promotion */}
+      <ConfirmDialog
+        open={promoting != null}
+        title={`Make account ${promoting?.trader_login ?? ''} the master`}
+        confirmLabel="Make it the master"
+        onConfirm={() => {
+          if (promoting) {
+            handleRoleChange(promoting.ctid_trader_account_id, 'master')
+          }
+          setPromoting(null)
+        }}
+        onCancel={() => setPromoting(null)}
+      >
+        <p>
+          {(() => {
+            const current = accounts.find(
+              (a) => a.role === 'master'
+                && a.ctid_trader_account_id !== promoting?.ctid_trader_account_id)
+            return current
+              ? `The current master (account ${current.trader_login}) becomes a slave, and every `
+              : 'Every '
+          })()}
+          enabled slave then copies account {promoting?.trader_login}'s trades.
+        </p>
       </ConfirmDialog>
 
       {/* Per-account kill switch */}

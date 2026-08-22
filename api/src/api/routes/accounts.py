@@ -169,8 +169,24 @@ def create_accounts_router() -> APIRouter:
             "WHERE ctid_trader_account_id = %s AND org_id = %s"
         )
 
+        # Promoting a master demotes the previous one ATOMICALLY (the
+        # connection is autocommit, so the explicit transaction is what
+        # makes demote+promote one action instead of a 409 scavenger
+        # hunt). A UniqueViolation -- a concurrent promotion racing this
+        # one -- rolls the demotion back and surfaces as the usual 409.
+        demoted: list[int] = []
         try:
-            conn.execute(update_sql, params)
+            with conn.transaction():
+                if request.role == "master":
+                    rows = conn.execute(
+                        """UPDATE accounts SET role = 'slave'
+                           WHERE org_id = %s AND role = 'master'
+                             AND ctid_trader_account_id != %s
+                           RETURNING ctid_trader_account_id""",
+                        (ctx.org_id, account_id),
+                    ).fetchall()
+                    demoted = [r[0] for r in rows]
+                conn.execute(update_sql, params)
         except errors.UniqueViolation:
             # This happens when trying to set a second master
             raise HTTPException(
@@ -198,6 +214,8 @@ def create_accounts_router() -> APIRouter:
             "nickname": row[8],
             "cutoff_date": row[9],
         }
+        if demoted:
+            result["demoted_to_slave"] = demoted
 
         # If role was changed, trigger copier reload
         if request.role is not None:
