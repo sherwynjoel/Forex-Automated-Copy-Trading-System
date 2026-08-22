@@ -569,15 +569,9 @@ export default function Accounts() {
         onCancel={() => setPromoting(null)}
       >
         <p>
-          {(() => {
-            const current = accounts.find(
-              (a) => a.role === 'master'
-                && a.ctid_trader_account_id !== promoting?.ctid_trader_account_id)
-            return current
-              ? `The current master (account ${current.trader_login}) becomes a slave, and every `
-              : 'Every '
-          })()}
-          enabled slave then copies account {promoting?.trader_login}'s trades.
+          Every other account in this workspace becomes a slave — including
+          the current master and any Ignored accounts — and every enabled
+          slave then copies account {promoting?.trader_login}'s trades.
         </p>
       </ConfirmDialog>
 

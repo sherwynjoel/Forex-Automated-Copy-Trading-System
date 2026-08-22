@@ -178,9 +178,12 @@ def create_accounts_router() -> APIRouter:
         try:
             with conn.transaction():
                 if request.role == "master":
+                    # EVERY other account becomes a slave -- the old master
+                    # and any still-Ignored accounts alike. Choosing a
+                    # master means "this one leads, everyone else follows".
                     rows = conn.execute(
                         """UPDATE accounts SET role = 'slave'
-                           WHERE org_id = %s AND role = 'master'
+                           WHERE org_id = %s AND role != 'slave'
                              AND ctid_trader_account_id != %s
                            RETURNING ctid_trader_account_id""",
                         (ctx.org_id, account_id),
