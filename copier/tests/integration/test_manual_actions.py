@@ -85,7 +85,9 @@ def test_close_all_one_account_closes_positions_and_cancels_orders(db):
 
 
 @pytest_twisted.inlineCallbacks
-def test_close_all_org_wide_pauses_copying_and_flattens_every_account(db):
+def test_close_all_org_wide_flattens_every_account_and_copying_survives(db, monkeypatch):
+    import copier.main as main_module
+    monkeypatch.setattr(main_module, "CLOSE_ALL_RESUME_GRACE_S", 0.05)
     server, repo, app = _setup(db)
     _seed_position(server, MASTER_ID, 7001, 100_000)
     _seed_position(server, SLAVE1_ID, 7002, 100_000)
@@ -95,8 +97,11 @@ def test_close_all_org_wide_pauses_copying_and_flattens_every_account(db):
 
         result = yield app.close_all(ORG_ID)
 
-        assert result["paused"] is True
-        assert repo.get_org(ORG_ID).copying_enabled is False
+        # Copying is paused only transiently inside the call (the fan-out
+        # race guard) and restored before it returns: the kill switch
+        # closes contracts, it does not stop the copier.
+        assert result["paused"] is False
+        assert repo.get_org(ORG_ID).copying_enabled is True
         by_account = {s["account_id"]: s for s in result["accounts"]}
         assert by_account[MASTER_ID]["positions_closed"] == 1
         assert by_account[SLAVE1_ID]["positions_closed"] == 1

@@ -82,6 +82,16 @@ TOKEN_REFRESH_INTERVAL_S = 86400.0  # once per day
 BALANCE_REFRESH_INTERVAL_S = 60.0
 RESYNC_INTERVAL_S = 60.0
 RESYNC_DEBOUNCE_S = 0.2
+
+# How long the org-wide close_all keeps copying transiently paused AFTER the
+# flatten, so the master's close executions drain without fanning out as
+# copy-closes against slave positions that were just closed directly. This
+# is a heuristic, not a drain signal (closes leave through the rate-limit
+# bucket, so a big book can still be sending when the timer starts): a
+# straggler master execution after the restore merely attempts to close an
+# already-closed copy and lands in the per-intent error path -- log noise,
+# no money moved -- because slave mapping updates are not kill-switch-gated.
+CLOSE_ALL_RESUME_GRACE_S = 2.0
 # Admin-set account cutoffs: remind this many calendar days before the date.
 # The scan is one cheap SQL query, so hourly keeps the reminder prompt
 # without waiting up to a day like the token-refresh cadence would.
@@ -1057,12 +1067,19 @@ class CopierApp:
         (account_id=None) every enabled, non-paused account in the org --
         master included.
 
-        The org-wide kill switch pauses THAT ORG's copying FIRST, so the
+        The org-wide flatten pauses THAT ORG's copying FIRST, so the
         master closes it is about to send cannot fan out as copy-closes while
         the slaves' positions are simultaneously being closed directly (each
-        close would otherwise race its own copy). No other org's settings or
-        accounts are ever touched, and a single-account kill switch pauses
-        nothing at all -- but still only accepts an account of its own org.
+        close would otherwise race its own copy) -- then RESTORES the prior
+        copying state after a short grace (CLOSE_ALL_RESUME_GRACE_S) that
+        lets the master's close executions drain. The button closes
+        contracts; it does not stop the copier. An org whose copying was
+        already off stays off, and the restore is a compare-and-set on
+        orgs.settings_version so an operator write landing mid-flatten
+        (STOP COPYING from another tab, a second close-all) is never
+        clobbered -- see _restore_copying_after_flatten. No other org's settings or accounts are ever
+        touched, and a single-account flatten pauses nothing at all -- but
+        still only accepts an account of its own org.
 
         The org is resolved FIRST, before anything is written or sent, so a
         caller that mis-binds its arguments (a positional account_id landing
@@ -1071,7 +1088,7 @@ class CopierApp:
         return {"status": "flattened", "paused": true, "accounts": []} -- a
         kill switch reporting success having closed NOTHING.
         """
-        self.repo.get_org(org_id)  # raises for a missing (or None) org
+        org = self.repo.get_org(org_id)  # raises for a missing (or None) org
 
         if account_id is not None:
             self._require_account_in_org(org_id, int(account_id))
@@ -1079,30 +1096,91 @@ class CopierApp:
             results = [summary]
             paused = False
         else:
+            was_copying = org.copying_enabled
             self.repo.set_org_setting(org_id, "copying_enabled", False)
-            paused = True
-            targets = [
-                a for a in self.repo.load_accounts()
-                if a.org_id == org_id and a.enabled and a.status != 'paused'
-            ]
+            guard_version = self.repo.get_org_settings_version(org_id)
             results = []
-            for account in targets:
-                try:
-                    summary = yield self._flatten_account(account.account_id)
-                except Exception as e:
-                    log.error("close_all: flatten %s failed: %s", account.account_id, e)
-                    summary = {"account_id": account.account_id,
-                               "positions_closed": 0, "orders_cancelled": 0,
-                               "error": str(e)}
-                results.append(summary)
+            # EVERYTHING between the pause write and the finally lives
+            # inside the try: a DB hiccup in load_accounts must still reach
+            # the restore, or copying is left silently off.
+            try:
+                targets = [
+                    a for a in self.repo.load_accounts()
+                    if a.org_id == org_id and a.enabled and a.status != 'paused'
+                ]
+                for account in targets:
+                    try:
+                        summary = yield self._flatten_account(account.account_id)
+                    except Exception as e:
+                        log.error("close_all: flatten %s failed: %s", account.account_id, e)
+                        summary = {"account_id": account.account_id,
+                                   "positions_closed": 0, "orders_cancelled": 0,
+                                   "error": str(e)}
+                    results.append(summary)
+            finally:
+                # Restore the org's prior copying state -- after a grace
+                # that lets in-flight master close executions arrive while
+                # still paused, so they cannot fan out against copies the
+                # loop above just closed. Runs even if the loop blew up:
+                # a failed flatten must not leave copying silently off.
+                if was_copying:
+                    clock = self.clock
+                    if clock is None:
+                        from twisted.internet import reactor as clock
+                    yield task.deferLater(
+                        clock, CLOSE_ALL_RESUME_GRACE_S, lambda: None)
+                    self._restore_copying_after_flatten(org_id, guard_version)
+            # Report the setting as it actually stands now, not as this
+            # call assumes it left it: a skipped or failed restore must
+            # never be narrated to the UI as "copying survived".
+            try:
+                paused = not self.repo.get_org(org_id).copying_enabled
+            except Exception:
+                paused = True  # unknown: claim the safe state
 
         self.repo.log_event(
             'control', 'warning',
             {'action': 'kill_switch', 'org_wide': account_id is None,
-             'accounts': results},
+             'copying_paused': paused, 'accounts': results},
             account_id=account_id, org_id=org_id,
         )
         return {"status": "flattened", "paused": paused, "accounts": results}
+
+    def _restore_copying_after_flatten(self, org_id: int, guard_version: int) -> None:
+        """Put copying back on after an org-wide flatten -- unless someone
+        else wrote the org's settings while it ran.
+
+        The restore is an atomic compare-and-set on orgs.settings_version
+        (trigger-bumped on every orgs write from EITHER process; the api
+        writes settings straight to Postgres). A moved version means an
+        operator acted mid-flatten: honor their write, log why. A DB error
+        is retried once; if the restore still fails, copying stays OFF (the
+        safe direction for money) and a control/error event says so instead
+        of the UI silently claiming copying survived.
+        """
+        for attempt in (1, 2):
+            try:
+                if self.repo.restore_copying_if_unchanged(org_id, guard_version):
+                    return
+                self.repo.log_event(
+                    'control', 'warning',
+                    {'action': 'close_all_restore_skipped',
+                     'detail': 'settings were changed during the flatten; '
+                               'leaving them as the newer write put them'},
+                    org_id=org_id)
+                return
+            except Exception as e:
+                log.error("close_all: restore attempt %s failed for org %s: %s",
+                          attempt, org_id, e)
+        try:
+            self.repo.log_event(
+                'control', 'error',
+                {'action': 'close_all_restore_failed',
+                 'detail': 'copying is still OFF after the flatten; '
+                           'resume it manually'},
+                org_id=org_id)
+        except Exception:
+            log.error("close_all: could not even log the failed restore for org %s", org_id)
 
     @defer.inlineCallbacks
     def _flatten_account(self, account_id: int):

@@ -118,7 +118,8 @@ function DeskStrip() {
         text:
           `Closed ${closed} position${closed === 1 ? '' : 's'} and cancelled ` +
           `${cancelled} order${cancelled === 1 ? '' : 's'} across ` +
-          `${result.accounts.length} account${result.accounts.length === 1 ? '' : 's'}. Copying is paused.`,
+          `${result.accounts.length} account${result.accounts.length === 1 ? '' : 's'}. ` +
+          (result.paused ? 'Copying is stopped.' : 'Copying is still running.'),
       })
       setDialogOpen(false)
       await refresh()
@@ -261,8 +262,13 @@ function DeskStrip() {
         >
           <p>
             This closes every open position and cancels every working order in
-            every enabled account in this organization at market, and pauses
-            copying. It cannot be undone.
+            every enabled account in this organization at market. It cannot be
+            undone.
+          </p>
+          <p>
+            {copying === false
+              ? 'Copying is currently stopped and stays stopped.'
+              : 'Copying stays on — though a master trade landing during the flatten itself is not copied.'}
           </p>
         </ConfirmDialog>
       )}

@@ -166,6 +166,34 @@ class Repo:
                 (value, org_id),
             )
 
+    def get_org_settings_version(self, org_id: int) -> int:
+        """Current settings_version of an org row (trigger-bumped on every
+        write to the row, by either process -- see migration 009)."""
+        with psycopg.connect(self.dsn, autocommit=True) as conn:
+            row = conn.execute(
+                "SELECT settings_version FROM orgs WHERE id = %s", (org_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"Unknown org: {org_id}")
+            return row[0]
+
+    def restore_copying_if_unchanged(self, org_id: int, expected_version: int) -> bool:
+        """Atomically re-enable copying IF nobody wrote the org row since
+        expected_version was read; returns whether the write happened.
+
+        This is close_all's restore: a plain write here would clobber an
+        operator's STOP COPYING issued mid-flatten, so the WHERE clause
+        makes 'someone else wrote in between' lose the race safely (copying
+        stays as the interim writer left it).
+        """
+        with psycopg.connect(self.dsn, autocommit=True) as conn:
+            cur = conn.execute(
+                "UPDATE orgs SET copying_enabled = TRUE "
+                "WHERE id = %s AND settings_version = %s",
+                (org_id, expected_version),
+            )
+            return cur.rowcount == 1
+
     def connection_org(self, connection_id: int) -> int:
         """Get the org_id that owns a ctid_connection.
 

@@ -227,10 +227,13 @@ slave, confirm a few real trades copy correctly, then scale up.
   immediately, without affecting any other org; resume with the matching resume control.
   It does not disconnect accounts or lose state — mappings and settings are untouched.
 - **Kill switch (close-all)** — flattens actual positions, not just copying.
-  The desk strip's "Close all positions" button (every page; requires typing
-  `CLOSE ALL`) closes every open position and cancels every working order in
-  every enabled account of that org from a fresh broker snapshot, and pauses copying
-  first so the master's closes can't race their own copy-closes. Per-account:
+  The desk strip's "Close all positions" button (every page; one-click
+  confirm) closes every open position and cancels every working order in
+  every enabled account of that org from a fresh broker snapshot. Copying is
+  paused only while the flatten runs — so the master's closes can't race
+  their own copy-closes — and restored automatically before the call
+  returns; an org whose copying was already stopped stays stopped, and any
+  settings write landing mid-flatten wins over the restore. Per-account:
   the "Flatten" button on the Accounts screen (`POST
   /api/orgs/{org_id}/control/close-all` with `{"account_id": N}`) does the same for one account without touching
   the org's pause.

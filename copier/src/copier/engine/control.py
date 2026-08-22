@@ -40,7 +40,8 @@ Routes:
 - POST /positions/close: close a position, body {account_id, position_id, volume_lots?}
 - POST /orders/cancel: cancel a working order, body {account_id, order_id}
 - POST /close-all: kill switch for one org, body {"org_id": int, "account_id": int?}
-  (no account_id = every enabled account in that org, pausing copying first)
+  (no account_id = every enabled account in that org; copying is paused only
+  while the flatten runs and restored before the response)
 """
 
 import json
@@ -348,7 +349,8 @@ class CloseAllResource(_JsonResource):
 
     Body {org_id, account_id} flattens one account of that org; body
     {org_id} (no account_id, or a null one) flattens EVERY enabled account
-    in that org and pauses its copying first.
+    in that org, pausing its copying only for the duration of the flatten
+    (restored before the response -- see CopierApp.close_all).
     """
 
     def _handle(self, request, body):

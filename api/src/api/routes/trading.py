@@ -85,8 +85,10 @@ def create_trading_router() -> APIRouter:
         cfg: ApiConfig = Depends(ApiConfig.from_env),
     ) -> Dict[str, Any]:
         """Kill switch: flatten one org account ({"account_id": N}) or this
-        org's whole book ({} -- also pauses the org's copying, see the
-        copier). Always org-bound; there is no all-orgs flatten."""
+        org's whole book ({} -- copying is paused only transiently during
+        the flatten and restored before the copier answers, see
+        CopierApp.close_all). Always org-bound; there is no all-orgs
+        flatten."""
         forward: Dict[str, Any] = {"org_id": ctx.org_id}
         if body and body.get("account_id") is not None:
             account_id = _required_account_id(body)

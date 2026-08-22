@@ -64,7 +64,8 @@ function mockRoutes(overrides: Record<string, unknown> = {}) {
     if (url.includes('/state')) return respond(overrides['state'] ?? apiState)
     if (url.includes('/accounts')) return respond(overrides['accounts'] ?? accounts)
     if (url.includes('/control/close-all')) {
-      return respond({ status: 'flattened', paused: true, accounts: [] })
+      return respond(
+        overrides['closeAll'] ?? { status: 'flattened', paused: false, accounts: [] })
     }
     return respond({})
   })
@@ -133,6 +134,30 @@ test('close-all confirms with a single click — no typed phrase required', asyn
     expect((call![1] as RequestInit).method).toBe('POST')
     expect((call![1] as RequestInit).body).toBe('{}')
   })
+
+  // The button only closes contracts: the outcome notice must say copying
+  // survived (the copier restores it after its transient flatten pause).
+  expect(
+    await screen.findByText(/Copying is still running/)
+  ).toBeInTheDocument()
+})
+
+test('close-all on a stopped org says copying stays stopped', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  mockRoutes({
+    closeAll: { status: 'flattened', paused: true, accounts: [] },
+    settings: { copying_enabled: false, dry_run: false },
+  })
+  renderLayout()
+
+  await userEvent.click(
+    await screen.findByRole('button', { name: /close all positions/i }))
+  // The dialog must not promise survival it cannot deliver on a paused org.
+  expect(screen.getByText(/stays stopped/i)).toBeInTheDocument()
+
+  await userEvent.click(
+    screen.getByRole('button', { name: /^close every position$/i }))
+  expect(await screen.findByText(/Copying is stopped\./)).toBeInTheDocument()
 })
 
 test('cancelling the close-all dialog sends nothing', async () => {

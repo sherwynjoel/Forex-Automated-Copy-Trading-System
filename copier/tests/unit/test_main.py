@@ -808,10 +808,13 @@ def test_pause_resume_set_dry_run_reject_unknown_org(repo, token_store):
 # ---------- kill switch ----------
 
 @pytest_twisted.inlineCallbacks
-def test_close_all_flattens_only_the_org(db, fernet_key):
+def test_close_all_flattens_only_the_org(db, fernet_key, monkeypatch):
     """Two orgs, both with open positions on the fake broker. close_all(org_a)
-    pauses org A's copying (org B's stays enabled) and sends
-    ProtoOAClosePositionReq only for org A's accounts."""
+    sends ProtoOAClosePositionReq only for org A's accounts. Copying is
+    paused only INSIDE the call (so the master's closes cannot fan out as
+    copy-closes mid-flatten) and restored before it returns: the button
+    closes contracts, it does not stop the copier."""
+    monkeypatch.setattr(main, "CLOSE_ALL_RESUME_GRACE_S", 0.05)
     org_a, org_b = seed_two_orgs(db, fernet_key)
 
     server = FakeCTraderServer(auto_fill=True)
@@ -829,13 +832,25 @@ def test_close_all_flattens_only_the_org(db, fernet_key):
     try:
         yield app.startup()
 
+        # The race guard itself: copying must be OFF while each account is
+        # being flattened (delete the pause write and this fails).
+        orig_flatten = app._flatten_account
+        copying_during_flatten = []
+        def spying_flatten(acct_id):
+            copying_during_flatten.append(repo.get_org(org_a).copying_enabled)
+            return orig_flatten(acct_id)
+        monkeypatch.setattr(app, "_flatten_account", spying_flatten)
+
         result = yield app.close_all(org_a)
 
-        assert result["paused"] is True
+        assert result["paused"] is False
         assert {s["account_id"] for s in result["accounts"]} == {MASTER_A, SLAVE_A1, SLAVE_A2}
+        assert copying_during_flatten and all(
+            v is False for v in copying_during_flatten)
 
-        # Only org A's kill switch was thrown.
-        assert repo.get_org(org_a).copying_enabled is False
+        # Copying survived the flatten on both orgs: the transient pause
+        # that guards the fan-out race was restored before returning.
+        assert repo.get_org(org_a).copying_enabled is True
         assert repo.get_org(org_b).copying_enabled is True
 
         yield _wait_until(lambda: len(_closes_for(server, MASTER_A)) == 1
@@ -857,6 +872,81 @@ def test_close_all_flattens_only_the_org(db, fernet_key):
         assert len(kill) == 1
         assert kill[0]["org_id"] == org_a
         assert kill[0]["payload"]["org_wide"] is True
+    finally:
+        for client in created:
+            client.stop()
+        server.shutdown()
+
+
+@pytest_twisted.inlineCallbacks
+def test_close_all_honors_a_concurrent_stop_during_the_flatten(db, fernet_key, monkeypatch):
+    """An operator's explicit stop issued WHILE the flatten runs must
+    survive the automatic restore. The api writes orgs directly in SQL, so
+    the guard is DB-side: migration 009's trigger bumps settings_version on
+    every org write and the restore is a compare-and-set that loses to any
+    interim write -- even one re-asserting the same False value."""
+    monkeypatch.setattr(main, "CLOSE_ALL_RESUME_GRACE_S", 0.05)
+    org_a, org_b = seed_two_orgs(db, fernet_key)
+
+    server = FakeCTraderServer(auto_fill=True)
+    server.accounts = {MASTER_A: TOKEN_A, SLAVE_A1: TOKEN_A, SLAVE_A2: TOKEN_A,
+                       MASTER_B: TOKEN_B, SLAVE_B1: TOKEN_B}
+    _seed_broker_position(server, MASTER_A, 7201)
+    port = server.listen(real_reactor)
+
+    repo = Repo(db)
+    factory, created = make_real_client_factory(port)
+    app = main.build_app(repo, TokenStore(db, fernet_key), factory, shards=1)
+    try:
+        yield app.startup()
+
+        orig_flatten = app._flatten_account
+        def stop_then_flatten(acct_id):
+            # Mid-flatten STOP COPYING, exactly as the api issues it: a
+            # direct settings write (same value the transient pause already
+            # holds -- the version bump alone must defeat the restore).
+            repo.set_org_setting(org_a, "copying_enabled", False)
+            return orig_flatten(acct_id)
+        monkeypatch.setattr(app, "_flatten_account", stop_then_flatten)
+
+        result = yield app.close_all(org_a)
+
+        assert result["paused"] is True
+        assert repo.get_org(org_a).copying_enabled is False
+        skipped = [e for e in _events(repo.dsn, action="close_all_restore_skipped")]
+        assert len(skipped) == 1 and skipped[0]["org_id"] == org_a
+    finally:
+        for client in created:
+            client.stop()
+        server.shutdown()
+
+
+@pytest_twisted.inlineCallbacks
+def test_close_all_keeps_an_already_stopped_org_stopped(db, fernet_key, monkeypatch):
+    """If the org's copying was already off before the button, close_all
+    must not sneakily resume it: the restore puts back the PRIOR state, and
+    the response says paused so the UI can tell the truth."""
+    monkeypatch.setattr(main, "CLOSE_ALL_RESUME_GRACE_S", 0.05)
+    org_a, org_b = seed_two_orgs(db, fernet_key)
+
+    server = FakeCTraderServer(auto_fill=True)
+    server.accounts = {MASTER_A: TOKEN_A, SLAVE_A1: TOKEN_A, SLAVE_A2: TOKEN_A,
+                       MASTER_B: TOKEN_B, SLAVE_B1: TOKEN_B}
+    _seed_broker_position(server, MASTER_A, 7101)
+    port = server.listen(real_reactor)
+
+    repo = Repo(db)
+    repo.set_org_setting(org_a, "copying_enabled", False)
+    factory, created = make_real_client_factory(port)
+    app = main.build_app(repo, TokenStore(db, fernet_key), factory, shards=1)
+    try:
+        yield app.startup()
+
+        result = yield app.close_all(org_a)
+
+        assert result["paused"] is True
+        assert repo.get_org(org_a).copying_enabled is False
+        yield _wait_until(lambda: server.open_positions[MASTER_A] == [])
     finally:
         for client in created:
             client.stop()

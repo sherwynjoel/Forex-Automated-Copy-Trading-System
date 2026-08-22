@@ -303,14 +303,15 @@ def test_two_orgs_never_touch_each_others_books():
 
     close_all = client_b.post(f"{b}/control/close-all", json={})
     assert close_all.status_code == 200, close_all.text
-    assert close_all.json()["paused"] is True, close_all.text
+    assert close_all.json()["paused"] is False, close_all.text
     assert {r["account_id"] for r in close_all.json()["accounts"]} == {
         ORG_B_MASTER, ORG_B_SLAVE}, close_all.text
 
-    # The org-wide kill switch pauses THAT org's copying, and only that org's.
+    # The transient flatten pause is restored before close-all returns:
+    # org B's copying survives its own kill switch, org A's was never touched.
     b_settings = client_b.get(f"{b}/settings")
     assert b_settings.status_code == 200, b_settings.text
-    assert b_settings.json()["copying_enabled"] is False, b_settings.text
+    assert b_settings.json()["copying_enabled"] is True, b_settings.text
 
     a_settings = client_a.get(f"{a}/settings")
     assert a_settings.status_code == 200, a_settings.text
