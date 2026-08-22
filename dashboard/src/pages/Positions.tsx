@@ -164,6 +164,11 @@ export default function Positions() {
                     position={pos}
                     isExpanded={expandedPositions.has(pos.position_id)}
                     onToggleExpand={() => togglePositionExpanded(pos.position_id)}
+                    pnlFor={(accountId, positionId) => {
+                      const snap = state.accounts?.[String(accountId)]
+                      const found = snap?.positions?.find((p) => p.position_id === positionId)
+                      return found?.pnl_quote ?? null
+                    }}
                   />
                 ))}
               </tbody>
@@ -231,10 +236,12 @@ function PositionRow({
   position,
   isExpanded,
   onToggleExpand,
+  pnlFor,
 }: {
   position: MasterPosition
   isExpanded: boolean
   onToggleExpand: () => void
+  pnlFor: (accountId: number, positionId: number | null | undefined) => number | null
 }) {
   return (
     <>
@@ -243,8 +250,12 @@ function PositionRow({
         <td data-label="Side" className="num p-3">{position.side}</td>
         <td data-label="Volume (units)" className="num p-3 text-right">{position.volume_lots || position.volume}</td>
         <td data-label="Entry Price" className="num p-3 text-right">{position.price.toFixed(5)}</td>
-        <td data-label="P&L" className="num p-3 text-right">
-          {position.pnl_quote != null ? position.pnl_quote.toFixed(2) : '-'}
+        <td data-label="P&L" className={`num p-3 text-right font-medium ${
+          position.pnl_quote == null ? '' : position.pnl_quote < 0 ? 'text-loss' : 'text-profit'
+        }`}>
+          {position.pnl_quote != null
+            ? (position.pnl_quote >= 0 ? '+' : '') + position.pnl_quote.toFixed(2)
+            : '-'}
         </td>
         <td className="p-3 text-center">
           <button
@@ -267,12 +278,18 @@ function PositionRow({
                     <th className="desk-label p-2 text-left border-b border-line">Status</th>
                     <th className="desk-label p-2 text-right border-b border-line">Fill Price</th>
                     <th className="desk-label p-2 text-right border-b border-line">Slippage (pts)</th>
+                    <th className="desk-label p-2 text-right border-b border-line">Live P&L</th>
                     <th className="desk-label p-2 text-left border-b border-line">Error</th>
                   </tr>
                 </thead>
                 <tbody>
                   {position.copies.map((copy) => (
-                    <CopyRow key={`${copy.slave_account_id}-${copy.slave_position_id}`} copy={copy} entryPrice={position.price} />
+                    <CopyRow
+                      key={`${copy.slave_account_id}-${copy.slave_position_id}`}
+                      copy={copy}
+                      entryPrice={position.price}
+                      livePnl={pnlFor(copy.slave_account_id, copy.slave_position_id)}
+                    />
                   ))}
                 </tbody>
               </table>
@@ -343,9 +360,11 @@ function OrderRow({
 function CopyRow({
   copy,
   entryPrice,
+  livePnl,
 }: {
   copy: PositionCopy
   entryPrice: number
+  livePnl: number | null
 }) {
   // Show "—" if fill_price is not available from backend
   const hasFillPrice = copy.fill_price != null
@@ -360,6 +379,11 @@ function CopyRow({
       <td data-label="Status" className="num p-2">{copy.status}</td>
       <td data-label="Fill Price" className="num p-2 text-right">{fillPriceDisplay}</td>
       <td data-label="Slippage (pts)" className="num p-2 text-right">{slippageDisplay}</td>
+      <td data-label="Live P&L" className={`num p-2 text-right font-medium ${
+        livePnl == null ? 'text-ink-faint' : livePnl < 0 ? 'text-loss' : 'text-profit'
+      }`}>
+        {livePnl != null ? (livePnl >= 0 ? '+' : '') + livePnl.toFixed(2) : '—'}
+      </td>
       <td data-label="Error" className="num p-2">{copy.error || '-'}</td>
     </tr>
   )

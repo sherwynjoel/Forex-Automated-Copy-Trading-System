@@ -98,7 +98,7 @@ test('renders master positions with lots and pnl', async () => {
   // Check for volume lots
   expect(screen.getByText('BUY')).toBeInTheDocument()
   // Check for P&L
-  const pnlElement = screen.getByText('500.00')
+  const pnlElement = screen.getByText('+500.00')
   expect(pnlElement).toBeInTheDocument()
 })
 
@@ -273,4 +273,34 @@ test('admin sees close-orphan, adopt, and dismiss buttons', async () => {
   expect(screen.getAllByRole('button', { name: /close orphan/i }).length).toBeGreaterThan(0)
   expect(screen.getAllByRole('button', { name: /adopt/i }).length).toBeGreaterThan(0)
   expect(screen.getAllByRole('button', { name: /dismiss/i }).length).toBeGreaterThan(0)
+})
+
+test('slave copy rows show their own live P&L from the state snapshot', async () => {
+  setRole('owner')
+  const stateWithSlaveBooks: ApiState = {
+    ...mockApiState,
+    accounts: {
+      '2001': {
+        balance: 5000, equity: 5012.34, open_pnl: 12.34,
+        positions: [
+          { position_id: 5001, symbol_id: 1, symbol: 'EURUSD', side: 'BUY',
+            volume: 100000, entry_price: 1.0951, pnl_quote: 12.34 },
+        ],
+      },
+    },
+  }
+  vi.spyOn(apiModule, 'orgApi').mockResolvedValue(stateWithSlaveBooks)
+
+  render(
+    <MemoryRouter>
+      <Positions />
+    </MemoryRouter>
+  )
+
+  await screen.findByText('EURUSD')
+  await userEvent.click(screen.getByRole('button', { name: /show copies/i }))
+
+  // The filled copy carries its live P&L; the failed one shows a dash.
+  expect(await screen.findByText('+12.34')).toBeInTheDocument()
+  expect(screen.getByText('Live P&L')).toBeInTheDocument()
 })
