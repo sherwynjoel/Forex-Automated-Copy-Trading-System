@@ -1609,6 +1609,16 @@ class CopierApp:
         def master_symbol(symbol_id: int):
             return self.master_symbols_by_org.get(org_id, {}).get(symbol_id)
 
+        # The slave's own broker snapshot, so a copy can report the
+        # protection actually sitting on it rather than the master's
+        # intent. Keyed by (account, position).
+        slave_protection: dict[tuple[int, int], tuple] = {}
+        if reconciler is not None:
+            for slave_id, snaps in (reconciler.slave_positions or {}).items():
+                for snap in snaps:
+                    slave_protection[(slave_id, snap.position_id)] = (
+                        snap.stop_loss, snap.take_profit)
+
         def copies_for(key: str, value: int, symbol_name: str | None) -> list[dict]:
             out = []
             for m in mappings:
@@ -1626,6 +1636,11 @@ class CopierApp:
                     'slave_volume': m.get('slave_volume'),
                     'volume_lots': lots(m.get('slave_volume'), slave_lot_size),
                     'fill_price': m.get('fill_price'),
+                    **dict(zip(
+                        ('stop_loss', 'take_profit'),
+                        slave_protection.get(
+                            (slave_account_id, m.get('slave_position_id')),
+                            (None, None)))),
                     'status': m.get('status'),
                     'error': m.get('error'),
                 })

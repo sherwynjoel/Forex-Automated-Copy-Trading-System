@@ -450,6 +450,7 @@ function PositionRow({
                     <th className="desk-label p-2 text-left border-b border-line">Account</th>
                     <th className="desk-label p-2 text-left border-b border-line">Status</th>
                     <th className="desk-label p-2 text-right border-b border-line">Fill Price</th>
+                    <th className="desk-label p-2 text-right border-b border-line whitespace-nowrap">SL / TP</th>
                     <th className="desk-label p-2 text-right border-b border-line">Current</th>
                     <th className="desk-label p-2 text-right border-b border-line">Live P&L</th>
                     <th className="desk-label p-2 text-left border-b border-line">Error</th>
@@ -544,6 +545,14 @@ function CopyRow({
       <td data-label="Account" className="num p-2">{copy.slave_account_id}</td>
       <td data-label="Status" className="num p-2">{copy.status}</td>
       <td data-label="Fill Price" className="num p-2 text-right">{fillPriceDisplay}</td>
+      {/* A copy can be live without the protection its master carries --
+          say so rather than leaving the operator to assume it followed. */}
+      <td data-label="SL / TP" className={`num p-2 text-right whitespace-nowrap ${
+        copy.status === 'active' && copy.stop_loss == null && copy.take_profit == null
+          ? 'text-warn-deep' : 'text-ink-soft'
+      }`}>
+        {copy.stop_loss ?? '—'} / {copy.take_profit ?? '—'}
+      </td>
       <td data-label="Current" className={`num p-2 text-right font-medium ${
         livePrice != null ? 'text-brand' : 'text-ink-faint'
       }`}>

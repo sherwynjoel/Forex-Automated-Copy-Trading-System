@@ -238,6 +238,9 @@ export interface PositionCopy {
   status: string
   error?: string | null
   fill_price?: number | null
+  /** Protection actually on the slave position, not the master's intent. */
+  stop_loss?: number | null
+  take_profit?: number | null
   volume_lots?: string | null
 }
 

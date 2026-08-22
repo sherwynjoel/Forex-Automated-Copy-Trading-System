@@ -2275,3 +2275,42 @@ def test_market_order_rejects_protection_on_the_wrong_side(repo, token_store):
         app.place_order({"account_id": MASTER_A, "symbol": symbol.name,
                          "side": "BUY", "order_type": "MARKET",
                          "volume_lots": 1, "take_profit": 1.0000})
+
+
+def test_copies_report_the_protection_actually_on_the_slave(repo, token_store):
+    """A copy can be live WITHOUT the protection its master carries -- the
+    amend can lose the race with the copy's own fill. The screen has to
+    report the slave's real state, not the master's intent."""
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    symbol = _seed_symbol_cache(repo, [MASTER_A, SLAVE_A1, SLAVE_A2])
+    app.master_symbols_by_org[ORG_A][symbol.symbol_id] = symbol
+
+    for slave, pos_id, coid in ((SLAVE_A1, 5001, "cm42.1"), (SLAVE_A2, 5002, "cm42.2")):
+        repo.create_position_mapping(master_position_id=42, slave_account_id=slave,
+                                     client_order_id=coid, org_id=ORG_A)
+        repo.activate_position_mapping(slave, coid, slave_position_id=pos_id,
+                                       slave_volume=100_000, fill_price=1.1050)
+
+    app.reconcilers[ORG_A].master_positions = [
+        PositionSnapshot(position_id=42, symbol_id=symbol.symbol_id, side=Side.BUY,
+                         volume=100_000, price=1.1050, label="copy:m42",
+                         stop_loss=1.1000, take_profit=1.1100),
+    ]
+    # One copy took the protection; the other is running naked.
+    app.reconcilers[ORG_A].slave_positions = {
+        SLAVE_A1: [PositionSnapshot(position_id=5001, symbol_id=symbol.symbol_id,
+                                    side=Side.BUY, volume=100_000, price=1.1051,
+                                    label="copy:m42", stop_loss=1.1001,
+                                    take_profit=1.1101)],
+        SLAVE_A2: [PositionSnapshot(position_id=5002, symbol_id=symbol.symbol_id,
+                                    side=Side.BUY, volume=100_000, price=1.1051,
+                                    label="copy:m42")],
+    }
+
+    copies = {c["slave_account_id"]: c
+              for c in app.get_state(ORG_A)["master_positions"][0]["copies"]}
+    assert copies[SLAVE_A1]["stop_loss"] == pytest.approx(1.1001)
+    assert copies[SLAVE_A1]["take_profit"] == pytest.approx(1.1101)
+    # The unprotected one says so plainly rather than echoing the master.
+    assert copies[SLAVE_A2]["stop_loss"] is None
+    assert copies[SLAVE_A2]["take_profit"] is None
