@@ -214,6 +214,7 @@ export interface PositionData {
   volume: number
   entry_price: number
   pnl_quote?: number | null
+  current_price?: number | null
 }
 
 export interface AccountStateData {
@@ -247,6 +248,7 @@ export interface MasterPosition {
   price: number
   label: string
   pnl_quote?: number | null
+  current_price?: number | null
   volume_lots?: string | null
   copies: PositionCopy[]
 }

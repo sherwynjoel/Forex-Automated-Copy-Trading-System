@@ -351,6 +351,7 @@ class AccountStateTracker:
                         "volume": pos.volume,
                         "entry_price": pos.price,
                         "pnl_quote": None,  # unknown due to missing symbol
+                        "current_price": None,
                     })
                     continue
 
@@ -358,15 +359,20 @@ class AccountStateTracker:
                 # received stays None in _spots; fall back to the entry
                 # price for that side (P&L 0), same as when no spot has
                 # arrived at all.
-                bid, ask = self._spots.get(pos.symbol_id, (None, None))
-                if bid is None:
-                    bid = pos.price
-                if ask is None:
-                    ask = pos.price
+                raw_bid, raw_ask = self._spots.get(pos.symbol_id, (None, None))
+                bid = raw_bid if raw_bid is not None else pos.price
+                ask = raw_ask if raw_ask is not None else pos.price
 
                 # Calculate P&L for this position
                 pnl = unrealized_pnl_quote(pos.side, pos.price, pos.volume, bid, ask)
                 open_pnl += pnl
+
+                # The live marking price: the side this position would CLOSE
+                # at (BUY -> bid, SELL -> ask), exactly what the P&L above is
+                # computed against. None until that side's first tick -- the
+                # dashboard shows a dash rather than an entry-price echo
+                # masquerading as a quote.
+                current = raw_bid if pos.side.value == "BUY" else raw_ask
 
                 # Add to positions list
                 sym_name = self._symbols_by_id[pos.symbol_id].name
@@ -378,6 +384,7 @@ class AccountStateTracker:
                     "volume": pos.volume,
                     "entry_price": pos.price,
                     "pnl_quote": pnl,
+                    "current_price": current,
                 })
 
             # Compute equity: None if balance unknown, else balance + open_pnl

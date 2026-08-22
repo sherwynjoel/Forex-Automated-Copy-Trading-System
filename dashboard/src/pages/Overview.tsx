@@ -572,6 +572,7 @@ export default function Overview() {
                     <th className="desk-label px-3 py-2 font-semibold">Symbol</th>
                     <th className="desk-label px-3 py-2 font-semibold">Side</th>
                     <th className="desk-label px-3 py-2 font-semibold text-right">Entry</th>
+                    <th className="desk-label px-3 py-2 font-semibold text-right">Current</th>
                     <th className="desk-label px-5 py-2 font-semibold text-right">Live P&L</th>
                     {can(role, 'trade') && <th className="px-3 py-2" />}
                   </tr>
@@ -585,6 +586,9 @@ export default function Overview() {
                         {row.pos.side}
                       </td>
                       <td data-label="Entry" className="tnum px-3 py-2.5 text-right">{row.pos.entry_price}</td>
+                      <td data-label="Current" className="tnum px-3 py-2.5 text-right">
+                        {row.pos.current_price ?? '\u2014'}
+                      </td>
                       <td data-label="Live P&L" className="tnum px-5 py-2.5 text-right">
                         <span className={(row.pos.pnl_quote ?? 0) < 0 ? 'text-loss' : 'text-profit'}>
                           {signed(row.pos.pnl_quote)}

@@ -89,6 +89,7 @@ const mockAccountState: StateSnapshot = {
         volume: 1.0,
         entry_price: 1.0800,
         pnl_quote: 200,
+        current_price: 2381.5,
       },
     ],
   },
@@ -1194,6 +1195,7 @@ test('the Open P&L tile expands a live open-contracts panel in place', async () 
   expect(tile).toHaveAttribute('aria-expanded', 'true')
   expect(screen.getAllByText('EURUSD').length).toBeGreaterThanOrEqual(2)
   expect(screen.getByText('+200.00')).toBeInTheDocument() // master's position
+  expect(screen.getByText('2381.5')).toBeInTheDocument() // its live marking price
   expect(screen.getByText('+500.00')).toBeInTheDocument() // slave's position
 
   // Toggles closed again

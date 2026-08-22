@@ -70,6 +70,7 @@ export default function Trade() {
   const [details, setDetails] = useState<AccountDetails | null>(null)
   // Live per-position P&L from the copier's state snapshot, keyed by id.
   const [livePnl, setLivePnl] = useState<Record<number, number | null>>({})
+  const [livePrice, setLivePrice] = useState<Record<number, number | null>>({})
   const [ticket, setTicket] = useState<TicketState>(EMPTY_TICKET)
   const [closing, setClosing] = useState<OpenPosition | null>(null)
   // Rows acknowledged instantly while the broker works.
@@ -122,10 +123,13 @@ export default function Trade() {
       setDetails(det)
       const snap = stateEnv?.accounts?.[String(accountId)]
       const pnlMap: Record<number, number | null> = {}
+      const priceMap: Record<number, number | null> = {}
       for (const p of snap?.positions ?? []) {
         pnlMap[p.position_id] = p.pnl_quote ?? null
+        priceMap[p.position_id] = p.current_price ?? null
       }
       setLivePnl(pnlMap)
+      setLivePrice(priceMap)
       // A pinned default symbol wins; otherwise keep the current pick or
       // fall back to the first cached symbol.
       const pinned = readDefaultSymbol(orgId, accountId)
@@ -741,6 +745,7 @@ export default function Trade() {
                       <th className="desk-label px-3 py-2 font-semibold">Side</th>
                       <th className="desk-label px-3 py-2 font-semibold text-right">Lots</th>
                       <th className="desk-label px-3 py-2 font-semibold text-right">Entry</th>
+                      <th className="desk-label px-3 py-2 font-semibold text-right">Current</th>
                       <th className="desk-label px-3 py-2 font-semibold text-right">Live P&L</th>
                       <th className="desk-label px-3 py-2 font-semibold text-right">SL / TP</th>
                       <th className="px-3 py-2" />
@@ -756,6 +761,9 @@ export default function Trade() {
                         </td>
                         <td data-label="Lots" className="num px-3 py-2.5 text-right">{pos.volume_lots ?? pos.volume}</td>
                         <td data-label="Entry" className="num px-3 py-2.5 text-right">{pos.price}</td>
+                        <td data-label="Current" className="num px-3 py-2.5 text-right">
+                          {livePrice[pos.position_id] ?? '\u2014'}
+                        </td>
                         <td data-label="Live P&L" className={`num px-3 py-2.5 text-right font-medium ${
                           livePnl[pos.position_id] == null ? 'text-ink-faint'
                             : livePnl[pos.position_id]! < 0 ? 'text-loss' : 'text-profit'

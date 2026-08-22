@@ -105,7 +105,8 @@ function mockRoutes(overrides: Record<string, unknown | (() => Response)> = {}) 
             balance: 10000, equity: 10004.2, open_pnl: 4.2,
             positions: [
               { position_id: 7001, symbol_id: 1, symbol: 'EURUSD', side: 'BUY',
-                volume: 200000, entry_price: 1.105, pnl_quote: 4.2 },
+                volume: 200000, entry_price: 1.105, pnl_quote: 4.2,
+                current_price: 1.10521 },
             ],
           },
         },
@@ -573,5 +574,7 @@ test('open positions on the Trade page carry live P&L', async () => {
 
   // The row shows its own live P&L, joined from the state snapshot.
   expect(await screen.findByText('+4.20')).toBeInTheDocument()
+  // The live marking price rides in the Current column next to it.
+  expect(screen.getByText('1.10521')).toBeInTheDocument()
   expect(screen.getByText('Live P&L')).toBeInTheDocument()
 })

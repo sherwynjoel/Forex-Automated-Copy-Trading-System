@@ -1165,6 +1165,7 @@ def test_get_state_enriches_copies_and_master_rows_for_the_positions_screen(repo
     assert master_position["symbol"] == "EURUSD"          # not "ID:1"
     assert master_position["volume_lots"] == "1.00"       # not 10000000
     assert master_position["pnl_quote"] == pytest.approx(100.0)
+    assert master_position["current_price"] == pytest.approx(1.10600)  # BUY marks at bid
 
     copy = master_position["copies"][0]
     assert copy["fill_price"] == pytest.approx(1.10537)   # not None -> not "-"
@@ -1194,6 +1195,7 @@ def test_get_state_reports_null_enrichment_rather_than_inventing_values(repo, to
     assert master_position["symbol"] is None          # symbol map is empty
     assert master_position["volume_lots"] is None
     assert master_position["pnl_quote"] is None
+    assert master_position["current_price"] is None
     assert master_position["copies"][0]["fill_price"] is None
     assert master_position["copies"][0]["volume_lots"] is None
 

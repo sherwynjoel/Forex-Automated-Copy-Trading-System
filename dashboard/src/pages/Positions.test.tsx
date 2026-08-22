@@ -32,6 +32,7 @@ const mockApiState: ApiState = {
       price: 1.0950,
       label: 'long-eur',
       pnl_quote: 500,
+      current_price: 1.1,
       volume_lots: '1.0',
       copies: [
         {
@@ -280,7 +281,8 @@ test('slave copy rows show their own live P&L from the state snapshot', async ()
         balance: 5000, equity: 5012.34, open_pnl: 12.34,
         positions: [
           { position_id: 5001, symbol_id: 1, symbol: 'EURUSD', side: 'BUY',
-            volume: 100000, entry_price: 1.0951, pnl_quote: 12.34 },
+            volume: 100000, entry_price: 1.0951, pnl_quote: 12.34,
+            current_price: 1.09635 },
         ],
       },
     },
@@ -298,4 +300,39 @@ test('slave copy rows show their own live P&L from the state snapshot', async ()
   // The filled copy carries its live P&L; the failed one shows a dash.
   expect(await screen.findByText('+12.34')).toBeInTheDocument()
   expect(screen.getByText('Live P&L')).toBeInTheDocument()
+})
+
+test('master rows and copy rows show the live current price', async () => {
+  setRole('owner')
+  const stateWithPrices: ApiState = {
+    ...mockApiState,
+    accounts: {
+      '2001': {
+        balance: 5000, equity: 5012.34, open_pnl: 12.34,
+        positions: [
+          { position_id: 5001, symbol_id: 1, symbol: 'EURUSD', side: 'BUY',
+            volume: 100000, entry_price: 1.0951, pnl_quote: 12.34,
+            current_price: 1.09635 },
+        ],
+      },
+    },
+  }
+  vi.spyOn(apiModule, 'orgApi').mockResolvedValue(stateWithPrices)
+
+  render(
+    <MemoryRouter>
+      <Positions />
+    </MemoryRouter>
+  )
+
+  // Master position marks at its tracker quote; the copy at its own
+  // account's quote.
+  expect(await screen.findByText('1.10000')).toBeInTheDocument()
+  expect(await screen.findByText('1.09635')).toBeInTheDocument()
+
+  // The 2002 copy has no snapshot entry: its Current cell must be an em
+  // dash, never a fabricated number.
+  const dashRow = screen.getByText('2002').closest('tr')!
+  const dashCell = dashRow.querySelector('td[data-label="Current"]')!
+  expect(dashCell.textContent).toBe('—')
 })

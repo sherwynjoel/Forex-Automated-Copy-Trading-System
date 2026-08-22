@@ -166,8 +166,10 @@ def test_partial_spot_event_retains_the_other_side():
     bid, ask = tracker._spots[1]
     assert bid == pytest.approx(1.15964)   # retained, not zeroed
     assert ask == pytest.approx(1.15968)
-    pnl = tracker.snapshot()[1001]["positions"][0]["pnl_quote"]
-    assert pnl == pytest.approx((1.15964 - 1.15941) * 5000)
+    snap_pos = tracker.snapshot()[1001]["positions"][0]
+    assert snap_pos["pnl_quote"] == pytest.approx((1.15964 - 1.15941) * 5000)
+    # The live marking price rides along: a BUY closes at bid.
+    assert snap_pos["current_price"] == pytest.approx(1.15964)
 
 
 def test_spot_side_never_seen_falls_back_to_entry_price():
@@ -199,8 +201,11 @@ def test_spot_side_never_seen_falls_back_to_entry_price():
     partial.ask = 115968
     tracker.on_spot(partial)
 
-    pnl = tracker.snapshot()[1001]["positions"][0]["pnl_quote"]
-    assert pnl == pytest.approx(0.0)
+    snap_pos = tracker.snapshot()[1001]["positions"][0]
+    assert snap_pos["pnl_quote"] == pytest.approx(0.0)
+    # No bid has ever arrived: report no marking price rather than echoing
+    # the entry price as if it were a live quote.
+    assert snap_pos["current_price"] is None
 
 
 def test_spot_event_scaling_for_3_digit_symbol():
@@ -437,7 +442,7 @@ def test_position_with_unmatched_symbol_is_surfaced_with_none_pnl():
     pos = account_state["positions"][0]
 
     # Verify all expected keys are present (schema consistency)
-    expected_keys = {"position_id", "symbol_id", "symbol", "side", "volume", "entry_price", "pnl_quote"}
+    expected_keys = {"position_id", "symbol_id", "symbol", "side", "volume", "entry_price", "pnl_quote", "current_price"}
     assert set(pos.keys()) == expected_keys, f"Missing or extra keys: {set(pos.keys()) ^ expected_keys}"
 
     # Verify values
@@ -445,6 +450,7 @@ def test_position_with_unmatched_symbol_is_surfaced_with_none_pnl():
     assert pos["symbol_id"] == 999
     assert pos["symbol"] is None  # Placeholder for unknown symbol
     assert pos["pnl_quote"] is None  # Unknown due to missing symbol
+    assert pos["current_price"] is None
     assert pos["side"] == "BUY"
     assert pos["volume"] == 10_000_000
     assert pos["entry_price"] == 1.1000

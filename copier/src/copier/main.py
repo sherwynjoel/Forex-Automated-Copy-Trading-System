@@ -1415,9 +1415,11 @@ class CopierApp:
             # snapshot the accounts block is built from -- so the Positions
             # screen and the Overview never disagree about a position.
             master_pnl_by_position: dict[int, float | None] = {}
+            master_px_by_position: dict[int, float | None] = {}
             for tracked in accounts_snapshot.get(
                     reconciler.master_account_id, {}).get('positions', []):
                 master_pnl_by_position[tracked['position_id']] = tracked.get('pnl_quote')
+                master_px_by_position[tracked['position_id']] = tracked.get('current_price')
 
             for pos in reconciler.master_positions:
                 sym = master_symbol(pos.symbol_id)
@@ -1431,6 +1433,7 @@ class CopierApp:
                     'volume_lots': lots(pos.volume, sym.lot_size if sym is not None else None),
                     'price': pos.price,
                     'pnl_quote': master_pnl_by_position.get(pos.position_id),
+                    'current_price': master_px_by_position.get(pos.position_id),
                     'label': pos.label,
                     'copies': copies_for('master_position_id', pos.position_id, symbol_name),
                 })
