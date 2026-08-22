@@ -536,7 +536,7 @@ class Repo:
 
         `fill_price` (T9c) is stamped only when supplied and only if not
         already set: the FIRST fill's execution price is the copy's entry
-        price for the slippage the Positions screen shows against the
+        price the Positions screen shows against the
         master's entry; a later increase's price would silently redefine it.
 
         `slave_account_id` is an OWNERSHIP predicate, not a lookup key --
@@ -725,7 +725,7 @@ class Repo:
         """Activate the pending fill by converting to position mapping.
 
         `fill_price` (T9c) is stamped when supplied so the Positions screen
-        can show a real fill price / slippage for a copy that came from a
+        can show a real fill price for a copy that came from a
         mirrored pending order, exactly as for a mirrored market open.
 
         Raises MappingNotFound if no active order mapping exists.

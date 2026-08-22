@@ -387,7 +387,7 @@ class CopierService:
             return
 
         # T9c: the execution price is what the Positions screen's per-copy
-        # "Fill Price"/"Slippage" columns are built from. It was already
+        # "Fill Price" column is built from. It was already
         # being read here for the event log; it is now also handed to the
         # mapping row so GET /state can report it (see repo.mappings.fill_price
         # / db/migrations/003_mapping_fill_price.sql).

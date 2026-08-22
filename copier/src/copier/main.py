@@ -1436,9 +1436,9 @@ class CopierApp:
         - per-copy `fill_price` (from the mapping row, stamped at
           activation) and `volume_lots` (the copy's own volume expressed in
           the SLAVE's lots, via that slave's cached symbol lot_size). The
-          screen's "Fill Price" and "Slippage (pts)" columns rendered a
-          literal "-" forever without the first, and volumes were shown in
-          raw protocol units without the second.
+          screen's "Fill Price" column rendered a literal "-" forever
+          without the first, and volumes were shown in raw protocol units
+          without the second.
         - per-master-position `symbol` (name, not `ID:<n>`), `volume_lots`
           and live `pnl_quote` from the state tracker.
 

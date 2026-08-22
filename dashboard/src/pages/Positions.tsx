@@ -263,7 +263,6 @@ function PositionRow({
                     <th className="desk-label p-2 text-left border-b border-line">Account</th>
                     <th className="desk-label p-2 text-left border-b border-line">Status</th>
                     <th className="desk-label p-2 text-right border-b border-line">Fill Price</th>
-                    <th className="desk-label p-2 text-right border-b border-line">Slippage (pts)</th>
                     <th className="desk-label p-2 text-right border-b border-line">Current</th>
                     <th className="desk-label p-2 text-right border-b border-line">Live P&L</th>
                     <th className="desk-label p-2 text-left border-b border-line">Error</th>
@@ -274,7 +273,6 @@ function PositionRow({
                     <CopyRow
                       key={`${copy.slave_account_id}-${copy.slave_position_id}`}
                       copy={copy}
-                      entryPrice={position.price}
                       livePnl={pnlFor(copy.slave_account_id, copy.slave_position_id)}
                       livePrice={priceFor(copy.slave_account_id, copy.slave_position_id)}
                     />
@@ -343,28 +341,22 @@ function OrderRow({
 
 function CopyRow({
   copy,
-  entryPrice,
   livePnl,
   livePrice,
 }: {
   copy: PositionCopy
-  entryPrice: number
   livePnl: number | null
   livePrice: number | null
 }) {
   // Show "—" if fill_price is not available from backend
-  const hasFillPrice = copy.fill_price != null
-  const slippageDisplay = hasFillPrice
-    ? ((copy.fill_price! - entryPrice) * 10000).toFixed(1)
-    : '—'
-  const fillPriceDisplay = hasFillPrice ? copy.fill_price!.toFixed(5) : '—'
+  const fillPriceDisplay = copy.fill_price != null
+    ? copy.fill_price.toFixed(5) : '—'
 
   return (
     <tr className="border-b border-line last:border-0">
       <td data-label="Account" className="num p-2">{copy.slave_account_id}</td>
       <td data-label="Status" className="num p-2">{copy.status}</td>
       <td data-label="Fill Price" className="num p-2 text-right">{fillPriceDisplay}</td>
-      <td data-label="Slippage (pts)" className="num p-2 text-right">{slippageDisplay}</td>
       <td data-label="Current" className={`num p-2 text-right font-medium ${
         livePrice != null ? 'text-brand' : 'text-ink-faint'
       }`}>

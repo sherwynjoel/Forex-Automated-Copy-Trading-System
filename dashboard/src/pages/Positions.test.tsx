@@ -103,7 +103,7 @@ test('renders master positions with lots and pnl', async () => {
   expect(pnlElement).toBeInTheDocument()
 })
 
-test('per-slave copy status with slippage is always visible', async () => {
+test('per-slave copy status is always visible', async () => {
   setRole('owner')
   vi.spyOn(apiModule, 'orgApi').mockResolvedValue(mockApiState)
 
@@ -122,7 +122,7 @@ test('per-slave copy status with slippage is always visible', async () => {
     // The table should show the slave account ID
     expect(screen.getByText('2001')).toBeInTheDocument()
     expect(screen.getByText('active')).toBeInTheDocument()
-    // When fill_price is not provided by backend, show "—" for both fill price and slippage
+    // When fill_price is not provided by backend, show "—" rather than 0
     const dashElements = screen.getAllByText('—')
     expect(dashElements.length).toBeGreaterThan(0)
   })

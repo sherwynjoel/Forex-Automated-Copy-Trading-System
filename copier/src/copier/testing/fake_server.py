@@ -59,7 +59,7 @@ class FakeCTraderServer:
         # Price every auto-filled deal reports as ProtoOADeal.executionPrice.
         # The real server always sets it on a fill; without it the copier's
         # slave-fill handler had no price to stamp onto the mapping row, so
-        # the Positions screen's Fill Price / Slippage columns (spec §7, see
+        # the Positions screen's Fill Price column (spec §7, see
         # T9c) were untestable end to end. Scriptable so a test can model a
         # slave filling away from the master's price.
         self.execution_price: float = 1.10500
@@ -822,7 +822,7 @@ class FakeCTraderServer:
                 fill_evt.deal.executionTimestamp = int(time.time() * 1000)
                 # Real cTrader always reports the price a deal filled at; the
                 # copier stamps it onto the mapping row (T9c) so the
-                # Positions screen can show Fill Price and Slippage.
+                # Positions screen can show Fill Price.
                 fill_evt.deal.executionPrice = self.execution_price
                 fill_evt.position.positionId = position_id
                 fill_evt.position.tradeData.symbolId = req.symbolId
