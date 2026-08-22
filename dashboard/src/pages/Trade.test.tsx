@@ -33,6 +33,7 @@ function setRole(role: Role) {
 afterEach(() => {
   vi.clearAllMocks()
   vi.unstubAllGlobals()
+  localStorage.clear()
 })
 
 const accounts = [
@@ -513,4 +514,36 @@ test('a broker order rejection streams into the order-error banner', async () =>
 
   const alert = await screen.findByRole('alert')
   expect(alert).toHaveTextContent(/market is closed/i)
+})
+
+test('a pinned default symbol wins over the first cached symbol', async () => {
+  localStorage.setItem('mf.defaultSymbol.1.100', 'GBPUSD')
+  setRole('trader')
+  mockRoutes()
+  renderTrade()
+
+  const symbolBox = await screen.findByLabelText(/symbol/i)
+  await waitFor(() => {
+    expect((symbolBox as HTMLInputElement).value).toBe('GBPUSD')
+  })
+})
+
+test('set as default pins the current symbol; unpin clears it', async () => {
+  setRole('trader')
+  mockRoutes()
+  renderTrade()
+
+  const symbolBox = await screen.findByLabelText(/symbol/i)
+  await waitFor(() => {
+    expect((symbolBox as HTMLInputElement).value).toBe('EURUSD')
+  })
+
+  await userEvent.click(screen.getByRole('button', { name: /set as default/i }))
+  expect(localStorage.getItem('mf.defaultSymbol.1.100')).toBe('EURUSD')
+
+  // The pin reflects its state and can be cleared.
+  const pinned = screen.getByRole('button', { name: /default symbol — click to clear/i })
+  await userEvent.click(pinned)
+  expect(localStorage.getItem('mf.defaultSymbol.1.100')).toBeNull()
+  expect(screen.getByRole('button', { name: /set as default/i })).toBeInTheDocument()
 })

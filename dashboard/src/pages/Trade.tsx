@@ -40,6 +40,17 @@ const EMPTY_TICKET: TicketState = {
   limitPrice: '', stopPrice: '', stopLoss: '', takeProfit: '',
 }
 
+const defaultSymbolKey = (orgId: number, accountId: number) =>
+  `mf.defaultSymbol.${orgId}.${accountId}`
+
+function readDefaultSymbol(orgId: number, accountId: number): string | null {
+  try {
+    return localStorage.getItem(defaultSymbolKey(orgId, accountId))
+  } catch {
+    return null
+  }
+}
+
 function accountLabel(account: Account): string {
   const name = account.nickname || `Account ${account.trader_login}`
   const env = account.is_live ? 'Live' : 'Demo'
@@ -74,6 +85,8 @@ export default function Trade() {
   const [margin, setMargin] = useState<MarginEstimate | null>(null)
   const [chartPeriod, setChartPeriod] = useState<string>('H1')
   const [chart, setChart] = useState<Trendbars | null>(null)
+  // Bumped whenever the pinned default changes, so the pin button re-renders.
+  const [, setPinVersion] = useState(0)
 
   // Load accounts once; default the ticket to the master.
   useEffect(() => {
@@ -104,8 +117,16 @@ export default function Trade() {
       if (accountIdRef.current !== accountId) return
       setSymbols(syms)
       setDetails(det)
-      setTicket((t) => (t.symbol && syms.some((s) => s.name === t.symbol)
-        ? t : { ...t, symbol: syms[0]?.name ?? '' }))
+      // A pinned default symbol wins; otherwise keep the current pick or
+      // fall back to the first cached symbol.
+      const pinned = readDefaultSymbol(orgId, accountId)
+      setTicket((t) => {
+        if (t.symbol && syms.some((s) => s.name === t.symbol)) return t
+        const fallback = (pinned && syms.some((s) => s.name === pinned))
+          ? pinned
+          : syms[0]?.name ?? ''
+        return { ...t, symbol: fallback }
+      })
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load account data')
@@ -443,7 +464,33 @@ export default function Trade() {
           </div>
 
           <div>
-            <label htmlFor="ticket-symbol" className="desk-label block mb-1">Symbol</label>
+            <div className="flex items-baseline justify-between mb-1">
+              <label htmlFor="ticket-symbol" className="desk-label">Symbol</label>
+              {accountId != null && ticket.symbol && (
+                readDefaultSymbol(orgId, accountId) === ticket.symbol ? (
+                  <button
+                    onClick={() => {
+                      try { localStorage.removeItem(defaultSymbolKey(orgId, accountId)) } catch { /* private mode */ }
+                      setPinVersion((v) => v + 1)
+                    }}
+                    aria-label="Default symbol — click to clear"
+                    className="text-[11px] font-semibold text-brand-deep bg-brand-wash rounded px-1.5 py-0.5 hover:bg-brand hover:text-white transition-colors"
+                  >
+                    ★ Default
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => {
+                      try { localStorage.setItem(defaultSymbolKey(orgId, accountId), ticket.symbol) } catch { /* private mode */ }
+                      setPinVersion((v) => v + 1)
+                    }}
+                    className="text-[11px] font-medium text-ink-soft hover:text-brand-deep transition-colors"
+                  >
+                    ☆ Set as default
+                  </button>
+                )
+              )}
+            </div>
             <SearchSelect
               id="ticket-symbol"
               mono
