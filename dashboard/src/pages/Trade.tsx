@@ -390,7 +390,7 @@ export default function Trade() {
   // gate is belt-and-braces against a direct visit.
   if (!can(role, 'trade')) {
     return (
-      <div className="space-y-6 max-w-5xl">
+      <div className="space-y-6">
         <header>
           <h1 className="page-title">Trade</h1>
         </header>
@@ -677,186 +677,186 @@ export default function Trade() {
 
         {/* Chart + live positions + working orders for the selected account */}
         <section className="lg:col-span-3 space-y-6">
-          <div className="bg-card rounded-lg border border-line p-5">
-            <div className="flex items-center justify-between mb-3">
-              <h2 className="desk-label">
-                {ticket.symbol || 'Price'} · {chartPeriod}
-              </h2>
-              <div className="flex gap-1">
-                {CHART_PERIODS.map((p) => (
-                  <button
-                    key={p}
-                    onClick={() => setChartPeriod(p)}
-                    className={`min-h-11 min-w-11 md:min-h-0 md:min-w-0 px-2 py-1 text-xs rounded transition-colors ${
-                      chartPeriod === p
-                        ? 'bg-brand text-on-accent font-semibold'
-                        : 'text-ink-soft hover:text-ink'
-                    }`}
-                  >
-                    {p}
-                  </button>
-                ))}
-              </div>
+          <div className="bg-card rounded-lg border border-line">
+            <div className="px-5 py-3 border-b border-line flex items-baseline justify-between">
+              <h2 className="desk-label">Open positions</h2>
+              {details?.balance != null && (
+                <span className="text-xs text-ink-soft">
+                  Balance <span className="num text-ink">{details.balance.toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
+                  {details.deposit_currency ? ` ${details.deposit_currency}` : ''}
+                </span>
+              )}
             </div>
-            {chart && chart.bars.length > 0 ? (
-              <CandleChart
-                bars={chart.bars}
-                lines={(details?.open_positions ?? [])
-                  .filter((pos) => pos.symbol === ticket.symbol)
-                  .flatMap((pos): PriceLine[] => {
-                    const lines: PriceLine[] = [
-                      { price: pos.price, label: `entry ${pos.position_id}`, kind: 'entry' },
-                    ]
-                    if (pos.stop_loss != null) lines.push({ price: pos.stop_loss, label: 'SL', kind: 'sl' })
-                    if (pos.take_profit != null) lines.push({ price: pos.take_profit, label: 'TP', kind: 'tp' })
-                    return lines
-                  })}
-                digits={symbols.find((s) => s.name === ticket.symbol)?.digits ?? 5}
-              />
-            ) : (
-              <p className="text-sm text-ink-faint py-10 text-center">
-                No candles for this symbol yet — the copier may still be
-                connecting, or the market has no bars in this range.
+            {!details || details.open_positions.length === 0 ? (
+              <p className="px-5 py-6 text-sm text-ink-faint">
+                No open positions on this account.
               </p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="stack-table w-full text-sm">
+                  <thead>
+                    <tr className="text-left border-b border-line">
+                      <th className="desk-label px-5 py-2 font-semibold">ID</th>
+                      <th className="desk-label px-3 py-2 font-semibold">Symbol</th>
+                      <th className="desk-label px-3 py-2 font-semibold">Side</th>
+                      <th className="desk-label px-3 py-2 font-semibold text-right">Lots</th>
+                      <th className="desk-label px-3 py-2 font-semibold text-right">Entry</th>
+                      <th className="desk-label px-3 py-2 font-semibold text-right">Current</th>
+                      <th className="desk-label px-3 py-2 font-semibold text-right">Live P&L</th>
+                      <th className="desk-label px-3 py-2 font-semibold text-right">SL / TP</th>
+                      <th className="px-3 py-2" />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {details.open_positions.map((pos) => (
+                      <tr key={pos.position_id} className="border-b border-line last:border-0">
+                        <td data-label="ID" className="num px-5 py-2.5 text-ink-soft">{pos.position_id}</td>
+                        <td data-label="Symbol" className="num px-3 py-2.5">{pos.symbol ?? pos.symbol_id}</td>
+                        <td data-label="Side" className={`px-3 py-2.5 font-medium ${pos.side === 'BUY' ? 'text-profit' : 'text-loss'}`}>
+                          {pos.side}
+                        </td>
+                        <td data-label="Lots" className="num px-3 py-2.5 text-right">{pos.volume_lots ?? pos.volume}</td>
+                        <td data-label="Entry" className="num px-3 py-2.5 text-right">{pos.price}</td>
+                        <td data-label="Current" className={`num px-3 py-2.5 text-right font-medium ${
+                          livePrice[pos.position_id] != null ? 'text-brand' : 'text-ink-faint'
+                        }`}>
+                          {livePrice[pos.position_id] ?? '\u2014'}
+                        </td>
+                        <td data-label="Live P&L" className={`num px-3 py-2.5 text-right font-medium ${
+                          livePnl[pos.position_id] == null ? 'text-ink-faint'
+                            : livePnl[pos.position_id]! < 0 ? 'text-loss' : 'text-profit'
+                        }`}>
+                          {livePnl[pos.position_id] != null
+                            ? (livePnl[pos.position_id]! >= 0 ? '+' : '') + livePnl[pos.position_id]!.toFixed(2)
+                            : '—'}
+                        </td>
+                        <td data-label="SL / TP" className="num px-3 py-2.5 text-right text-ink-soft">
+                          {pos.stop_loss ?? '—'} / {pos.take_profit ?? '—'}
+                        </td>
+                        <td className="px-3 py-2.5 text-right">
+                          {closingIds.has(pos.position_id) ? (
+                            <span className="px-3 py-2.5 md:py-1 text-xs font-semibold text-ink-faint animate-pulse motion-reduce:animate-none">
+                              Closing…
+                            </span>
+                          ) : (
+                          <button
+                            onClick={() => { setClosing(pos); setPartialLots('') }}
+                            className="px-3 py-2.5 md:py-1 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-on-accent transition-colors"
+                          >
+                            Close
+                          </button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          <div className="bg-card rounded-lg border border-line">
+            <div className="px-5 py-3 border-b border-line">
+              <h2 className="desk-label">Working orders</h2>
+            </div>
+            {!details || details.pending_orders.length === 0 ? (
+              <p className="px-5 py-6 text-sm text-ink-faint">
+                No working orders on this account.
+              </p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="stack-table w-full text-sm">
+                  <thead>
+                    <tr className="text-left border-b border-line">
+                      <th className="desk-label px-5 py-2 font-semibold">ID</th>
+                      <th className="desk-label px-3 py-2 font-semibold">Symbol</th>
+                      <th className="desk-label px-3 py-2 font-semibold">Type</th>
+                      <th className="desk-label px-3 py-2 font-semibold">Side</th>
+                      <th className="desk-label px-3 py-2 font-semibold text-right">Lots</th>
+                      <th className="desk-label px-3 py-2 font-semibold text-right">Price</th>
+                      <th className="px-3 py-2" />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {details.pending_orders.map((order) => (
+                      <tr key={order.order_id} className="border-b border-line last:border-0">
+                        <td data-label="ID" className="num px-5 py-2.5 text-ink-soft">{order.order_id}</td>
+                        <td data-label="Symbol" className="num px-3 py-2.5">{order.symbol ?? order.symbol_id}</td>
+                        <td data-label="Type" className="px-3 py-2.5">{order.order_type}</td>
+                        <td data-label="Side" className={`px-3 py-2.5 font-medium ${order.side === 'BUY' ? 'text-profit' : 'text-loss'}`}>
+                          {order.side}
+                        </td>
+                        <td data-label="Lots" className="num px-3 py-2.5 text-right">{order.volume_lots ?? order.volume}</td>
+                        <td data-label="Price" className="num px-3 py-2.5 text-right">
+                          {order.limit_price ?? order.stop_price ?? '—'}
+                        </td>
+                        <td className="px-3 py-2.5 text-right">
+                          {cancellingIds.has(order.order_id) ? (
+                            <span className="px-3 py-2.5 md:py-1 text-xs font-semibold text-ink-faint animate-pulse motion-reduce:animate-none">
+                              Cancelling…
+                            </span>
+                          ) : (
+                          <button
+                            onClick={() => setCancelling(order)}
+                            className="px-3 py-2.5 md:py-1 text-xs font-semibold rounded border border-line-strong text-ink-soft hover:text-ink hover:border-ink transition-colors"
+                          >
+                            Cancel order
+                          </button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             )}
           </div>
 
         </section>
       </div>
 
-      {/* The account book spans the full page: every column visible, no sideways scroll. */}
-      <div className="bg-card rounded-lg border border-line">
-        <div className="px-5 py-3 border-b border-line flex items-baseline justify-between">
-          <h2 className="desk-label">Open positions</h2>
-          {details?.balance != null && (
-            <span className="text-xs text-ink-soft">
-              Balance <span className="num text-ink">{details.balance.toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
-              {details.deposit_currency ? ` ${details.deposit_currency}` : ''}
-            </span>
-          )}
-        </div>
-        {!details || details.open_positions.length === 0 ? (
-          <p className="px-5 py-6 text-sm text-ink-faint">
-            No open positions on this account.
-          </p>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="stack-table w-full text-sm">
-              <thead>
-                <tr className="text-left border-b border-line">
-                  <th className="desk-label px-5 py-2 font-semibold">ID</th>
-                  <th className="desk-label px-3 py-2 font-semibold">Symbol</th>
-                  <th className="desk-label px-3 py-2 font-semibold">Side</th>
-                  <th className="desk-label px-3 py-2 font-semibold text-right">Lots</th>
-                  <th className="desk-label px-3 py-2 font-semibold text-right">Entry</th>
-                  <th className="desk-label px-3 py-2 font-semibold text-right">Current</th>
-                  <th className="desk-label px-3 py-2 font-semibold text-right">Live P&L</th>
-                  <th className="desk-label px-3 py-2 font-semibold text-right">SL / TP</th>
-                  <th className="px-3 py-2" />
-                </tr>
-              </thead>
-              <tbody>
-                {details.open_positions.map((pos) => (
-                  <tr key={pos.position_id} className="border-b border-line last:border-0">
-                    <td data-label="ID" className="num px-5 py-2.5 text-ink-soft">{pos.position_id}</td>
-                    <td data-label="Symbol" className="num px-3 py-2.5">{pos.symbol ?? pos.symbol_id}</td>
-                    <td data-label="Side" className={`px-3 py-2.5 font-medium ${pos.side === 'BUY' ? 'text-profit' : 'text-loss'}`}>
-                      {pos.side}
-                    </td>
-                    <td data-label="Lots" className="num px-3 py-2.5 text-right">{pos.volume_lots ?? pos.volume}</td>
-                    <td data-label="Entry" className="num px-3 py-2.5 text-right">{pos.price}</td>
-                    <td data-label="Current" className={`num px-3 py-2.5 text-right font-medium ${
-                      livePrice[pos.position_id] != null ? 'text-brand' : 'text-ink-faint'
-                    }`}>
-                      {livePrice[pos.position_id] ?? '\u2014'}
-                    </td>
-                    <td data-label="Live P&L" className={`num px-3 py-2.5 text-right font-medium ${
-                      livePnl[pos.position_id] == null ? 'text-ink-faint'
-                        : livePnl[pos.position_id]! < 0 ? 'text-loss' : 'text-profit'
-                    }`}>
-                      {livePnl[pos.position_id] != null
-                        ? (livePnl[pos.position_id]! >= 0 ? '+' : '') + livePnl[pos.position_id]!.toFixed(2)
-                        : '—'}
-                    </td>
-                    <td data-label="SL / TP" className="num px-3 py-2.5 text-right text-ink-soft">
-                      {pos.stop_loss ?? '—'} / {pos.take_profit ?? '—'}
-                    </td>
-                    <td className="px-3 py-2.5 text-right">
-                      {closingIds.has(pos.position_id) ? (
-                        <span className="px-3 py-2.5 md:py-1 text-xs font-semibold text-ink-faint animate-pulse motion-reduce:animate-none">
-                          Closing…
-                        </span>
-                      ) : (
-                      <button
-                        onClick={() => { setClosing(pos); setPartialLots('') }}
-                        className="px-3 py-2.5 md:py-1 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-on-accent transition-colors"
-                      >
-                        Close
-                      </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+      {/* The chart keeps out of the way of the desk: full width, below the fold. */}
+      <div className="bg-card rounded-lg border border-line p-5">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="desk-label">
+            {ticket.symbol || 'Price'} · {chartPeriod}
+          </h2>
+          <div className="flex gap-1">
+            {CHART_PERIODS.map((p) => (
+              <button
+                key={p}
+                onClick={() => setChartPeriod(p)}
+                className={`min-h-11 min-w-11 md:min-h-0 md:min-w-0 px-2 py-1 text-xs rounded transition-colors ${
+                  chartPeriod === p
+                    ? 'bg-brand text-on-accent font-semibold'
+                    : 'text-ink-soft hover:text-ink'
+                }`}
+              >
+                {p}
+              </button>
+            ))}
           </div>
-        )}
-      </div>
-
-      <div className="bg-card rounded-lg border border-line">
-        <div className="px-5 py-3 border-b border-line">
-          <h2 className="desk-label">Working orders</h2>
         </div>
-        {!details || details.pending_orders.length === 0 ? (
-          <p className="px-5 py-6 text-sm text-ink-faint">
-            No working orders on this account.
-          </p>
+        {chart && chart.bars.length > 0 ? (
+          <CandleChart
+            bars={chart.bars}
+            lines={(details?.open_positions ?? [])
+              .filter((pos) => pos.symbol === ticket.symbol)
+              .flatMap((pos): PriceLine[] => {
+                const lines: PriceLine[] = [
+                  { price: pos.price, label: `entry ${pos.position_id}`, kind: 'entry' },
+                ]
+                if (pos.stop_loss != null) lines.push({ price: pos.stop_loss, label: 'SL', kind: 'sl' })
+                if (pos.take_profit != null) lines.push({ price: pos.take_profit, label: 'TP', kind: 'tp' })
+                return lines
+              })}
+            digits={symbols.find((s) => s.name === ticket.symbol)?.digits ?? 5}
+          />
         ) : (
-          <div className="overflow-x-auto">
-            <table className="stack-table w-full text-sm">
-              <thead>
-                <tr className="text-left border-b border-line">
-                  <th className="desk-label px-5 py-2 font-semibold">ID</th>
-                  <th className="desk-label px-3 py-2 font-semibold">Symbol</th>
-                  <th className="desk-label px-3 py-2 font-semibold">Type</th>
-                  <th className="desk-label px-3 py-2 font-semibold">Side</th>
-                  <th className="desk-label px-3 py-2 font-semibold text-right">Lots</th>
-                  <th className="desk-label px-3 py-2 font-semibold text-right">Price</th>
-                  <th className="px-3 py-2" />
-                </tr>
-              </thead>
-              <tbody>
-                {details.pending_orders.map((order) => (
-                  <tr key={order.order_id} className="border-b border-line last:border-0">
-                    <td data-label="ID" className="num px-5 py-2.5 text-ink-soft">{order.order_id}</td>
-                    <td data-label="Symbol" className="num px-3 py-2.5">{order.symbol ?? order.symbol_id}</td>
-                    <td data-label="Type" className="px-3 py-2.5">{order.order_type}</td>
-                    <td data-label="Side" className={`px-3 py-2.5 font-medium ${order.side === 'BUY' ? 'text-profit' : 'text-loss'}`}>
-                      {order.side}
-                    </td>
-                    <td data-label="Lots" className="num px-3 py-2.5 text-right">{order.volume_lots ?? order.volume}</td>
-                    <td data-label="Price" className="num px-3 py-2.5 text-right">
-                      {order.limit_price ?? order.stop_price ?? '—'}
-                    </td>
-                    <td className="px-3 py-2.5 text-right">
-                      {cancellingIds.has(order.order_id) ? (
-                        <span className="px-3 py-2.5 md:py-1 text-xs font-semibold text-ink-faint animate-pulse motion-reduce:animate-none">
-                          Cancelling…
-                        </span>
-                      ) : (
-                      <button
-                        onClick={() => setCancelling(order)}
-                        className="px-3 py-2.5 md:py-1 text-xs font-semibold rounded border border-line-strong text-ink-soft hover:text-ink hover:border-ink transition-colors"
-                      >
-                        Cancel order
-                      </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <p className="text-sm text-ink-faint py-10 text-center">
+            No candles for this symbol yet — the copier may still be
+            connecting, or the market has no bars in this range.
+          </p>
         )}
       </div>
 
