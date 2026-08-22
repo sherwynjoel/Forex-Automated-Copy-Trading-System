@@ -56,12 +56,12 @@ from copier.ctrader.client import CTraderClient, make_sdk_client
 from copier.ctrader.tokens import TokenStore
 from copier.ctrader.symbols import fetch_symbol_map, by_id as symbols_by_id
 from copier.db.repo import Repo
-from copier.domain.models import MANUAL_ORDER_LABEL
+from copier.domain.models import MANUAL_ORDER_LABEL, Side
 from copier.engine.service import CopierService
 from copier.engine.reconcile import Reconciler
 from copier.engine.routing import OrgRouting, build_routing
 from copier.engine.state import AccountStateTracker, PositionSnapshot as StatePositionSnapshot
-from copier.engine.dispatch import Dispatcher, SendNotAttempted
+from copier.engine.dispatch import Dispatcher, relative_protection, SendNotAttempted
 from copier.engine.throttle import TokenBucket
 from copier.engine.control import make_control_site
 from copier.engine import queries
@@ -100,6 +100,8 @@ CUTOFF_REMINDER_DAYS = 2
 CUTOFF_REMINDER_INTERVAL_S = 3600.0
 CONTROL_PORT = 8080
 _SIDE_BY_NAME = {"BUY": ProtoOATradeSide.BUY, "SELL": ProtoOATradeSide.SELL}
+# The domain Side, for helpers that reason about direction.
+_SIDE_BY_NAME_DOMAIN = {"BUY": Side.BUY, "SELL": Side.SELL}
 
 # Fat-finger ceiling for MANUAL orders (the trade ticket). A manual order on
 # the master fans out to every slave scaled by each one's multiplier, so a
@@ -1038,10 +1040,57 @@ class CopierApp:
             req.limitPrice = float(limit_price)
         if stop_price is not None:
             req.stopPrice = float(stop_price)
-        if params.get("stop_loss") is not None:
-            req.stopLoss = float(params["stop_loss"])
-        if params.get("take_profit") is not None:
-            req.takeProfit = float(params["take_profit"])
+
+        protection_audit: dict | None = None
+        raw_sl = params.get("stop_loss")
+        raw_tp = params.get("take_profit")
+        if raw_sl is not None or raw_tp is not None:
+            sl = float(raw_sl) if raw_sl is not None else None
+            tp = float(raw_tp) if raw_tp is not None else None
+            if type_name == "MARKET":
+                # Absolute SL/TP are rejected on a market order; the broker
+                # wants the distance from the fill. Measure it from the side
+                # the order will actually cross.
+                bid, ask = self._spot_for(account_id, symbol_name)
+                reference = ask if side_name == "BUY" else bid
+                if reference is None:
+                    raise ValueError(
+                        f"no live price for {symbol_name} yet, so a stop loss or "
+                        f"take profit cannot be placed with a market order -- "
+                        f"try again in a moment, or place the order without "
+                        f"protection and set it on the position")
+                sl_rel, tp_rel = relative_protection(
+                    _SIDE_BY_NAME_DOMAIN[side_name], reference, sl, tp)
+                if sl is not None and sl_rel is None:
+                    raise ValueError(
+                        f"a {side_name} stop loss must sit on the losing side of "
+                        f"the market ({reference})")
+                if tp is not None and tp_rel is None:
+                    raise ValueError(
+                        f"a {side_name} take profit must sit on the winning side "
+                        f"of the market ({reference})")
+                if sl_rel is not None:
+                    req.relativeStopLoss = sl_rel
+                if tp_rel is not None:
+                    req.relativeTakeProfit = tp_rel
+                # The broker applies these distances to the FILL, which is
+                # not exactly the price quoted here. Record both so a stop
+                # that lands somewhere unexpected can be explained.
+                protection_audit = {
+                    'requested_stop_loss': sl, 'requested_take_profit': tp,
+                    'reference_price': reference,
+                    'relative_stop_loss': sl_rel,
+                    'relative_take_profit': tp_rel,
+                    'note': 'market-order protection is placed relative to '
+                            'the fill, so the final level moves with slippage',
+                }
+            else:
+                # LIMIT and STOP orders do take absolute prices.
+                if sl is not None:
+                    req.stopLoss = sl
+                if tp is not None:
+                    req.takeProfit = tp
+                protection_audit = {'stop_loss': sl, 'take_profit': tp}
 
         self.dispatcher.send_direct(account_id, req)
         summary = {
@@ -1051,7 +1100,9 @@ class CopierApp:
         }
         self.repo.log_event(
             'control', 'info',
-            {'action': 'manual_order', **{k: v for k, v in summary.items() if k != 'status'}},
+            {'action': 'manual_order',
+             **{k: v for k, v in summary.items() if k != 'status'},
+             **({'protection': protection_audit} if protection_audit else {})},
             account_id=account_id, org_id=org_id, actor=params.get("actor_email"),
         )
         return summary
@@ -1332,6 +1383,35 @@ class CopierApp:
         )
         return {"account_id": account_id, "positions_closed": positions_closed,
                 "orders_cancelled": orders_cancelled, "error": None}
+
+    def _spot_for(self, account_id: int, symbol_name: str):
+        """(bid, ask) for a symbol, resolved in the MASTER's namespace.
+
+        The org's tracker subscribes on the master connection, so its quote
+        store is keyed by MASTER symbol ids -- looking it up with the target
+        account's id would read whatever instrument happens to share that
+        number on the slave's broker. Resolve by NAME, which is how the rest
+        of the copy engine matches symbols across accounts.
+
+        Also subscribes, so a symbol with no open position starts ticking
+        and a caller told to "try again in a moment" actually can.
+        """
+        org_id = self._org_for_account(account_id)
+        tracker = self.state_trackers.get(org_id) if org_id is not None else None
+        if tracker is None:
+            return None, None
+        master_sym = next(
+            (si for si in self.master_symbols_by_org.get(org_id, {}).values()
+             if si.name == symbol_name), None)
+        if master_sym is None:
+            return None, None
+        try:
+            tracker.ensure_spot_subscription(master_sym.symbol_id)
+        except Exception:  # subscription is best-effort; the read decides
+            pass
+        # quote() answers None (not a pair) before the symbol's first tick.
+        spot = tracker.quote(master_sym.symbol_id)
+        return spot if spot else (None, None)
 
     def get_quote(self, account_id: int, symbol_name: str) -> dict:
         """Live (bid, ask) for one of the account's symbols, from the org's

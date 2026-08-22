@@ -87,7 +87,8 @@ class TestBuildRequest:
             volume=50000,
             stop_loss=1.05,
             take_profit=1.15,
-            label="copy:m42"
+            label="copy:m42",
+            entry_price=1.10,
         )
         account_id, req = build_request(intent)
 
@@ -98,8 +99,13 @@ class TestBuildRequest:
         assert req.orderType == ProtoOAOrderType.MARKET
         assert req.tradeSide == ProtoOATradeSide.BUY
         assert req.volume == 50000
-        assert req.stopLoss == 1.05
-        assert req.takeProfit == 1.15
+        # A MARKET order carries protection as a DISTANCE from the fill, in
+        # 1/100000 of a price unit -- absolute prices are refused outright
+        # (they were, silently, for every copy that carried SL/TP).
+        assert req.relativeStopLoss == 5000     # 1.10 - 1.05
+        assert req.relativeTakeProfit == 5000   # 1.15 - 1.10
+        assert not req.HasField('stopLoss')
+        assert not req.HasField('takeProfit')
         assert req.label == "copy:m42"
         assert req.clientOrderId == "cm42.101"
         # Verify message serializes
@@ -126,6 +132,40 @@ class TestBuildRequest:
         assert req.takeProfit == 0.0
         # Verify message serializes
         req.SerializeToString()
+
+    def test_build_open_market_sell_protection_is_mirrored(self):
+        """A stop protects ABOVE a sell and a target BELOW it; the distance
+        is the same arithmetic mirrored."""
+        intent = OpenMarket(
+            slave_account_id=102, master_position_id=43, symbol_id=200,
+            side=Side.SELL, volume=25000, stop_loss=1.15, take_profit=1.05,
+            label="copy:m43", entry_price=1.10,
+        )
+        _, req = build_request(intent)
+        assert req.relativeStopLoss == 5000     # 1.15 - 1.10
+        assert req.relativeTakeProfit == 5000   # 1.10 - 1.05
+
+    def test_open_market_drops_protection_it_cannot_express(self):
+        """Without the master's fill there is no distance to send, and a
+        level on the wrong side would be refused. Better an unprotected
+        position than an order the broker throws away entirely."""
+        no_reference = OpenMarket(
+            slave_account_id=102, master_position_id=44, symbol_id=200,
+            side=Side.BUY, volume=25000, stop_loss=1.05, take_profit=1.15,
+            label="copy:m44",
+        )
+        _, req = build_request(no_reference)
+        assert not req.HasField('relativeStopLoss')
+        assert not req.HasField('relativeTakeProfit')
+
+        wrong_side = OpenMarket(
+            slave_account_id=102, master_position_id=45, symbol_id=200,
+            side=Side.BUY, volume=25000, stop_loss=1.20, take_profit=1.15,
+            label="copy:m45", entry_price=1.10,
+        )
+        _, req = build_request(wrong_side)
+        assert not req.HasField('relativeStopLoss')  # above a BUY: refused
+        assert req.relativeTakeProfit == 5000        # the sound half survives
 
     def test_build_close_position_request(self):
         intent = ClosePosition(
@@ -459,7 +499,8 @@ class TestDispatcher:
             volume=50000,
             stop_loss=1.05,
             take_profit=1.15,
-            label="copy:m42"
+            label="copy:m42",
+            entry_price=1.10,
         )
         dispatcher.dispatch([intent], org_id=ORG_ID)
 
@@ -478,8 +519,10 @@ class TestDispatcher:
 
         # Verify operators can see exact fields: SL, TP, label, volume, etc.
         would_send = payload['would_send']
-        assert would_send['stopLoss'] == 1.05
-        assert would_send['takeProfit'] == 1.15
+        # The logged request mirrors what actually goes on the wire, so a
+        # market order shows the relative distance, not an absolute price.
+        assert would_send['relativeStopLoss'] == 5000
+        assert would_send['relativeTakeProfit'] == 5000
         assert would_send['label'] == "copy:m42"
         assert would_send['volume'] == 50000
 
@@ -1128,3 +1171,57 @@ class TestPerOrgGates:
         dispatcher.dispatch([self._open_market(201, 43)], org_id=OTHER_ORG_ID)
 
         assert [a for a, _m in sent] == [101], "only org B was in dry-run"
+
+
+class TestRelativeProtectionEdges:
+    """The arithmetic guards, in isolation."""
+
+    def test_a_gap_below_one_wire_unit_is_dropped_not_zeroed(self):
+        """0 is not "no protection" -- the broker reads it as a level AT the
+        fill, which stops out instantly or is refused outright."""
+        from copier.engine.dispatch import relative_protection
+        # 0.000004 of a price unit is below 1/100000 and cannot be sent.
+        sl, tp = relative_protection(Side.BUY, 1.100000, 1.099996, None)
+        assert sl is None
+        # One whole unit survives.
+        sl, _ = relative_protection(Side.BUY, 1.100000, 1.099990, None)
+        assert sl == 1
+
+    def test_an_unknown_side_is_refused_rather_than_guessed(self):
+        """Defaulting to SELL would mirror protection onto the wrong side
+        of the market."""
+        from copier.engine.dispatch import relative_protection
+        with pytest.raises(ValueError, match="unknown side"):
+            relative_protection("BUY", 1.10, 1.05, None)  # a str, not Side
+
+
+def test_a_copy_placed_without_its_protection_is_logged(seed_accounts, repo):
+    """Unprotected beats unplaced -- but never silently."""
+    sent = []
+
+    def mock_send(account_id, msg):
+        sent.append((account_id, msg))
+        return defer.succeed(None)
+
+    bucket = Mock()
+    bucket.acquire.return_value = defer.succeed(None)
+    dispatcher = Dispatcher(mock_send, repo, bucket, clock=Clock())
+
+    # No entry_price: the distance cannot be computed, so the master's stop
+    # cannot travel with the copy.
+    dispatcher.dispatch([OpenMarket(
+        slave_account_id=101, master_position_id=42, symbol_id=100,
+        side=Side.BUY, volume=50000, stop_loss=1.05, take_profit=1.15,
+        label="copy:m42")], org_id=ORG_ID)
+
+    with psycopg.connect(repo.dsn, autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT severity, payload FROM events "
+            "WHERE payload->>'action' = 'protection_dropped'").fetchall()
+    assert len(rows) == 1
+    severity, payload = rows[0]
+    assert severity == 'warning'
+    assert sorted(payload['dropped']) == ['stop loss', 'take profit']
+    assert payload['master_position_id'] == 42
+    # The order still went out: a position you can close beats one never opened.
+    assert len(sent) == 1

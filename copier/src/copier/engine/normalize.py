@@ -86,7 +86,16 @@ def normalize(evt: ProtoOAExecutionEvent,
                 volume=evt.deal.filledVolume,
                 lot_size=symbol_info.lot_size,
                 stop_loss=stop_loss,
-                take_profit=take_profit
+                take_profit=take_profit,
+                # What the copy's SL/TP distance is measured from. The
+                # POSITION's price, not this deal's: on a partial fill the
+                # master's levels were set against the position's entry, and
+                # measuring from one deal would shift the copy's stop by the
+                # difference. Falls back to the deal when absent.
+                entry_price=(
+                    evt.position.price if evt.position.HasField('price')
+                    else (evt.deal.executionPrice
+                          if evt.deal.HasField('executionPrice') else None)),
             )
 
         # Unknown order type with fill -> ignore

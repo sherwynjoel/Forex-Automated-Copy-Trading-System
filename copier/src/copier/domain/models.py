@@ -52,6 +52,10 @@ class MasterPositionOpened:
     lot_size: int        # master's lotSize for the symbol
     stop_loss: float | None
     take_profit: float | None
+    # The master's fill. A copy's SL/TP has to be sent as a DISTANCE from
+    # the slave's own fill (the broker rejects absolute prices on market
+    # orders), and this is what that distance is measured against.
+    entry_price: float | None = None
 
 
 @dataclass(frozen=True)
@@ -151,6 +155,10 @@ class OpenMarket:
     # Slave-resolved symbol NAME, stamped onto the mapping row for copy
     # feeds. Defaulted so pre-existing positional constructions stay valid.
     symbol_name: str = ""
+    # Master's entry, so SL/TP can be expressed as the distance the master
+    # chose rather than an absolute price the broker will not take. Appended
+    # LAST for the same reason symbol_name is defaulted.
+    entry_price: float | None = None
 
 
 @dataclass(frozen=True)

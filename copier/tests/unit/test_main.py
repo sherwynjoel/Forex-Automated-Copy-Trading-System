@@ -2189,3 +2189,89 @@ def test_get_state_names_the_master_account_and_its_protection(repo, token_store
     assert pos["account_id"] == MASTER_A
     assert pos["stop_loss"] == pytest.approx(1.0950)
     assert pos["take_profit"] == pytest.approx(1.1150)
+
+
+# ---- market orders express protection as a distance, not a price ----
+
+def _sent_order(app):
+    sent = []
+    app.dispatcher.send_direct = lambda acct, req: sent.append(req)
+    return sent
+
+
+def test_manual_market_order_sends_relative_protection(repo, token_store):
+    """The broker refuses an absolute SL/TP on a MARKET order, so the ticket
+    has to send the distance from the price the order will cross."""
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    symbol = _seed_symbol_cache(repo, [MASTER_A])
+    app.master_symbols_by_org[ORG_A][symbol.symbol_id] = symbol
+    app.state_trackers[ORG_A]._spots[symbol.symbol_id] = (1.0998, 1.1000)
+    sent = _sent_order(app)
+
+    app.place_order({"account_id": MASTER_A, "symbol": symbol.name,
+                     "side": "BUY", "order_type": "MARKET", "volume_lots": 1,
+                     "stop_loss": 1.0900, "take_profit": 1.1100})
+
+    req = sent[0]
+    # BUY crosses the ask (1.1000). The distance is 0.0100, and the wire
+    # unit is 1/100000 of a price: 0.0100 * 100000 = 1000.
+    assert req.relativeStopLoss == 1000
+    assert req.relativeTakeProfit == 1000
+    assert req.stopLoss == 0.0 and req.takeProfit == 0.0
+
+
+def test_pending_orders_keep_absolute_protection(repo, token_store):
+    """LIMIT and STOP orders DO take absolute prices -- the fix must not
+    convert those."""
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    symbol = _seed_symbol_cache(repo, [MASTER_A])
+    app.master_symbols_by_org[ORG_A][symbol.symbol_id] = symbol
+    sent = _sent_order(app)
+
+    app.place_order({"account_id": MASTER_A, "symbol": symbol.name,
+                     "side": "BUY", "order_type": "LIMIT", "volume_lots": 1,
+                     "limit_price": 1.0950,
+                     "stop_loss": 1.0900, "take_profit": 1.1100})
+
+    req = sent[0]
+    assert req.stopLoss == pytest.approx(1.0900)
+    assert req.takeProfit == pytest.approx(1.1100)
+    assert req.relativeStopLoss == 0
+
+
+def test_market_order_protection_needs_a_live_price(repo, token_store):
+    """Without a quote there is no distance to compute. Say so plainly
+    rather than sending something the broker will reject."""
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    symbol = _seed_symbol_cache(repo, [MASTER_A])
+    app.master_symbols_by_org[ORG_A][symbol.symbol_id] = symbol
+    _sent_order(app)
+
+    with pytest.raises(ValueError, match="no live price"):
+        app.place_order({"account_id": MASTER_A, "symbol": symbol.name,
+                         "side": "BUY", "order_type": "MARKET",
+                         "volume_lots": 1, "stop_loss": 1.09})
+
+    # ...but an unprotected market order still goes through.
+    assert app.place_order({"account_id": MASTER_A, "symbol": symbol.name,
+                            "side": "BUY", "order_type": "MARKET",
+                            "volume_lots": 1})["status"] == "submitted"
+
+
+def test_market_order_rejects_protection_on_the_wrong_side(repo, token_store):
+    """A stop above a BUY is not protection; catch it here with a readable
+    message instead of letting the broker answer TRADING_BAD_STOPS."""
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    symbol = _seed_symbol_cache(repo, [MASTER_A])
+    app.master_symbols_by_org[ORG_A][symbol.symbol_id] = symbol
+    app.state_trackers[ORG_A]._spots[symbol.symbol_id] = (1.0998, 1.1000)
+    _sent_order(app)
+
+    with pytest.raises(ValueError, match="losing side"):
+        app.place_order({"account_id": MASTER_A, "symbol": symbol.name,
+                         "side": "BUY", "order_type": "MARKET",
+                         "volume_lots": 1, "stop_loss": 1.2000})
+    with pytest.raises(ValueError, match="winning side"):
+        app.place_order({"account_id": MASTER_A, "symbol": symbol.name,
+                         "side": "BUY", "order_type": "MARKET",
+                         "volume_lots": 1, "take_profit": 1.0000})

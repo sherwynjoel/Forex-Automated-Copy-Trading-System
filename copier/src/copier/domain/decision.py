@@ -47,7 +47,8 @@ def _position_opened(e: m.MasterPositionOpened,
             continue
         out.append(m.OpenMarket(s.account_id, e.position_id, sym.symbol_id, e.side, vol,
                                 e.stop_loss, e.take_profit, f"copy:m{e.position_id}",
-                                symbol_name=e.symbol_name))
+                                symbol_name=e.symbol_name,
+                                entry_price=e.entry_price))
     return out
 
 

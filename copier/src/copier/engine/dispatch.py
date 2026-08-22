@@ -55,6 +55,58 @@ def client_order_id_for(intent: SlaveIntent) -> str | None:
         return None
 
 
+# The broker states a market order's protection in 1/100000 of a price
+# unit, measured from the fill.
+RELATIVE_PRICE_SCALE = 100_000
+
+# Requests whose protection could not be expressed, keyed by request
+# identity, so the send path can warn about it once. Small and short-lived:
+# build_request and the send happen back to back.
+_DROPPED_PROTECTION: dict[int, tuple] = {}
+
+
+def relative_protection(
+    side: Side,
+    entry_price: float | None,
+    stop_loss: float | None,
+    take_profit: float | None,
+) -> tuple[int | None, int | None]:
+    """Absolute SL/TP prices -> the relative distances a MARKET order takes.
+
+    The cTrader Open API refuses absolute stopLoss/takeProfit on market
+    orders ("Not supported for MARKET orders") because the fill price is
+    not known when the order is sent; it wants the distance instead, and
+    applies it in the protective direction for the side.
+
+    Returns (relative_stop_loss, relative_take_profit), either of which is
+    None when it cannot be expressed -- no reference price, or a level on
+    the wrong side of it. Dropping one is deliberate: the alternative is an
+    order the broker rejects outright, which would leave the trade unmade
+    rather than merely unprotected.
+    """
+    if side not in (Side.BUY, Side.SELL):
+        raise ValueError(f"unknown side {side!r}: cannot place protection")
+    if entry_price is None or entry_price <= 0:
+        return None, None
+
+    def distance(target: float | None, protective_below: bool) -> int | None:
+        if target is None:
+            return None
+        gap = (entry_price - target) if protective_below else (target - entry_price)
+        if gap <= 0:
+            return None  # wrong side of the market; the broker would refuse
+        units = int(round(gap * RELATIVE_PRICE_SCALE))
+        # Below one wire unit the distance is not representable. Sending 0
+        # would not mean "no protection" -- the broker's formula reads it as
+        # a level AT the fill, which stops out immediately or is refused.
+        return units if units >= 1 else None
+
+    is_buy = side == Side.BUY
+    # A stop protects below a BUY and above a SELL; a target is the reverse.
+    return (distance(stop_loss, protective_below=is_buy),
+            distance(take_profit, protective_below=not is_buy))
+
+
 def build_request(intent: SlaveIntent) -> tuple[int, message.Message]:
     """Build a protobuf request from a SlaveIntent.
 
@@ -68,10 +120,25 @@ def build_request(intent: SlaveIntent) -> tuple[int, message.Message]:
         req.orderType = ProtoOAOrderType.MARKET
         req.tradeSide = ProtoOATradeSide.BUY if intent.side == Side.BUY else ProtoOATradeSide.SELL
         req.volume = intent.volume
-        if intent.stop_loss is not None:
-            req.stopLoss = intent.stop_loss
-        if intent.take_profit is not None:
-            req.takeProfit = intent.take_profit
+        # A MARKET order takes its protection as a distance from the fill,
+        # never as an absolute price -- see relative_protection().
+        sl_rel, tp_rel = relative_protection(
+            intent.side, intent.entry_price, intent.stop_loss, intent.take_profit)
+        if sl_rel is not None:
+            req.relativeStopLoss = sl_rel
+        if tp_rel is not None:
+            req.relativeTakeProfit = tp_rel
+        # Recorded on the request so the dispatcher can warn: a copy going
+        # out without the protection its master carries is the kind of
+        # thing an operator must hear about, not discover in a drawdown.
+        dropped = [
+            name for name, wanted, got in (
+                ("stop loss", intent.stop_loss, sl_rel),
+                ("take profit", intent.take_profit, tp_rel),
+            ) if wanted is not None and got is None
+        ]
+        if dropped:
+            _DROPPED_PROTECTION[id(req)] = (intent, dropped)
         req.label = intent.label
         req.clientOrderId = client_order_id_for(intent)
         return intent.slave_account_id, req
@@ -297,12 +364,35 @@ class Dispatcher:
             org_id=org_id
         )
 
+    def _warn_dropped_protection(self, req, account_id: int, org_id: int) -> None:
+        """Say plainly when a copy went out without protection its master
+        had. The order is still worth placing -- an unprotected position can
+        be closed, a rejected one was never opened -- but the operator has
+        to be told."""
+        entry = _DROPPED_PROTECTION.pop(id(req), None)
+        if entry is None:
+            return
+        intent, dropped = entry
+        self._repo.log_event(
+            'slave_action', 'warning',
+            {'action': 'protection_dropped',
+             'master_position_id': getattr(intent, 'master_position_id', None),
+             'dropped': dropped,
+             'stop_loss': intent.stop_loss,
+             'take_profit': intent.take_profit,
+             'entry_price': intent.entry_price,
+             'detail': 'copy placed WITHOUT this protection: the level could '
+                       'not be expressed as a distance from the fill'},
+            account_id=account_id, org_id=org_id,
+        )
+
     def _handle_dry_run(self, intent: SlaveIntent, org_id: int) -> None:
         """Log would-be request without sending; create mappings (stay pending)."""
         account_id, req = build_request(intent)
 
         # Create mapping if needed (but stays pending)
         self._create_mapping(intent, account_id, org_id)
+        self._warn_dropped_protection(req, account_id, org_id)
 
         # Log dry-run event with exact request summary (all fields)
         summary = self._request_summary(req)
@@ -324,6 +414,10 @@ class Dispatcher:
 
         # Create mapping if needed
         self._create_mapping(intent, account_id, org_id)
+
+        # Tell the operator BEFORE the send if this copy is going out
+        # without protection its master carries.
+        self._warn_dropped_protection(req, account_id, org_id)
 
         # Send with retries
         self._send_with_retries(account_id, req, attempt=0)
