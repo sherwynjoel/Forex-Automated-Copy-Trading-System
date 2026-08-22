@@ -83,6 +83,10 @@ export default function Trade() {
   // clear `error` on success, but only the user dismisses an order failure.
   const [orderError, setOrderError] = useState<string | null>(null)
   const [quote, setQuote] = useState<{ bid: number | null; ask: number | null } | null>(null)
+  // When the streamed quote last landed. The 2s HTTP poll is only a
+  // fallback for a dropped socket, so a poll response that arrives after a
+  // fresher tick must not drag the price backwards.
+  const streamedQuoteAt = useRef(0)
   const [margin, setMargin] = useState<MarginEstimate | null>(null)
   // Last closed bar for the ticket's symbol, kept only as the reference
   // price the order summary falls back to when the market is closed and
@@ -159,7 +163,10 @@ export default function Trade() {
     if (evt?.category === 'quotes') {
       const payload = evt.payload as TicksPayload | undefined
       const q = payload?.quotes?.[ticket.symbol]
-      if (q && (q.bid != null || q.ask != null)) setQuote({ bid: q.bid, ask: q.ask })
+      if (q && (q.bid != null || q.ask != null)) {
+        streamedQuoteAt.current = Date.now()
+        setQuote({ bid: q.bid, ask: q.ask })
+      }
       const snap = accountId != null ? payload?.accounts?.[String(accountId)] : undefined
       if (snap?.positions) {
         const ticked = snap.positions
@@ -197,6 +204,7 @@ export default function Trade() {
   // one ticks.
   useEffect(() => {
     setQuote(null)
+    streamedQuoteAt.current = 0
     if (accountId == null || !ticket.symbol) return
     let cancelled = false
     const pull = async () => {
@@ -205,8 +213,12 @@ export default function Trade() {
           orgId,
           `accounts/${accountId}/quote?symbol=${encodeURIComponent(ticket.symbol)}`)
         if (!cancelled) {
-          // Never let a slower poll blank a price the stream just painted
-          // (a fresh subscription answers nulls for its first beat).
+          // The stream is authoritative while it is alive: skip the poll's
+          // answer entirely if a tick landed inside the poll interval,
+          // rather than repainting an older price over a newer one.
+          if (Date.now() - streamedQuoteAt.current < 2_000) return
+          // And never blank a price the stream painted (a fresh
+          // subscription answers nulls for its first beat).
           setQuote((prev) =>
             q.bid == null && q.ask == null && prev != null
             && (prev.bid != null || prev.ask != null)

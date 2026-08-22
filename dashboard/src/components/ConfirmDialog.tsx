@@ -9,6 +9,10 @@ interface ConfirmDialogProps {
   /** When set, the confirm button stays disabled until this exact phrase is typed. */
   typeToConfirm?: string
   busy?: boolean
+  /** Confirm is refused for a reason that is NOT work in progress (e.g.
+   * the form holds a value the broker would reject). Distinct from `busy`
+   * so the button stays labelled rather than claiming to be working. */
+  disabled?: boolean
   onConfirm: () => void
   onCancel: () => void
 }
@@ -19,7 +23,7 @@ interface ConfirmDialogProps {
  * (closing every position everywhere); ordinary confirms just read and click.
  */
 export default function ConfirmDialog({
-  open, title, children, confirmLabel, danger, typeToConfirm, busy,
+  open, title, children, confirmLabel, danger, typeToConfirm, busy, disabled,
   onConfirm, onCancel,
 }: ConfirmDialogProps) {
   const [typed, setTyped] = useState('')
@@ -125,7 +129,7 @@ export default function ConfirmDialog({
           </button>
           <button
             onClick={onConfirm}
-            disabled={blocked || busy}
+            disabled={blocked || busy || disabled}
             className={`px-4 py-2 text-sm font-semibold rounded text-on-accent transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
               danger ? 'bg-loss hover:bg-loss-deep' : 'bg-brand hover:bg-brand-deep'
             }`}

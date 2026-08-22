@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi, afterEach } from 'vitest'
 import * as apiModule from '../lib/api'
-import Positions from './Positions'
+import Positions, { protectionProblem } from './Positions'
 import { ApiState } from '../lib/types'
 import type { Role } from '../lib/roles'
 import { mockUseOrg } from '../test/orgMock'
@@ -433,4 +433,55 @@ test('a viewer gets no SL/TP editor', async () => {
 
   await screen.findByText('EURUSD')
   expect(screen.queryByRole('button', { name: /sl \/ tp/i })).not.toBeInTheDocument()
+})
+
+test('a wrong-side protection is caught before the broker refuses it', () => {
+  // The real incident: a BUY on BTCUSD at ~77130 given a take profit of
+  // 0.03. The broker answered TRADING_BAD_STOPS and discarded the whole
+  // amend, so the stop appeared to save and the target silently did not.
+  expect(protectionProblem('BUY', 77130.54, null, 0.03))
+    .toMatch(/take profit has to sit above the market/i)
+  expect(protectionProblem('BUY', 77130.54, 77200, null))
+    .toMatch(/stop loss has to sit below the market/i)
+  expect(protectionProblem('SELL', 100, null, 120))
+    .toMatch(/take profit has to sit below the market/i)
+  expect(protectionProblem('SELL', 100, 90, null))
+    .toMatch(/stop loss has to sit above the market/i)
+
+  // Sound pairs pass, on both sides.
+  expect(protectionProblem('BUY', 77130.54, 76000, 78000)).toBeNull()
+  expect(protectionProblem('SELL', 100, 110, 90)).toBeNull()
+  // Nothing to judge against: do not invent a complaint.
+  expect(protectionProblem('BUY', null, 1, 2)).toBeNull()
+})
+
+test('the dialog blocks a wrong-side target instead of sending it', async () => {
+  setRole('trader')
+  const stateWithProtection: ApiState = {
+    ...mockApiState,
+    master_positions: mockApiState.master_positions.map((p) => ({
+      ...p, account_id: 1001, side: 'BUY', current_price: 77130.54,
+      stop_loss: null, take_profit: null,
+    })),
+  }
+  const orgApiMock = vi.spyOn(apiModule, 'orgApi')
+    .mockImplementation(async (_org, path) =>
+      (path === 'state' ? stateWithProtection : {}) as never)
+
+  render(
+    <MemoryRouter>
+      <Positions />
+    </MemoryRouter>
+  )
+
+  const row = (await screen.findByText('EURUSD')).closest('tr')!
+  await userEvent.click(within(row).getByRole('button', { name: /sl \/ tp/i }))
+  await userEvent.type(screen.getByLabelText('Take profit'), '0.03')
+
+  expect(await screen.findByRole('alert'))
+    .toHaveTextContent(/take profit has to sit above the market/i)
+
+  await userEvent.click(screen.getByRole('button', { name: /update protection/i }))
+  expect(orgApiMock.mock.calls.some(([, path]) => path === 'positions/amend'))
+    .toBe(false)
 })

@@ -9,6 +9,46 @@ import ConfirmDialog from '../components/ConfirmDialog'
 import { actionBurst } from '../lib/refresh'
 import { mergeTicksIntoApiState, TicksPayload } from '../lib/ticks'
 
+/**
+ * Why a stop loss / take profit pair would be refused, or null if it is
+ * sound. The broker rejects the WHOLE amend when either side is wrong, so
+ * a bad take profit silently discards an edit to the stop too -- which is
+ * exactly what "the stop moved but the target didn't" looks like from the
+ * outside.
+ *
+ * A stop is the losing side of the market, a target the winning side:
+ * BUY  -> stop below, target above
+ * SELL -> stop above, target below
+ */
+export function protectionProblem(
+  side: string,
+  reference: number | null | undefined,
+  stopLoss: number | null,
+  takeProfit: number | null,
+): string | null {
+  if (reference == null) return null // no price to judge against
+  const isBuy = side.toUpperCase() === 'BUY'
+  const px = reference.toString()
+  if (stopLoss != null) {
+    if (isBuy && stopLoss >= reference) {
+      return `On a BUY the stop loss has to sit below the market (${px}).`
+    }
+    if (!isBuy && stopLoss <= reference) {
+      return `On a SELL the stop loss has to sit above the market (${px}).`
+    }
+  }
+  if (takeProfit != null) {
+    if (isBuy && takeProfit <= reference) {
+      return `On a BUY the take profit has to sit above the market (${px}).`
+    }
+    if (!isBuy && takeProfit >= reference) {
+      return `On a SELL the take profit has to sit below the market (${px}).`
+    }
+  }
+  return null
+}
+
+
 export default function Positions() {
   const { orgId, role } = useOrg()
   const [state, setState] = useState<ApiState | null>(null)
@@ -39,6 +79,10 @@ export default function Positions() {
   const [slDraft, setSlDraft] = useState('')
   const [tpDraft, setTpDraft] = useState('')
   const [amendBusy, setAmendBusy] = useState(false)
+  // Broker refusals stream in as control events. Kept apart from `error`
+  // (the page-load failure) so a background refresh cannot wipe it: only
+  // the reader dismisses it.
+  const [brokerError, setBrokerError] = useState<string | null>(null)
 
   // Pre-fill from the position: the broker's amend replaces BOTH values,
   // so editing one must not silently clear the other.
@@ -47,8 +91,24 @@ export default function Positions() {
     setTpDraft(editing?.take_profit != null ? String(editing.take_profit) : '')
   }, [editing])
 
+  const draftPrice = (raw: string): number | null => {
+    const trimmed = raw.trim()
+    if (trimmed === '') return null
+    const value = Number(trimmed)
+    return Number.isFinite(value) ? value : null
+  }
+
+  // Judged against the live mark, falling back to the entry price.
+  const amendProblem = editing
+    ? protectionProblem(
+        editing.side,
+        editing.current_price ?? editing.price,
+        draftPrice(slDraft),
+        draftPrice(tpDraft))
+    : null
+
   const submitAmend = async () => {
-    if (!editing) return
+    if (!editing || amendProblem) return
     setAmendBusy(true)
     setError(null)
     try {
@@ -57,8 +117,8 @@ export default function Positions() {
         body: JSON.stringify({
           account_id: editing.account_id,
           position_id: editing.position_id,
-          stop_loss: slDraft.trim() === '' ? null : Number(slDraft),
-          take_profit: tpDraft.trim() === '' ? null : Number(tpDraft),
+          stop_loss: draftPrice(slDraft),
+          take_profit: draftPrice(tpDraft),
         }),
       })
       setEditing(null)
@@ -72,6 +132,18 @@ export default function Positions() {
   }
 
   useLiveRefresh(fetchState, orgId, (evt) => {
+    if (evt?.category === 'control' && evt?.payload?.action === 'order_rejected') {
+      const code = String(evt.payload.error_code ?? 'UNKNOWN')
+      setBrokerError(code === 'TRADING_BAD_STOPS'
+        ? 'The broker refused those levels (TRADING_BAD_STOPS): a stop loss '
+          + 'must sit on the losing side of the market and a take profit on '
+          + 'the winning side, both far enough away to be accepted. Nothing '
+          + 'was changed.'
+        : code === 'MARKET_CLOSED'
+          ? 'The market is closed, so the broker refused the change.'
+          : `The broker refused the change: ${code}`)
+      return
+    }
     // Quotes ticks update marks and P&L in place; structural changes
     // still arrive through the refetch path above.
     if (evt?.category !== 'quotes') return
@@ -164,6 +236,10 @@ export default function Positions() {
         </div>
       )}
 
+      {brokerError && (
+        <Banner kind="error" onDismiss={() => setBrokerError(null)}>{brokerError}</Banner>
+      )}
+
       {/* Master Positions Section */}
       <section>
         <h2 className="font-display text-xl text-ink mb-4">Master Positions</h2>
@@ -246,6 +322,7 @@ export default function Positions() {
         title={`Stop loss / take profit · ${editing?.symbol ?? ''}`}
         confirmLabel="Update protection"
         busy={amendBusy}
+        disabled={amendProblem != null}
         onConfirm={submitAmend}
         onCancel={() => setEditing(null)}
       >
@@ -283,6 +360,12 @@ export default function Positions() {
           Leaving a field empty removes that protection — the broker replaces
           both together.
         </p>
+        {amendProblem && (
+          <p role="alert" className="text-sm text-loss-deep bg-loss-wash border border-loss/30 rounded px-3 py-2">
+            {amendProblem} The broker would refuse the whole change, losing
+            the other value with it.
+          </p>
+        )}
       </ConfirmDialog>
 
       {/* Drift/Orphan Section */}
