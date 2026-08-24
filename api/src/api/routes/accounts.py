@@ -259,8 +259,13 @@ def create_accounts_router() -> APIRouter:
             except Exception:
                 logger.exception("failed to audit account change for %s", account_id)
 
-        # If role was changed, trigger copier reload
-        if request.role is not None:
+        # Reload the copier for every field its routing snapshot bakes in:
+        # role, enabled and multiplier all decide what gets copied and how
+        # big. The copier caches that snapshot briefly for latency, and
+        # this call is what makes an edit apply on the very next event
+        # instead of whenever the cache happens to expire.
+        if (request.role is not None or request.enabled is not None
+                or validated_multiplier is not None):
             try:
                 client = http_request.app.state.http
                 url = f"{cfg.copier_control_url}/reload"

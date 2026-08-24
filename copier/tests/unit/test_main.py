@@ -459,10 +459,13 @@ def test_build_app_builds_one_engine_per_org_with_a_master(db, fernet_key):
     assert app.service._master_symbols_by_org is app.master_symbols_by_org
 
 
-def test_routing_provider_is_a_fresh_db_backed_snapshot(db, fernet_key):
-    """The routing snapshot must be re-read per call (the freshness contract
-    the old slaves_provider had): an enabled/multiplier edit applies on the
-    next event, without waiting for a reload."""
+def test_routing_provider_caches_until_invalidated(db, fernet_key):
+    """Routing is briefly cached for the hot path: repeat calls inside the
+    TTL serve the SAME snapshot (zero database work per event), and the
+    freshness contract is now reload()-shaped -- an enabled/status edit
+    applies after invalidate() (which reload() calls), or on TTL expiry.
+    The kill switch is NOT behind this cache; the dispatcher reads
+    get_org() fresh on every dispatch."""
     org_a, org_b = seed_two_orgs(db, fernet_key)
     repo = Repo(db)
     app = main.build_app(repo, TokenStore(db, fernet_key), make_stub_client_factory(), shards=1)
@@ -473,9 +476,15 @@ def test_routing_provider_is_a_fresh_db_backed_snapshot(db, fernet_key):
     assert {s.account_id for s in routing.slaves_by_org[org_b]} == {SLAVE_B1}
     assert all(s.enabled for s in routing.slaves_by_org[org_a])
 
+    # Inside the TTL the same snapshot object comes back -- the hot path
+    # pays no database round trips.
+    assert app.routing_provider() is routing
+
     repo.set_account_status(SLAVE_A1, 'paused')
 
+    app.routing_provider.invalidate()  # exactly what reload() does
     refreshed = app.routing_provider()
+    assert refreshed is not routing
     flags = {s.account_id: s.enabled for s in refreshed.slaves_by_org[org_a]}
     assert flags[SLAVE_A1] is False and flags[SLAVE_A2] is True
 

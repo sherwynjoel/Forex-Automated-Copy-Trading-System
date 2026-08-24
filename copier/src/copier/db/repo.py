@@ -1,5 +1,7 @@
 """Repository layer for mappings, events, settings, accounts, and symbol cache."""
 
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Sequence
@@ -51,9 +53,110 @@ class Repo:
     Satisfies the MappingState protocol with position_entries() and order_entries() methods.
     """
 
+    # A connection idle longer than this is probed before it is handed out.
+    # Short enough that any realistic gap between master events triggers a
+    # probe, long enough that a burst of calls within one event does not.
+    IDLE_PROBE_S = 2.0
+
     def __init__(self, dsn: str):
         """Initialize repository with database connection string."""
         self.dsn = dsn
+        self._conn: psycopg.Connection | None = None
+        self._last_used = 0.0
+
+    def _open(self) -> psycopg.Connection:
+        """Open a connection configured for long-lived, single-threaded use.
+
+        prepare_threshold=None disables psycopg's automatic prepared
+        statements. They were harmless when every call opened its own
+        connection, but on a connection held for the process lifetime a
+        migration that changes a selected column's type invalidates the
+        server-side plan, and the resulting error is a ProgrammingError --
+        NOT one of the connection-level errors below -- so the connection
+        would be kept and that query would fail until the copier was
+        restarted. Queries here are simple and measured at ~0.2ms; the
+        plan cache is not worth that failure mode.
+
+        The TCP keepalives matter for the same reason: a connection that is
+        idle between market events must discover a dead peer itself rather
+        than blocking the single-threaded reactor for the kernel's
+        retransmit timeout.
+        """
+        return psycopg.connect(
+            self.dsn,
+            autocommit=True,
+            prepare_threshold=None,
+            connect_timeout=10,
+            keepalives=1,
+            keepalives_idle=30,
+            keepalives_interval=10,
+            keepalives_count=3,
+        )
+
+    @contextmanager
+    def _connect(self):
+        """Lease the cached autocommit connection, (re)opening it if needed.
+
+        Opening a Postgres connection costs a TCP handshake plus SCRAM
+        authentication -- ~11ms on the production box -- and the copy hot
+        path makes a dozen or more repo calls per master event, so per-call
+        connects were pure added latency on every copy. One cached
+        connection serves every autocommit call.
+
+        LIVENESS: a connection killed server-side while idle (postgres
+        restart, admin termination, an idle-session timeout) still reports
+        `closed == False` -- libpq only marks the socket bad after a failed
+        read or write. Handing that connection out would fail the caller,
+        and on the copy path the caller is a live master fill, so the copy
+        would simply never happen. Anything idle longer than IDLE_PROBE_S
+        is therefore probed with a trivial round trip (~0.2ms) before it is
+        handed out, and replaced if the probe fails.
+
+        The probe is deliberately the only automatic retry here: re-running
+        a statement that already reached the server would double-apply
+        non-idempotent writes (reduce_position_mapping's volume decrement,
+        log_event's insert), so a connection that dies mid-statement fails
+        that one call and heals for the next.
+
+        Single-threaded by design: the copier runs everything on the
+        Twisted reactor thread, so the one connection is never contended.
+        """
+        conn = self._conn
+        now = time.monotonic()
+
+        if conn is not None and not conn.closed and getattr(conn, "broken", False):
+            conn = None  # psycopg knows it is dead even though it is not closed
+            self._conn = None
+
+        if conn is not None and not conn.closed and (now - self._last_used) > self.IDLE_PROBE_S:
+            try:
+                conn.execute("SELECT 1")
+            except Exception:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                conn = None
+                self._conn = None
+
+        if conn is None or conn.closed:
+            conn = self._open()
+            self._conn = conn
+
+        self._last_used = now
+        try:
+            yield conn
+        except (psycopg.OperationalError, psycopg.InterfaceError):
+            # Connection-level failures only: a constraint violation or a
+            # bad query must NOT cost the healthy connection.
+            self._conn = None
+            try:
+                conn.close()
+            except Exception:
+                pass
+            raise
+        finally:
+            self._last_used = time.monotonic()
 
     # ---------- events ----------
 
@@ -84,7 +187,7 @@ class Repo:
         Returns:
             The new event ID
         """
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
+        with self._connect() as conn:
             (event_id,) = conn.execute(
                 """
                 INSERT INTO events (account_id, org_id, category, severity,
@@ -101,7 +204,7 @@ class Repo:
 
     def get_settings(self) -> Settings:
         """Get current global (process-config-only) settings."""
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
+        with self._connect() as conn:
             row = conn.execute(
                 "SELECT shards FROM settings WHERE id = true"
             ).fetchone()
@@ -124,7 +227,7 @@ class Repo:
             raise ValueError(f"Unknown setting: {name}")
 
         column = columns[name]
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
+        with self._connect() as conn:
             conn.execute(
                 f"UPDATE settings SET {column} = %s WHERE id = true",
                 (value,),
@@ -134,7 +237,7 @@ class Repo:
 
     def load_orgs(self) -> list[OrgRow]:
         """Load all orgs."""
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
+        with self._connect() as conn:
             rows = conn.execute(
                 "SELECT id, name, copying_enabled, dry_run FROM orgs"
             ).fetchall()
@@ -146,7 +249,7 @@ class Repo:
 
         Raises RuntimeError if the org does not exist.
         """
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
+        with self._connect() as conn:
             row = conn.execute(
                 "SELECT id, name, copying_enabled, dry_run FROM orgs WHERE id = %s",
                 (org_id,),
@@ -166,7 +269,7 @@ class Repo:
         columns = {"copying_enabled": "copying_enabled", "dry_run": "dry_run"}
         if name not in columns:
             raise ValueError(f"Unknown org setting: {name}")
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
+        with self._connect() as conn:
             conn.execute(
                 f"UPDATE orgs SET {columns[name]} = %s WHERE id = %s",
                 (value, org_id),
@@ -175,7 +278,7 @@ class Repo:
     def get_org_settings_version(self, org_id: int) -> int:
         """Current settings_version of an org row (trigger-bumped on every
         write to the row, by either process -- see migration 009)."""
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
+        with self._connect() as conn:
             row = conn.execute(
                 "SELECT settings_version FROM orgs WHERE id = %s", (org_id,)
             ).fetchone()
@@ -192,7 +295,7 @@ class Repo:
         makes 'someone else wrote in between' lose the race safely (copying
         stays as the interim writer left it).
         """
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
+        with self._connect() as conn:
             cur = conn.execute(
                 "UPDATE orgs SET copying_enabled = TRUE "
                 "WHERE id = %s AND settings_version = %s",
@@ -205,7 +308,7 @@ class Repo:
 
         Raises RuntimeError if the connection does not exist.
         """
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
+        with self._connect() as conn:
             row = conn.execute(
                 "SELECT org_id FROM ctid_connections WHERE id = %s", (connection_id,)
             ).fetchone()
@@ -217,7 +320,7 @@ class Repo:
 
     def load_accounts(self) -> list[AccountRow]:
         """Load all accounts."""
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
+        with self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT ctid_trader_account_id, org_id, ctid_connection_id, trader_login, is_live,
@@ -256,7 +359,7 @@ class Repo:
         into another's tracker, which is exactly what the lookup exists to
         prevent. One connection, one indexed lookup on the primary key.
         """
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
+        with self._connect() as conn:
             row = conn.execute(
                 "SELECT org_id FROM accounts WHERE ctid_trader_account_id = %s",
                 (account_id,),
@@ -265,7 +368,7 @@ class Repo:
 
     def set_account_status(self, account_id: int, status: str, last_error: str | None = None) -> None:
         """Set account status and optional error message."""
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
+        with self._connect() as conn:
             conn.execute(
                 "UPDATE accounts SET status = %s, last_error = %s WHERE ctid_trader_account_id = %s",
                 (status, last_error, account_id),
@@ -291,7 +394,7 @@ class Repo:
 
         Returns True if this call actually cleared a degraded account.
         """
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
+        with self._connect() as conn:
             cursor = conn.execute(
                 """
                 UPDATE accounts SET status = 'ok', last_error = NULL
@@ -320,7 +423,7 @@ class Repo:
         Returns True if the row was inserted or updated (this org owns it),
         False if another org already owns this account_id.
         """
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
+        with self._connect() as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO accounts (ctid_trader_account_id, ctid_connection_id,
@@ -342,7 +445,7 @@ class Repo:
         date has not been sent. IS DISTINCT FROM makes a moved cutoff due
         again while a re-saved identical date stays quiet.
         """
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
+        with self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT ctid_trader_account_id, org_id, nickname, trader_login,
@@ -363,7 +466,7 @@ class Repo:
 
     def mark_cutoff_reminder_sent(self, account_id: int, cutoff_date) -> None:
         """Stamp which cutoff value the reminder covered (send-once guard)."""
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
+        with self._connect() as conn:
             conn.execute(
                 "UPDATE accounts SET cutoff_reminder_sent_for = %s "
                 "WHERE ctid_trader_account_id = %s",
@@ -374,7 +477,7 @@ class Repo:
 
     def load_drift_dismissals(self, org_id: int) -> set[str]:
         """Drift ids the operator dismissed in this org (survives restarts)."""
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
+        with self._connect() as conn:
             rows = conn.execute(
                 "SELECT drift_id FROM drift_dismissals WHERE org_id = %s",
                 (org_id,),
@@ -383,7 +486,7 @@ class Repo:
 
     def save_drift_dismissal(self, org_id: int, drift_id: str) -> None:
         """Record one dismissal; re-dismissing the same item is a no-op."""
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
+        with self._connect() as conn:
             conn.execute(
                 "INSERT INTO drift_dismissals (org_id, drift_id) VALUES (%s, %s) "
                 "ON CONFLICT DO NOTHING",
@@ -393,7 +496,7 @@ class Repo:
     def prune_drift_dismissals(self, org_id: int, keep: set[str]) -> None:
         """Drop this org's dismissals not in `keep` (their condition cleared,
         so a returning condition must alert again). Other orgs untouched."""
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
+        with self._connect() as conn:
             conn.execute(
                 "DELETE FROM drift_dismissals WHERE org_id = %s "
                 "AND NOT (drift_id = ANY(%s))",
@@ -426,7 +529,7 @@ class Repo:
 
     def load_symbol_cache(self, account_id: int) -> dict[str, SymbolInfo]:
         """Load symbol cache for account."""
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
+        with self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT name, symbol_id, digits, lot_size, min_volume, step_volume
@@ -488,7 +591,7 @@ class Repo:
         slave_position_id) and reduce_position_mapping would deduct each
         close from every one of them.
         """
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
+        with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO mappings (master_position_id, slave_account_id,
@@ -551,7 +654,7 @@ class Repo:
         Raises MappingNotFound if no mapping exists with this client_order_id
         FOR THAT SLAVE ACCOUNT.
         """
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
+        with self._connect() as conn:
             cursor = conn.execute(
                 """
                 UPDATE mappings
@@ -581,7 +684,7 @@ class Repo:
         Sets status to 'closed' when slave_volume reaches 0.
         Atomic: uses single UPDATE with GREATEST to avoid TOCTOU race on concurrent reduces.
         """
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
+        with self._connect() as conn:
             # Atomic single-statement update: decrement slave_volume safely,
             # set status='closed' when volume <= 0, update timestamp
             row = conn.execute(
@@ -607,7 +710,7 @@ class Repo:
         Raises MappingNotFound if no mapping exists with this client_order_id
         FOR THAT SLAVE ACCOUNT.
         """
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
+        with self._connect() as conn:
             cursor = conn.execute(
                 """
                 UPDATE mappings
@@ -630,7 +733,7 @@ class Repo:
         symbol: str | None = None,
     ) -> None:
         """Create a pending order mapping."""
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
+        with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO mappings (master_order_id, slave_account_id,
@@ -656,7 +759,7 @@ class Repo:
         Raises MappingNotFound if no pending mapping exists with this
         client_order_id FOR THAT SLAVE ACCOUNT.
         """
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
+        with self._connect() as conn:
             cursor = conn.execute(
                 """
                 UPDATE mappings
@@ -675,7 +778,7 @@ class Repo:
 
         Raises MappingNotFound if no active mapping exists with these identifiers.
         """
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
+        with self._connect() as conn:
             cursor = conn.execute(
                 """
                 UPDATE mappings
@@ -700,7 +803,7 @@ class Repo:
         Only updates active mappings; stale/failed rows are not touched.
         Raises MappingNotFound if no active order mapping exists.
         """
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
+        with self._connect() as conn:
             cursor = conn.execute(
                 """
                 UPDATE mappings
@@ -730,7 +833,7 @@ class Repo:
 
         Raises MappingNotFound if no active order mapping exists.
         """
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
+        with self._connect() as conn:
             cursor = conn.execute(
                 """
                 UPDATE mappings
@@ -755,7 +858,7 @@ class Repo:
         org_id: int,
     ) -> None:
         """Adopt an existing position (drift remedy)."""
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
+        with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO mappings (master_position_id, slave_account_id, slave_position_id,
@@ -778,7 +881,7 @@ class Repo:
         snapshots. It is a plain nullable column with no FK (migration
         006): like events.org_id, the history has to survive the account
         (and its org) going away."""
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
+        with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO portfolio_snapshots (snapshot_date, account_id, balance,
@@ -805,10 +908,12 @@ class Repo:
             query += " WHERE org_id = %s"
             params = (org_id,)
 
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
-            # Use column names
-            conn.row_factory = psycopg.rows.dict_row
-            rows = conn.execute(query, params).fetchall()
+        with self._connect() as conn:
+            # Dict rows for THIS query only. Scoped to the cursor, never set
+            # on the connection: the connection is shared now, and mutating
+            # its row_factory would poison every later tuple-indexed read.
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                rows = cur.execute(query, params).fetchall()
 
         return rows
 
@@ -819,7 +924,7 @@ class Repo:
 
         Returns only active mappings with slave_position_id IS NOT NULL.
         """
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
+        with self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT slave_account_id, slave_position_id, slave_volume
@@ -839,7 +944,7 @@ class Repo:
 
         Returns only active mappings.
         """
-        with psycopg.connect(self.dsn, autocommit=True) as conn:
+        with self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT slave_account_id, slave_order_id

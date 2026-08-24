@@ -768,3 +768,106 @@ def test_log_event_accepts_risk_category(db):
     repo = Repo(db)
     event_id = repo.log_event("risk", "error", {"action": "margin_call"}, account_id=100)
     assert event_id
+
+
+class TestConnectionReuse:
+    """The copy hot path makes several repo calls per master event. Each one
+    opening (and SCRAM-authenticating) a fresh Postgres connection cost about
+    70ms apiece on the production box -- roughly half a second of self-made
+    copy latency per event. All autocommit calls must share one cached
+    connection, and that connection must heal itself after a postgres restart."""
+
+    def test_calls_share_one_connection(self, repo, monkeypatch):
+        import copier.db.repo as repo_mod
+        real_connect = repo_mod.psycopg.connect
+        count = {"n": 0}
+
+        def counting(*args, **kwargs):
+            count["n"] += 1
+            return real_connect(*args, **kwargs)
+
+        monkeypatch.setattr(repo_mod.psycopg, "connect", counting)
+        repo.load_accounts()
+        repo.load_symbol_cache(100)
+        repo.log_event("control", "info", {"action": "x"}, account_id=100)
+        repo.load_accounts()
+        assert count["n"] == 1
+
+    def test_cleanly_closed_connection_is_replaced(self, repo):
+        first = repo.load_accounts()
+        repo._conn.close()  # e.g. postgres restarted between events
+        assert repo.load_accounts() == first
+
+    def test_connection_dying_mid_statement_is_evicted_from_the_cache(self, repo):
+        """A connection that fails DURING a statement must be dropped, not
+        merely closed -- otherwise the next call re-leases a dead handle."""
+        repo.load_accounts()
+
+        class Broken:
+            # Stays False through close() on purpose: the assertion must
+            # prove the CACHE was cleared, not that `closed` flipped.
+            closed = False
+            close_calls = 0
+
+            def execute(self, *args, **kwargs):
+                raise psycopg.OperationalError("server closed the connection unexpectedly")
+
+            def close(self):
+                Broken.close_calls += 1
+
+        repo._conn = Broken()
+        with pytest.raises(psycopg.OperationalError):
+            repo.load_accounts()
+
+        assert repo._conn is None, "poisoned connection was left in the cache"
+        assert Broken.close_calls == 1
+        assert repo.load_accounts() is not None  # heals on the next call
+
+    def test_idle_connection_killed_server_side_is_replaced_not_handed_out(self, repo):
+        """THE regression this guards: a connection terminated server-side
+        while idle still reports closed == False (libpq only marks the
+        socket bad after a failed read/write). Handed out unchecked, the
+        first call after a postgres restart fails -- and on the copy path
+        that call is a live master fill, so the copy never happens."""
+        first = repo.load_accounts()
+        dead = repo._conn
+
+        class DeadButNotClosed:
+            """Exactly what libpq reports for a server-killed idle session."""
+            closed = False
+            broken = False
+
+            def execute(self, *args, **kwargs):
+                raise psycopg.OperationalError(
+                    "terminating connection due to administrator command")
+
+            def close(self):
+                pass
+
+        repo._conn = DeadButNotClosed()
+        # Force the idle probe: the connection has "not been used" recently.
+        repo._last_used -= (repo.IDLE_PROBE_S + 1)
+
+        # Must SUCCEED -- the probe detects the dead peer and reconnects
+        # before the caller ever touches it.
+        assert repo.load_accounts() == first
+        assert not isinstance(repo._conn, DeadButNotClosed)
+        dead.close()
+
+    def test_no_probe_within_a_burst_of_calls(self, repo):
+        """The probe must not add a round trip to every call: consecutive
+        calls inside one event are well under IDLE_PROBE_S."""
+        repo.load_accounts()
+        probes = {"n": 0}
+        real_execute = repo._conn.execute
+
+        def counting_execute(query, *args, **kwargs):
+            if str(query).strip() == "SELECT 1":
+                probes["n"] += 1
+            return real_execute(query, *args, **kwargs)
+
+        object.__setattr__(repo._conn, "execute", counting_execute)
+        repo.load_accounts()
+        repo.load_symbol_cache(100)
+        repo.log_event("control", "info", {"action": "burst"}, account_id=100)
+        assert probes["n"] == 0

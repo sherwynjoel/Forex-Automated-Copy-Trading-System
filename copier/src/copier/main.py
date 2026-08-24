@@ -59,7 +59,7 @@ from copier.db.repo import Repo
 from copier.domain.models import MANUAL_ORDER_LABEL, Side
 from copier.engine.service import CopierService
 from copier.engine.reconcile import Reconciler
-from copier.engine.routing import OrgRouting, build_routing
+from copier.engine.routing import OrgRouting, RoutingCache, build_routing
 from copier.engine.state import AccountStateTracker, PositionSnapshot as StatePositionSnapshot
 from copier.engine.dispatch import Dispatcher, relative_protection, SendNotAttempted
 from copier.engine.throttle import TokenBucket
@@ -695,6 +695,29 @@ class CopierApp:
         Tolerates zero accounts. Builds clients for newly-needed environments
         lazily (e.g. the first live account ever discovered).
         """
+        try:
+            yield self._reload_inner()
+        finally:
+            # Whatever this reload wrote (symbol caches especially) lands
+            # after several yields; drop any snapshot an event rebuilt
+            # while we were parked.
+            invalidate = getattr(self.routing_provider, "invalidate", None)
+            if invalidate is not None:
+                invalidate()
+
+    @defer.inlineCallbacks
+    def _reload_inner(self):
+        """The body of reload(); see reload() for the invalidation contract."""
+        # The routing snapshot must not outlive whatever change prompted
+        # this reload (account added/removed, settings edit). Invalidated
+        # again in the finally below: reload() parks on broker round trips
+        # and writes the symbol cache AFTER those yields, so an event
+        # arriving mid-reload would otherwise refill the cache from a
+        # half-written state and serve it for a further full TTL.
+        invalidate = getattr(self.routing_provider, "invalidate", None)
+        if invalidate is not None:
+            invalidate()
+
         accounts = self.repo.load_accounts()
         envs_needed = {a.is_live for a in accounts}
 
@@ -1832,11 +1855,16 @@ def build_app(
 
     master_symbols_by_org: dict[int, dict] = {}
 
-    def routing_provider() -> OrgRouting:
-        # Fresh DB-backed snapshot per call -- the same freshness contract the
-        # old slaves_provider had (enabled/multiplier edits apply on the next
-        # event without waiting for a reload).
-        return build_routing(repo.load_accounts(), repo.load_symbol_cache)
+    # Cached for up to a second: routing used to be rebuilt from the
+    # database on every event, which put ~200ms of queries and symbol
+    # parsing in front of every copy. reload() invalidates it, so
+    # control-plane changes still apply immediately; anything else is at
+    # most TTL-stale, which the freshness contract (edits apply on the
+    # next event) comfortably absorbs.
+    routing_provider = RoutingCache(
+        lambda: build_routing(repo.load_accounts(), repo.load_symbol_cache),
+        clock=clock,
+    )
 
     service = CopierService(
         repo=repo, dispatcher=dispatcher, routing_provider=routing_provider,

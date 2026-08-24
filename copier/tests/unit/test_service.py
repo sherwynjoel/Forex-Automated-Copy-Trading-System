@@ -865,3 +865,64 @@ class TestPositionsChangedNotification:
 
         open_intents = [i for i in recording_dispatcher.intents if isinstance(i, OpenMarket)]
         assert len(open_intents) == 2
+
+
+class TestMasterEventLatencyStamp:
+    """latency_ms on the master_event audit row must measure the whole
+    internal copy path -- normalize, decide, and the dispatch handoff -- and
+    the audit write itself must come AFTER the send handoff, never sit in
+    front of it as a blocking database write."""
+
+    def _service_with(self, dispatch_side_effect, repo, clock, routing_box):
+        dispatcher = Mock()
+        dispatcher.dispatch = Mock(side_effect=dispatch_side_effect)
+        service = CopierService(
+            repo=repo,
+            dispatcher=dispatcher,
+            routing_provider=lambda: routing_box["routing"],
+            master_symbols_by_org={ORG_ID: {1: EURUSD, 2: GBPUSD}},
+            clock=clock,
+        )
+        return service, dispatcher
+
+    def test_audit_write_happens_after_the_dispatch_handoff(
+        self, db_seeded, repo, clock, routing_box
+    ):
+        rows_at_dispatch = {}
+
+        def probing_dispatch(intents, org_id):
+            with psycopg.connect(db_seeded, autocommit=True) as conn:
+                (n,) = conn.execute(
+                    "SELECT count(*) FROM events WHERE category = 'master_event'"
+                ).fetchone()
+            rows_at_dispatch["n"] = n
+
+        service, dispatcher = self._service_with(
+            probing_dispatch, repo, clock, routing_box)
+        service.handle_execution(999, base_event())
+
+        assert dispatcher.dispatch.called
+        assert rows_at_dispatch["n"] == 0, (
+            "master_event was written before dispatch -- the audit INSERT "
+            "is blocking the copy handoff")
+        with psycopg.connect(db_seeded, autocommit=True) as conn:
+            row = conn.execute(
+                "SELECT latency_ms FROM events WHERE category = 'master_event'"
+            ).fetchone()
+        assert row is not None and row[0] is not None and row[0] >= 0
+
+    def test_audit_row_still_lands_when_dispatch_raises(
+        self, db_seeded, repo, clock, routing_box
+    ):
+        def exploding_dispatch(intents, org_id):
+            raise RuntimeError("wire fell over")
+
+        service, _ = self._service_with(
+            exploding_dispatch, repo, clock, routing_box)
+        service.handle_execution(999, base_event())  # must not raise
+
+        with psycopg.connect(db_seeded, autocommit=True) as conn:
+            (n,) = conn.execute(
+                "SELECT count(*) FROM events WHERE category = 'master_event'"
+            ).fetchone()
+        assert n == 1

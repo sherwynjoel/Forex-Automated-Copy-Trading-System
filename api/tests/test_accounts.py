@@ -183,8 +183,14 @@ def test_role_change_triggers_copier_reload(org_client):
     assert "copier_reloaded" in data
 
 
-def test_multiplier_change_does_not_trigger_reload(org_client):
-    """Changing multiplier does not call copier reload."""
+def test_multiplier_change_triggers_reload(org_client):
+    """A multiplier edit must reach the copier immediately.
+
+    The copier caches its routing snapshot (which bakes in the multiplier)
+    for a second to keep the copy path fast, so the DB write alone is no
+    longer enough -- without this reload the next copy could still be sized
+    by the old multiplier.
+    """
     client, org_id, seed = org_client
     seed(12345, is_live=True)
 
@@ -194,9 +200,37 @@ def test_multiplier_change_does_not_trigger_reload(org_client):
         headers=_csrf(client),
     )
     assert response.status_code == 200
-    # Should not include copier_reloaded in response if multiplier only changed
-    data = response.json()
-    # This is just an update response, not a reload response
+    assert "copier_reloaded" in response.json()
+
+
+def test_enabling_a_slave_triggers_reload(org_client):
+    """Same contract for the enabled flag: pausing or resuming a slave from
+    the dashboard must not wait on a cache expiry."""
+    client, org_id, seed = org_client
+    seed(12345, is_live=True)
+
+    response = client.patch(
+        f"/api/orgs/{org_id}/accounts/12345",
+        json={"enabled": False},
+        headers=_csrf(client),
+    )
+    assert response.status_code == 200
+    assert "copier_reloaded" in response.json()
+
+
+def test_nickname_only_change_does_not_trigger_reload(org_client):
+    """A cosmetic edit must NOT cost a copier reload -- reload does broker
+    round trips, so it is reserved for changes the engine acts on."""
+    client, org_id, seed = org_client
+    seed(12345, is_live=True)
+
+    response = client.patch(
+        f"/api/orgs/{org_id}/accounts/12345",
+        json={"nickname": "Desk B"},
+        headers=_csrf(client),
+    )
+    assert response.status_code == 200
+    assert "copier_reloaded" not in response.json()
 
 
 def test_disconnect_account_cascades(org_client, db):

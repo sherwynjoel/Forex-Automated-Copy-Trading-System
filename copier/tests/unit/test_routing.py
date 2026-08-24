@@ -40,3 +40,45 @@ def test_org_without_master():
     routing = build_routing([_row(201, 2, "slave")], symbol_loader=lambda a: {})
     assert 2 not in routing.master_by_org
     assert routing.org_by_account[201] == 2
+
+
+class TestRoutingCache:
+    """Routing is resolved on EVERY execution event; rebuilding it from the
+    database each time (accounts plus a symbol cache per slave) was the
+    single largest latency in the copy path. A short TTL trades at most one
+    second of staleness for a sub-millisecond hot path; reload() invalidates
+    explicitly so control-plane changes still apply immediately."""
+
+    def _cache(self, ttl_s=1.0):
+        from twisted.internet.task import Clock
+        from copier.engine.routing import RoutingCache
+
+        clock = Clock()
+        builds = []
+
+        def build():
+            builds.append(1)
+            return object()
+
+        return RoutingCache(build, clock=clock, ttl_s=ttl_s), clock, builds
+
+    def test_within_ttl_serves_the_same_snapshot(self):
+        cache, clock, builds = self._cache()
+        first = cache()
+        clock.advance(0.5)
+        assert cache() is first
+        assert len(builds) == 1
+
+    def test_after_ttl_a_fresh_snapshot_is_built(self):
+        cache, clock, builds = self._cache()
+        first = cache()
+        clock.advance(1.01)
+        assert cache() is not first
+        assert len(builds) == 2
+
+    def test_invalidate_forces_a_rebuild_within_ttl(self):
+        cache, clock, builds = self._cache()
+        first = cache()
+        cache.invalidate()
+        assert cache() is not first
+        assert len(builds) == 2

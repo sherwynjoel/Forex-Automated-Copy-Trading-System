@@ -167,11 +167,8 @@ class CopierService:
             start_time: Event processing start time in milliseconds.
             routing: The routing snapshot this event is being processed against.
         """
-        # Measure latency
         normalized = normalize(evt, self._master_symbols_by_org.get(org_id, {}))
 
-        # Log master event always (even if normalized to None)
-        latency_ms = (time.time_ns() // 1_000_000) - start_time
         payload = {
             'execution_type': ProtoOAExecutionType.Name(evt.executionType),
             'normalized': type(normalized).__name__ if normalized else None,
@@ -183,26 +180,45 @@ class CopierService:
             # {"normalized": null} for exactly this lack of detail.
             payload['order_type'] = ProtoOAOrderType.Name(evt.order.orderType)
             payload['symbol_id'] = evt.order.tradeData.symbolId
-        self._repo.log_event(
-            'master_event',
-            'info',
-            payload,
-            account_id=master_account_id,
-            latency_ms=latency_ms,
-            org_id=org_id,
-        )
+
+        # Decide and dispatch FIRST; the audit row is written in the
+        # finally, so it can never sit as a blocking database write in
+        # front of the copy handoff, and it is still written even when
+        # decide/dispatch raise (the outer handler then logs the failure
+        # as well). latency_ms therefore measures the whole internal
+        # path: normalize -> decide -> dispatch handoff.
+        try:
+            if normalized is not None:
+                # Decide: get intents for THIS ORG's enabled slaves only
+                slaves = routing.slaves_by_org.get(org_id, [])
+                intents = decide(normalized, self._repo, slaves)
+
+                # Dispatch intents against this org's gates
+                if intents:
+                    self._dispatcher.dispatch(intents, org_id=org_id)
+        finally:
+            # Best-effort: the orders are already at the broker by now, so
+            # a failed audit write must not replace the real exception, and
+            # must not skip the post-dispatch bookkeeping below. A lost
+            # audit row is a diagnostics gap; a skipped pending-fill check
+            # is a real one.
+            latency_ms = (time.time_ns() // 1_000_000) - start_time
+            try:
+                self._repo.log_event(
+                    'master_event',
+                    'info',
+                    payload,
+                    account_id=master_account_id,
+                    latency_ms=latency_ms,
+                    org_id=org_id,
+                )
+            except Exception:
+                log.exception(
+                    "master_event audit write failed (copy already dispatched)")
 
         # If normalization yielded no event, we're done
         if normalized is None:
             return
-
-        # Decide: get intents for THIS ORG's enabled slaves only
-        slaves = routing.slaves_by_org.get(org_id, [])
-        intents = decide(normalized, self._repo, slaves)
-
-        # Dispatch intents against this org's gates
-        if intents:
-            self._dispatcher.dispatch(intents, org_id=org_id)
 
         # Schedule pending fill alert if this is a pending fill
         if isinstance(normalized, MasterPendingFilled):
