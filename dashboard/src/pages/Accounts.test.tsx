@@ -103,6 +103,20 @@ function jsonResponse(payload: unknown, status = 200) {
 }
 
 /** Route-based fetch mock; individual tests override specific routes. */
+// Live equity comes from the engine's state endpoint, keyed by account id,
+// NOT from the accounts row -- the accounts table stores no balance.
+const mockState = {
+  accounts: {
+    // Keyed by ctid_trader_account_id (1), NOT the trader login shown on screen.
+    '1': { equity: 1049.48, open_pnl: 0, positions: [] },
+    // Account 2 deliberately absent: an account the engine has no reading
+    // for must show a dash, never 0.00, which would read as "empty account".
+  },
+  master_positions: [],
+  pending_orders: [],
+  drift: [],
+}
+
 function mockRoutes(overrides: Record<string, (init?: RequestInit) => Response> = {}) {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
@@ -115,6 +129,7 @@ function mockRoutes(overrides: Record<string, (init?: RequestInit) => Response> 
       }
     }
     if (url.includes('/details')) return jsonResponse(mockDetails)
+    if (url.includes('/api/orgs/1/state')) return jsonResponse(mockState)
     if (url.includes('/api/orgs/1/accounts')) return jsonResponse(mockAccounts)
     return jsonResponse({})
   })
@@ -640,4 +655,36 @@ test('admin (control) sees editors, disconnect, the connect link, flatten, and r
   expect(screen.getByRole('button', { name: /connect ctrader id/i })).toBeInTheDocument()
   expect(screen.getAllByRole('button', { name: /^flatten$/i }).length).toBeGreaterThan(0)
   expect(screen.getAllByRole('button', { name: /re-grant access/i }).length).toBeGreaterThan(0)
+})
+
+
+test('shows each account\'s live equity, and a dash when the engine has no reading', async () => {
+  // Operators asked for per-account equity on this screen: the header only
+  // ever showed the MASTER's, so there was no way to see at a glance that a
+  // slave had drifted far from the others, or been drained by a margin call.
+  setRole('admin')
+  mockRoutes()
+  renderAccounts()
+
+  expect(await screen.findByText('1,049.48')).toBeInTheDocument()
+
+  // The account with no engine reading must not be rendered as 0.00.
+  const rows = screen.getAllByRole('row')
+  const unknown = rows.find((r) => r.textContent?.includes('12346'))
+  expect(unknown).toBeTruthy()
+  expect(unknown!.textContent).not.toMatch(/0\.00/)
+})
+
+test('equity failure does not break the accounts list', async () => {
+  // The account list is the point of this page. If the engine is down the
+  // rows must still render -- an unreachable copier must not blank the
+  // screen an operator uses to disconnect or flatten an account.
+  setRole('admin')
+  mockRoutes({
+    '/api/orgs/1/state': () => new Response('boom', { status: 502 }),
+  })
+  renderAccounts()
+
+  expect(await screen.findByText('12345')).toBeInTheDocument()
+  expect(screen.getByText('12346')).toBeInTheDocument()
 })

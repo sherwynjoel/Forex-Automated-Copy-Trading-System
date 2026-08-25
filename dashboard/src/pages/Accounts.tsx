@@ -2,8 +2,9 @@ import { useEffect, useState } from 'react'
 import { orgApi } from '../lib/api'
 import { useOrg } from '../lib/org'
 import { can } from '../lib/roles'
-import type { Account, AccountDetails, CloseAllResult } from '../lib/types'
+import type { Account, AccountDetails, ApiState, CloseAllResult, StateSnapshot } from '../lib/types'
 import ConfirmDialog from '../components/ConfirmDialog'
+import { money } from '../lib/format'
 
 // How long the green "Flattened ✓" confirmation stays on a row button.
 const FLATTEN_DONE_MS = 5000
@@ -42,6 +43,24 @@ export default function Accounts() {
   const [detailsError, setDetailsError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
+  // Live equity per account, keyed by account id. Held separately from the
+  // accounts rows because it comes from the engine, not the database: the
+  // accounts table has no balance column, and a stale number here would be
+  // worse than none.
+  const [equityByAccount, setEquityByAccount] = useState<StateSnapshot>({})
+
+  const fetchEquity = async () => {
+    try {
+      const envelope = await orgApi<ApiState>(orgId, 'state')
+      setEquityByAccount(envelope.accounts ?? {})
+    } catch {
+      // The engine being unreachable must not blank the accounts list --
+      // this screen is how an operator disconnects or flattens an account,
+      // and it has to work when the copier is the thing that is broken.
+      setEquityByAccount({})
+    }
+  }
+
   const fetchAccounts = async () => {
     try {
       const data = await orgApi<Account[]>(orgId, 'accounts')
@@ -57,12 +76,14 @@ export default function Accounts() {
 
   useEffect(() => {
     fetchAccounts()
+    fetchEquity()
   }, [orgId])
 
   // Refetch when the OAuth popup closes and focus returns to this window.
   useEffect(() => {
     const handleFocus = () => {
       fetchAccounts()
+      fetchEquity()
     }
     window.addEventListener('focus', handleFocus)
     return () => window.removeEventListener('focus', handleFocus)
@@ -289,6 +310,7 @@ export default function Accounts() {
                 <th className="desk-label px-5 py-2.5 font-semibold">Account</th>
                 <th className="desk-label px-3 py-2.5 font-semibold">Nickname</th>
                 <th className="desk-label px-3 py-2.5 font-semibold">Env</th>
+                <th className="desk-label px-3 py-2.5 font-semibold text-right">Equity</th>
                 <th className="desk-label px-3 py-2.5 font-semibold">Role</th>
                 <th className="desk-label px-3 py-2.5 font-semibold">Enabled</th>
                 <th className="desk-label px-3 py-2.5 font-semibold">Cutoff</th>
@@ -336,6 +358,13 @@ export default function Accounts() {
                         account.is_live ? 'bg-loss-wash text-loss-deep' : 'bg-line text-ink-soft'
                       }`}>
                         {account.is_live ? 'Live' : 'Demo'}
+                      </span>
+                    </td>
+                    <td data-label="Equity" className="num px-3 py-3 text-right whitespace-nowrap">
+                      {/* An account the engine has no reading for shows a dash. Rendering
+                          0.00 would read as an empty account, which is a different fact. */}
+                      <span className="text-ink">
+                        {money(equityByAccount[String(account.ctid_trader_account_id)]?.equity)}
                       </span>
                     </td>
                     <td data-label="Role" className="px-3 py-3">
