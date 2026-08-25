@@ -82,7 +82,15 @@ export default function Accounts() {
   }
 
   const handleConnectOAuth = () => {
-    window.open(`/api/orgs/${orgId}/oauth/connect`, 'ctrader-oauth', 'width=520,height=680')
+    // Same tab, deliberately NOT a popup. The broker sends the browser back
+    // to /api/oauth/callback, and that return trip is cross-site: the
+    // session cookie is SameSite=Lax, which browsers withhold from a popup
+    // navigated cross-site. The callback then saw an anonymous request and
+    // answered "Not authenticated", so connecting an account was
+    // impossible. A top-level navigation always carries the cookie, and
+    // the callback already redirects to this same page with ?connected=1,
+    // so nothing is lost by leaving it.
+    window.location.assign(`/api/orgs/${orgId}/oauth/connect`)
   }
 
   const handleRoleChange = (accountId: number, newRole: string) =>

@@ -79,6 +79,21 @@ def create_oauth_router() -> APIRouter:
         # cTrader's logs or the browser's history worth stealing.
         state = secrets.token_urlsafe(32)
 
+        # Sweep expired states before adding one. Nothing else ever deleted
+        # them, so every click of Connect left a row behind for good -- 71
+        # had piled up in production, and once more than one was still
+        # inside STATE_TTL_SECONDS the callback could no longer tell which
+        # org was meant and refused the connect outright. Cheap, bounded,
+        # and it keeps the single-use guard honest.
+        try:
+            conn.execute(
+                "DELETE FROM oauth_states WHERE created_at < now() - make_interval(secs => %s)",
+                (STATE_TTL_SECONDS,),
+            )
+        except Exception as e:
+            # Housekeeping must never block a connect.
+            logger.warning(f"Could not sweep expired OAuth states: {e}")
+
         # Store state in database as consumed=False for single-use enforcement
         try:
             conn.execute(

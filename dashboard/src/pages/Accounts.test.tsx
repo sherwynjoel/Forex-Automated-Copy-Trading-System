@@ -15,10 +15,19 @@ function setRole(role: Role) {
 }
 
 let mockWindowOpen: ReturnType<typeof vi.fn>
+let mockLocationAssign: ReturnType<typeof vi.fn>
 let focusListeners: Set<(event: Event) => void> = new Set()
 
 beforeEach(() => {
   mockWindowOpen = vi.fn()
+  mockLocationAssign = vi.fn()
+  // jsdom's location is not writable; stub only assign, which is what the
+  // connect handler calls.
+  Object.defineProperty(window, 'location', {
+    value: { ...window.location, assign: mockLocationAssign },
+    writable: true,
+    configurable: true,
+  })
   focusListeners.clear()
 
   Object.defineProperty(window, 'open', {
@@ -133,7 +142,11 @@ test('loads and displays accounts with nicknames on mount', async () => {
   expect(screen.getByDisplayValue('Second desk')).toBeInTheDocument()
 })
 
-test('connect button opens oauth popup at the org-scoped route', async () => {
+test('connect navigates THIS tab to the org-scoped route, never a popup', async () => {
+  // A popup breaks the flow outright: the broker's redirect back to
+  // /api/oauth/callback is cross-site, and a SameSite=Lax session cookie
+  // is withheld from a popup navigated that way -- the callback answered
+  // "Not authenticated" and no account could ever be connected.
   setRole('admin')
   mockRoutes()
   renderAccounts()
@@ -141,11 +154,8 @@ test('connect button opens oauth popup at the org-scoped route', async () => {
   const connectButton = await screen.findByRole('button', { name: /connect ctrader id/i })
   await userEvent.click(connectButton)
 
-  expect(mockWindowOpen).toHaveBeenCalledWith(
-    '/api/orgs/1/oauth/connect',
-    'ctrader-oauth',
-    'width=520,height=680'
-  )
+  expect(mockLocationAssign).toHaveBeenCalledWith('/api/orgs/1/oauth/connect')
+  expect(mockWindowOpen).not.toHaveBeenCalled()
 })
 
 test('window-focus refetch: refetches accounts after OAuth popup closes', async () => {
