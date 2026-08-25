@@ -104,7 +104,29 @@ function mockRoutes(overrides: Record<string, unknown | (() => Response)> = {}) 
   return fetchMock
 }
 
+/**
+ * Renders History on the PER-ACCOUNT view.
+ *
+ * The page now opens on the whole fleet, which is what an operator wants
+ * first. These tests predate that and exercise the single-account tabs, so
+ * the helper navigates there rather than each test repeating the click.
+ * The real default is asserted separately, by the tests at the end of this
+ * file -- otherwise this helper would quietly hide a regression in it.
+ */
 function renderHistory() {
+  useOrgMock.mockReturnValue(mockUseOrg('viewer'))
+  const result = render(
+    <MemoryRouter>
+      <History />
+    </MemoryRouter>
+  )
+  // The tablist renders immediately; only its panel waits on data.
+  fireEvent.click(screen.getByRole('tab', { name: /closed positions/i }))
+  return result
+}
+
+/** Renders and stays on the default view. */
+function renderHistoryDefault() {
   useOrgMock.mockReturnValue(mockUseOrg('viewer'))
   return render(
     <MemoryRouter>
@@ -423,8 +445,8 @@ test('tabs move with arrow keys', async () => {
   const closedTab = screen.getByRole('tab', { name: /closed positions/i })
   closedTab.focus()
   await userEvent.keyboard('{ArrowRight}')
-  expect(screen.getByRole('tab', { name: /by master/i })).toHaveAttribute('aria-selected', 'true')
-  expect(screen.getByRole('tab', { name: /by master/i })).toHaveFocus()
+  expect(screen.getByRole('tab', { name: /all accounts/i })).toHaveAttribute('aria-selected', 'true')
+  expect(screen.getByRole('tab', { name: /all accounts/i })).toHaveFocus()
 })
 
 test('closing the drill drawer returns focus to the position that opened it', async () => {
@@ -467,7 +489,7 @@ test('the By-master tab nests slave copies under their master trade', async () =
   renderHistory()
   await screen.findAllByText('+20.00')
 
-  await userEvent.click(screen.getByRole('tab', { name: /by master/i }))
+  await userEvent.click(screen.getByRole('tab', { name: /all accounts/i }))
 
   // Master group header: position #21 with its aggregate net (20 - 0.12 - 0.7).
   expect(await screen.findByText('#21')).toBeInTheDocument()
@@ -489,7 +511,7 @@ test('a master trade with no copies in the window says so', async () => {
   renderHistory()
   await screen.findAllByText('+20.00')
 
-  await userEvent.click(screen.getByRole('tab', { name: /by master/i }))
+  await userEvent.click(screen.getByRole('tab', { name: /all accounts/i }))
   expect(await screen.findByText('#21')).toBeInTheDocument()
   expect(screen.getByText(/no slave copies in this week/i)).toBeInTheDocument()
 })
@@ -502,7 +524,7 @@ test('By-master survives one slave failing and says which copies are missing', a
   renderHistory()
   await screen.findAllByText('+20.00')
 
-  await userEvent.click(screen.getByRole('tab', { name: /by master/i }))
+  await userEvent.click(screen.getByRole('tab', { name: /all accounts/i }))
 
   // The master's groups still render...
   expect(await screen.findByText('#21')).toBeInTheDocument()
@@ -528,7 +550,7 @@ test('By-master shows an error, never a fake empty, when the master load fails',
   renderHistory()
   await screen.findAllByText('+20.00')
 
-  await userEvent.click(screen.getByRole('tab', { name: /by master/i }))
+  await userEvent.click(screen.getByRole('tab', { name: /all accounts/i }))
 
   expect(await screen.findByText(/master account's history could not be loaded/i)).toBeInTheDocument()
   // The broker's rate-limit enum is explained, not left raw and unexplained.
@@ -558,7 +580,7 @@ test('a throttled account is retried, not silently dropped from the fleet view',
   })
   renderHistory()
 
-  await userEvent.click(await screen.findByRole('tab', { name: /by master/i }))
+  await userEvent.click(await screen.findByRole('tab', { name: /all accounts/i }))
 
   // The retry must actually happen: the same URL is requested twice.
   await waitFor(() => {
@@ -572,3 +594,42 @@ test('a throttled account is retried, not silently dropped from the fleet view',
     expect(screen.queryByText(/could not load/i)).not.toBeInTheDocument()
   }, { timeout: 10000 })
 }, 20000)
+
+
+test('History opens on the whole fleet, not one account', async () => {
+  // The question this page answers is "did every slave copy the master?".
+  // Opening on a single account buried that behind a tab an operator had
+  // to know existed.
+  mockRoutes()
+  renderHistoryDefault()
+
+  const fleetTab = await screen.findByRole('tab', { name: /all accounts/i })
+  expect(fleetTab).toHaveAttribute('aria-selected', 'true')
+})
+
+test('the account picker is hidden on the fleet view, shown on a per-account tab', async () => {
+  // Leaving it visible invites the operator to pick an account and watch
+  // nothing happen, because the fleet view covers all of them.
+  mockRoutes()
+  renderHistoryDefault()
+
+  await screen.findByRole('tab', { name: /all accounts/i })
+  expect(screen.queryByLabelText('Account')).not.toBeInTheDocument()
+
+  await userEvent.click(screen.getByRole('tab', { name: /closed positions/i }))
+  expect(await screen.findByLabelText('Account')).toBeInTheDocument()
+})
+
+test('the fleet view does not also burst-fetch the selected account', async () => {
+  // loadHistory fires three parallel requests. Running it alongside the
+  // paced whole-fleet load competes for the same broker throttle, which is
+  // exactly what drops accounts out of the view.
+  const fetchMock = mockRoutes()
+  renderHistoryDefault()
+
+  await screen.findByRole('tab', { name: /all accounts/i })
+  await waitFor(() => {
+    expect(fetchMock.mock.calls.some(
+      (c) => String(c[0]).includes('/history/cashflow'))).toBe(false)
+  })
+})

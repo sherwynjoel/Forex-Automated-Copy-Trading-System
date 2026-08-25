@@ -131,7 +131,11 @@ export default function History() {
   const [windowDays, setWindowDays] = useState<7 | 1>(7)
   // Whether the window's trailing edge sits at "now" (Later is meaningless).
   const [atNow, setAtNow] = useState(true)
-  const [tab, setTab] = useState<Tab>('closed')
+  // The whole fleet, grouped by master trade, is the question this page
+  // exists to answer: what did the master do, and did each slave copy it?
+  // Opening on a single account made that the buried case -- an operator
+  // had to know the tab existed and pick it every visit.
+  const [tab, setTab] = useState<Tab>('bymaster')
   const [deals, setDeals] = useState<Deal[]>([])
   const [orders, setOrders] = useState<HistoricalOrder[]>([])
   const [cashFlow, setCashFlow] = useState<CashFlowEntry[]>([])
@@ -226,8 +230,13 @@ export default function History() {
   }, [orgId, accountId, windowEnd, windowMs])
 
   useEffect(() => {
+    // The fleet tab loads every account itself, paced. Firing a
+    // three-request burst for the selected account alongside it competes
+    // for the same broker throttle -- the exact thing that drops accounts
+    // out of the view.
+    if (tab === 'bymaster') return
     loadHistory()
-  }, [loadHistory])
+  }, [loadHistory, tab])
 
   useEffect(() => {
     if (tab !== 'bymaster' || accounts.length === 0) return
@@ -513,29 +522,35 @@ export default function History() {
       <header>
         <h1 className="page-title">History</h1>
         <p className="text-sm text-ink-soft mt-1 max-w-prose">
-          Closed positions, fills, and orders for any account, straight from
-          the broker. One week at a time — that is the most cTrader hands out
+          Every master trade with the copies each slave placed against it,
+          straight from the broker. Switch tabs to look at one account on
+          its own. One week at a time — that is the most cTrader hands out
           per request.
         </p>
       </header>
 
       {/* Controls */}
       <div className="flex flex-wrap items-end gap-4">
-        <div>
-          <label htmlFor="history-account" className="desk-label block mb-1">Account</label>
-          <select
-            id="history-account"
-            value={accountId ?? ''}
-            onChange={(e) => { setAccountId(Number(e.target.value)); setJumpDate('') }}
-            className="rounded border border-line-strong px-3 py-2 text-sm bg-card min-w-64"
-          >
-            {accounts.map((a) => (
-              <option key={a.ctid_trader_account_id} value={a.ctid_trader_account_id}>
-                {accountLabel(a)}
-              </option>
-            ))}
-          </select>
-        </div>
+        {/* Only meaningful on the per-account tabs. Leaving it visible on
+            the fleet view invites the operator to pick an account and
+            watch nothing happen. */}
+        {tab !== 'bymaster' && (
+          <div>
+            <label htmlFor="history-account" className="desk-label block mb-1">Account</label>
+            <select
+              id="history-account"
+              value={accountId ?? ''}
+              onChange={(e) => { setAccountId(Number(e.target.value)); setJumpDate('') }}
+              className="rounded border border-line-strong px-3 py-2 text-sm bg-card min-w-64"
+            >
+              {accounts.map((a) => (
+                <option key={a.ctid_trader_account_id} value={a.ctid_trader_account_id}>
+                  {accountLabel(a)}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
         <div className="flex items-center gap-2 flex-wrap">
           <div className="flex rounded border border-line-strong overflow-hidden" role="group" aria-label="Window size">
             {([7, 1] as const).map((days) => (
@@ -630,8 +645,8 @@ export default function History() {
             role="tablist"
             onKeyDown={onTablistKeyDown}
           >
+            {tabButton('bymaster', 'All accounts', fleet != null ? masterGroups.length : undefined)}
             {tabButton('closed', 'Closed positions', closingDeals.length)}
-            {tabButton('bymaster', 'By master', fleet != null ? masterGroups.length : undefined)}
             {tabButton('deals', 'Deals', deals.length)}
             {tabButton('orders', 'Orders', orders.length)}
             {tabButton('cashflow', 'Cash flow', cashFlow.length)}
