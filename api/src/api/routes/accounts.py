@@ -375,6 +375,11 @@ def create_accounts_router() -> APIRouter:
                 "digits": r[2],
                 "min_volume_lots": r[4] / r[3] if r[3] else None,
                 "step_volume_lots": r[5] / r[3] if r[3] else None,
+                # Protocol units per 1.00 lot. The order ticket needs it to
+                # express a stop or target as an AMOUNT of money rather than
+                # a price: profit = price_move * (lots * lot_size / 100), so
+                # without the contract size that sum cannot be inverted.
+                "lot_size": r[3],
             }
             for r in rows
         ]

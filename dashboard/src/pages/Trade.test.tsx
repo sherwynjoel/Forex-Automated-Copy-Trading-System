@@ -50,7 +50,7 @@ const accounts = [
 ]
 
 const symbols = [
-  { name: 'EURUSD', symbol_id: 1, digits: 5, min_volume_lots: 0.01, step_volume_lots: 0.01 },
+  { name: 'EURUSD', symbol_id: 1, digits: 5, min_volume_lots: 0.01, step_volume_lots: 0.01, lot_size: 10_000_000 },
   { name: 'GBPUSD', symbol_id: 2, digits: 5, min_volume_lots: 0.01, step_volume_lots: 0.01 },
 ]
 
@@ -625,4 +625,75 @@ test('open positions on the Trade page carry live P&L', async () => {
   // The live marking price rides in the Current column next to it.
   expect(screen.getByText('1.10521')).toBeInTheDocument()
   expect(screen.getByText('Live P&L')).toBeInTheDocument()
+})
+
+
+test('amount mode sends a converted PRICE, never the raw money figure', async () => {
+  // The bug this exists for: a trader typed 1.5 meaning "a dollar fifty"
+  // into a field that wanted a price, on an instrument trading at 4652.
+  // The broker rightly refused it. Amount mode does that arithmetic.
+  setRole('trader')
+  const fetchMock = mockRoutes()
+  renderTrade()
+
+  await waitFor(() => {
+    expect((screen.getByLabelText(/symbol/i) as HTMLInputElement).value).toBe('EURUSD')
+  })
+
+  await userEvent.click(screen.getByRole('button', { name: /^amount/i }))
+  await userEvent.clear(screen.getByLabelText(/volume/i))
+  await userEvent.type(screen.getByLabelText(/volume/i), '0.01')
+  await userEvent.type(screen.getByLabelText(/take profit/i), '1.5')
+  await userEvent.click(screen.getByRole('button', { name: /place order/i }))
+
+  await waitFor(() => {
+    const call = fetchMock.mock.calls.find(([u, init]) =>
+      String(u) === '/api/orgs/1/orders' && (init as RequestInit)?.method === 'POST')
+    expect(call).toBeTruthy()
+    const body = JSON.parse((call![1] as RequestInit).body as string)
+    // 0.01 lots of a 10,000,000-unit contract = 1,000 units. $1.50 over
+    // 1,000 units is 0.0015 of price, above a BUY fill at ask 1.08431.
+    expect(body.take_profit).toBeCloseTo(1.08581, 5)
+    // The raw 1.5 must never reach the broker as a price.
+    expect(body.take_profit).not.toBe(1.5)
+  })
+})
+
+test('amount mode shows the price it will exit at, rather than converting silently', async () => {
+  setRole('trader')
+  mockRoutes()
+  renderTrade()
+
+  await waitFor(() => {
+    expect((screen.getByLabelText(/symbol/i) as HTMLInputElement).value).toBe('EURUSD')
+  })
+
+  await userEvent.click(screen.getByRole('button', { name: /^amount/i }))
+  await userEvent.clear(screen.getByLabelText(/volume/i))
+  await userEvent.type(screen.getByLabelText(/volume/i), '0.01')
+  await userEvent.type(screen.getByLabelText(/take profit/i), '1.5')
+
+  // Hiding the arithmetic would just move the guesswork out of sight.
+  expect(await screen.findByText(/exits at/i)).toBeInTheDocument()
+  expect(screen.getByText('1.08581')).toBeInTheDocument()
+})
+
+test('price mode is untouched: what you type is what is sent', async () => {
+  setRole('trader')
+  const fetchMock = mockRoutes()
+  renderTrade()
+
+  await waitFor(() => {
+    expect((screen.getByLabelText(/symbol/i) as HTMLInputElement).value).toBe('EURUSD')
+  })
+
+  await userEvent.type(screen.getByLabelText(/take profit/i), '1.09')
+  await userEvent.click(screen.getByRole('button', { name: /place order/i }))
+
+  await waitFor(() => {
+    const call = fetchMock.mock.calls.find(([u, init]) =>
+      String(u) === '/api/orgs/1/orders' && (init as RequestInit)?.method === 'POST')
+    const body = JSON.parse((call![1] as RequestInit).body as string)
+    expect(body.take_profit).toBe(1.09)
+  })
 })

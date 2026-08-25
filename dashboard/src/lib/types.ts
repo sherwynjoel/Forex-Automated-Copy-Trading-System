@@ -157,6 +157,9 @@ export interface TradeSymbol {
   digits: number
   min_volume_lots?: number | null
   step_volume_lots?: number | null
+  /** Protocol units per 1.00 lot; needed to price a money-denominated
+   *  stop or target. Absent on older responses. */
+  lot_size?: number | null
 }
 
 export interface FlattenSummary {

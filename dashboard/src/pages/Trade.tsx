@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { orgApi } from '../lib/api'
+import { unitsFor, priceForAmount, quoteCurrencyOf } from '../lib/protection'
 import { actionBurst } from '../lib/refresh'
 import { useOrg } from '../lib/org'
 import { can } from '../lib/roles'
@@ -31,11 +32,16 @@ interface TicketState {
   stopPrice: string
   stopLoss: string
   takeProfit: string
+  /** Whether stopLoss/takeProfit are prices or money in the quote currency. */
+  protectionMode: 'price' | 'amount'
 }
 
 const EMPTY_TICKET: TicketState = {
   symbol: '', side: 'BUY', orderType: 'MARKET', volumeLots: '0.01',
   limitPrice: '', stopPrice: '', stopLoss: '', takeProfit: '',
+  // Price by default: it is what the broker stores, so an operator who
+  // never touches the toggle keeps exactly the old behaviour.
+  protectionMode: 'price',
 }
 
 const defaultSymbolKey = (orgId: number, accountId: number) =>
@@ -297,6 +303,35 @@ export default function Trade() {
     return Number.isFinite(value) ? value : null
   }
 
+  // The price an order is expected to fill at: a market order pays the
+  // spread, a pending order fills at its own trigger.
+  const expectedFill = ((): number | null => {
+    if (ticket.orderType === 'LIMIT') return numOrNull(ticket.limitPrice)
+    if (ticket.orderType === 'STOP') return numOrNull(ticket.stopPrice)
+    return ticket.side === 'BUY' ? (quote?.ask ?? null) : (quote?.bid ?? null)
+  })()
+
+  // Stop and target as PRICES, whichever way the operator typed them.
+  // In amount mode this is the arithmetic they would otherwise do by hand
+  // at the ticket -- which is exactly where the mistakes happen.
+  const protectionUnits = unitsFor(
+    numOrNull(ticket.volumeLots) ?? 0, selectedSymbol?.lot_size)
+
+  const resolveProtection = (raw: string, kind: 'tp' | 'sl'): number | null => {
+    const value = numOrNull(raw)
+    if (value == null) return null
+    if (ticket.protectionMode === 'price') return value
+    if (expectedFill == null) return null
+    return priceForAmount(ticket.side, kind, expectedFill, value, protectionUnits)
+  }
+
+  const resolvedStopLoss = resolveProtection(ticket.stopLoss, 'sl')
+  const resolvedTakeProfit = resolveProtection(ticket.takeProfit, 'tp')
+
+  // What the money would actually be denominated in. Null means we cannot
+  // tell, and an unlabelled field is better than a wrong label.
+  const quoteCurrency = quoteCurrencyOf(ticket.symbol)
+
   const ticketProblem = ((): string | null => {
     if (!selected) return 'Pick an account'
     if (!ticket.symbol) return 'Pick a symbol'
@@ -310,6 +345,18 @@ export default function Trade() {
     }
     if (ticket.orderType === 'STOP' && numOrNull(ticket.stopPrice) == null) {
       return 'Stop orders need a stop price'
+    }
+    if (ticket.protectionMode === 'amount'
+        && (numOrNull(ticket.stopLoss) != null || numOrNull(ticket.takeProfit) != null)) {
+      // Sending an unconverted amount as a price would put the stop at
+      // $1.50 on an instrument trading at 4652 -- the exact mistake the
+      // amount mode exists to prevent.
+      if (protectionUnits == null) {
+        return 'Cannot size a money amount for this symbol - use price instead'
+      }
+      if (expectedFill == null) {
+        return 'Waiting for a live price to convert the amount'
+      }
     }
     return null
   })()
@@ -328,8 +375,9 @@ export default function Trade() {
       }
       if (ticket.orderType === 'LIMIT') body.limit_price = numOrNull(ticket.limitPrice)
       if (ticket.orderType === 'STOP') body.stop_price = numOrNull(ticket.stopPrice)
-      if (numOrNull(ticket.stopLoss) != null) body.stop_loss = numOrNull(ticket.stopLoss)
-      if (numOrNull(ticket.takeProfit) != null) body.take_profit = numOrNull(ticket.takeProfit)
+      // Always a price on the wire: the broker accepts nothing else.
+      if (resolvedStopLoss != null) body.stop_loss = resolvedStopLoss
+      if (resolvedTakeProfit != null) body.take_profit = resolvedTakeProfit
 
       await orgApi(orgId, 'orders', { method: 'POST', body: JSON.stringify(body) })
       setNotice(
@@ -616,26 +664,71 @@ export default function Trade() {
             </div>
           )}
 
+          <div className="flex items-center justify-between gap-2">
+            <span className="desk-label">Protection</span>
+            <div className="flex rounded border border-line-strong overflow-hidden text-xs">
+              {(['price', 'amount'] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  aria-pressed={ticket.protectionMode === mode}
+                  onClick={() => setTicket({ ...ticket, protectionMode: mode })}
+                  className={`px-2.5 py-1 font-medium transition-colors ${
+                    ticket.protectionMode === mode
+                      ? 'bg-brand text-on-accent'
+                      : 'text-ink-soft hover:text-ink'
+                  }`}
+                >
+                  {mode === 'price' ? 'Price' : `Amount${quoteCurrency ? ` (${quoteCurrency})` : ''}`}
+                </button>
+              ))}
+            </div>
+          </div>
+
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label htmlFor="ticket-sl" className="desk-label block mb-1">Stop loss</label>
               <input
                 id="ticket-sl" type="number" step="0.00001" value={ticket.stopLoss}
-                placeholder="none"
+                placeholder={ticket.protectionMode === 'amount' ? 'e.g. 1.50' : 'none'}
                 onChange={(e) => setTicket({ ...ticket, stopLoss: e.target.value })}
                 className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card"
               />
+              {/* Show the price the amount becomes. Converting silently would
+                  just move the guesswork somewhere the operator cannot see. */}
+              {ticket.protectionMode === 'amount' && ticket.stopLoss !== '' && (
+                <p className="mt-1 text-xs text-ink-faint">
+                  {resolvedStopLoss != null
+                    ? <>exits at <span className="num text-ink-soft">{resolvedStopLoss.toFixed(priceDigits)}</span></>
+                    : 'cannot price this yet'}
+                </p>
+              )}
             </div>
             <div>
               <label htmlFor="ticket-tp" className="desk-label block mb-1">Take profit</label>
               <input
                 id="ticket-tp" type="number" step="0.00001" value={ticket.takeProfit}
-                placeholder="none"
+                placeholder={ticket.protectionMode === 'amount' ? 'e.g. 1.50' : 'none'}
                 onChange={(e) => setTicket({ ...ticket, takeProfit: e.target.value })}
                 className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card"
               />
+              {ticket.protectionMode === 'amount' && ticket.takeProfit !== '' && (
+                <p className="mt-1 text-xs text-ink-faint">
+                  {resolvedTakeProfit != null
+                    ? <>exits at <span className="num text-ink-soft">{resolvedTakeProfit.toFixed(priceDigits)}</span></>
+                    : 'cannot price this yet'}
+                </p>
+              )}
             </div>
           </div>
+
+          {ticket.protectionMode === 'amount' && (
+            <p className="text-xs text-ink-faint">
+              Closes when the position is that much in profit or loss
+              {quoteCurrency ? `, in ${quoteCurrency}` : ''}. Worked out from
+              your volume, so it moves with the size you trade.
+            </p>
+          )}
 
           {margin && (
             <p className="text-xs text-ink-soft bg-paper border border-line rounded px-2 py-1.5">
