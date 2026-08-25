@@ -9,6 +9,24 @@ const DAY_MS = 24 * 3600 * 1000
 
 type Tab = 'closed' | 'bymaster' | 'deals' | 'orders' | 'cashflow'
 
+/**
+ * Pacing for whole-fleet history loads.
+ *
+ * cTrader refuses a burst: fired back-to-back the broker answers 400 part
+ * way through, and the refusal is silent from the operator's side -- the
+ * account simply shows no history. Measured on production, a ten-account
+ * fleet showed roughly the first three.
+ *
+ * Mutable so tests can run at zero delay without pretending the delay does
+ * not exist in production.
+ */
+export const historyPacing = {
+  /** Between every request, including the two for one account. */
+  gapMs: 350,
+  /** Longer wait before a throttled account's single retry. */
+  retryMs: 1500,
+}
+
 function accountLabel(account: Account): string {
   const env = account.is_live ? 'Live' : 'Demo'
   return account.nickname
@@ -132,6 +150,9 @@ export default function History() {
   const [fleetLoading, setFleetLoading] = useState(false)
   const [fleetFailed, setFleetFailed] = useState<string[]>([])
   const [fleetReloadKey, setFleetReloadKey] = useState(0)
+  // Which account the fleet load is on, so a paced load of ten accounts
+  // reads as progress rather than a hung screen.
+  const [fleetProgress, setFleetProgress] = useState<{ done: number; total: number } | null>(null)
   const seqRef = useRef(0)
   const drillSeqRef = useRef(0)
   const drillCloseRef = useRef<HTMLButtonElement>(null)
@@ -213,27 +234,54 @@ export default function History() {
     let cancelled = false
     const load = async () => {
       setFleetLoading(true)
-      // SEQUENTIAL on purpose: cTrader throttles history payloads, and a
-      // whole-fleet burst answers BLOCKED_PAYLOAD_TYPE (seen live on prod).
-      // One account at a time keeps the copier's send queue calm; a single
-      // failing account costs its rows, never the whole view.
+      // SEQUENTIAL AND PACED. cTrader throttles history hard: fired
+      // back-to-back, the broker starts answering 400/BLOCKED_PAYLOAD_TYPE
+      // partway through. Measured on production with four accounts, the
+      // first five requests answered and the next three were refused --
+      // so a ten-account fleet showed roughly the first three accounts and
+      // silently dropped the rest, which read as "most of my accounts have
+      // no history". Sequential alone was never enough; the gap is what
+      // keeps the broker answering.
       const query = `from=${windowEnd - windowMs}&to=${windowEnd}`
       const result: Record<number, { deals: Deal[]; orders: HistoricalOrder[] }> = {}
       const failed: string[] = []
-      for (const account of accounts) {
+
+      // Waits, but stays responsive to the tab being closed mid-load.
+      const pause = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+      const fetchWindow = async (id: number) => {
+        const d = await orgApi<{ deals: Deal[] }>(
+          orgId, `accounts/${id}/history/deals?${query}`)
+        await pause(historyPacing.gapMs)
+        const o = await orgApi<{ orders: HistoricalOrder[] }>(
+          orgId, `accounts/${id}/history/orders?${query}`)
+        return { deals: d.deals, orders: o.orders }
+      }
+
+      for (let i = 0; i < accounts.length; i += 1) {
         if (cancelled) return
+        const account = accounts[i]
         const id = account.ctid_trader_account_id
+        setFleetProgress({ done: i, total: accounts.length })
         try {
-          const d = await orgApi<{ deals: Deal[] }>(
-            orgId, `accounts/${id}/history/deals?${query}`)
-          const o = await orgApi<{ orders: HistoricalOrder[] }>(
-            orgId, `accounts/${id}/history/orders?${query}`)
-          result[id] = { deals: d.deals, orders: o.orders }
+          result[id] = await fetchWindow(id)
         } catch {
-          failed.push(accountLabel(account))
+          // One retry after a longer wait. A throttled account is not a
+          // broken account, and reporting it as failed on the first
+          // refusal is what made healthy accounts look empty.
+          if (cancelled) return
+          await pause(historyPacing.retryMs)
+          if (cancelled) return
+          try {
+            result[id] = await fetchWindow(id)
+          } catch {
+            failed.push(accountLabel(account))
+          }
         }
+        if (i < accounts.length - 1) await pause(historyPacing.gapMs)
       }
       if (cancelled) return
+      setFleetProgress(null)
       setFleet(result)
       setFleetFailed(failed)
       setFleetLoading(false)
@@ -597,6 +645,7 @@ export default function History() {
                 <MasterGroupsView
                   groups={masterGroups}
                   loading={fleetLoading && fleet == null}
+                  progress={fleetProgress}
                   masterLoaded={fleet != null && masterAccountId != null
                     && fleet[masterAccountId] != null}
                   failedAccounts={fleetFailed}
@@ -719,11 +768,12 @@ export default function History() {
 }
 
 function MasterGroupsView({
-  groups, loading, masterLoaded, failedAccounts, onRetryFleet,
+  groups, loading, progress, masterLoaded, failedAccounts, onRetryFleet,
   digitsFor, windowNoun, onDrill, masterAccountId,
 }: {
   groups: MasterGroup[]
   loading: boolean
+  progress: { done: number; total: number } | null
   masterLoaded: boolean
   failedAccounts: string[]
   onRetryFleet: () => void
@@ -733,7 +783,16 @@ function MasterGroupsView({
   masterAccountId?: number
 }) {
   if (loading) {
-    return <p className="text-sm text-ink-soft py-8">Loading the fleet's history…</p>
+    // Paced deliberately (the broker refuses a burst), so a ten-account
+    // fleet takes a few seconds. Counting up says "working", where a bare
+    // spinner on a slow load says "stuck".
+    return (
+      <p className="text-sm text-ink-soft py-8">
+        {progress && progress.total > 1
+          ? `Loading the fleet's history… account ${progress.done + 1} of ${progress.total}`
+          : "Loading the fleet's history…"}
+      </p>
+    )
   }
   const retryButton = (
     <button

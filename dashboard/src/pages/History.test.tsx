@@ -2,7 +2,7 @@ import { render, screen, waitFor, within, fireEvent } from '@testing-library/rea
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi, afterEach } from 'vitest'
-import History from './History'
+import History, { historyPacing } from './History'
 import { mockUseOrg } from '../test/orgMock'
 
 const { useOrgMock } = vi.hoisted(() => ({ useOrgMock: vi.fn() }))
@@ -61,6 +61,11 @@ const orders = {
   ],
   has_more: false,
 }
+
+// Production paces fleet history requests so the broker keeps answering.
+// The delay is real and deliberate; tests exercise the LOGIC at zero wait.
+historyPacing.gapMs = 0
+historyPacing.retryMs = 0
 
 function mockRoutes(overrides: Record<string, unknown | (() => Response)> = {}) {
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
@@ -531,3 +536,39 @@ test('By-master shows an error, never a fake empty, when the master load fails',
   expect(screen.queryByText(/no master positions were closed/i)).not.toBeInTheDocument()
   expect(screen.getByRole('button', { name: /retry fleet/i })).toBeInTheDocument()
 })
+
+
+test('a throttled account is retried, not silently dropped from the fleet view', async () => {
+  // cTrader refuses a whole-fleet burst of history requests. Measured on
+  // production: fired back-to-back, the first five answered and the next
+  // three came back 400, so a ten-account fleet showed roughly the first
+  // three accounts and the rest looked like they had no history at all.
+  // One refusal must cost a retry, never the account.
+  let firstCall = true
+  const fetchMock = mockRoutes({
+    '/accounts/101/history/deals': () => {
+      if (firstCall) {
+        firstCall = false
+        return new Response('BLOCKED_PAYLOAD_TYPE', { status: 400 })
+      }
+      return new Response(JSON.stringify(deals), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      })
+    },
+  })
+  renderHistory()
+
+  await userEvent.click(await screen.findByRole('tab', { name: /by master/i }))
+
+  // The retry must actually happen: the same URL is requested twice.
+  await waitFor(() => {
+    const calls = fetchMock.mock.calls.filter(
+      (c) => String(c[0]).includes('/accounts/101/history/deals'))
+    expect(calls.length).toBeGreaterThanOrEqual(2)
+  }, { timeout: 10000 })
+
+  // And the account must NOT be listed as failed once the retry succeeds.
+  await waitFor(() => {
+    expect(screen.queryByText(/could not load/i)).not.toBeInTheDocument()
+  }, { timeout: 10000 })
+}, 20000)
