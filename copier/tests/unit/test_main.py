@@ -1326,6 +1326,65 @@ def test_resync_runs_one_org_or_every_org(db, fernet_key):
 
 
 @pytest_twisted.inlineCallbacks
+def test_one_orgs_failing_resync_does_not_blind_the_others(db, fernet_key):
+    """A sweep must isolate per-org failures.
+
+    In production one org's accounts were disabled by its broker, so its
+    reconcile answered with an error object. That raised inside the sweep
+    and, because the loop awaited each org in turn with no guard, aborted
+    the whole pass -- every org queued behind it stopped refreshing. The
+    visible symptom was a Positions page that kept showing a trade the
+    broker had already closed, because the only thing that clears it is a
+    resync, and the periodic one had been dying every minute for hours.
+    """
+    org_a, org_b = seed_two_orgs(db, fernet_key)
+    repo = Repo(db)
+    app = main.build_app(repo, TokenStore(db, fernet_key), make_stub_client_factory(), shards=1)
+
+    def exploding():
+        raise AttributeError("'ProtoOAErrorRes' object has no attribute 'position'")
+
+    healthy = []
+
+    def healthy_run():
+        healthy.append(org_b)
+        return defer.succeed(["drift-b"])
+
+    app.reconcilers[org_a].run = exploding
+    app.reconcilers[org_b].run = healthy_run
+    trackers = {org_a: _RecordingStateTracker(), org_b: _RecordingStateTracker()}
+    app.state_trackers = trackers
+
+    items = yield app.resync()          # must NOT raise
+
+    assert healthy == [org_b], "the healthy org was skipped by its neighbour's failure"
+    assert items == ["drift-b"]
+    assert set(trackers[org_b].positions) == {MASTER_B}
+
+
+@pytest_twisted.inlineCallbacks
+def test_org_scoped_resync_still_surfaces_its_own_failure(db, fernet_key):
+    """Isolation is for the SWEEP. When an operator resyncs one org by
+    hand, a failure is theirs to see -- swallowing it would report success
+    on a resync that did nothing."""
+    org_a, _ = seed_two_orgs(db, fernet_key)
+    repo = Repo(db)
+    app = main.build_app(repo, TokenStore(db, fernet_key), make_stub_client_factory(), shards=1)
+
+    def exploding():
+        raise AttributeError("boom")
+
+    app.reconcilers[org_a].run = exploding
+
+    try:
+        yield app.resync(org_a)
+    except AttributeError:
+        pass
+    else:
+        raise AssertionError("an explicitly requested resync must not hide its failure")
+
+
+@pytest_twisted.inlineCallbacks
 def test_resync_feeds_slave_positions_into_the_state_tracker(db, fernet_key):
     """The slave tiles and /state read per-account positions from the state
     tracker -- but resync used to push ONLY the master's snapshot, so every

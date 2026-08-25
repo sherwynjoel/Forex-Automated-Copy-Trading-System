@@ -446,6 +446,24 @@ class Reconciler:
 
         def _extract(res):
             reconcile_res = Protobuf.extract(res)
+
+            # The broker does not always answer with positions. An account
+            # it has disabled comes back as an error message instead, which
+            # carries no `position` field at all. Reading it raised
+            # AttributeError out of this callback, which killed the whole
+            # resync -- and resync is the only thing that refreshes the
+            # Positions screen, so every org went stale behind one broken
+            # account. Treat an unreadable account as contributing nothing.
+            if not hasattr(reconcile_res, "position"):
+                log.warning(
+                    "reconcile for account %s answered %s (%s): treating as empty",
+                    account_id,
+                    type(reconcile_res).__name__,
+                    getattr(reconcile_res, "errorCode", None)
+                    or getattr(reconcile_res, "description", "no detail"),
+                )
+                return ([], [])
+
             positions = [
                 PositionSnapshot(
                     position_id=p.positionId,

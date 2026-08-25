@@ -1103,3 +1103,84 @@ def test_reconcile_keeps_the_order_side_type_and_trigger_price():
     # A LIMIT price wins when both are present.
     order.limitPrice = 1.1111
     assert _trigger_price(order) == 1.1111
+
+
+class TestReconcileErrorResponse:
+    """The broker does not always answer a reconcile with positions.
+
+    A disabled account answers with an error message, which has no
+    `position` field at all -- reading it raised AttributeError, killed the
+    resync, and left every org's Positions page frozen on stale data. In
+    production this ran once a minute for hours: a trade that had already
+    closed at the broker still showed as open, so the operator kept
+    pressing Close on a position that was not there.
+    """
+
+    def _wire(self, message, payload_type):
+        """Wrap a protobuf message the way the transport delivers it --
+        Protobuf.extract() reads .payloadType and .payload off the wire
+        envelope, not off the message itself."""
+
+        class Envelope:
+            payloadType = payload_type
+            payload = message.SerializeToString()
+
+        return Envelope()
+
+    def _snapshot_from(self, message, payload_type):
+        from unittest.mock import Mock
+        from twisted.internet import defer
+        from copier.engine.reconcile import Reconciler
+
+        client = Mock()
+        client.send = Mock(return_value=defer.succeed(self._wire(message, payload_type)))
+        # _fetch_snapshot needs no database, so skip __init__ entirely.
+        r = Reconciler.__new__(Reconciler)
+        r.clients_by_account = lambda _a: client
+
+        out = {}
+        d = r._fetch_snapshot(12345)
+        d.addCallbacks(lambda v: out.update(value=v), lambda f: out.update(failure=f))
+        return out
+
+    def test_error_response_degrades_to_an_empty_snapshot(self):
+        from ctrader_open_api.messages.OpenApiCommonMessages_pb2 import ProtoErrorRes
+        from ctrader_open_api.messages.OpenApiCommonModelMessages_pb2 import ProtoPayloadType
+
+        err = ProtoErrorRes()
+        err.errorCode = "ACCOUNT_DISABLED"
+        err.description = "account is disabled"
+
+        out = self._snapshot_from(err, ProtoPayloadType.ERROR_RES)
+
+        assert "failure" not in out, f"raised instead of degrading: {out.get('failure')}"
+        positions, orders = out["value"]
+        assert positions == [] and orders == [], (
+            "an account we cannot read must contribute nothing, not crash the sweep")
+
+    def test_a_normal_response_is_unaffected(self):
+        from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOAReconcileRes
+        from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
+            ProtoOAPayloadType, ProtoOAPositionStatus)
+        from ctrader_open_api.messages.OpenApiModelMessages_pb2 import ProtoOATradeSide
+
+        res = ProtoOAReconcileRes()
+        res.ctidTraderAccountId = 12345
+        pos = res.position.add()
+        pos.positionId = 999
+        pos.price = 1.2345
+        pos.tradeData.symbolId = 1
+        pos.tradeData.volume = 100000
+        pos.tradeData.tradeSide = ProtoOATradeSide.BUY
+        pos.tradeData.label = "copy:1"
+        # protobuf marks these required; omitting them fails to serialize.
+        pos.positionStatus = ProtoOAPositionStatus.POSITION_STATUS_OPEN
+        pos.swap = 0
+
+        out = self._snapshot_from(res, ProtoOAPayloadType.PROTO_OA_RECONCILE_RES)
+
+        assert "failure" not in out, out.get("failure")
+        positions, _orders = out["value"]
+        assert len(positions) == 1
+        assert positions[0].position_id == 999
+        assert positions[0].price == 1.2345

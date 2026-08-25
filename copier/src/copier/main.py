@@ -647,12 +647,30 @@ class CopierApp:
         another's accounts.
         """
         org_ids = [org_id] if org_id is not None else list(self.reconcilers.keys())
+        sweeping = org_id is None
         all_items = []
         for oid in org_ids:
             reconciler = self.reconcilers.get(oid)
             if reconciler is None:
                 continue
-            items = yield reconciler.run()
+            # In a SWEEP, one org's failure must not stop the others. Its
+            # accounts can be disabled, its tokens stale, its broker down --
+            # none of which is a reason to stop refreshing every other
+            # tenant. Without this, one org with broker-disabled accounts
+            # killed the periodic resync every minute for hours, and since
+            # resync is what clears a closed position from the Positions
+            # screen, operators were left pressing Close on trades that had
+            # already closed.
+            #
+            # An explicitly requested resync still raises: the operator
+            # asked for THAT org and must not be told it succeeded.
+            try:
+                items = yield reconciler.run()
+            except Exception:
+                if not sweeping:
+                    raise
+                log.exception("resync: org %s failed; continuing the sweep", oid)
+                continue
             all_items.extend(items or [])
             tracker = self.state_trackers.get(oid)
             if tracker is not None:
