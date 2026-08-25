@@ -1081,7 +1081,10 @@ test('the panel close-all button closes every listed contract after confirm', as
   })
 })
 
-test("the Copied Today tile expands the list of today's copy fills", async () => {
+test("the Total P&L tile expands the list of today's copy fills", async () => {
+  // Renamed from "Copied today": the tile now leads with the fleet's P&L,
+  // but it still opens the same fills panel -- that behaviour is what this
+  // test protects, not the label.
   setRole('owner')
   // Pinned inside today regardless of the wall clock (an hour-ago stamp
   // crosses midnight when the suite runs just after 00:00).
@@ -1114,7 +1117,7 @@ test("the Copied Today tile expands the list of today's copy fills", async () =>
   )
 
   await screen.findByText('Copying Status')
-  await userEvent.click(screen.getByRole('button', { name: /copied today/i }))
+  await userEvent.click(screen.getByRole('button', { name: /total p&l/i }))
 
   const panel = screen.getByText(/today's copy fills/i).closest('section')!
   // The fill from an hour ago is listed; the three-day-old one is not
@@ -1244,4 +1247,42 @@ test('the copier-performance analytics live on Performance, not Overview', async
   // ...and the analytics fetch that fed them is gone with it.
   expect(fetchMock.mock.calls.map(([u]) => String(u))
     .some((u) => u.includes('/analytics'))).toBe(false)
+})
+
+
+test('Total P&L replaces the copy counter and sums every account', async () => {
+  // Operators wanted one number for the whole fleet -- master and slaves --
+  // instead of a fill count that said nothing about money.
+  setRole('owner')
+  stubApi(statsRoutes())
+
+  render(<MemoryRouter><Overview /></MemoryRouter>)
+
+  expect(await screen.findByText('Total P&L')).toBeInTheDocument()
+  // The old tile must be gone, not merely pushed off screen.
+  expect(screen.queryByText('Copied today')).not.toBeInTheDocument()
+})
+
+test('Total P&L shows a dash, not zero, before there is a yesterday', async () => {
+  // A desk with no prior snapshot has no P&L to report. Rendering 0.00
+  // would claim it broke even, which is a different and false statement.
+  setRole('owner')
+  stubApi({ ...statsRoutes(), '/api/orgs/1/overview': { ...overviewStats, yesterday: null } })
+
+  render(<MemoryRouter><Overview /></MemoryRouter>)
+
+  expect(await screen.findByText('Total P&L')).toBeInTheDocument()
+  expect(screen.getByText('needs a full day of history')).toBeInTheDocument()
+})
+
+test('a degraded account still warns after the copy-counter tile was replaced', async () => {
+  // This warning used to live on "Copied today". A degraded account has
+  // silently stopped copying, so losing the signal with the old tile would
+  // have been a real regression.
+  setRole('owner')
+  stubApi({ ...statsRoutes(), '/api/orgs/1/overview': { ...overviewStats, degraded: 2 } })
+
+  render(<MemoryRouter><Overview /></MemoryRouter>)
+
+  expect(await screen.findByText('2 degraded')).toBeInTheDocument()
 })

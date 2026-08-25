@@ -230,6 +230,16 @@ export default function Overview() {
     ? (portfolioValue - yesterdayEquity) / yesterdayEquity
     : null
 
+  // Total P&L across the whole fleet -- master and every slave -- as the
+  // change in combined equity since yesterday's snapshot. Null until there
+  // IS a yesterday: a desk that started today has no P&L to report, and
+  // 0.00 would claim it broke even rather than admit we cannot know yet.
+  // This moves with deposits and withdrawals too, which is why the tile
+  // says "since yesterday" rather than "profit".
+  const totalPnl = (portfolioValue != null && yesterdayEquity != null)
+    ? portfolioValue - yesterdayEquity
+    : null
+
   // Accounts (master or slave) whose cTrader-ID token refresh has failed. Once the
   // token expires, copying for these accounts silently stops, so this must be
   // impossible to miss on the dashboard - not just a row in the Logs table.
@@ -325,11 +335,16 @@ export default function Overview() {
           expanded={expandedKpi === 'contracts'}
         />
         <StatTile
-          label="Copied today"
-          value={String(stats?.copied_today ?? '—')}
+          label="Total P&L"
+          value={totalPnl == null ? '—' : signed(totalPnl)}
+          tone={totalPnl == null ? undefined : (totalPnl < 0 ? 'loss' : 'profit')}
           sub={stats && stats.degraded > 0
+            // A degraded account has silently stopped copying. That signal
+            // used to live on "Copied today" and must not vanish with it.
             ? <span className="text-loss">{stats.degraded} degraded</span>
-            : 'copy fills since midnight'}
+            : totalPnl == null
+              ? 'needs a full day of history'
+              : `all accounts · ${stats?.copied_today ?? 0} copies today`}
           onClick={() => toggleKpi('fills')}
           expanded={expandedKpi === 'fills'}
         />
