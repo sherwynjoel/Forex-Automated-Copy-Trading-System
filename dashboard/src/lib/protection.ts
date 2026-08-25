@@ -64,3 +64,17 @@ export function quoteCurrencyOf(symbol: string | null | undefined): string | nul
   const plain = symbol.replace(/[^A-Za-z]/g, '').toUpperCase()
   return plain.length === 6 ? plain.slice(3) : null
 }
+
+/**
+ * Units for a position already on the book.
+ *
+ * An open position reports its size in protocol volume, so its unit count
+ * needs no contract size at all -- the engine's own divisor is enough.
+ * That makes an amount-denominated stop exact on the Positions screen,
+ * where the ticket has to infer it from lots and lot_size.
+ */
+export function unitsFromVolume(protocolVolume: number | null | undefined): number | null {
+  if (protocolVolume == null) return null
+  if (!Number.isFinite(protocolVolume) || protocolVolume <= 0) return null
+  return protocolVolume / 100
+}

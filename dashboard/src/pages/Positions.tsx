@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { ApiState, MasterPosition, PendingOrder, PositionCopy, DriftItem } from '../lib/types'
 import { orgApi } from '../lib/api'
+import { unitsFromVolume, priceForAmount, quoteCurrencyOf } from '../lib/protection'
 import { useOrg } from '../lib/org'
 import Banner from '../components/Banner'
 import { can } from '../lib/roles'
@@ -79,6 +80,10 @@ export default function Positions() {
   const [slDraft, setSlDraft] = useState('')
   const [tpDraft, setTpDraft] = useState('')
   const [amendBusy, setAmendBusy] = useState(false)
+  // Price or money. Price stays the default: it is what the broker stores
+  // and what the row already shows, so an operator who ignores the toggle
+  // sees no change at all.
+  const [amendMode, setAmendMode] = useState<'price' | 'amount'>('price')
   // Broker refusals stream in as control events. Kept apart from `error`
   // (the page-load failure) so a background refresh cannot wipe it: only
   // the reader dismisses it.
@@ -89,13 +94,32 @@ export default function Positions() {
   useEffect(() => {
     setSlDraft(editing?.stop_loss != null ? String(editing.stop_loss) : '')
     setTpDraft(editing?.take_profit != null ? String(editing.take_profit) : '')
+    // Reopen in price mode: the values just pre-filled are prices, and
+    // showing them under an "amount" heading would misread them wildly.
+    setAmendMode('price')
   }, [editing])
 
-  const draftPrice = (raw: string): number | null => {
+  // An open position states its own size, so turning money into a price
+  // needs nothing beyond the position itself.
+  const amendUnits = unitsFromVolume(editing?.volume)
+  const amendCurrency = quoteCurrencyOf(editing?.symbol)
+
+  /**
+   * The PRICE a draft field means, whichever way it was typed.
+   *
+   * Deliberately the single conversion point: validation, the preview
+   * under each field and the request body all read through here, so they
+   * cannot disagree about what the operator asked for.
+   */
+  const draftPrice = (raw: string, kind: 'tp' | 'sl'): number | null => {
     const trimmed = raw.trim()
     if (trimmed === '') return null
     const value = Number(trimmed)
-    return Number.isFinite(value) ? value : null
+    if (!Number.isFinite(value)) return null
+    if (amendMode === 'price') return value
+    if (editing?.price == null) return null
+    return priceForAmount(
+      editing.side === 'SELL' ? 'SELL' : 'BUY', kind, editing.price, value, amendUnits)
   }
 
   // Judged against the live mark, falling back to the entry price.
@@ -103,8 +127,8 @@ export default function Positions() {
     ? protectionProblem(
         editing.side,
         editing.current_price ?? editing.price,
-        draftPrice(slDraft),
-        draftPrice(tpDraft))
+        draftPrice(slDraft, 'sl'),
+        draftPrice(tpDraft, 'tp'))
     : null
 
   const submitAmend = async () => {
@@ -117,8 +141,8 @@ export default function Positions() {
         body: JSON.stringify({
           account_id: editing.account_id,
           position_id: editing.position_id,
-          stop_loss: draftPrice(slDraft),
-          take_profit: draftPrice(tpDraft),
+          stop_loss: draftPrice(slDraft, 'sl'),
+          take_profit: draftPrice(tpDraft, 'tp'),
         }),
       })
       setEditing(null)
@@ -330,6 +354,27 @@ export default function Positions() {
           Applies to the master position and, through the normal copy path,
           to every slave copy of it.
         </p>
+        <div className="flex items-center justify-between gap-2">
+          <span className="desk-label">Set by</span>
+          <div className="flex rounded border border-line-strong overflow-hidden text-xs">
+            {(['price', 'amount'] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                aria-pressed={amendMode === mode}
+                onClick={() => setAmendMode(mode)}
+                className={`px-2.5 py-1 font-medium transition-colors ${
+                  amendMode === mode
+                    ? 'bg-brand text-on-accent'
+                    : 'text-ink-soft hover:text-ink'
+                }`}
+              >
+                {mode === 'price' ? 'Price' : `Amount${amendCurrency ? ` (${amendCurrency})` : ''}`}
+              </button>
+            ))}
+          </div>
+        </div>
+
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label htmlFor="amend-sl" className="desk-label block mb-1">Stop loss</label>
@@ -339,9 +384,18 @@ export default function Positions() {
               step="0.00001"
               value={slDraft}
               onChange={(e) => setSlDraft(e.target.value)}
-              placeholder="none"
+              placeholder={amendMode === 'amount' ? 'e.g. 1.50' : 'none'}
               className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink"
             />
+            {/* Show the price the money becomes. Converting out of sight
+                would only move the guesswork somewhere uncheckable. */}
+            {amendMode === 'amount' && slDraft.trim() !== '' && (
+              <p className="mt-1 text-xs text-ink-faint">
+                {draftPrice(slDraft, 'sl') != null
+                  ? <>exits at <span className="num text-ink-soft">{draftPrice(slDraft, 'sl')}</span></>
+                  : 'cannot price this'}
+              </p>
+            )}
           </div>
           <div>
             <label htmlFor="amend-tp" className="desk-label block mb-1">Take profit</label>
@@ -351,11 +405,25 @@ export default function Positions() {
               step="0.00001"
               value={tpDraft}
               onChange={(e) => setTpDraft(e.target.value)}
-              placeholder="none"
+              placeholder={amendMode === 'amount' ? 'e.g. 1.50' : 'none'}
               className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink"
             />
+            {amendMode === 'amount' && tpDraft.trim() !== '' && (
+              <p className="mt-1 text-xs text-ink-faint">
+                {draftPrice(tpDraft, 'tp') != null
+                  ? <>exits at <span className="num text-ink-soft">{draftPrice(tpDraft, 'tp')}</span></>
+                  : 'cannot price this'}
+              </p>
+            )}
           </div>
         </div>
+        {amendMode === 'amount' && (
+          <p className="text-xs text-ink-faint">
+            Measured from this position&rsquo;s entry at{' '}
+            <span className="num">{editing?.price}</span> and its size, so it
+            closes when the position is that much up or down.
+          </p>
+        )}
         <p className="text-xs text-ink-faint">
           Leaving a field empty removes that protection — the broker replaces
           both together.

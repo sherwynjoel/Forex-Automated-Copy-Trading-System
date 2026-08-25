@@ -1,5 +1,5 @@
 import { expect, test, describe } from 'vitest'
-import { unitsFor, priceForAmount, quoteCurrencyOf } from './protection'
+import { unitsFor, unitsFromVolume, priceForAmount, quoteCurrencyOf } from './protection'
 
 describe('unitsFor', () => {
   test('gold: 0.01 lots of a 100-unit contract is 1 ounce', () => {
@@ -66,5 +66,31 @@ describe('quoteCurrencyOf', () => {
     expect(quoteCurrencyOf('US500')).toBeNull()
     expect(quoteCurrencyOf('')).toBeNull()
     expect(quoteCurrencyOf(null)).toBeNull()
+  })
+})
+
+describe('unitsFromVolume', () => {
+  test('an open 0.01-lot gold position reports 100 protocol units = 1 ounce', () => {
+    expect(unitsFromVolume(100)).toBe(1)
+  })
+
+  test('agrees with the lots-and-contract-size route', () => {
+    // Both paths must value the same position identically, or an amount
+    // would mean one thing on the ticket and another on Positions.
+    expect(unitsFromVolume(100)).toBe(unitsFor(0.01, 10_000))
+  })
+
+  test('refuses nonsense rather than returning a misleading zero', () => {
+    expect(unitsFromVolume(0)).toBeNull()
+    expect(unitsFromVolume(null)).toBeNull()
+    expect(unitsFromVolume(NaN)).toBeNull()
+  })
+})
+
+describe('amount protection on an open position', () => {
+  test('$1.50 on a 0.01-lot BUY of gold entered at 4631.31', () => {
+    const units = unitsFromVolume(100)
+    expect(priceForAmount('BUY', 'tp', 4631.31, 1.5, units)).toBeCloseTo(4632.81, 5)
+    expect(priceForAmount('BUY', 'sl', 4631.31, 1.5, units)).toBeCloseTo(4629.81, 5)
   })
 })

@@ -485,3 +485,64 @@ test('the dialog blocks a wrong-side target instead of sending it', async () => 
   expect(orgApiMock.mock.calls.some(([, path]) => path === 'positions/amend'))
     .toBe(false)
 })
+
+test('amount mode amends a position with a converted price, not the money figure', async () => {
+  // Same confusion as the order ticket: "get me out a dollar down" is the
+  // intent; the price is only arithmetic. Typing the amount into a price
+  // field is exactly what the broker refuses.
+  setRole('trader')
+  const positioned: ApiState = {
+    ...mockApiState,
+    master_positions: mockApiState.master_positions.map((p) => ({
+      ...p, account_id: 1001, stop_loss: null, take_profit: null,
+    })),
+  }
+  const orgApiMock = vi.spyOn(apiModule, 'orgApi')
+    .mockImplementation(async (_org, path) =>
+      (path === 'state' ? positioned : {}) as never)
+
+  render(<MemoryRouter><Positions /></MemoryRouter>)
+
+  const row = (await screen.findByText('EURUSD')).closest('tr')!
+  await userEvent.click(within(row).getByRole('button', { name: /sl \/ tp/i }))
+  await userEvent.click(screen.getByRole('button', { name: /^amount/i }))
+
+  await userEvent.type(screen.getByLabelText('Take profit'), '500')
+
+  // 100,000 protocol units = 1,000 base units. 500 over 1,000 units is
+  // 0.5 of price, above a BUY entered at 1.0950.
+  expect(await screen.findByText(/exits at/i)).toBeInTheDocument()
+
+  await userEvent.click(screen.getByRole('button', { name: /update protection/i }))
+
+  await waitFor(() => {
+    const call = orgApiMock.mock.calls.find(([, path]) => path === 'positions/amend')
+    expect(call).toBeTruthy()
+    const body = JSON.parse(String((call![2] as RequestInit).body))
+    expect(body.take_profit).toBeCloseTo(1.595, 5)
+    // The raw amount must never reach the broker as a price.
+    expect(body.take_profit).not.toBe(500)
+  })
+})
+
+test('the amend dialog reopens in price mode so prefilled prices are not misread', async () => {
+  // The values pre-filled from the position ARE prices. Showing them under
+  // an "amount" heading would misstate them by orders of magnitude.
+  setRole('trader')
+  const positioned: ApiState = {
+    ...mockApiState,
+    master_positions: mockApiState.master_positions.map((p) => ({
+      ...p, account_id: 1001, stop_loss: 1.09, take_profit: null,
+    })),
+  }
+  vi.spyOn(apiModule, 'orgApi')
+    .mockImplementation(async (_org, path) =>
+      (path === 'state' ? positioned : {}) as never)
+
+  render(<MemoryRouter><Positions /></MemoryRouter>)
+
+  const row = (await screen.findByText('EURUSD')).closest('tr')!
+  await userEvent.click(within(row).getByRole('button', { name: /sl \/ tp/i }))
+
+  expect(screen.getByRole('button', { name: /^price/i })).toHaveAttribute('aria-pressed', 'true')
+})
