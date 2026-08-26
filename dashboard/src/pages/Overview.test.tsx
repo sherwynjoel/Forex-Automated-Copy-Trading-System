@@ -901,7 +901,12 @@ const overviewStats = {
   disabled_or_paused: 0,
   degraded: 0,
   copied_today: 5,
-  yesterday: { total_balance: 20000, total_equity: 20000 },
+  yesterday: {
+    total_balance: 20000,
+    total_equity: 20000,
+    // mockState has accounts 1, 2 and 3; give each a yesterday to compare.
+    equity_by_account: { '1': 10000, '2': 5000, '3': 5000 },
+  },
   recent_copies: [
     {
       status: 'active', master_position_id: 42, master_order_id: null,
@@ -1285,4 +1290,57 @@ test('a degraded account still warns after the copy-counter tile was replaced', 
   render(<MemoryRouter><Overview /></MemoryRouter>)
 
   expect(await screen.findByText('2 degraded')).toBeInTheDocument()
+})
+
+
+test('Total P&L ignores accounts that were not here yesterday', async () => {
+  // The bug a trader hit: the tile subtracted yesterday's TOTAL from
+  // today's TOTAL. When an org went from 18 accounts to 10 -- a broker
+  // disabled them and they were reconnected -- it reported -275,112.83 of
+  // "P&L" with no trade behind any of it. Only accounts present on both
+  // days can be compared.
+  setRole('owner')
+  stubApi({
+    ...statsRoutes(),
+    '/api/orgs/1/overview': {
+      ...overviewStats,
+      // Yesterday had ONE account, carrying an enormous balance, which is
+      // gone today. Its disappearance must not be reported as a loss.
+      yesterday: {
+        total_balance: 300000, total_equity: 300000,
+        equity_by_account: { '1': 10000, '999': 290000 },
+      },
+    },
+  })
+
+  render(<MemoryRouter><Overview /></MemoryRouter>)
+
+  await screen.findByText('Total P&L')
+  // Account 999 vanished; its 290,000 must not surface as a loss anywhere.
+  expect(screen.queryByText(/290,000|-290,000|275,112/)).not.toBeInTheDocument()
+  // And the tile must state how many accounts it actually compared, so a
+  // total that omits some cannot pass as a total of everything.
+  expect(screen.getByText(/account.*since yesterday/i)).toBeInTheDocument()
+})
+
+test('Total P&L reports a dash when nothing is comparable', async () => {
+  // Every account is new since yesterday. That is "cannot say", not
+  // "broke even" -- reporting 0.00 would be a claim we cannot support.
+  setRole('owner')
+  stubApi({
+    ...statsRoutes(),
+    '/api/orgs/1/overview': {
+      ...overviewStats,
+      yesterday: {
+        total_balance: 500, total_equity: 500,
+        equity_by_account: { '777': 500 },   // no overlap with mockState
+      },
+    },
+  })
+
+  render(<MemoryRouter><Overview /></MemoryRouter>)
+
+  await screen.findByText('Total P&L')
+  // "cannot say" reads as needing history, never as a number.
+  expect(screen.getByText('needs a full day of history')).toBeInTheDocument()
 })

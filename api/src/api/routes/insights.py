@@ -197,16 +197,30 @@ def create_insights_router() -> APIRouter:
         # portfolio_snapshots.org_id is nullable and FK-less (migration 006),
         # so pre-006 rows and rows whose account has since been disconnected
         # simply drop out of this sum rather than leaking across orgs.
-        snapshot = conn.execute(
-            """SELECT SUM(balance), SUM(equity) FROM portfolio_snapshots
+        # PER ACCOUNT, not just a sum. Comparing today's total against
+        # yesterday's total silently compares two different sets of
+        # accounts: this org went 18 accounts -> 21 -> 10 across three days
+        # as a broker disabled them and they were reconnected, and the
+        # resulting "P&L" read -275,112.83 -- account churn, not trading.
+        # A caller that wants a real change can only get one by matching
+        # accounts on both sides, which needs the breakdown.
+        snapshot_rows = conn.execute(
+            """SELECT account_id, balance, equity FROM portfolio_snapshots
                WHERE snapshot_date = CURRENT_DATE - 1 AND org_id = %s""",
             (ctx.org_id,),
-        ).fetchone()
+        ).fetchall()
         yesterday = None
-        if snapshot and snapshot[0] is not None:
+        if snapshot_rows:
+            balances = [r[1] for r in snapshot_rows if r[1] is not None]
+            equities = [r[2] for r in snapshot_rows if r[2] is not None]
             yesterday = {
-                "total_balance": float(snapshot[0]),
-                "total_equity": float(snapshot[1]) if snapshot[1] is not None else None,
+                "total_balance": float(sum(balances)) if balances else None,
+                "total_equity": float(sum(equities)) if equities else None,
+                # account_id -> equity, so the caller can compare only the
+                # accounts that existed on BOTH days.
+                "equity_by_account": {
+                    str(r[0]): float(r[2]) for r in snapshot_rows if r[2] is not None
+                },
             }
 
         copy_rows = conn.execute(

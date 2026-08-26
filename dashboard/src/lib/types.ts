@@ -376,6 +376,12 @@ export interface OverviewStats {
   disabled_or_paused: number
   degraded: number
   copied_today: number
-  yesterday: { total_balance: number; total_equity: number | null } | null
+  yesterday: {
+    total_balance: number | null
+    total_equity: number | null
+    /** account_id -> equity at yesterday's snapshot. Lets a caller compare
+     *  only the accounts that existed on both days. */
+    equity_by_account?: Record<string, number> | null
+  } | null
   recent_copies: RecentCopy[]
 }

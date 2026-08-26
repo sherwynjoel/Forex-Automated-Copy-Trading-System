@@ -230,15 +230,37 @@ export default function Overview() {
     ? (portfolioValue - yesterdayEquity) / yesterdayEquity
     : null
 
-  // Total P&L across the whole fleet -- master and every slave -- as the
-  // change in combined equity since yesterday's snapshot. Null until there
-  // IS a yesterday: a desk that started today has no P&L to report, and
-  // 0.00 would claim it broke even rather than admit we cannot know yet.
-  // This moves with deposits and withdrawals too, which is why the tile
-  // says "since yesterday" rather than "profit".
-  const totalPnl = (portfolioValue != null && yesterdayEquity != null)
-    ? portfolioValue - yesterdayEquity
-    : null
+  /**
+   * Total P&L across the fleet: the change in equity since yesterday,
+   * summed over ONLY the accounts present on both days.
+   *
+   * Subtracting yesterday's total from today's total looks equivalent and
+   * is not. The two sums cover whatever accounts happened to exist at each
+   * moment, so an account added or removed in between lands in the answer
+   * at its full balance. One org went 18 accounts -> 21 -> 10 across three
+   * days as a broker disabled them and they were reconnected, and the tile
+   * duly reported -275,112.83 of "P&L" -- entirely account churn, with no
+   * trade behind any of it.
+   *
+   * Matching per account is the only honest reading: an account that was
+   * not here yesterday has no yesterday to be compared against.
+   */
+  const yesterdayByAccount = stats?.yesterday?.equity_by_account ?? null
+  const totalPnl = ((): { value: number; accounts: number; skipped: number } | null => {
+    if (!yesterdayByAccount) return null
+    let value = 0
+    let accounts = 0
+    let skipped = 0
+    for (const [id, snap] of Object.entries(state)) {
+      const before = yesterdayByAccount[id]
+      const now = snap.equity
+      if (before == null || now == null) { skipped += 1; continue }
+      value += now - before
+      accounts += 1
+    }
+    // Nothing comparable is not the same as no change.
+    return accounts > 0 ? { value, accounts, skipped } : null
+  })()
 
   // Accounts (master or slave) whose cTrader-ID token refresh has failed. Once the
   // token expires, copying for these accounts silently stops, so this must be
@@ -336,15 +358,18 @@ export default function Overview() {
         />
         <StatTile
           label="Total P&L"
-          value={totalPnl == null ? '—' : signed(totalPnl)}
-          tone={totalPnl == null ? undefined : (totalPnl < 0 ? 'loss' : 'profit')}
+          value={totalPnl == null ? '—' : signed(totalPnl.value)}
+          tone={totalPnl == null ? undefined : (totalPnl.value < 0 ? 'loss' : 'profit')}
           sub={stats && stats.degraded > 0
             // A degraded account has silently stopped copying. That signal
             // used to live on "Copied today" and must not vanish with it.
             ? <span className="text-loss">{stats.degraded} degraded</span>
             : totalPnl == null
               ? 'needs a full day of history'
-              : `all accounts · ${stats?.copied_today ?? 0} copies today`}
+              // Say what was counted. A total that quietly omits accounts
+              // is how the -275,112.83 went unquestioned for a day.
+              : `${totalPnl.accounts} account${totalPnl.accounts === 1 ? '' : 's'} since yesterday`
+                + (totalPnl.skipped > 0 ? ` · ${totalPnl.skipped} too new` : '')}
           onClick={() => toggleKpi('fills')}
           expanded={expandedKpi === 'fills'}
         />
