@@ -633,3 +633,20 @@ test('the fleet view does not also burst-fetch the selected account', async () =
       (c) => String(c[0]).includes('/history/cashflow'))).toBe(false)
   })
 })
+
+
+test('the default view renders instead of sitting on "Loading history"', async () => {
+  // Regression: the outer gate waited on the SINGLE-ACCOUNT load, which the
+  // fleet tab deliberately does not run. `loading` stayed true forever, so
+  // the page rendered nothing at all -- a permanently loading History for
+  // every operator who simply opened it.
+  mockRoutes()
+  renderHistoryDefault()
+
+  // The fleet view must reach a rendered state, not the outer spinner.
+  await waitFor(() => {
+    expect(screen.queryByText('Loading history…')).not.toBeInTheDocument()
+  }, { timeout: 10000 })
+
+  expect(await screen.findByRole('tabpanel')).toBeInTheDocument()
+}, 20000)

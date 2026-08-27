@@ -652,7 +652,13 @@ export default function History() {
             {tabButton('cashflow', 'Cash flow', cashFlow.length)}
           </div>
 
-          {loading && fetchedAt == null ? (
+          {/* This gate is about the SINGLE-ACCOUNT load. The fleet tab does
+              not run that load -- its three parallel requests would race
+              the paced whole-fleet fetch -- so `loading` stays true there
+              forever and the gate never opened: the page sat on "Loading
+              history..." and rendered nothing at all. The fleet view
+              reports its own progress, so it must not be gated here. */}
+          {tab !== 'bymaster' && loading && fetchedAt == null ? (
             <p className="text-sm text-ink-soft py-8">Loading history…</p>
           ) : (
             <div id="history-tabpanel" role="tabpanel" aria-labelledby={`history-tab-${tab}`} className="mt-6">
