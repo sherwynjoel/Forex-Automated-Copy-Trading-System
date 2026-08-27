@@ -57,6 +57,11 @@ class PositionSnapshot:
     """Snapshot of an open position at a point in time.
 
     This matches Task 17's (reconcile.py) interface for compatibility.
+
+    stop_loss/take_profit ride along so the live contracts table can show
+    what each account is actually protected by. Reading protection off the
+    master alone hides the case that matters: a copy whose stop never
+    arrived is the one holding unguarded risk.
     """
     position_id: int
     symbol_id: int
@@ -64,6 +69,8 @@ class PositionSnapshot:
     volume: int
     price: float  # entry price
     label: str
+    stop_loss: float | None = None
+    take_profit: float | None = None
 
 
 class AccountStateTracker:
@@ -372,6 +379,8 @@ class AccountStateTracker:
                         "side": pos.side.value,
                         "volume": pos.volume,
                         "entry_price": pos.price,
+                        "stop_loss": pos.stop_loss,
+                        "take_profit": pos.take_profit,
                         "pnl_quote": None,  # unknown due to missing symbol
                         "current_price": None,
                     })
@@ -404,6 +413,8 @@ class AccountStateTracker:
                     "symbol": sym_name,
                     "side": pos.side.value,
                     "volume": pos.volume,
+                    "stop_loss": pos.stop_loss,
+                    "take_profit": pos.take_profit,
                     "entry_price": pos.price,
                     "pnl_quote": pnl,
                     "current_price": current,

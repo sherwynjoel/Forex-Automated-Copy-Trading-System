@@ -411,7 +411,8 @@ def test_position_with_unmatched_symbol_is_surfaced_with_none_pnl():
 
     Verifies dict schema consistency: both matched and unmatched branches
     must emit identical keys (position_id, symbol_id, symbol, side, volume,
-    entry_price, pnl_quote) so downstream consumers don't KeyError.
+    entry_price, stop_loss, take_profit, pnl_quote, current_price) so
+    downstream consumers don't KeyError.
     """
     sdk, clock = StubSdk(), Clock()
     client = CTraderClient(sdk, "cid", "csecret", clock=clock)
@@ -442,12 +443,20 @@ def test_position_with_unmatched_symbol_is_surfaced_with_none_pnl():
     pos = account_state["positions"][0]
 
     # Verify all expected keys are present (schema consistency)
-    expected_keys = {"position_id", "symbol_id", "symbol", "side", "volume", "entry_price", "pnl_quote", "current_price"}
+    # stop_loss/take_profit ride along so the live contracts table can show
+    # what each position is actually protected by -- a copy whose stop never
+    # arrived is the row that matters, and it can only be spotted per
+    # position rather than read off the master.
+    expected_keys = {"position_id", "symbol_id", "symbol", "side", "volume",
+                     "entry_price", "stop_loss", "take_profit",
+                     "pnl_quote", "current_price"}
     assert set(pos.keys()) == expected_keys, f"Missing or extra keys: {set(pos.keys()) ^ expected_keys}"
 
     # Verify values
     assert pos["position_id"] == 1
     assert pos["symbol_id"] == 999
+    # An unprotected position reports None, never a borrowed number.
+    assert pos["stop_loss"] is None and pos["take_profit"] is None
     assert pos["symbol"] is None  # Placeholder for unknown symbol
     assert pos["pnl_quote"] is None  # Unknown due to missing symbol
     assert pos["current_price"] is None

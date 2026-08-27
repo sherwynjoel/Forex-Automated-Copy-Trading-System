@@ -218,6 +218,9 @@ export interface PositionData {
   side: string
   volume: number
   entry_price: number
+  /** This position's own protection; null means none is set on it. */
+  stop_loss?: number | null
+  take_profit?: number | null
   pnl_quote?: number | null
   current_price?: number | null
 }

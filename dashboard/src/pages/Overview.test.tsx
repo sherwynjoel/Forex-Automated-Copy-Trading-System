@@ -1344,3 +1344,52 @@ test('Total P&L reports a dash when nothing is comparable', async () => {
   // "cannot say" reads as needing history, never as a number.
   expect(screen.getByText('needs a full day of history')).toBeInTheDocument()
 })
+
+
+test('the live contracts table shows the protection on each position itself', async () => {
+  // Reading protection off the master alone hides the case that matters:
+  // a copy whose stop never arrived is the one holding unguarded risk.
+  setRole('owner')
+  const withProtection = {
+    ...mockState,
+    accounts: {
+      ...mockState.accounts,
+      '1': {
+        ...(mockState.accounts as Record<string, unknown>)['1'] as object,
+        open_pnl: -5,
+        positions: [{
+          position_id: 900, symbol: 'XAUUSD', symbol_id: 41, side: 'SELL',
+          volume: 100, entry_price: 4583.46, current_price: 4586,
+          stop_loss: 4600.5, take_profit: 4550.25, pnl_quote: -5,
+        }],
+      },
+      '2': {
+        ...(mockState.accounts as Record<string, unknown>)['2'] as object,
+        open_pnl: -5,
+        positions: [{
+          // The copy that never received its protection.
+          position_id: 901, symbol: 'XAUUSD', symbol_id: 41, side: 'SELL',
+          volume: 100, entry_price: 4583.41, current_price: 4586,
+          stop_loss: null, take_profit: null, pnl_quote: -5,
+        }],
+      },
+    },
+  }
+  stubApi({ ...statsRoutes(withProtection) })
+
+  render(<MemoryRouter><Overview /></MemoryRouter>)
+
+  // Open the contracts panel from the Open P&L tile.
+  await userEvent.click(await screen.findByRole('button', { name: /open p&l/i }))
+
+  // The protected position states its own levels...
+  expect(await screen.findByText('4600.5')).toBeInTheDocument()
+  expect(screen.getByText('4550.25')).toBeInTheDocument()
+  // ...and the unprotected copy shows dashes rather than borrowing them.
+  const slTpCells = document.querySelectorAll('td[data-label="SL / TP"]')
+  expect(slTpCells.length).toBe(2)
+  const unprotected = Array.from(slTpCells).find(
+    (c) => !c.textContent?.includes('4600.5'))!
+  expect(unprotected.textContent).toContain('—')
+  expect(unprotected.textContent).not.toContain('4600.5')
+})

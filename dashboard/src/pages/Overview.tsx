@@ -587,6 +587,7 @@ export default function Overview() {
                     <th className="desk-label px-3 py-2 font-semibold">Side</th>
                     <th className="desk-label px-3 py-2 font-semibold text-right">Entry</th>
                     <th className="desk-label px-3 py-2 font-semibold text-right">Current</th>
+                    <th className="desk-label px-3 py-2 font-semibold text-right whitespace-nowrap">SL / TP</th>
                     <th className="desk-label px-5 py-2 font-semibold text-right">Live P&L</th>
                     {can(role, 'trade') && <th className="px-3 py-2" />}
                   </tr>
@@ -604,6 +605,20 @@ export default function Overview() {
                         row.pos.current_price != null ? 'text-brand' : 'text-ink-faint'
                       }`}>
                         {row.pos.current_price ?? '\u2014'}
+                      </td>
+                      {/* Each row's OWN protection. A copy whose stop never
+                          arrived is the row that matters here, and reading
+                          the master's alone would hide exactly that -- so an
+                          unprotected side shows a dash and is tinted, rather
+                          than borrowing a number from somewhere else. */}
+                      <td data-label="SL / TP" className="tnum px-3 py-2.5 text-right whitespace-nowrap">
+                        <span className={row.pos.stop_loss == null ? 'text-warn' : 'text-ink-soft'}>
+                          {row.pos.stop_loss ?? '—'}
+                        </span>
+                        <span className="text-ink-faint"> / </span>
+                        <span className={row.pos.take_profit == null ? 'text-warn' : 'text-ink-soft'}>
+                          {row.pos.take_profit ?? '—'}
+                        </span>
                       </td>
                       <td data-label="Live P&L" className="tnum px-5 py-2.5 text-right">
                         <span className={(row.pos.pnl_quote ?? 0) < 0 ? 'text-loss' : 'text-profit'}>

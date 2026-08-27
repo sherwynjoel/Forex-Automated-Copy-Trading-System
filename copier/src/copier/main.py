@@ -678,6 +678,7 @@ class CopierApp:
                     StatePositionSnapshot(
                         position_id=p.position_id, symbol_id=p.symbol_id, side=p.side,
                         volume=p.volume, price=p.price, label=p.label,
+                        stop_loss=p.stop_loss, take_profit=p.take_profit,
                     )
                     for p in reconciler.master_positions
                 ]
@@ -691,6 +692,10 @@ class CopierApp:
                             position_id=p.position_id, symbol_id=p.symbol_id,
                             side=p.side, volume=p.volume, price=p.price,
                             label=p.label,
+                            # A slave's OWN protection, not the master's: a
+                            # copy whose stop never arrived is precisely the
+                            # row an operator needs to spot.
+                            stop_loss=p.stop_loss, take_profit=p.take_profit,
                         )
                         for p in slave_pos
                     ])
