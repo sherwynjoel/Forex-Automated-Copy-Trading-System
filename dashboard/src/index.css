@@ -211,3 +211,24 @@ select.bg-card {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Stop iOS Safari zooming the page on every tap into a field.
+
+   Safari zooms in whenever a focused form control has a font smaller than
+   16px -- and it does NOT zoom back out afterwards, so the desk is left
+   magnified until the operator pinches it back. The ticket's inputs are
+   text-sm (14px), which trips it on every symbol, volume and price field.
+
+   Raising them to 16px on phones removes the trigger entirely. Left at
+   14px on wider screens, where the density is wanted and no auto-zoom
+   exists to provoke. !important because these have to beat Tailwind's
+   utility classes, which are what set the 14px in the first place.
+--------------------------------------------------------------------------- */
+@media (max-width: 640px) {
+  input,
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
+}

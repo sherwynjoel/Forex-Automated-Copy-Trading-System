@@ -569,7 +569,7 @@ function OrderRow({
           <td colSpan={6} className="p-4">
             <div className="ml-4 space-y-2">
               <h4 className="desk-label mb-2">Slave Copies</h4>
-              <table className="w-full text-sm">
+              <table className="stack-table w-full text-sm">
                 <thead>
                   <tr>
                     <th className="desk-label p-2 text-left border-b border-line">Account</th>
@@ -580,9 +580,9 @@ function OrderRow({
                 <tbody>
                   {order.copies.map((copy) => (
                     <tr key={`${copy.slave_account_id}-${copy.slave_order_id}`}>
-                      <td className="num p-2">{copy.slave_account_id}</td>
-                      <td className="num p-2">{copy.status}</td>
-                      <td className="num p-2">{copy.error || '-'}</td>
+                      <td data-label="Account" className="num p-2">{copy.slave_account_id}</td>
+                      <td data-label="Status" className="num p-2">{copy.status}</td>
+                      <td data-label="Error" className="num p-2">{copy.error || '-'}</td>
                     </tr>
                   ))}
                 </tbody>
