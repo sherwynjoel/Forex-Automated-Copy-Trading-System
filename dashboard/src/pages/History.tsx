@@ -902,6 +902,7 @@ function MasterGroupsView({
                     <th className="desk-label px-3 py-2 font-semibold text-right">Lots</th>
                     <th className="desk-label px-3 py-2 font-semibold text-right">Entry → Exit</th>
                     <th className="desk-label px-3 py-2 font-semibold text-right">Entry diff</th>
+                    <th className="desk-label px-3 py-2 font-semibold text-right">Exit diff</th>
                     <th className="desk-label px-5 py-2 font-semibold text-right">Net</th>
                   </tr>
                 </thead>
@@ -909,6 +910,14 @@ function MasterGroupsView({
                   {group.copies.map((copy) => {
                     const diff = copy.entry != null && group.entry != null
                       ? copy.entry - group.entry
+                      : null
+                    // Entering together says nothing about leaving together.
+                    // A copy can open at the master's price and still exit
+                    // somewhere else -- its own stop, a later fill, a wider
+                    // spread on the way out -- and that gap is just as much
+                    // of the difference in what the slave actually earned.
+                    const exitDiff = copy.exit != null && group.exit != null
+                      ? copy.exit - group.exit
                       : null
                     return (
                       <tr key={`${copy.accountId}-${copy.positionId}`} className="border-b border-line last:border-0">
@@ -928,6 +937,14 @@ function MasterGroupsView({
                         </td>
                         <td data-label="Entry diff" className="num px-3 py-2.5 text-right text-ink-soft">
                           {diff == null ? '—' : (diff >= 0 ? '+' : '') + diff.toFixed(digits)}
+                        </td>
+                        {/* Defensive dash: this view is built from closed
+                            positions, so an exit is normally present -- but
+                            0.00 would read as "closed level with the master"
+                            if one were ever missing, which is a claim rather
+                            than an absence. */}
+                        <td data-label="Exit diff" className="num px-3 py-2.5 text-right text-ink-soft">
+                          {exitDiff == null ? '—' : (exitDiff >= 0 ? '+' : '') + exitDiff.toFixed(digits)}
                         </td>
                         <td data-label="Net" className={`num px-5 py-2.5 text-right font-medium ${copy.net < 0 ? 'text-loss' : 'text-profit'}`}>
                           {signed(copy.net)}

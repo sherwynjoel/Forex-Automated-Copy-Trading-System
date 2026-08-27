@@ -650,3 +650,28 @@ test('the default view renders instead of sitting on "Loading history"', async (
 
   expect(await screen.findByRole('tabpanel')).toBeInTheDocument()
 }, 20000)
+
+
+test('a copy shows how far its EXIT sat from the master, not just its entry', async () => {
+  // Entering together says nothing about leaving together. A copy can open
+  // at the master's price and still exit somewhere else -- its own stop, a
+  // later fill, a wider spread on the way out -- and that gap is just as
+  // much of the difference in what the slave actually earned.
+  mockRoutes({
+    '/accounts/101/history/deals': slaveDeals,
+    '/accounts/101/history/orders': {
+      orders: [{ ...orders.orders[0], order_id: 99, position_id: 31, label: 'copy:m21' }],
+      has_more: false,
+    },
+  })
+  renderHistory()
+  await screen.findAllByText('+20.00')
+
+  await userEvent.click(screen.getByRole('tab', { name: /all accounts/i }))
+  const panel = await screen.findByRole('tabpanel')
+  await within(panel).findByText(/Second · 90101/)
+
+  // Master 1.10000 -> 1.12000; copy 1.10050 -> 1.11950.
+  expect(within(panel).getByText('+0.00050')).toBeInTheDocument()   // entry
+  expect(within(panel).getByText('-0.00050')).toBeInTheDocument()   // exit
+})
