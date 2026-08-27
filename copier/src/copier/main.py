@@ -1196,6 +1196,31 @@ class CopierApp:
         return {"status": "submitted", "account_id": account_id,
                 "position_id": position_id, "volume": volume}
 
+    def _digits_for_position(self, account_id: int, position_id: int, symbols) -> int | None:
+        """Decimal places the symbol under an open position is quoted to.
+
+        Returns None when the position or its symbol cannot be resolved, in
+        which case the caller must send the price unchanged rather than
+        guess at a precision -- rounding to the wrong number of places is
+        its own way of moving somebody's stop.
+        """
+        try:
+            org_id = self._org_for_account(account_id)
+            reconciler = self.reconcilers.get(org_id) if org_id is not None else None
+            if reconciler is None:
+                return None
+            positions = list(reconciler.master_positions or [])
+            for book in (reconciler.slave_positions or {}).values():
+                positions.extend(book or [])
+            for pos in positions:
+                if pos.position_id == position_id:
+                    # _query_context hands back symbols keyed by symbol_id.
+                    info = (symbols or {}).get(pos.symbol_id)
+                    return info.digits if info is not None else None
+        except Exception:
+            log.exception("could not resolve digits for position %s", position_id)
+        return None
+
     def amend_position_sltp(self, account_id: int, position_id: int,
                             stop_loss=None, take_profit=None,
                             actor: str | None = None) -> dict:
@@ -1230,7 +1255,26 @@ class CopierApp:
         tp = _price("take_profit", take_profit)
 
         # Resolves the client too, so an unknown account fails here.
-        self._query_context(account_id)
+        _client, symbols = self._query_context(account_id)
+
+        # ROUND TO WHAT THE SYMBOL IS QUOTED TO, here rather than trusting
+        # the caller. A price carrying more decimals than the broker quotes
+        # is refused outright -- INVALID_REQUEST, with the protection
+        # silently not set -- and it is trivially easy to produce one:
+        # 4573.27 - (100 / 90) is 4572.158888888889 in binary floating
+        # point, which is what a dashboard computing a money-denominated
+        # stop actually arrives at.
+        #
+        # The browser rounds too, but it must not be the only thing that
+        # does: a stale cached bundle, another client, or a direct API call
+        # would each put an unusable price on the wire, and the failure
+        # gives the operator no clue why their stop never took.
+        digits = self._digits_for_position(account_id, position_id, symbols)
+        if digits is not None:
+            if sl is not None:
+                sl = round(sl, digits)
+            if tp is not None:
+                tp = round(tp, digits)
 
         req = ProtoOAAmendPositionSLTPReq()
         req.ctidTraderAccountId = account_id
