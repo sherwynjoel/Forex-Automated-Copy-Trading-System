@@ -260,6 +260,8 @@ export interface MasterPosition {
   label: string
   /** The master account this position lives on -- amend targets it. */
   account_id: number
+  /** Decimals this symbol is quoted to; a price with more is refused. */
+  digits?: number | null
   stop_loss?: number | null
   take_profit?: number | null
   pnl_quote?: number | null

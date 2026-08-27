@@ -322,7 +322,8 @@ export default function Trade() {
     if (value == null) return null
     if (ticket.protectionMode === 'price') return value
     if (expectedFill == null) return null
-    return priceForAmount(ticket.side, kind, expectedFill, value, protectionUnits)
+    return priceForAmount(ticket.side, kind, expectedFill, value, protectionUnits,
+                          selectedSymbol?.digits)
   }
 
   const resolvedStopLoss = resolveProtection(ticket.stopLoss, 'sl')

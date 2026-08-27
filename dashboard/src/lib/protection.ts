@@ -33,6 +33,7 @@ export function unitsFor(lots: number, lotSize: number | null | undefined): numb
  * @param entry     the price the order is expected to fill at
  * @param amount    money in the symbol's quote currency, always positive
  * @param units     from unitsFor()
+ * @param digits    the symbol's quoted decimal places
  * @returns the price, or null when it cannot be computed
  */
 export function priceForAmount(
@@ -41,6 +42,7 @@ export function priceForAmount(
   entry: number,
   amount: number,
   units: number | null,
+  digits?: number | null,
 ): number | null {
   if (units == null || !Number.isFinite(entry) || entry <= 0) return null
   if (!Number.isFinite(amount) || amount <= 0) return null
@@ -51,7 +53,18 @@ export function priceForAmount(
   const price = up ? entry + move : entry - move
 
   // A stop below zero is not a price. Refuse rather than send nonsense.
-  return price > 0 ? price : null
+  if (!(price > 0)) return null
+
+  // ROUND TO WHAT THE BROKER QUOTES. Binary floating point turns
+  // 4587.48 - 2.3 into 4585.179999999999, and cTrader answered
+  // INVALID_REQUEST to a gold stop carrying twelve decimals when the
+  // symbol is quoted to two -- so the protection simply never took, with
+  // nothing on screen to say why.
+  //
+  // Without a digit count, 8 places still removes the artifact (which
+  // appears far further out) while preserving any realistic precision.
+  const places = digits != null && Number.isFinite(digits) ? digits : 8
+  return Number(price.toFixed(places))
 }
 
 /**

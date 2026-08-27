@@ -1719,6 +1719,10 @@ class CopierApp:
                     'volume': pos.volume,
                     'volume_lots': lots(pos.volume, sym.lot_size if sym is not None else None),
                     'price': pos.price,
+                    # How many decimals this symbol is quoted to. A price
+                    # carrying more than the broker quotes is refused
+                    # outright, so anything computing one needs this.
+                    'digits': sym.digits if sym is not None else None,
                     'stop_loss': pos.stop_loss,
                     'take_profit': pos.take_profit,
                     'pnl_quote': master_pnl_by_position.get(pos.position_id),

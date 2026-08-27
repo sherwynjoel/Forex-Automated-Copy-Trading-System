@@ -94,3 +94,33 @@ describe('amount protection on an open position', () => {
     expect(priceForAmount('BUY', 'sl', 4631.31, 1.5, units)).toBeCloseTo(4629.81, 5)
   })
 })
+
+describe('rounding to the price the broker will accept', () => {
+  test('the exact case cTrader refused: gold to 2 decimals', () => {
+    // Live rejection: stop_loss 4585.179999999999 -> INVALID_REQUEST.
+    // 4587.48 - (62.1 / 27) lands on a binary artifact, and a symbol
+    // quoted to two decimals will not take twelve.
+    const price = priceForAmount('BUY', 'sl', 4587.48, 62.1, 27, 2)
+    expect(price).toBe(4585.18)
+    expect(String(price)).not.toContain('99999')
+  })
+
+  test('five-decimal pairs keep their precision', () => {
+    // EURUSD: 0.01 lots of a 10,000,000 contract = 1,000 units.
+    const price = priceForAmount('BUY', 'tp', 1.08431, 1.5, 1000, 5)
+    expect(price).toBe(1.08581)
+  })
+
+  test('without a digit count the artifact is still removed', () => {
+    const price = priceForAmount('BUY', 'sl', 4587.48, 62.1, 27)
+    expect(String(price)).not.toContain('99999')
+    expect(price).toBeCloseTo(4585.18, 6)
+  })
+
+  test('rounding never turns a valid price into zero or a negative', () => {
+    // A stop rounded to nothing would be sent as 0 and silently clear the
+    // protection instead of setting it.
+    expect(priceForAmount('BUY', 'sl', 0.5, 0.4, 1, 2)).toBeCloseTo(0.1, 6)
+    expect(priceForAmount('BUY', 'sl', 10, 5000, 1, 2)).toBeNull()
+  })
+})

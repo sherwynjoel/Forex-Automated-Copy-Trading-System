@@ -119,7 +119,8 @@ export default function Positions() {
     if (amendMode === 'price') return value
     if (editing?.price == null) return null
     return priceForAmount(
-      editing.side === 'SELL' ? 'SELL' : 'BUY', kind, editing.price, value, amendUnits)
+      editing.side === 'SELL' ? 'SELL' : 'BUY', kind, editing.price, value,
+      amendUnits, editing.digits)
   }
 
   // Judged against the live mark, falling back to the entry price.
