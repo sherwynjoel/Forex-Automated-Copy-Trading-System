@@ -2419,3 +2419,88 @@ def test_startup_learns_commission_only_after_authorizing(db_seeded, fernet_key)
 
     assert "commission" in order, "startup() must seed the commission rates"
     assert order.index("authorized") < order.index("commission")
+
+
+class _RefusingClient:
+    """A client whose broker refuses one account without erroring the send.
+
+    That is what a real refusal looks like: ProtoOAAccountAuthReq is
+    answered with an error MESSAGE, so the Deferred fires successfully and
+    only account_auth_error() distinguishes it from an authorization.
+    """
+
+    def __init__(self, reason="RET_ACCOUNT_DISABLED"):
+        self.reason = reason
+
+    def authorize_account(self, account_id, access_token):
+        return defer.succeed(None)
+
+    def account_auth_error(self, account_id):
+        return self.reason
+
+
+@pytest_twisted.inlineCallbacks
+def test_a_refused_account_is_degraded_and_names_the_brokers_reason(db_seeded, fernet_key):
+    """RED before the fix: the copier logged "authorized account 48434167"
+    one line after the client logged "rejected: RET_ACCOUNT_DISABLED",
+    left the account 'ok', and showed it as healthy. Every later request
+    then failed as a bare INVALID_REQUEST naming neither account nor cause.
+    """
+    repo = Repo(db_seeded)
+    token_store = TokenStore(db_seeded, fernet_key)
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    account = next(a for a in repo.load_accounts() if a.account_id == MASTER_A)
+
+    yield app._authorize_one(_RefusingClient(), account)
+
+    refreshed = next(a for a in repo.load_accounts() if a.account_id == MASTER_A)
+    assert refreshed.status == "degraded"
+    assert "RET_ACCOUNT_DISABLED" in refreshed.last_error
+
+
+@pytest_twisted.inlineCallbacks
+def test_authorizing_again_clears_a_previously_refused_account(db_seeded, fernet_key):
+    """A broker that re-enables an account must not leave it degraded."""
+    repo = Repo(db_seeded)
+    token_store = TokenStore(db_seeded, fernet_key)
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    account = next(a for a in repo.load_accounts() if a.account_id == MASTER_A)
+
+    yield app._authorize_one(_RefusingClient(), account)
+    yield app._authorize_one(_RefusingClient(reason=None), account)
+
+    refreshed = next(a for a in repo.load_accounts() if a.account_id == MASTER_A)
+    assert refreshed.status == "ok"
+    assert refreshed.last_error is None
+
+
+def test_querying_a_refused_account_names_the_reason(db_seeded, fernet_key):
+    """"400: trader details failed: INVALID_REQUEST" was true and useless.
+
+    Every request type on an account the broker has refused comes back
+    INVALID_REQUEST, indistinguishable from a malformed request of our own.
+    """
+    repo = Repo(db_seeded)
+    token_store = TokenStore(db_seeded, fernet_key)
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    app._client_for_account = lambda account: _RefusingClient()
+
+    with pytest.raises(ValueError) as excinfo:
+        app._query_context(MASTER_A)
+
+    assert "RET_ACCOUNT_DISABLED" in str(excinfo.value)
+    assert str(MASTER_A) in str(excinfo.value)
+
+
+def test_a_query_is_not_blocked_while_auth_is_merely_in_flight(db_seeded, fernet_key):
+    """In flight is not refused. Only an explicit refusal short circuits --
+    a request during re-auth must take its chances as it always has."""
+    repo = Repo(db_seeded)
+    token_store = TokenStore(db_seeded, fernet_key)
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    app._client_for_account = lambda account: _RefusingClient(reason=None)
+
+    client, symbols = app._query_context(MASTER_A)   # must not raise
+
+    assert client is not None
+    assert symbols == {}

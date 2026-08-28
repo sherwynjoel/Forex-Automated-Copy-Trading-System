@@ -542,10 +542,32 @@ class CopierApp:
         try:
             pair = self.token_store.get(account.connection_id)
             yield client.authorize_account(account.account_id, pair.access_token)
-            log.info("authorized account %s", account.account_id)
         except Exception as e:
             log.error("failed to authorize account %s: %s", account.account_id, e)
             self.repo.set_account_status(account.account_id, 'degraded', f"authorization failed: {e}")
+            return
+
+        # A REFUSAL IS NOT AN ERROR ON THE WIRE. The broker answers a
+        # rejected ProtoOAAccountAuthReq with an error MESSAGE, which
+        # resolves the send perfectly happily -- so this used to log
+        # "authorized account 48434167" one line after the client logged
+        # "account auth 48434167 rejected: RET_ACCOUNT_DISABLED", leave the
+        # account 'ok', and show it as healthy on the dashboard. Every
+        # later request on it then failed as a bare INVALID_REQUEST with
+        # nothing anywhere to say the account had never been authorized.
+        reason = client.account_auth_error(account.account_id)
+        if reason is not None:
+            log.error("account %s NOT authorized: broker refused with %s",
+                      account.account_id, reason)
+            self.repo.set_account_status(
+                account.account_id, 'degraded', f"broker refused authorization: {reason}")
+            return
+
+        log.info("authorized account %s", account.account_id)
+        # Guarded by `WHERE status='degraded'`, so this restores an account
+        # the broker has stopped refusing without ever resuming one an
+        # operator deliberately paused.
+        self.repo.clear_degraded(account.account_id)
 
     @defer.inlineCallbacks
     def _fetch_and_cache_symbols(self, accounts, force: bool = False):
@@ -1057,6 +1079,20 @@ class CopierApp:
         client = self._client_for_account(account)
         if client is None:
             raise ValueError(f"no client for account {account_id}")
+
+        # Say what is actually wrong. Querying an account the broker has
+        # refused returns INVALID_REQUEST for every request type, which
+        # reached the operator as "400: trader details failed:
+        # INVALID_REQUEST" -- true, useless, and indistinguishable from a
+        # malformed request on our side. Only an explicit refusal short
+        # circuits here: auth still in flight is not a refusal, and that
+        # request should take its chances as it always has.
+        reason = client.account_auth_error(account_id)
+        if reason is not None:
+            raise ValueError(
+                f"account {account_id} is not authorized: the broker refused "
+                f"with {reason}")
+
         return client, symbols_by_id(self.repo.load_symbol_cache(account_id))
 
     def get_account_details(self, account_id: int) -> defer.Deferred:

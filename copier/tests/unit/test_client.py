@@ -818,3 +818,77 @@ def test_undecodable_auth_response_fails_closed():
     client._on_account_auth_response(object(), 1001)   # not a ProtoMessage at all
 
     assert not client.is_account_authed(1001)
+
+
+def test_refusal_reason_is_kept_so_the_caller_can_say_why():
+    """A refused auth resolves the send normally, so the reason is all
+    there is to distinguish it from success.
+
+    Without this the copier logged "authorized account 48434167" one line
+    after "account auth 48434167 rejected: RET_ACCOUNT_DISABLED", left the
+    account 'ok' on the dashboard, and every later request on it came back
+    as a bare INVALID_REQUEST that named neither the account nor the cause.
+    """
+    sdk, _, client = make()
+    sdk.connect()
+    client.authorize_account(1001, "tok")
+
+    client._on_account_auth_response(
+        _auth_envelope(ProtoOAErrorRes(errorCode="RET_ACCOUNT_DISABLED")), 1001)
+
+    assert client.account_auth_error(1001) == "RET_ACCOUNT_DISABLED"
+
+
+def test_no_refusal_recorded_when_the_broker_has_not_refused():
+    sdk, _, client = make()
+    sdk.connect()
+    client.authorize_account(1001, "tok")
+
+    # Never answered yet: in flight is not refused.
+    assert client.account_auth_error(1001) is None
+
+    client._on_account_auth_response(
+        _auth_envelope(ProtoOAAccountAuthRes(ctidTraderAccountId=1001)), 1001)
+    assert client.account_auth_error(1001) is None
+
+
+def test_a_later_success_clears_an_earlier_refusal():
+    """A broker that re-enables an account must not stay 'refused' forever."""
+    sdk, _, client = make()
+    sdk.connect()
+    client.authorize_account(1001, "tok")
+    client._on_account_auth_response(
+        _auth_envelope(ProtoOAErrorRes(errorCode="RET_ACCOUNT_DISABLED")), 1001)
+    assert client.account_auth_error(1001) == "RET_ACCOUNT_DISABLED"
+
+    client._on_account_auth_response(
+        _auth_envelope(ProtoOAAccountAuthRes(ctidTraderAccountId=1001)), 1001)
+
+    assert client.account_auth_error(1001) is None
+    assert client.is_account_authed(1001)
+
+
+def test_an_undecodable_response_is_an_unknown_not_a_refusal():
+    """It fails closed for TRADING, but must not be reported as the broker
+    refusing -- the next reconnect's re-auth may well succeed, and naming a
+    cause we did not receive would send an operator chasing nothing."""
+    sdk, _, client = make()
+    sdk.connect()
+    client.authorize_account(1001, "tok")
+
+    client._on_account_auth_response(object(), 1001)
+
+    assert not client.is_account_authed(1001)
+    assert client.account_auth_error(1001) is None
+
+
+def test_deauthorize_forgets_the_refusal():
+    sdk, _, client = make()
+    sdk.connect()
+    client.authorize_account(1001, "tok")
+    client._on_account_auth_response(
+        _auth_envelope(ProtoOAErrorRes(errorCode="RET_ACCOUNT_DISABLED")), 1001)
+
+    client.deauthorize_account(1001)
+
+    assert client.account_auth_error(1001) is None

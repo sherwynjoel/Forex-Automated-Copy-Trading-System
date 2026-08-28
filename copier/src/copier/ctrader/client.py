@@ -224,6 +224,12 @@ class CTraderClient:
         # was ever called" -- not proof of auth on this connection. See
         # is_account_authed() / NEW-1.
         self._authed_accounts: set[int] = set()
+        # account_id -> the broker's own reason for refusing this account's
+        # auth, e.g. RET_ACCOUNT_DISABLED. A refusal does not errback the
+        # send, so without this the caller cannot tell a refused account
+        # from an authorized one and every later request on it comes back
+        # as a bare INVALID_REQUEST with nothing to explain it.
+        self._auth_errors: dict[int, str] = {}
         self._exec_cbs: list[Callable] = []
         self._disc_cbs: list[Callable] = []
         self._invalid_cbs: list[Callable] = []
@@ -254,6 +260,16 @@ class CTraderClient:
     def deauthorize_account(self, account_id: int) -> None:
         self._accounts.pop(account_id, None)
         self._authed_accounts.discard(account_id)
+        self._auth_errors.pop(account_id, None)
+
+    def account_auth_error(self, account_id: int) -> str | None:
+        """The broker's reason for refusing this account, or None.
+
+        Set only by an explicit refusal, never by auth merely being in
+        flight -- callers use it to fail fast with something an operator
+        can act on, and a not-yet-authorized account is not a refused one.
+        """
+        return self._auth_errors.get(account_id)
 
     def is_account_authed(self, account_id: int) -> bool:
         """True once a (non-error) response to this account's
@@ -514,8 +530,13 @@ class CTraderClient:
             return response
         if isinstance(payload, (ProtoOAErrorRes, ProtoErrorRes)):
             log.error("account auth %s rejected: %s", account_id, payload.errorCode)
+            # Kept so the caller can say WHY. An undecodable response is
+            # deliberately not recorded here: it is an unknown, not a
+            # refusal, and the next reconnect's re-auth may well succeed.
+            self._auth_errors[account_id] = payload.errorCode
             return response
         self._authed_accounts.add(account_id)
+        self._auth_errors.pop(account_id, None)
         return response
 
     def _on_disconnected(self, _sdk, reason) -> None:
