@@ -926,3 +926,159 @@ class TestMasterEventLatencyStamp:
                 "SELECT count(*) FROM events WHERE category = 'master_event'"
             ).fetchone()
         assert n == 1
+
+
+def sltp_event(position_id=11, stop_loss=None, take_profit=None,
+               execution_type=ProtoOAExecutionType.ORDER_ACCEPTED):
+    """The separate protection event cTrader sends AFTER a fill."""
+    e = base_event(account_id=999, execution_type=execution_type,
+                   order_type=ProtoOAOrderType.STOP_LOSS_TAKE_PROFIT,
+                   position_id=position_id)
+    if stop_loss is not None:
+        e.position.stopLoss = stop_loss
+    if take_profit is not None:
+        e.position.takeProfit = take_profit
+    return e
+
+
+def amends(dispatcher):
+    from copier.domain.models import AmendPositionSLTP
+    return [i for i in dispatcher.intents if isinstance(i, AmendPositionSLTP)]
+
+
+class TestCopiesInheritMasterProtection:
+    """A copy must not fill naked when its master carries a stop.
+
+    cTrader protects a market order in two steps: ORDER_FILLED arrives with
+    no stopLoss on the position, then a STOP_LOSS_TAKE_PROFIT order is
+    accepted ~25ms later. The copies take ~250ms to fill. So the fan-out
+    for that second event runs while every copy is still an unfilled order
+    -- position_entries() sees no slave_position_id, logs "slave has no
+    mapped copy", and the copies then fill unprotected and stay that way.
+
+    Seen in production: master holding 4582.79 / 4584.79 with all ten
+    copies showing no stop and no target.
+    """
+
+    def test_a_copy_filling_after_the_master_was_protected_still_gets_it(
+            self, service, recording_dispatcher, repo):
+        # 1. Master fills. Its own event carries NO protection yet -- this
+        #    is the detail that makes the race possible.
+        opened = base_event(account_id=999, position_id=11)
+        opened.deal.positionId = 11
+        opened.deal.filledVolume = 10_000_000
+        service.handle_execution(999, opened)
+
+        # 2. The copy order is on the wire but unfilled: a mapping exists
+        #    with no slave_position_id, which is what hides it from the
+        #    SL/TP fan-out.
+        repo.create_position_mapping(master_position_id=11, slave_account_id=100,
+                                     client_order_id="cm11.100", org_id=ORG_ID)
+
+        # 3. The master is protected. Nothing to amend yet -- and before
+        #    this fix, nothing ever would be.
+        service.handle_execution(999, sltp_event(11, stop_loss=1.0900,
+                                                 take_profit=1.1100))
+        assert amends(recording_dispatcher) == []
+
+        # 4. The copy fills, a quarter of a second later.
+        fill = base_event(account_id=100, position_id=11)
+        fill.order.clientOrderId = "cm11.100"
+        fill.deal.positionId = 55
+        fill.deal.filledVolume = 10_000_000
+        service.handle_execution(100, fill)
+
+        applied = amends(recording_dispatcher)
+        assert len(applied) == 1, "the copy filled without its master's protection"
+        assert applied[0].slave_account_id == 100
+        assert applied[0].position_id == 55
+        assert applied[0].stop_loss == pytest.approx(1.0900)
+        assert applied[0].take_profit == pytest.approx(1.1100)
+
+    def test_an_unprotected_master_costs_no_extra_request(
+            self, service, recording_dispatcher, repo):
+        """Most trades carry no protection. They must not pay for this."""
+        opened = base_event(account_id=999, position_id=11)
+        opened.deal.positionId = 11
+        opened.deal.filledVolume = 10_000_000
+        service.handle_execution(999, opened)
+
+        repo.create_position_mapping(master_position_id=11, slave_account_id=100,
+                                     client_order_id="cm11.100", org_id=ORG_ID)
+        fill = base_event(account_id=100, position_id=11)
+        fill.order.clientOrderId = "cm11.100"
+        fill.deal.positionId = 55
+        fill.deal.filledVolume = 10_000_000
+        service.handle_execution(100, fill)
+
+        assert amends(recording_dispatcher) == []
+
+    def test_clearing_the_masters_protection_is_remembered_too(
+            self, service, recording_dispatcher, repo):
+        """A copy filling later must not be handed a stop the master has
+        since removed."""
+        service.handle_execution(999, sltp_event(11, stop_loss=1.0900))
+        service.handle_execution(999, sltp_event(
+            11, execution_type=ProtoOAExecutionType.ORDER_REPLACED))
+
+        repo.create_position_mapping(master_position_id=11, slave_account_id=100,
+                                     client_order_id="cm11.100", org_id=ORG_ID)
+        fill = base_event(account_id=100, position_id=11)
+        fill.order.clientOrderId = "cm11.100"
+        fill.deal.positionId = 55
+        fill.deal.filledVolume = 10_000_000
+        service.handle_execution(100, fill)
+
+        assert amends(recording_dispatcher) == []
+
+    def test_each_copy_of_the_same_master_is_protected(
+            self, service, recording_dispatcher, repo):
+        """The fleet is the point: every copy, not just the first back."""
+        service.handle_execution(999, sltp_event(11, stop_loss=1.0900,
+                                                 take_profit=1.1100))
+        for account_id, slave_position_id in ((100, 55), (101, 56)):
+            repo.create_position_mapping(
+                master_position_id=11, slave_account_id=account_id,
+                client_order_id=f"cm11.{account_id}", org_id=ORG_ID)
+            fill = base_event(account_id=account_id, position_id=11)
+            fill.order.clientOrderId = f"cm11.{account_id}"
+            fill.deal.positionId = slave_position_id
+            fill.deal.filledVolume = 10_000_000
+            service.handle_execution(account_id, fill)
+
+        applied = amends(recording_dispatcher)
+        assert {(a.slave_account_id, a.position_id) for a in applied} == {
+            (100, 55), (101, 56)}
+
+
+class TestRememberedProtectionDoesNotLeak:
+    def test_a_closed_master_position_is_forgotten(self, service):
+        service.handle_execution(999, sltp_event(11, stop_loss=1.0900))
+        assert 11 in service._master_protection
+
+        closed = base_event(account_id=999, position_id=11)
+        closed.deal.positionId = 11
+        closed.deal.filledVolume = 10_000_000
+        closed.deal.closePositionDetail.entryPrice = 1.1000
+        closed.deal.closePositionDetail.closedVolume = 10_000_000
+        service.handle_execution(999, closed)
+
+        assert 11 not in service._master_protection
+
+    def test_the_table_is_bounded(self, service):
+        """A close we never see must not accumulate for the life of the
+        process -- a reconnect mid-trade is enough to lose one."""
+        from copier.engine.service import MAX_REMEMBERED_PROTECTION
+        for position_id in range(1, MAX_REMEMBERED_PROTECTION + 51):
+            service.handle_execution(
+                999, sltp_event(position_id, stop_loss=1.0900))
+        assert len(service._master_protection) <= MAX_REMEMBERED_PROTECTION
+
+
+def test_master_position_of_reads_the_copy_marker():
+    from copier.engine.service import master_position_of
+    assert master_position_of("cm665938284.48434542") == 665938284
+    assert master_position_of("co77.100") is None      # a pending-order copy
+    assert master_position_of("manual") is None
+    assert master_position_of(None) is None
+    assert master_position_of("cmnotanumber.1") is None

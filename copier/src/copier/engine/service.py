@@ -22,7 +22,8 @@ from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
 
 from copier.db.repo import Repo, MappingNotFound
 from copier.domain.models import (
-    MANUAL_ORDER_LABEL, SymbolInfo, MasterPendingFilled)
+    MANUAL_ORDER_LABEL, SymbolInfo, MasterPendingFilled, AmendPositionSLTP,
+    MasterPositionOpened, MasterPositionClosed, MasterPositionSLTPAmended)
 from copier.domain.decision import decide
 from copier.engine.normalize import normalize
 from copier.engine.dispatch import Dispatcher
@@ -31,6 +32,22 @@ from copier.engine.routing import OrgRouting
 log = logging.getLogger(__name__)
 
 PENDING_FILL_ALERT_S = 30.0
+
+# Cap on remembered master protection levels. Entries are dropped when the
+# master position closes, so this only bounds the pathological case where a
+# close is never seen (a reconnect mid-trade); without it a long-lived
+# process could accumulate one entry per position it ever saw.
+MAX_REMEMBERED_PROTECTION = 2000
+
+
+def master_position_of(client_order_id: str | None) -> int | None:
+    """"cm665938284.48434542" -> 665938284, or None if it is not a copy."""
+    if not client_order_id or not client_order_id.startswith("cm"):
+        return None
+    try:
+        return int(client_order_id[2:].split(".", 1)[0])
+    except ValueError:
+        return None
 
 
 class CopierService:
@@ -77,6 +94,87 @@ class CopierService:
         # that changes positions/orders/mappings, so /state can refresh
         # immediately instead of waiting for the next periodic resync tick.
         self.on_positions_changed: Callable[[int | None], None] | None = None
+
+        # master position id -> (stop_loss, take_profit) currently on it.
+        # See _remember_master_protection for the race this exists to close.
+        self._master_protection: dict[int, tuple[float | None, float | None]] = {}
+
+    def _remember_master_protection(self, normalized) -> None:
+        """Track the master's live SL/TP per position, for copies not yet born.
+
+        THE RACE THIS CLOSES. A market order carrying protection fills
+        first and is protected second: cTrader answers with ORDER_FILLED
+        whose position carries NO stopLoss, then creates the protection as
+        a separate STOP_LOSS_TAKE_PROFIT order about 25ms later. The copies
+        meanwhile take ~250ms to come back filled. So the fan-out for that
+        second event runs while every copy is still an unfilled order,
+        position_entries() returns nothing (it only sees mappings that have
+        a slave_position_id), and it logs ten "slave has no mapped copy"
+        warnings. The copies then fill and stay unprotected for the life of
+        the trade.
+
+        Seen on live positions: master holding 4582.79 / 4584.79 while all
+        ten copies showed no stop and no target. Every copy of a protected
+        market order was naked, which is the worst way for this to fail --
+        the screen said the master was protected, and the risk sat on the
+        accounts nobody was looking at.
+
+        Remembering the level is what lets the fill path apply it at the
+        first moment the copy actually exists.
+        """
+        if isinstance(normalized, MasterPositionClosed):
+            self._master_protection.pop(normalized.position_id, None)
+            return
+        if not isinstance(normalized, (MasterPositionOpened,
+                                       MasterPositionSLTPAmended)):
+            return
+
+        levels = (normalized.stop_loss, normalized.take_profit)
+        if levels == (None, None):
+            # A cleared amend, or an open with nothing attached. Forgetting
+            # is the point: a copy filling later must not be handed
+            # protection the master no longer carries.
+            self._master_protection.pop(normalized.position_id, None)
+            return
+
+        if (normalized.position_id not in self._master_protection
+                and len(self._master_protection) >= MAX_REMEMBERED_PROTECTION):
+            # Insertion-ordered, so this drops the position seen longest
+            # ago -- the one least likely to still be open.
+            self._master_protection.pop(next(iter(self._master_protection)))
+        self._master_protection[normalized.position_id] = levels
+
+    def _protect_new_copy(self, account_id: int, client_order_id: str,
+                          slave_position_id: int, org_id: int) -> None:
+        """Give a just-filled copy the protection its master already has.
+
+        This is the first instant the copy can be amended -- before the
+        fill it has no position id, which is exactly why the master's own
+        SL/TP event could not reach it. Sent even when the copy may already
+        carry the level: re-stating the same stop is a no-op at the broker,
+        and the alternative is guessing about a naked position.
+
+        Never raises. A copy that opened is real money at the broker; a
+        failure to protect it must be logged and must not take down the
+        fill bookkeeping that follows.
+        """
+        master_position_id = master_position_of(client_order_id)
+        if master_position_id is None:
+            return
+        levels = self._master_protection.get(master_position_id)
+        if levels is None:
+            return
+        stop_loss, take_profit = levels
+        try:
+            self._dispatcher.dispatch(
+                [AmendPositionSLTP(account_id, slave_position_id,
+                                   stop_loss, take_profit)],
+                org_id=org_id,
+            )
+        except Exception:
+            log.exception(
+                "could not protect copy %s on account %s (master %s)",
+                slave_position_id, account_id, master_position_id)
 
     def _notify_positions_changed(self, org_id: int | None = None) -> None:
         """Invoke on_positions_changed; a callback failure must never break
@@ -168,6 +266,9 @@ class CopierService:
             routing: The routing snapshot this event is being processed against.
         """
         normalized = normalize(evt, self._master_symbols_by_org.get(org_id, {}))
+        # Before decide(), so a copy that fills during this very event's
+        # dispatch already finds the level recorded.
+        self._remember_master_protection(normalized)
 
         payload = {
             'execution_type': ProtoOAExecutionType.Name(evt.executionType),
@@ -429,6 +530,11 @@ class CopierService:
                     account_id=account_id,
                     org_id=org_id,
                 )
+                # The copy exists now, so the master's protection can
+                # finally reach it -- it could not when the master's own
+                # SL/TP event fired, a quarter of a second ago.
+                self._protect_new_copy(
+                    account_id, client_order_id, deal_position_id, org_id)
             except MappingNotFound:
                 # Unknown clientOrderId - log as drift warning
                 self._repo.log_event(
