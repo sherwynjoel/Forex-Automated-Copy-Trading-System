@@ -350,6 +350,13 @@ class CopierApp:
             self.repo.log_event('connection', 'error', {'action': 'initial_reconcile_failed'})
 
         yield self.refresh_balances()
+        # AFTER authorization, not alongside it. Started as its own
+        # now=True LoopingCall this raced _connect_and_authorize and asked
+        # the broker for deal history 0.3s before the account was
+        # authorized, which comes back INVALID_REQUEST -- so the copier
+        # booted with no rate at all and every amend stayed uncorrected
+        # until the next six-hourly tick.
+        yield self.refresh_commission_rates()
 
         log.info("startup: complete")
 
@@ -2217,11 +2224,10 @@ def boot(config: BootConfig, reactor_) -> CopierApp:
     app.commission_refresh_call = commission_refresh_call
 
     def _start_commission_loop():
-        # now=True: the rate is read from the database on every amend, so a
-        # process that boots without one leaves protection uncorrected
-        # until the first interval elapses. One deal-history request per
-        # master at boot is a small price for being right immediately.
-        start_d = commission_refresh_call.start(COMMISSION_REFRESH_INTERVAL_S, now=True)
+        # now=False: startup() does the first refresh, once the accounts it
+        # queries are actually authorized. Firing here instead raced that
+        # authorization and every request came back INVALID_REQUEST.
+        start_d = commission_refresh_call.start(COMMISSION_REFRESH_INTERVAL_S, now=False)
         start_d.addErrback(
             lambda f: log.error("commission refresh loop failed to start: %s", f))
 

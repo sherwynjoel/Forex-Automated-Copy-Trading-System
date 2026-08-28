@@ -2385,3 +2385,37 @@ def test_copies_report_the_protection_actually_on_the_slave(repo, token_store):
     # The unprotected one says so plainly rather than echoing the master.
     assert copies[SLAVE_A2]["stop_loss"] is None
     assert copies[SLAVE_A2]["take_profit"] is None
+
+
+@pytest_twisted.inlineCallbacks
+def test_startup_learns_commission_only_after_authorizing(db_seeded, fernet_key):
+    """The first commission read must FOLLOW authorization, not race it.
+
+    Wired as its own now=True LoopingCall, this asked the broker for deal
+    history 0.3s before the account was authorized -- every request came
+    back INVALID_REQUEST, so the copier booted with no rate at all and
+    every money-denominated stop stayed uncorrected until the next
+    six-hourly tick. Ordering is the whole fix, so it is what is pinned.
+    """
+    repo = Repo(db_seeded)
+    token_store = TokenStore(db_seeded, fernet_key)
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+
+    order = []
+    original_authorize = app._connect_and_authorize
+
+    def spy_authorize(accounts):
+        d = defer.maybeDeferred(original_authorize, accounts)
+        return d.addCallback(lambda result: (order.append("authorized"), result)[1])
+
+    def spy_commission():
+        order.append("commission")
+        return defer.succeed(None)
+
+    app._connect_and_authorize = spy_authorize
+    app.refresh_commission_rates = spy_commission
+
+    yield app.startup()
+
+    assert "commission" in order, "startup() must seed the commission rates"
+    assert order.index("authorized") < order.index("commission")
