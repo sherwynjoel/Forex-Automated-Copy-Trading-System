@@ -94,6 +94,20 @@ RESYNC_DEBOUNCE_S = 0.2
 # same limit the History page states to the operator.
 COMMISSION_REFRESH_INTERVAL_S = 21600.0
 COMMISSION_HISTORY_DAYS = 7
+# ...and how soon after a position changes the rate may be re-read.
+#
+# The six-hourly loop keeps a KNOWN rate current, which is the easy half.
+# Acquiring the FIRST one is the half that matters: an account connected
+# five minutes ago has no rate, so every amount-denominated stop on it is
+# uncorrected until the loop next comes round -- and this fleet is
+# reconnected often enough that "within six hours" meant "never" in
+# practice. A position change is the only moment a new round trip can have
+# appeared, so it is the only moment worth looking again.
+#
+# Debounced hard because a single trade produces a burst of position
+# changes (master fill, then one per slave, then the closes), and deal
+# history is far too heavyweight to ride every one of them.
+COMMISSION_LEARN_DEBOUNCE_S = 300.0
 
 # How long the org-wide close_all keeps copying transiently paused AFTER the
 # flatten, so the master's close executions drain without fanning out as
@@ -180,6 +194,13 @@ class CopierApp:
         self.shards = shards
         self.master_symbols_by_org = master_symbols_by_org
         self.routing_provider = routing_provider
+        # Debounces the position-change-triggered commission read. None,
+        # not 0.0, because "never" is not a time: against the reactor's
+        # epoch seconds 0.0 happens to read as long ago, but against a
+        # clock that starts at zero it reads as just now and swallows the
+        # very first look -- the one that matters most, on an account
+        # connected while the process was already running.
+        self._last_commission_learn: float | None = None
         # Required, not optional: reload() builds an engine with it the
         # moment an org acquires a master after boot, and a None here would
         # produce a Reconciler that cannot reach any client at all. Same
@@ -445,6 +466,17 @@ class CopierApp:
             except Exception:
                 log.exception("refresh_balances: snapshot write failed (org %s)", org_id)
 
+    def _maybe_learn_commission(self) -> None:
+        """Re-read commission after a position change, at most every
+        COMMISSION_LEARN_DEBOUNCE_S. See that constant for why."""
+        clock = self.clock
+        if clock is None:
+            from twisted.internet import reactor as clock
+        last = self._last_commission_learn
+        if last is not None and clock.seconds() - last < COMMISSION_LEARN_DEBOUNCE_S:
+            return
+        self.refresh_commission_rates()
+
     def refresh_commission_rates(self) -> defer.Deferred:
         """Re-derive every master's real commission from its own trades.
 
@@ -464,6 +496,10 @@ class CopierApp:
         Never raises or errbacks: it is a LoopingCall body, and a
         LoopingCall whose Deferred fails stops looping permanently.
         """
+        clock = self.clock
+        if clock is None:
+            from twisted.internet import reactor as clock
+        self._last_commission_learn = clock.seconds()
         d = defer.maybeDeferred(self._refresh_commission_rates_body)
         d.addErrback(lambda f: log.error("commission refresh: unexpected failure: %s", f))
         return d
@@ -721,6 +757,12 @@ class CopierApp:
         if clock is None:
             from twisted.internet import reactor as clock
         clock.callLater(RESYNC_DEBOUNCE_S, _fire)
+
+        # A position just changed, so a round trip we have never priced may
+        # have just completed. Debounced inside; deliberately not gated on
+        # the resync succeeding, since the rate is read from the broker's
+        # history rather than from anything the resync produces.
+        self._maybe_learn_commission()
 
     def periodic_resync(self) -> defer.Deferred:
         """LoopingCall body: keep Positions and drift current between

@@ -2504,3 +2504,89 @@ def test_a_query_is_not_blocked_while_auth_is_merely_in_flight(db_seeded, fernet
 
     assert client is not None
     assert symbols == {}
+
+
+def _commission_spy(app):
+    """Replace the refresh with a counter, keeping the debounce stamp."""
+    calls = []
+
+    def spy():
+        app._last_commission_learn = app.clock.seconds()
+        calls.append(1)
+        return defer.succeed(None)
+
+    app.refresh_commission_rates = spy
+    return calls
+
+
+def test_a_position_change_looks_for_a_rate_we_do_not_have_yet(db_seeded, fernet_key):
+    """Six hours is right for keeping a rate current and wrong for getting
+    the first one.
+
+    An account connected minutes ago has no rate, so every amount stop on
+    it is uncorrected until the periodic loop comes round -- and this fleet
+    is reconnected often enough that in practice it never did. Observed
+    live: a fresh account took a $1.50 target and paid $1.29.
+    """
+    repo = Repo(db_seeded)
+    token_store = TokenStore(db_seeded, fernet_key)
+    clock = Clock()
+    app = main.build_app(repo, token_store, make_stub_client_factory(),
+                         shards=1, clock=clock)
+    calls = _commission_spy(app)
+
+    app.request_resync(ORG_A)
+
+    assert len(calls) == 1
+
+
+def test_the_burst_from_one_trade_reads_history_once(db_seeded, fernet_key):
+    """A single trade fires a position change per account. Deal history is
+    far too heavyweight to ride every one."""
+    repo = Repo(db_seeded)
+    token_store = TokenStore(db_seeded, fernet_key)
+    clock = Clock()
+    app = main.build_app(repo, token_store, make_stub_client_factory(),
+                         shards=1, clock=clock)
+    calls = _commission_spy(app)
+
+    for _ in range(12):
+        app.request_resync(ORG_A)
+        clock.advance(0.2)
+
+    assert len(calls) == 1
+
+
+def test_a_later_trade_may_look_again(db_seeded, fernet_key):
+    """The debounce is a rate limit, not a one-shot: a symbol traded for
+    the first time tomorrow still needs its rate."""
+    repo = Repo(db_seeded)
+    token_store = TokenStore(db_seeded, fernet_key)
+    clock = Clock()
+    app = main.build_app(repo, token_store, make_stub_client_factory(),
+                         shards=1, clock=clock)
+    calls = _commission_spy(app)
+
+    app.request_resync(ORG_A)
+    clock.advance(main.COMMISSION_LEARN_DEBOUNCE_S + 1)
+    app.request_resync(ORG_A)
+
+    assert len(calls) == 2
+
+
+def test_the_startup_read_counts_towards_the_debounce(db_seeded, fernet_key):
+    """Otherwise the first fill after boot fires a second sweep seconds
+    after startup() has already done one."""
+    repo = Repo(db_seeded)
+    token_store = TokenStore(db_seeded, fernet_key)
+    clock = Clock()
+    app = main.build_app(repo, token_store, make_stub_client_factory(),
+                         shards=1, clock=clock)
+
+    # A real refresh stamps the debounce even when it finds nothing.
+    app.refresh_commission_rates()
+    calls = _commission_spy(app)
+
+    app.request_resync(ORG_A)
+
+    assert calls == []
