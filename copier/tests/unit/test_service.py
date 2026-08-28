@@ -1082,3 +1082,262 @@ def test_master_position_of_reads_the_copy_marker():
     assert master_position_of("manual") is None
     assert master_position_of(None) is None
     assert master_position_of("cmnotanumber.1") is None
+
+
+# ---------- execution capture ----------
+
+class _StubTracker:
+    """Stands in for AccountStateTracker: answers quote(symbol_id)."""
+
+    def __init__(self, quotes=None):
+        self._quotes = quotes or {}
+
+    def quote(self, symbol_id):
+        return self._quotes.get(symbol_id)
+
+
+def _executions(dsn):
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT account_id, is_master, symbol, side, volume, "
+            "execution_price, execution_timestamp, bid_at_exec, ask_at_exec "
+            "FROM executions ORDER BY account_id").fetchall()
+    return [
+        {"account_id": r[0], "is_master": r[1], "symbol": r[2], "side": r[3],
+         "volume": r[4], "execution_price": r[5], "execution_timestamp": r[6],
+         "bid": r[7], "ask": r[8]}
+        for r in rows
+    ]
+
+
+@pytest.fixture
+def writer(repo, db_seeded):
+    """An AsyncWriter attached to the repo, drained inline at teardown.
+
+    Deliberately not start()ed: flush_and_stop() writes whatever is queued
+    on the calling thread, which makes these tests deterministic instead of
+    racing a daemon thread's batch interval.
+    """
+    from copier.db.writer import AsyncWriter
+
+    w = AsyncWriter(db_seeded, batch_interval_s=10.0)
+    repo.writer = w
+    try:
+        yield w
+    finally:
+        repo.writer = None
+        w.flush_and_stop(timeout_s=2.0)
+
+
+def test_master_fill_writes_an_executions_row_with_the_trade_economics(
+        service, writer, db_seeded):
+    """The gap this whole change exists to close: a master fill must leave a
+    durable record of price, volume, side and symbol. The master_event log
+    line records {execution_type, normalized} and nothing else, so realized
+    copy slippage was not computable from production at all."""
+    evt = base_event(account_id=999,
+                     execution_type=ProtoOAExecutionType.ORDER_FILLED)
+    evt.deal.positionId = 11
+    evt.deal.filledVolume = 10_000_000
+    evt.deal.executionPrice = 1.0855
+    evt.deal.executionTimestamp = 1700000000000
+
+    service.handle_execution(999, evt)
+    writer.flush_and_stop(timeout_s=2.0)
+
+    rows = _executions(db_seeded)
+    master = [r for r in rows if r["account_id"] == 999]
+    assert len(master) == 1, "no executions row was written for the master"
+    row = master[0]
+    assert row["is_master"] is True
+    assert row["symbol"] == "EURUSD"
+    assert row["side"] == "BUY"
+    assert row["volume"] == 10_000_000
+    assert row["execution_price"] == pytest.approx(1.0855)
+    assert row["execution_timestamp"] == 1700000000000
+
+
+def test_a_slave_execution_row_carries_the_slaves_own_symbol(
+        service, writer, routing_box, make_routing, db_seeded):
+    """M1: the capture used to pass an EMPTY symbol map for every slave
+    (`symbols = ... if is_master else {}`), so every slave execution row
+    stored symbol = NULL -- the instrument missing from exactly the rows
+    that measure per-copy slippage, and no query over `executions` could
+    group a copy with its master trade without re-joining through
+    mappings. A slave's map is its own, and build_routing already holds
+    it.
+
+    The slave here trades a symbol the MASTER's map does not contain, so
+    borrowing the master's map records a null name just as the empty map
+    did: only the slave's own map answers.
+    """
+    usdjpy = SymbolInfo(symbol_id=3, name="USDJPY", digits=3,
+                        lot_size=10_000_000, min_volume=100_000,
+                        step_volume=100_000)
+    routing_box["routing"] = make_routing(
+        master=999, org_id=ORG_ID,
+        slaves=[SlaveConfig(account_id=100, enabled=True,
+                            multiplier=Decimal("1.0"),
+                            symbols={"USDJPY": usdjpy})])
+
+    evt = base_event(account_id=100,
+                     execution_type=ProtoOAExecutionType.ORDER_FILLED,
+                     symbol_id=3)
+    evt.deal.positionId = 77
+    evt.deal.filledVolume = 5_000_000
+
+    service.handle_execution(100, evt)
+    writer.flush_and_stop(timeout_s=2.0)
+
+    rows = [r for r in _executions(db_seeded) if r["account_id"] == 100]
+    assert len(rows) == 1, "no executions row was written for the slave"
+    assert rows[0]["is_master"] is False
+    assert rows[0]["symbol"] == "USDJPY", (
+        "the slave execution row stored a null/foreign symbol")
+
+
+def test_an_execution_row_carries_the_quote_that_was_live_at_the_fill(
+        service, writer, db_seeded):
+    service.state_tracker_provider = lambda account_id: _StubTracker(
+        {1: (1.08540, 1.08556)})
+    evt = base_event(account_id=999,
+                     execution_type=ProtoOAExecutionType.ORDER_FILLED)
+    evt.deal.positionId = 11
+    evt.deal.filledVolume = 10_000_000
+
+    service.handle_execution(999, evt)
+    writer.flush_and_stop(timeout_s=2.0)
+
+    row = _executions(db_seeded)[0]
+    assert row["bid"] == pytest.approx(1.08540)
+    assert row["ask"] == pytest.approx(1.08556)
+
+
+def test_a_missing_quote_is_null_never_zero(service, writer, db_seeded):
+    """A zero bid/ask would read as a real price and silently poison every
+    spread and slippage figure computed off this table."""
+    service.state_tracker_provider = lambda account_id: _StubTracker({})
+    evt = base_event(account_id=999,
+                     execution_type=ProtoOAExecutionType.ORDER_FILLED)
+    evt.deal.positionId = 11
+    evt.deal.filledVolume = 10_000_000
+
+    service.handle_execution(999, evt)
+    writer.flush_and_stop(timeout_s=2.0)
+
+    row = _executions(db_seeded)[0]
+    assert row["bid"] is None
+    assert row["ask"] is None
+
+
+def test_capture_is_skipped_entirely_when_no_writer_is_attached(
+        service, repo, db_seeded):
+    """Tests (and any deployment without a writer) must not gain a
+    synchronous insert on the event path."""
+    evt = base_event(account_id=999,
+                     execution_type=ProtoOAExecutionType.ORDER_FILLED)
+    evt.deal.positionId = 11
+    evt.deal.filledVolume = 10_000_000
+
+    service.handle_execution(999, evt)
+
+    assert _executions(db_seeded) == []
+
+
+def test_a_capture_failure_never_stops_a_copy(
+        service, repo, recording_dispatcher):
+    """Observability must never cost a trade."""
+    class _ExplodingWriter:
+        def submit(self, *args, **kwargs):
+            raise RuntimeError("writer exploded")
+
+    repo.writer = _ExplodingWriter()
+    try:
+        evt = base_event(account_id=999,
+                         execution_type=ProtoOAExecutionType.ORDER_FILLED)
+        evt.deal.positionId = 11
+        evt.deal.filledVolume = 10_000_000
+
+        service.handle_execution(999, evt)
+
+        opens = [i for i in recording_dispatcher.intents
+                 if isinstance(i, OpenMarket)]
+        assert len(opens) == 2, "a capture failure suppressed the copies"
+    finally:
+        repo.writer = None
+
+
+def test_a_capture_failure_never_stops_slave_fill_bookkeeping(
+        service, repo, db_seeded):
+    """The slave capture sits in front of the mapping updates, so a raising
+    writer there would leave a live copy unmapped -- a phantom drift
+    warning and a position nothing can close."""
+    class _ExplodingWriter:
+        def submit(self, *args, **kwargs):
+            raise RuntimeError("writer exploded")
+
+    repo.create_position_mapping(11, 100, "cm11.100", org_id=ORG_ID)
+    repo.writer = _ExplodingWriter()
+    try:
+        evt = base_event(account_id=100,
+                         execution_type=ProtoOAExecutionType.ORDER_FILLED)
+        evt.order.clientOrderId = "cm11.100"
+        evt.deal.positionId = 4242
+        evt.deal.filledVolume = 10_000_000
+
+        service.handle_execution(100, evt)
+    finally:
+        repo.writer = None
+
+    entries = repo.position_entries(11)
+    assert [e.slave_position_id for e in entries] == [4242], (
+        "the fill never reached the mapping: the copy is now unmapped")
+
+
+def test_master_fill_price_is_recorded_only_after_the_copies_are_dispatched(
+        service, repo, recording_dispatcher):
+    """record_master_fill is one indexed UPDATE. It must never sit between
+    a master fill arriving and the slave orders reaching the wire."""
+    order = []
+    inner = recording_dispatcher.dispatch.side_effect
+
+    def recording(intents, org_id):
+        order.append("dispatch")
+        return inner(intents, org_id)
+
+    recording_dispatcher.dispatch.side_effect = recording
+    repo.record_master_fill = lambda *a, **k: order.append("record_master_fill")
+
+    evt = base_event(account_id=999,
+                     execution_type=ProtoOAExecutionType.ORDER_FILLED)
+    evt.deal.positionId = 11
+    evt.deal.filledVolume = 10_000_000
+    evt.deal.executionPrice = 1.0855
+    evt.deal.executionTimestamp = 1700000000000
+
+    service.handle_execution(999, evt)
+
+    assert order == ["dispatch", "record_master_fill"]
+
+
+def test_the_masters_fill_price_is_stamped_onto_this_orgs_copies(
+        service, repo, db_seeded):
+    """mappings.fill_price is the SLAVE's half; without the master's,
+    realized slippage and true copy latency are not computable at all."""
+    repo.create_position_mapping(11, 100, "cm11.100", org_id=ORG_ID)
+
+    evt = base_event(account_id=999,
+                     execution_type=ProtoOAExecutionType.ORDER_FILLED)
+    evt.deal.positionId = 11
+    evt.deal.filledVolume = 10_000_000
+    evt.deal.executionPrice = 1.0855
+    evt.deal.executionTimestamp = 1700000000000
+
+    service.handle_execution(999, evt)
+
+    with psycopg.connect(db_seeded, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT master_fill_price, master_exec_timestamp FROM mappings "
+            "WHERE master_position_id = 11").fetchone()
+    assert row[0] == pytest.approx(1.0855)
+    assert row[1] == 1700000000000

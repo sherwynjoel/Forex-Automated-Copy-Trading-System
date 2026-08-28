@@ -37,6 +37,7 @@ from copier.ctrader.client import CTraderClient
 from copier.ctrader.tokens import TokenStore
 from copier.db.repo import Repo
 from copier.domain.models import Side, SymbolInfo
+from copier.engine.backfill import WEEK_MS
 from copier.engine.reconcile import DriftItem, OrderSnapshot, PositionSnapshot
 from copier.testing.fake_server import FakeCTraderServer
 from test_client import StubSdk
@@ -151,6 +152,34 @@ def repo(db_seeded):
 @pytest.fixture
 def token_store(db_seeded, fernet_key):
     return TokenStore(db_seeded, fernet_key)
+
+
+@pytest.fixture(autouse=True)
+def _drain_boot_writers(monkeypatch):
+    """Stop every AsyncWriter boot() starts, when the test that booted ends.
+
+    boot() now attaches a real writer running on a daemon thread with its
+    own connection. Left alive past the test, it can flush rows queued by
+    THIS test into the next test's freshly truncated database -- a
+    cross-test leak that shows up as an unexplained extra row somewhere
+    unrelated. Production never needs this: the shutdown trigger boot()
+    registers does the same job.
+    """
+    created = []
+    real = main.AsyncWriter
+
+    def factory(*args, **kwargs):
+        writer = real(*args, **kwargs)
+        created.append(writer)
+        return writer
+
+    monkeypatch.setattr(main, "AsyncWriter", factory)
+    yield
+    for writer in created:
+        try:
+            writer.flush_and_stop(timeout_s=2.0)
+        except Exception:
+            pass
 
 
 def make_stub_client_factory():
@@ -295,19 +324,27 @@ class _RecordingStateTracker:
 
 
 class _FakeReactor:
-    """Records callWhenRunning/listenTCP calls without ever invoking them --
-    proves boot() composes and wires the reactor without requiring a real
-    event loop or accidentally calling reactor.run()."""
+    """Records callWhenRunning/listenTCP/addSystemEventTrigger calls without
+    ever invoking them -- proves boot() composes and wires the reactor
+    without requiring a real event loop or accidentally calling
+    reactor.run()."""
 
     def __init__(self):
         self.callWhenRunning_calls = []
         self.listenTCP_calls = []
+        self.addSystemEventTrigger_calls = []
 
     def callWhenRunning(self, f):
         self.callWhenRunning_calls.append(f)
 
     def listenTCP(self, port, site, interface=""):
         self.listenTCP_calls.append({"port": port, "site": site, "interface": interface})
+        return object()
+
+    def addSystemEventTrigger(self, phase, event_type, f, *args, **kwargs):
+        self.addSystemEventTrigger_calls.append(
+            {"phase": phase, "event_type": event_type, "f": f,
+             "args": args, "kwargs": kwargs})
         return object()
 
     def seconds(self):
@@ -410,15 +447,25 @@ def test_boot_composes_without_crashing_and_binds_all_interfaces(db, fernet_key)
     assert call["interface"] == "0.0.0.0"
     assert call["interface"] != "127.0.0.1"
     # startup + token-refresh loop + balance-refresh loop (N9) + resync
-    # loop + cutoff-reminder loop + commission-refresh loop were scheduled,
-    # not run inline (no reactor loop here).
-    assert len(fake_reactor.callWhenRunning_calls) == 6
+    # loop + cutoff-reminder loop + commission-refresh loop +
+    # partition-maintenance loop + deal-backfill loop were scheduled, not
+    # run inline (no reactor loop here).
+    assert len(fake_reactor.callWhenRunning_calls) == 8
     assert app.balance_refresh_call.interval is None   # not started until the reactor runs
     assert app.resync_call.interval is None            # not started until the reactor runs
     assert app.cutoff_reminder_call.interval is None   # not started until the reactor runs
     # Learned commission is read on every amend, so the loop has to exist
     # from boot -- but it must not fire before the reactor is up either.
     assert app.commission_refresh_call.interval is None
+    assert app.partition_call.interval is None
+    assert app.deal_backfill_call.interval is None
+    # The writer's drain is registered as a shutdown trigger, so a clean
+    # restart loses nothing that was still queued.
+    assert len(fake_reactor.addSystemEventTrigger_calls) == 1
+    trigger = fake_reactor.addSystemEventTrigger_calls[0]
+    assert trigger["phase"] == "before"
+    assert trigger["event_type"] == "shutdown"
+    assert trigger["f"] == app.writer.flush_and_stop
 
 
 def test_build_app_tolerates_zero_accounts_and_wires_dispatcher_before_app_exists(db, fernet_key):
@@ -2803,3 +2850,533 @@ def test_accounts_are_flattened_concurrently(db, fernet_key, monkeypatch):
         for c in created:
             c.stop()
         server.shutdown()
+
+
+# ---------- get_analytics: read from `deals`, not the broker ----------
+
+def test_get_analytics_with_no_backfill_state_is_truncated(repo, token_store):
+    """A freshly deployed system has no deal_backfill_state row yet. The
+    Performance page must be told backfill has not started, rather than
+    reading a near-empty result as "there is no trading history"."""
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+
+    result = app.get_analytics(MASTER_A, weeks=4)
+
+    assert result["truncated"] is True
+    assert result["weeks"] == 4
+
+
+def test_get_analytics_not_truncated_once_backfill_is_exhausted(repo, token_store):
+    """exhausted=True means the backfill walked all the way back to the
+    history bound: nothing more is missing."""
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    repo.set_backfill_state(MASTER_A, 0, 1700000000000, exhausted=True)
+
+    assert app.get_analytics(MASTER_A, weeks=4)["truncated"] is False
+
+
+def test_get_analytics_truncated_when_backfill_has_not_reached_the_window(
+        repo, token_store):
+    """Backfill in progress, but its oldest covered point is still newer
+    than the requested window's start: some of the window is uncovered."""
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    now_ms = app._now_ms()
+    window_start = now_ms - 4 * WEEK_MS
+    repo.set_backfill_state(MASTER_A, window_start + WEEK_MS, now_ms,
+                            exhausted=False)
+
+    assert app.get_analytics(MASTER_A, weeks=4)["truncated"] is True
+
+
+def test_get_analytics_not_truncated_when_backfill_covers_the_window(
+        repo, token_store):
+    """Backfill unfinished but already walked back past the window start:
+    that window is fully covered."""
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    now_ms = app._now_ms()
+    window_start = now_ms - 4 * WEEK_MS
+    repo.set_backfill_state(MASTER_A, window_start - WEEK_MS, now_ms,
+                            exhausted=False)
+
+    assert app.get_analytics(MASTER_A, weeks=4)["truncated"] is False
+
+
+def test_get_analytics_weeks_zero_means_all_stored_history(repo, token_store):
+    """weeks == 0 asks for the whole `deals` table (since_ms=None), not the
+    max(1, ...) clamp applied to every other value."""
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    repo.upsert_deals(MASTER_A, ORG_A, [{
+        "deal_id": 1, "execution_timestamp": 1, "commission": 0.0,
+        "close": {"entry_price": 1.0, "gross_profit": 5.0, "swap": 0.0,
+                  "commission": 0.0, "balance": 10005.0, "closed_volume": 1},
+    }])
+
+    result = app.get_analytics(MASTER_A, weeks=0)
+
+    assert result["weeks"] == 0
+    assert result["net_pnl"] == pytest.approx(5.0)
+    # No backfill state at all and weeks == 0 (window start = beginning of
+    # time): truncated only turns False once exhausted is True.
+    assert result["truncated"] is True
+
+
+def test_get_analytics_reads_stored_deals_and_never_the_broker(repo, token_store):
+    """The whole point: one indexed DB read, no DealListReq fan-out."""
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    repo.upsert_deals(MASTER_A, ORG_A, [{
+        "deal_id": 2, "execution_timestamp": app._now_ms(), "commission": -0.07,
+        "close": {"entry_price": 1.08, "gross_profit": 2.75, "swap": -0.12,
+                  "commission": -0.07, "balance": 10002.75, "closed_volume": 1},
+    }])
+
+    called = []
+    original = main.queries.deal_history
+    main.queries.deal_history = lambda *a, **k: called.append(a)
+    try:
+        result = app.get_analytics(MASTER_A, weeks=4)
+    finally:
+        main.queries.deal_history = original
+
+    assert called == [], "get_analytics went to the broker"
+    assert result["net_pnl"] == pytest.approx(2.75 - 0.12 - 0.07)
+
+
+def test_get_analytics_bounds_the_row_fetch(repo, token_store):
+    """D3: analytics runs synchronously on the reactor connection, so an
+    account with years of history must not be able to stall every org on
+    one unbounded fetch. load_deals is handed an explicit LIMIT."""
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    seen = {}
+    real = repo.load_deals
+
+    def spy(account_id, since_ms=None, limit=None):
+        seen["limit"] = limit
+        return real(account_id, since_ms, limit=limit)
+
+    repo.load_deals = spy
+    try:
+        app.get_analytics(MASTER_A, weeks=4)
+    finally:
+        repo.load_deals = real
+
+    assert seen["limit"] == main.ANALYTICS_ROW_LIMIT
+
+
+# ---------- /health reports the async writer ----------
+
+def test_get_health_reports_the_db_writer(repo, token_store):
+    """The writer DROPS rather than blocks under overflow, so its health is
+    the only place a silent loss of executions, position upserts and event
+    logs becomes visible. The rest of the payload must not change shape."""
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+
+    without = app.get_health()
+    assert without["db_writer"] == {"healthy": None, "dropped": 0}
+    assert without["status"] == "ok"
+    assert [o["org_id"] for o in without["orgs"]] == [ORG_A]
+
+    writer = main.AsyncWriter(repo.dsn, batch_interval_s=10.0)
+    repo.writer = writer
+    try:
+        health = app.get_health()
+        assert health["db_writer"] == {"healthy": True, "dropped": 0}
+        assert [o["org_id"] for o in health["orgs"]] == [ORG_A]
+    finally:
+        writer.flush_and_stop(timeout_s=2.0)
+        repo.writer = None
+
+
+# ---------- deal-backfill orchestration ----------
+
+class _FakeDealBroker:
+    """Answers deal_history and records every window it was asked for."""
+
+    def __init__(self, has_more_over_ms=None, deals_per_window=1):
+        self.calls = []
+        self._has_more_over_ms = has_more_over_ms
+        self._deals_per_window = deals_per_window
+
+    def deal_history(self, client, account_id, symbols, from_ms, to_ms, **kw):
+        self.calls.append((account_id, from_ms, to_ms))
+        has_more = (self._has_more_over_ms is not None
+                    and (to_ms - from_ms) > self._has_more_over_ms)
+        deals = [{"deal_id": from_ms + to_ms + i,
+                  "execution_timestamp": from_ms, "close": None}
+                 for i in range(self._deals_per_window)]
+        return defer.succeed({"deals": deals, "has_more": has_more})
+
+
+@pytest.fixture
+def backfill_app(repo, token_store):
+    """The real CopierApp over the seeded three-account org A."""
+    return main.build_app(repo, token_store, make_stub_client_factory(),
+                          shards=1)
+
+
+@pytest_twisted.inlineCallbacks
+def test_backfill_rotates_across_accounts_instead_of_starving_all_but_one(
+        backfill_app, repo, monkeypatch):
+    """The loop used to return after the FIRST account with a window, and
+    next_window() hands an already-exhausted account a forward catch-up
+    window on essentially every tick (backfilled_to_ms carries the previous
+    tick's now_ms). So one account consumed every 30s tick forever and the
+    others never had a single deal fetched -- `deals` empty,
+    get_backfill_state None, get_analytics zeros and truncated=True for the
+    life of the deployment AND across restarts, because the watermark is
+    durable."""
+    broker = _FakeDealBroker()
+    monkeypatch.setattr(main.queries, "deal_history", broker.deal_history)
+    # SLAVE_A1 is exhausted with a stale watermark: a forward window every tick.
+    repo.set_backfill_state(SLAVE_A1, 1, backfill_app._now_ms() - 60_000,
+                            exhausted=True)
+
+    for _ in range(3):
+        yield backfill_app.backfill_deals_once()
+
+    serviced = {account_id for account_id, _, _ in broker.calls}
+    assert serviced == {MASTER_A, SLAVE_A1, SLAVE_A2}, (
+        f"3 ticks backfilled only {sorted(serviced)}; the rest are starved "
+        "permanently and their Performance page stays blank")
+
+
+@pytest_twisted.inlineCallbacks
+def test_backfill_does_one_window_per_tick(backfill_app, monkeypatch):
+    """The rate discipline the rotation must not trade away: the broker
+    caps DealList at a week and 500 rows and the send path runs at
+    10 msg/s, so a tick services exactly one account."""
+    broker = _FakeDealBroker()
+    monkeypatch.setattr(main.queries, "deal_history", broker.deal_history)
+
+    yield backfill_app.backfill_deals_once()
+
+    assert len(broker.calls) == 1
+
+
+@pytest_twisted.inlineCallbacks
+def test_a_single_empty_week_does_not_mark_an_account_exhausted(
+        backfill_app, repo, monkeypatch):
+    """`exhausted` means "reached the account's first deal", but it was set
+    by the first window that happened to be empty. An account with two
+    years of history that simply did not trade last week -- a holiday, a
+    paused slave, i.e. most of the fleet -- lost its ENTIRE history on tick
+    1, and get_analytics then reported truncated=False, "we hold everything
+    the broker has", over an empty table."""
+    def empty(client, account_id, symbols, from_ms, to_ms, **kw):
+        return defer.succeed({"deals": [], "has_more": False})
+
+    monkeypatch.setattr(main.queries, "deal_history", empty)
+
+    for _ in range(3):
+        yield backfill_app.backfill_deals_once()
+
+    for account_id in (MASTER_A, SLAVE_A1, SLAVE_A2):
+        state = repo.get_backfill_state(account_id)
+        assert state is not None, f"account {account_id} was never backfilled"
+        assert state["exhausted"] is False, (
+            f"account {account_id} was declared complete after one quiet "
+            "week; its entire history is now unreachable")
+
+
+@pytest_twisted.inlineCallbacks
+def test_the_walk_marks_exhausted_once_it_reaches_the_history_bound(
+        backfill_app, repo, monkeypatch):
+    """The other half: `exhausted` must still be reachable, or truncated
+    stays True forever even after backfill has stopped for good."""
+    broker = _FakeDealBroker()
+    monkeypatch.setattr(main.queries, "deal_history", broker.deal_history)
+    year_ms = 365 * 24 * 3600 * 1000
+    bound = main.DEAL_BACKFILL_MAX_YEARS * year_ms
+    # One week short of the bound: the next backward window lands on it.
+    repo.set_backfill_state(
+        SLAVE_A1, backfill_app._now_ms() - (bound - WEEK_MS),
+        backfill_app._now_ms(), exhausted=False)
+
+    yield backfill_app.backfill_deals_once()
+
+    assert repo.get_backfill_state(SLAVE_A1)["exhausted"] is True
+
+
+@pytest_twisted.inlineCallbacks
+def test_forward_catch_up_never_un_exhausts_an_account(
+        backfill_app, repo, monkeypatch):
+    """Once the walk is done it stays done: the forward catch-up branch
+    re-reads recent time, whose from_ms is nowhere near the history bound."""
+    broker = _FakeDealBroker()
+    monkeypatch.setattr(main.queries, "deal_history", broker.deal_history)
+    repo.set_backfill_state(SLAVE_A1, 1, backfill_app._now_ms() - 60_000,
+                            exhausted=True)
+
+    yield backfill_app.backfill_deals_once()
+
+    assert repo.get_backfill_state(SLAVE_A1)["exhausted"] is True
+
+
+@pytest_twisted.inlineCallbacks
+def test_a_window_over_the_row_cap_is_bisected_not_silently_truncated(
+        backfill_app, repo, monkeypatch):
+    """deal_history caps a response at 500 rows and reports the overflow as
+    has_more. The watermark advanced past the window regardless and the
+    walk never revisits it, so an active week of 700 deals lost 200 of them
+    forever -- with `exhausted` eventually True and `truncated` False, i.e.
+    no signal at all that closed_trades, net_pnl and the equity curve are
+    wrong."""
+    broker = _FakeDealBroker(has_more_over_ms=WEEK_MS // 2)
+    monkeypatch.setattr(main.queries, "deal_history", broker.deal_history)
+
+    yield backfill_app.backfill_deals_once()
+
+    assert len(broker.calls) == 3, (
+        f"a has_more window produced {len(broker.calls)} requests; it must "
+        "be bisected and re-fetched, not skipped")
+    windows = sorted((lo, hi) for _, lo, hi in broker.calls)
+    halves = [w for w in windows if w[1] - w[0] <= WEEK_MS // 2]
+    full = [w for w in windows if w[1] - w[0] > WEEK_MS // 2]
+    assert len(full) == 1 and len(halves) == 2
+    assert halves[0][0] == full[0][0], "the older half must start at the window start"
+    assert halves[1][1] == full[0][1], "the newer half must end at the window end"
+    assert halves[0][1] == halves[1][0], "the halves must tile the window"
+    # Every deal the broker handed back is stored; nothing was dropped.
+    assert len(repo.load_deals(SLAVE_A1)) == 3
+
+
+@pytest_twisted.inlineCallbacks
+def test_backfill_tick_never_errbacks(backfill_app, monkeypatch):
+    """It is a LoopingCall body: a Deferred that fails stops the loop
+    permanently, and deal history would then never be fetched again."""
+    def boom(*args, **kwargs):
+        raise RuntimeError("broker exploded")
+
+    monkeypatch.setattr(main.queries, "deal_history", boom)
+
+    yield backfill_app.backfill_deals_once()   # must not raise
+
+
+# ---------- the intraday balance-sample clock is PER ORG ----------
+
+class _BalanceStateTracker(_RecordingStateTracker):
+    """A tracker whose snapshot() carries real balances, so the sample
+    write actually has rows to persist."""
+
+    def __init__(self, account_ids):
+        super().__init__()
+        self._account_ids = list(account_ids)
+
+    def snapshot(self):
+        return {a: {"balance": 10_000.0, "equity": 10_050.0, "open_pnl": 50.0}
+                for a in self._account_ids}
+
+
+def _sampled_accounts(dsn):
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT account_id FROM balance_samples").fetchall()
+    return {r[0] for r in rows}
+
+
+def test_an_org_scoped_refresh_does_not_consume_every_orgs_sample_slot(
+        db, fernet_key):
+    """A single process-wide clock would starve every org but one, because
+    this body is also called org-scoped: resync(org_id) ends with
+    refresh_balances(org_id), and request_resync fires on every position
+    change. An actively-trading org A lands one of those A-only invocations
+    on the 5-minute gate inside every window: the clock is stamped, the
+    loop `continue`s past orgs B..N, and B..N never get an intraday balance
+    sample at all."""
+    org_a, org_b = seed_two_orgs(db, fernet_key)
+    repo = Repo(db)
+    app = main.build_app(repo, TokenStore(db, fernet_key),
+                         make_stub_client_factory(), shards=1)
+    app.state_trackers = {
+        org_a: _BalanceStateTracker([MASTER_A, SLAVE_A1, SLAVE_A2]),
+        org_b: _BalanceStateTracker([MASTER_B, SLAVE_B1]),
+    }
+
+    app.refresh_balances(org_a)      # org A's fill-driven resync
+    assert _sampled_accounts(db) >= {MASTER_A}
+
+    app.refresh_balances()           # the fleet-wide 60s poll, right after
+
+    assert MASTER_B in _sampled_accounts(db), (
+        "org B never got an intraday balance sample: org A's org-scoped "
+        "refresh consumed the process-wide sampling slot")
+
+
+def test_a_second_refresh_inside_the_interval_does_not_resample_an_org(
+        db, fernet_key):
+    """The gate must still throttle: BALANCE_SAMPLE_INTERVAL_S is 5
+    minutes and the poll runs every 60 s."""
+    org_a = seed_db(db, fernet_key)
+    repo = Repo(db)
+    app = main.build_app(repo, TokenStore(db, fernet_key),
+                         make_stub_client_factory(), shards=1)
+    app.state_trackers = {org_a: _BalanceStateTracker([MASTER_A])}
+
+    app.refresh_balances()
+    app.refresh_balances()
+
+    with psycopg.connect(db, autocommit=True) as conn:
+        (n,) = conn.execute(
+            "SELECT count(*) FROM balance_samples WHERE account_id = %s",
+            (MASTER_A,)).fetchone()
+    assert n == 1, f"{n} samples in one interval; the throttle is gone"
+
+
+def test_balance_samples_carry_equity_and_unrealized_pnl_and_null_margin(
+        db, fernet_key):
+    """margin_used is not tracked anywhere in this codebase, so it must be
+    NULL rather than a fabricated zero; open_pnl is the unrealized half."""
+    org_a = seed_db(db, fernet_key)
+    repo = Repo(db)
+    app = main.build_app(repo, TokenStore(db, fernet_key),
+                         make_stub_client_factory(), shards=1)
+    app.state_trackers = {org_a: _BalanceStateTracker([MASTER_A])}
+
+    app.refresh_balances()
+
+    with psycopg.connect(db, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT org_id, balance, equity, margin_used, unrealized_pnl "
+            "FROM balance_samples WHERE account_id = %s", (MASTER_A,)).fetchone()
+    org_id, balance, equity, margin_used, unrealized = row
+    assert org_id == org_a
+    assert float(balance) == pytest.approx(10_000.0)
+    assert float(equity) == pytest.approx(10_050.0)
+    assert margin_used is None
+    assert float(unrealized) == pytest.approx(50.0)
+
+
+# ---------- resync persists positions without extra blocking reads ----------
+
+@pytest_twisted.inlineCallbacks
+def test_resync_does_not_re_read_each_slaves_symbol_cache(db, fernet_key):
+    """resync must not call load_symbol_cache(slave_id) per slave to build
+    the position upsert's symbol map -- a full 500-2000 row SELECT each,
+    synchronously on the reactor -- when routing_provider(), resolved for
+    the same pass, ALREADY holds exactly that map for every slave.
+
+    request_resync fires ~0.2s after a fill, while the 10 msg/s send queue
+    is still draining slaves 3-5 of the fan-out, so those extra round trips
+    stall the queue mid-copy.
+    """
+    org_a = seed_db(db, fernet_key)
+    repo = Repo(db)
+    _seed_symbol_cache(repo, [MASTER_A, SLAVE_A1, SLAVE_A2])
+    app = main.build_app(repo, TokenStore(db, fernet_key),
+                         make_stub_client_factory(), shards=1)
+
+    app.reconcilers[org_a].run = lambda: defer.succeed([])
+    app.reconcilers[org_a].master_positions = []
+    app.reconcilers[org_a].slave_positions = {
+        SLAVE_A1: [PositionSnapshot(position_id=5001, symbol_id=1,
+                                    side=Side.BUY, volume=5_000_000,
+                                    price=1.10537, label="")],
+        SLAVE_A2: [],
+    }
+    app.state_trackers = {org_a: _RecordingStateTracker()}
+
+    # Loads made while building an OrgRouting are the ones resync is
+    # entitled to; the finding is the SECOND set it would make on top.
+    direct_loads: list[int] = []
+    depth = {"routing": 0}
+    real_load = repo.load_symbol_cache
+    real_routing = app.routing_provider
+
+    def counting_load(account_id):
+        if depth["routing"] == 0:
+            direct_loads.append(account_id)
+        return real_load(account_id)
+
+    def tracked_routing():
+        depth["routing"] += 1
+        try:
+            return real_routing()
+        finally:
+            depth["routing"] -= 1
+
+    repo.load_symbol_cache = counting_load
+    app.routing_provider = tracked_routing
+    try:
+        yield app.resync(org_a)
+    finally:
+        repo.load_symbol_cache = real_load
+
+    assert direct_loads == [], (
+        f"resync read symbol caches for {direct_loads} on top of the ones "
+        "the routing snapshot it just built already holds")
+
+
+@pytest_twisted.inlineCallbacks
+def test_resync_persists_open_positions_and_closes_the_vanished_ones(
+        db, fernet_key):
+    """Positions existed only in Reconciler.master_positions and the
+    in-memory tracker, so a restart showed an empty Positions screen until
+    the broker answered. Each resync now records the book -- and the
+    broker's answer is the truth about what is still open, so anything it
+    stops reporting is closed out."""
+    org_a = seed_db(db, fernet_key)
+    repo = Repo(db)
+    info = _seed_symbol_cache(repo, [MASTER_A, SLAVE_A1, SLAVE_A2])
+    app = main.build_app(repo, TokenStore(db, fernet_key),
+                         make_stub_client_factory(), shards=1)
+    # startup()'s symbol fetch fills this in production; the master's map
+    # is the one cache routing does NOT carry (routing holds slaves only).
+    app.master_symbols_by_org[org_a][info.symbol_id] = info
+
+    reconciler = app.reconcilers[org_a]
+    reconciler.run = lambda: defer.succeed([])
+    reconciler.master_positions = [
+        PositionSnapshot(position_id=7001, symbol_id=1, side=Side.BUY,
+                         volume=1_000_000, price=1.1050, label="")]
+    reconciler.slave_positions = {
+        SLAVE_A1: [PositionSnapshot(position_id=5001, symbol_id=1,
+                                    side=Side.SELL, volume=5_000_000,
+                                    price=1.10537, label="")],
+        SLAVE_A2: [],
+    }
+    app.state_trackers = {org_a: _RecordingStateTracker()}
+
+    yield app.resync(org_a)
+
+    stored = {(r["account_id"], r["position_id"]): r
+              for r in repo.load_open_positions(org_a)}
+    assert set(stored) == {(MASTER_A, 7001), (SLAVE_A1, 5001)}
+    assert stored[(MASTER_A, 7001)]["symbol"] == "EURUSD"
+    assert stored[(SLAVE_A1, 5001)]["side"] == "SELL"
+
+    # The broker now reports the master flat and the slave unchanged.
+    reconciler.master_positions = []
+    yield app.resync(org_a)
+
+    assert {(r["account_id"], r["position_id"])
+            for r in repo.load_open_positions(org_a)} == {(SLAVE_A1, 5001)}
+
+
+def test_get_state_serves_stored_positions_before_the_first_resync(
+        db, fernet_key):
+    """A fresh process has no reconciler snapshot until the first resync
+    lands. Serve the last known book from the database rather than an
+    empty screen, flagged `stale` so the caller knows the quote-derived
+    fields are missing."""
+    org_a = seed_db(db, fernet_key)
+    repo = Repo(db)
+    _seed_symbol_cache(repo, [MASTER_A])
+    repo.upsert_positions(
+        MASTER_A, org_a,
+        [PositionSnapshot(position_id=7001, symbol_id=1, side=Side.BUY,
+                          volume=1_000_000, price=1.1050, label="")],
+        {1: SymbolInfo(symbol_id=1, name="EURUSD", digits=5,
+                       lot_size=10_000_000, min_volume=100_000,
+                       step_volume=100_000)})
+    app = main.build_app(repo, TokenStore(db, fernet_key),
+                         make_stub_client_factory(), shards=1)
+
+    state = app.get_state(org_a)
+
+    assert [p["position_id"] for p in state["master_positions"]] == [7001]
+    pos = state["master_positions"][0]
+    assert pos["account_id"] == MASTER_A
+    assert pos["symbol"] == "EURUSD"
+    assert pos["stale"] is True
+    # No live quote before the first resync: invent nothing.
+    assert pos["pnl_quote"] is None
+    assert pos["current_price"] is None

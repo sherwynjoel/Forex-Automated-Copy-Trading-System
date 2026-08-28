@@ -20,11 +20,13 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOAExecutionEvent
 from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
     ProtoOAExecutionType, ProtoOAOrderType)
 
+from copier.ctrader.symbols import by_id as symbols_by_id
 from copier.db.repo import Repo, MappingNotFound
 from copier.domain.models import (
     MANUAL_ORDER_LABEL, SymbolInfo, MasterPendingFilled, AmendPositionSLTP,
     MasterPositionOpened, MasterPositionClosed, MasterPositionSLTPAmended)
 from copier.domain.decision import decide
+from copier.engine.capture import execution_row
 from copier.engine.normalize import normalize
 from copier.engine.dispatch import Dispatcher
 from copier.engine.routing import OrgRouting
@@ -94,6 +96,13 @@ class CopierService:
         # that changes positions/orders/mappings, so /state can refresh
         # immediately instead of waiting for the next periodic resync tick.
         self.on_positions_changed: Callable[[int | None], None] | None = None
+
+        # Set by build_app()/CopierApp, same as on_positions_changed above:
+        # resolves an account to the AccountStateTracker holding its org's
+        # live quotes, so a captured execution can carry the bid/ask that
+        # was live at fill time. None in unit tests, where a capture then
+        # records a null quote rather than failing.
+        self.state_tracker_provider: Callable[[int], object | None] | None = None
 
         # master position id -> (stop_loss, take_profit) currently on it.
         # See _remember_master_protection for the race this exists to close.
@@ -175,6 +184,66 @@ class CopierService:
             log.exception(
                 "could not protect copy %s on account %s (master %s)",
                 slave_position_id, account_id, master_position_id)
+
+    def _state_tracker_for(self, account_id: int):
+        """Resolve the AccountStateTracker holding this account's live
+        quotes. Wired by CopierApp; None in unit tests, which then record a
+        null quote rather than failing."""
+        if self.state_tracker_provider is None:
+            return None
+        return self.state_tracker_provider(account_id)
+
+    def _symbols_for(
+        self, org_id: int | None, account_id: int, routing: OrgRouting,
+        is_master: bool,
+    ) -> Mapping[int, SymbolInfo]:
+        """The symbol map belonging to THE ACCOUNT THE EVENT CAME FROM.
+
+        The master's map is the shared, mutated-in-place cache CopierApp
+        keeps. A slave's is its OWN: build_routing already loaded it into
+        SlaveConfig.symbols (keyed by name), so this only re-keys it by id
+        -- no database round trip.
+
+        This used to pass an empty map for every slave, so EVERY slave
+        execution row stored symbol = NULL: the instrument was missing from
+        exactly the rows that measure per-copy slippage, and no query over
+        `executions` could group a copy with the master trade it came from
+        without re-joining through mappings.
+
+        An account that resolves to no config yields {}, which
+        execution_row turns into a null name rather than dropping the row.
+        """
+        if is_master:
+            return self._master_symbols_by_org.get(org_id, {})
+        for slave in routing.slaves_by_org.get(org_id, []):
+            if slave.account_id == account_id:
+                return symbols_by_id(slave.symbols)
+        return {}
+
+    def _submit_execution(
+        self, org_id: int | None, account_id: int, evt, is_master: bool,
+        routing: OrgRouting,
+    ) -> None:
+        """Queue one `executions` row. Never raises: a capture failure must
+        not stop a copy."""
+        writer = getattr(self._repo, 'writer', None)
+        if writer is None:
+            return
+        try:
+            symbols = self._symbols_for(org_id, account_id, routing, is_master)
+            # A quote we do not hold is NULL, never 0: a zero bid/ask would
+            # read as a real price and silently poison every spread and
+            # slippage figure computed off this table.
+            quote = None
+            tracker = self._state_tracker_for(account_id)
+            symbol_id = evt.order.tradeData.symbolId
+            if tracker is not None and symbol_id:
+                quote = tracker.quote(symbol_id)
+            writer.submit('executions', execution_row(
+                evt, account_id=account_id, org_id=org_id,
+                is_master=is_master, symbols_by_id=symbols, quote=quote))
+        except Exception:
+            log.exception("execution capture failed for account %s", account_id)
 
     def _notify_positions_changed(self, org_id: int | None = None) -> None:
         """Invoke on_positions_changed; a callback failure must never break
@@ -317,9 +386,28 @@ class CopierService:
                 log.exception(
                     "master_event audit write failed (copy already dispatched)")
 
+        # The master trade's OWN economics -- price, volume, side, symbol,
+        # broker clock and the quote that was live at the time. The
+        # master_event log line above deliberately stays thin; this is the
+        # record. Queued, not written, so it costs the reactor nothing.
+        self._submit_execution(org_id, master_account_id, evt,
+                               is_master=True, routing=routing)
+
         # If normalization yielded no event, we're done
         if normalized is None:
             return
+
+        # Stamp the master half of the slippage measurement onto the copies.
+        # STRICTLY after the dispatch above: it is one indexed UPDATE, and
+        # nothing may sit between a master fill arriving and the slave
+        # orders reaching the wire.
+        if evt.deal.HasField('executionPrice') and evt.deal.positionId:
+            self._repo.record_master_fill(
+                org_id,
+                evt.deal.positionId,
+                evt.deal.executionPrice,
+                evt.deal.executionTimestamp or None,
+            )
 
         # Schedule pending fill alert if this is a pending fill
         if isinstance(normalized, MasterPendingFilled):
@@ -418,6 +506,11 @@ class CopierService:
                 org_id=org_id,
             )
             return
+
+        # This slave's own half of the trade, carrying ITS symbol and ITS
+        # fill -- the row the master's execution is compared against.
+        self._submit_execution(org_id, account_id, evt,
+                               is_master=False, routing=routing)
 
         execution_type = evt.executionType
 

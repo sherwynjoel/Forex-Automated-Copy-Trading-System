@@ -56,11 +56,13 @@ from copier.ctrader.client import CTraderClient, make_sdk_client
 from copier.ctrader.tokens import TokenStore
 from copier.ctrader.symbols import fetch_symbol_map, by_id as symbols_by_id
 from copier.db.repo import Repo
+from copier.db.writer import AsyncWriter
 from copier.domain.models import MANUAL_ORDER_LABEL, Side
 from copier.engine.service import CopierService
 from copier.engine.reconcile import Reconciler
 from copier.engine.routing import OrgRouting, RoutingCache, build_routing
 from copier.engine.state import AccountStateTracker, PositionSnapshot as StatePositionSnapshot
+from copier.engine.backfill import next_window, reached_history_bound, WEEK_MS
 from copier.engine.dispatch import Dispatcher, relative_protection, SendNotAttempted
 from copier.engine.throttle import TokenBucket
 from copier.engine.control import make_control_site
@@ -82,6 +84,10 @@ TOKEN_REFRESH_INTERVAL_S = 86400.0  # once per day
 # ~50-account target is ~10 s of queue every minute -- comfortably clear,
 # and it never touches the instant-write trade path.
 BALANCE_REFRESH_INTERVAL_S = 60.0
+
+# Intraday balance/equity series. portfolio_snapshots stays daily-close.
+BALANCE_SAMPLE_INTERVAL_S = 5 * 60
+
 RESYNC_INTERVAL_S = 60.0
 RESYNC_DEBOUNCE_S = 0.2
 
@@ -159,7 +165,27 @@ FLATTEN_SETTLE_S = 0.6
 # without waiting up to a day like the token-refresh cadence would.
 CUTOFF_REMINDER_DAYS = 2
 CUTOFF_REMINDER_INTERVAL_S = 3600.0
+# Daily. Migration 012 creates a year of partitions up front; this only has
+# to keep the horizon from shrinking.
+PARTITION_MAINTENANCE_INTERVAL_S = 24 * 60 * 60
 CONTROL_PORT = 8080
+# One account, one window per tick. Deliberately slow: the broker caps
+# DealList at a week and 500 rows, and the queued send path is 10 msg/s.
+DEAL_BACKFILL_INTERVAL_S = 30
+DEAL_BACKFILL_MAX_YEARS = int(os.environ.get("DEAL_BACKFILL_MAX_YEARS", "2"))
+# A window the broker answers with has_more is bisected and re-fetched
+# rather than skipped (advancing the watermark past it would lose those
+# deals forever). Floor and request budget so a pathologically dense
+# account cannot turn one tick into an unbounded fan-out: a week bisected
+# to one hour is 168 leaves, which needs far fewer than 64 requests unless
+# EVERY hour of it holds 500+ deals.
+DEAL_WINDOW_MIN_MS = 60 * 60 * 1000
+DEAL_WINDOW_MAX_FETCHES = 64
+# Row ceiling on the analytics read. Analytics runs SYNCHRONOUSLY on the
+# reactor connection (there is no pool on this base -- see the porting
+# spec's D1/D3), so an account with years of history must not be able to
+# stall every org's quotes and order sends on one unbounded fetch.
+ANALYTICS_ROW_LIMIT = 50_000
 _SIDE_BY_NAME = {"BUY": ProtoOATradeSide.BUY, "SELL": ProtoOATradeSide.SELL}
 # The domain Side, for helpers that reason about direction.
 _SIDE_BY_NAME_DOMAIN = {"BUY": Side.BUY, "SELL": Side.SELL}
@@ -254,6 +280,26 @@ class CopierApp:
         # Debounce keys: an org id, or None for the fleet-wide sweep.
         self._resync_requested: set = set()
         self._org_resync_in_flight: set = set()
+        # PER-ORG intraday balance-sampling clock (see
+        # _refresh_balances_body). A single process-wide float let one
+        # actively-trading org's fill-driven, org-scoped refresh consume
+        # the fleet's 5-minute slot, so every other org went unsampled.
+        self._last_balance_sample: dict[int, float] = {}
+        # Rotating start offset for the deal-backfill walk; see
+        # backfill_deals_once. Advanced every tick so no single account can
+        # hold the one-window-per-tick slot.
+        self._backfill_cursor = 0
+
+    @property
+    def writer(self):
+        """The repo's AsyncWriter, or None when nothing is attached.
+
+        Read through the repo rather than snapshotted in the ctor: boot()
+        attaches the writer before build_app() runs, but tests routinely
+        attach one to an app that already exists, and a stale None here
+        would report a healthy writer as absent on /health.
+        """
+        return getattr(self.repo, "writer", None)
 
     def reconciler_for(self, org_id: int) -> Reconciler:
         """The org's engine, or ValueError if it has none (no master)."""
@@ -292,6 +338,23 @@ class CopierApp:
         except Exception:
             log.exception("failed to resolve org for account %s", account_id)
             return None
+
+    def state_tracker_for_account(self, account_id: int):
+        """The state tracker for whichever org owns this account.
+
+        Wired onto service.state_tracker_provider so a captured execution
+        (see CopierService._submit_execution) can read the bid/ask that was
+        live on that org's connection at fill time.
+
+        Goes through routing_provider(), which on this base is a
+        RoutingCache: the snapshot it serves is at most one second old and
+        costs no database round trip, so this is cheap enough to sit on the
+        execution path.
+        """
+        org_id = self.routing_provider().org_by_account.get(account_id)
+        if org_id is None:
+            return None
+        return self.state_trackers.get(org_id)
 
     # ---------- client event wiring ----------
 
@@ -458,6 +521,23 @@ class CopierApp:
         except Exception:
             log.exception("refresh_balances: failed to load accounts")
             return
+
+        # The intraday balance/equity sample is gated PER ORG.
+        #
+        # A single process-wide clock starved every org but one, because
+        # this body is also called org-scoped: resync(org_id) ends with
+        # refresh_balances(org_id) (see below), and request_resync fires on
+        # every position change. Org A trading actively would land one of
+        # those fill-driven, A-only invocations on the 5-minute gate inside
+        # every window: the clock was stamped, the loop then `continue`d
+        # past orgs B..N, and B..N never got an intraday sample AT ALL.
+        # Gating per org is safe here in a way it was not with one clock --
+        # each org's gate is only ever opened and stamped by that org.
+        #
+        # routing_provider() is resolved lazily and at most once per pass.
+        now = time.monotonic()
+        routing = None
+
         for org_id, tracker in self.state_trackers.items():
             if tracker is None:
                 continue
@@ -488,6 +568,17 @@ class CopierApp:
                 log.exception("refresh_balances: broker request failed (org %s)", org_id)
                 continue
 
+            # Fetched once and shared by the daily snapshot write below and
+            # the intraday balance-sample write further down, so a failure
+            # in either write never leaves `snapshot` undefined for the
+            # other. Defaults to empty on failure so both writes below are
+            # no-ops rather than raising out of the per-org loop.
+            try:
+                snapshot = tracker.snapshot()
+            except Exception:
+                log.exception("refresh_balances: snapshot read failed (org %s)", org_id)
+                snapshot = {}
+
             # Daily portfolio snapshot: upsert each refreshed account under
             # today's UTC date -- the last write of a day wins, so yesterday's
             # rows hold yesterday's closing values (Overview's vs-yesterday
@@ -495,7 +586,6 @@ class CopierApp:
             # iterated so each desk's overview sums only its own snapshots.
             try:
                 today = datetime.utcnow().date()
-                snapshot = tracker.snapshot()
                 for account in org_accounts:
                     state = snapshot.get(account.account_id)
                     if state is None or state.get("balance") is None:
@@ -505,6 +595,41 @@ class CopierApp:
                         state.get("equity"), org_id=account.org_id)
             except Exception:
                 log.exception("refresh_balances: snapshot write failed (org %s)", org_id)
+
+            # Intraday balance/equity series, sampled every
+            # BALANCE_SAMPLE_INTERVAL_S rather than every poll.
+            # portfolio_snapshots above stays daily-close.
+            due = (now - self._last_balance_sample.get(org_id, 0.0)
+                   >= BALANCE_SAMPLE_INTERVAL_S)
+            if due:
+                try:
+                    # Inside the try, and stamped only after the writes
+                    # land: a routing_provider() or repo failure must not
+                    # burn this org's 5-minute slot as well as losing the
+                    # sample.
+                    if routing is None:
+                        routing = self.routing_provider()
+                    for account_id, snap in snapshot.items():
+                        self.repo.record_balance_sample(
+                            account_id,
+                            routing.org_by_account.get(account_id),
+                            snap.get("balance"),
+                            snap.get("equity"),
+                            # margin_used stays NULL: the state tracker parses
+                            # only ProtoOATrader.balance and derives equity
+                            # from it. The broker exposes usedMargin per
+                            # position, but PositionSnapshot does not carry it,
+                            # and threading a new field through the reconcile
+                            # path is trade-critical work this task should not
+                            # take on. The column exists so it can be
+                            # backfilled later without a migration.
+                            None,
+                            snap.get("open_pnl"),
+                        )
+                    self._last_balance_sample[org_id] = now
+                except Exception:
+                    log.exception(
+                        "refresh_balances: balance sample write failed (org %s)", org_id)
 
     def _maybe_learn_commission(self) -> None:
         """Re-read commission after a position change, at most every
@@ -846,6 +971,15 @@ class CopierApp:
         org_ids = [org_id] if org_id is not None else list(self.reconcilers.keys())
         sweeping = org_id is None
         all_items = []
+        # ONE routing snapshot for the whole pass, resolved lazily, and the
+        # slave symbol maps taken off it. build_routing ALREADY loaded each
+        # slave's symbol cache into SlaveConfig.symbols; calling
+        # load_symbol_cache(slave_id) again per slave would cost a SECOND
+        # full symbol-cache SELECT each (500-2000 rows), synchronously on
+        # the reactor, ~0.2s after a fill while the 10 msg/s send queue is
+        # still draining the fan-out.
+        routing = None
+        slave_symbols: dict[int, dict] = {}
         for oid in org_ids:
             reconciler = self.reconcilers.get(oid)
             if reconciler is None:
@@ -896,6 +1030,40 @@ class CopierApp:
                         )
                         for p in slave_pos
                     ])
+                # Persist too, so the Positions screen survives a restart
+                # instead of reading an empty AccountStateTracker until the
+                # next broker reconcile lands. Best-effort: a bookkeeping
+                # write must never cost the operator the resync itself.
+                try:
+                    if routing is None:
+                        routing = self.routing_provider()
+                        slave_symbols = {
+                            s.account_id: symbols_by_id(s.symbols)
+                            for slaves in routing.slaves_by_org.values()
+                            for s in slaves
+                        }
+                    master_org = routing.org_by_account.get(
+                        reconciler.master_account_id)
+                    self.repo.upsert_positions(
+                        reconciler.master_account_id, master_org,
+                        reconciler.master_positions,
+                        self.master_symbols_by_org.get(master_org, {}))
+                    # The broker's reconcile response is the truth about
+                    # what is open; anything else we hold is stale. One
+                    # UPDATE per account -- close_missing_positions is
+                    # per-account on this base.
+                    self.repo.close_missing_positions(
+                        reconciler.master_account_id,
+                        [p.position_id for p in reconciler.master_positions])
+                    for slave_id, slave_pos in reconciler.slave_positions.items():
+                        self.repo.upsert_positions(
+                            slave_id, routing.org_by_account.get(slave_id),
+                            slave_pos, slave_symbols.get(slave_id, {}))
+                        self.repo.close_missing_positions(
+                            slave_id, [p.position_id for p in slave_pos])
+                except Exception:
+                    log.exception(
+                        "resync: position persistence failed (org %s)", oid)
                 try:
                     yield tracker.ensure_spot_subscriptions()
                 except Exception:
@@ -1149,6 +1317,121 @@ class CopierApp:
                 )
             except Exception:
                 log.exception("failed to log token_refresh_failed event")
+
+    # ---------- deal backfill ----------
+
+    def _now_ms(self) -> int:
+        return int(time.time() * 1000)
+
+    @defer.inlineCallbacks
+    def _fetch_deal_window(self, client, account_id, symbols, from_ms, to_ms):
+        """Every deal in [from_ms, to_ms], bisecting around the broker's
+        500-row cap.
+
+        queries.deal_history caps a response at DEAL_LIST_MAX_ROWS and
+        reports the overflow as has_more. The caller advances the watermark
+        past the window afterwards and the walk NEVER revisits it, so a
+        window that reported has_more used to lose every deal past the 500th
+        permanently -- compute_analytics under-reporting closed_trades,
+        net_pnl, max_drawdown and the equity curve with `exhausted` eventually
+        True and `truncated` False, i.e. no signal at all.
+
+        Splitting and re-fetching is safe: deals are upserted on
+        (account_id, deal_id), so the overlap at each midpoint costs nothing.
+        In the ordinary case this is exactly one request.
+        """
+        pending = [(from_ms, to_ms)]
+        deals: list[dict] = []
+        fetches = 0
+        while pending:
+            lo, hi = pending.pop()
+            result = yield queries.deal_history(
+                client, account_id, symbols, lo, hi)
+            fetches += 1
+            deals.extend(result["deals"])
+            if not result.get("has_more"):
+                continue
+            if hi - lo <= DEAL_WINDOW_MIN_MS or fetches >= DEAL_WINDOW_MAX_FETCHES:
+                # >500 deals for one account inside an hour, or a week that
+                # needed more than 64 requests. Nothing further this API can
+                # do; say so loudly rather than lose rows in silence.
+                log.error(
+                    "deal backfill: account %s window [%s, %s] still reports "
+                    "has_more after %d requests; deals in it are unreachable "
+                    "through DealList", account_id, lo, hi, fetches)
+                continue
+            mid = (lo + hi) // 2
+            pending.append((lo, mid))
+            pending.append((mid, hi))
+        return deals
+
+    @defer.inlineCallbacks
+    def backfill_deals_once(self):
+        """Fetch ONE window for ONE account per tick, ROUND-ROBIN.
+
+        Deliberately one account/window per tick rather than a greedy loop
+        over every account: the broker caps DealList at a week and 500
+        rows, and the queued send path runs at 10 msg/s, so a fan-out here
+        would hammer it.
+
+        The starting offset rotates on every tick and advances whether or
+        not work was found. Scanning from index 0 and returning after the
+        first account with a window starved every other account
+        PERMANENTLY: next_window() hands an already-exhausted account a
+        forward catch-up window on essentially every tick (its
+        backfilled_to_ms was stamped with the PREVIOUS tick's now_ms, so it
+        is always strictly less than the current one), so account #1
+        consumed every tick forever while accounts #2..N never had a single
+        deal fetched -- get_backfill_state None, get_analytics zeros,
+        truncated=True, a blank Performance page for the life of the
+        deployment and across restarts, because the watermark is durable.
+
+        Accounts are sorted by id so the rotation is stable from tick to
+        tick; repo.load_accounts() has no ORDER BY.
+
+        Never raises or errbacks: this is a LoopingCall body, and a
+        LoopingCall whose Deferred fails stops looping permanently.
+        """
+        try:
+            accounts = sorted(self.repo.load_accounts(),
+                              key=lambda a: a.account_id)
+            if not accounts:
+                return
+            start = self._backfill_cursor % len(accounts)
+            self._backfill_cursor = start + 1
+            now_ms = self._now_ms()
+            for offset in range(len(accounts)):
+                acc = accounts[(start + offset) % len(accounts)]
+                state = self.repo.get_backfill_state(acc.account_id)
+                window = next_window(state, now_ms, DEAL_BACKFILL_MAX_YEARS)
+                if window is None:
+                    continue
+                from_ms, to_ms = window
+                # The base's own sharding-aware resolver: an org can mix
+                # demo and live accounts, and each shard has its own client.
+                client = self._client_for_account(acc)
+                if client is None:
+                    continue
+                symbols = symbols_by_id(
+                    self.repo.load_symbol_cache(acc.account_id))
+                deals = yield self._fetch_deal_window(
+                    client, acc.account_id, symbols, from_ms, to_ms)
+                self.repo.upsert_deals(acc.account_id, acc.org_id, deals)
+                # `exhausted` means "we walked back as far as we are going
+                # to", never "this window happened to be empty". A slave
+                # that has not been copied to in a week -- the common case
+                # -- used to be marked complete on tick 1, discarding its
+                # entire history while reporting truncated=False. Once set
+                # it stays set: the forward catch-up branch re-walks recent
+                # time and must not un-exhaust the account.
+                exhausted = bool(state and state.get("exhausted")) or \
+                    reached_history_bound(
+                        from_ms, now_ms, DEAL_BACKFILL_MAX_YEARS)
+                self.repo.set_backfill_state(
+                    acc.account_id, from_ms, to_ms, exhausted=exhausted)
+                return  # one window per tick
+        except Exception:
+            log.exception("deal backfill tick failed")
 
     # ---------- on-demand broker queries ----------
 
@@ -1926,31 +2209,63 @@ class CopierApp:
             ctx[0], account_id, position_id, ctx[1], from_ms, to_ms))
         return d
 
-    @defer.inlineCallbacks
-    def get_analytics(self, account_id: int, weeks: int = 4):
-        """Performance aggregation over the last `weeks` of deal history.
+    def get_analytics(self, account_id: int, weeks: int = 4) -> dict:
+        """Performance aggregation over the stored `deals` table.
 
-        cTrader caps each DealListReq at one week, so this loops windows and
-        dedupes by deal id (boundary timestamps can land in two windows).
-        Capped at 26 weeks = 26 broker round trips.
+        The old path fanned out to the broker one week at a time,
+        sequentially, bounded by a hard 26-week ceiling and a slow-command
+        timeout. From `deals` (the background backfill above) this is ONE
+        indexed query instead.
+
+        Stays synchronous on the reactor connection: there is no pool on
+        this base (porting spec D1/D2), so deferToThread would need a
+        connection per worker and would contend with the single-threaded
+        `Repo._connect()`. The bound is ANALYTICS_ROW_LIMIT instead --
+        retention is forever and `deals` projects ~400k rows/year, so an
+        unbounded fetch two years in would stall every org's quotes,
+        heartbeats and order sends at once.
+
+        `weeks == 0` means "all stored history": since_ms is None and no
+        clamp applies. Every other value keeps the pre-existing
+        max(1, min(weeks, 26)) clamp -- the api caller (routes/insights.py)
+        never sends 0, so it is unaffected.
+
+        `truncated` used to mean "the broker had more deals than we
+        fetched" (paging truncation). Read from the database that question
+        does not apply -- the new meaning is "the backfill has not yet
+        covered the requested window", from deal_backfill_state:
+          - no state row yet -> True (backfill has not started)
+          - state.exhausted -> False (we hold everything the broker has)
+          - otherwise -> True iff backfilled_from_ms is None or newer than
+            the window start (for weeks == 0 the window start is the
+            beginning of time, so this is True unless exhausted).
+        Without this, a freshly deployed system renders a near-empty
+        Performance page with no signal that backfill is still running,
+        which reads to the user as data loss.
         """
-        weeks = max(1, min(int(weeks), 26))
-        client, symbols = self._query_context(account_id)
-        now_ms = int(time.time() * 1000)
-        week_ms = 7 * 24 * 3600 * 1000
+        weeks = int(weeks)
+        if weeks == 0:
+            since_ms = None
+        else:
+            weeks = max(1, min(weeks, 26))
+            since_ms = self._now_ms() - weeks * WEEK_MS
 
-        by_deal_id: dict[int, dict] = {}
-        truncated = False
-        for i in range(weeks):
-            to_ms = now_ms - i * week_ms
-            from_ms = to_ms - week_ms
-            result = yield queries.deal_history(
-                client, account_id, symbols, from_ms, to_ms)
-            truncated = truncated or result["has_more"]
-            for deal in result["deals"]:
-                by_deal_id[deal["deal_id"]] = deal
+        deals = self.repo.load_deals(
+            account_id, since_ms, limit=ANALYTICS_ROW_LIMIT)
+        stats = compute_analytics(deals)
 
-        stats = compute_analytics(list(by_deal_id.values()))
+        state = self.repo.get_backfill_state(account_id)
+        if state is None:
+            truncated = True
+        elif state["exhausted"]:
+            truncated = False
+        elif state["backfilled_from_ms"] is None:
+            truncated = True
+        elif since_ms is None:
+            truncated = True
+        else:
+            truncated = state["backfilled_from_ms"] > since_ms
+
         return {**stats, "weeks": weeks, "truncated": truncated}
 
     # ---------- read models ----------
@@ -1967,7 +2282,18 @@ class CopierApp:
                 "copying_enabled": org.copying_enabled,
                 "dry_run": org.dry_run,
             })
-        return {"status": "ok", "orgs": orgs}
+        writer = self.writer
+        return {
+            "status": "ok",
+            "orgs": orgs,
+            # The async writer drops rather than blocks under overflow, so
+            # its health is the only place a silent loss of executions,
+            # position upserts and event logs becomes visible.
+            "db_writer": {
+                "healthy": writer.healthy if writer else None,
+                "dropped": writer.dropped if writer else 0,
+            },
+        }
 
     def get_ticks(self, org_id: int) -> dict:
         """Live quotes and per-account marks for one org: everything the
@@ -2153,6 +2479,40 @@ class CopierApp:
                     'copies': copies_for('master_order_id', order.order_id, symbol_name),
                 })
 
+        # A fresh process has no reconciler snapshot until the first resync
+        # lands: Reconciler.master_positions starts empty and is only filled
+        # in by reconcile_once() talking to the broker. Serve the last known
+        # positions from the database rather than an empty screen -- the
+        # next resync overwrites these (and drops 'stale') moments later.
+        # pnl_quote/current_price need a live quote we do not have before
+        # that resync, so they stay null rather than inventing a number.
+        if reconciler is not None and not master_positions:
+            for r in self.repo.load_open_positions(org_id):
+                if r['account_id'] != reconciler.master_account_id:
+                    continue
+                sym = slave_symbols(r['account_id']).get(r['symbol'])
+                master_positions.append({
+                    'position_id': r['position_id'],
+                    'account_id': r['account_id'],
+                    'symbol_id': sym.symbol_id if sym is not None else None,
+                    'symbol': r['symbol'],
+                    'side': r['side'],
+                    'volume': r['volume'],
+                    'volume_lots': lots(r['volume'],
+                                        sym.lot_size if sym is not None else None),
+                    'price': r['entry_price'],
+                    'digits': sym.digits if sym is not None else None,
+                    'commission_per_unit': None,
+                    'stop_loss': r['stop_loss'],
+                    'take_profit': r['take_profit'],
+                    'pnl_quote': None,
+                    'current_price': None,
+                    'label': None,
+                    'copies': copies_for('master_position_id', r['position_id'],
+                                         r['symbol']),
+                    'stale': True,
+                })
+
         return {
             "accounts": accounts_snapshot,
             "master_positions": master_positions,
@@ -2336,6 +2696,7 @@ def build_app(
     # order), so the position-change hook is attached here instead of via
     # its ctor: any fill/close/cancel refreshes /state within ~1s.
     service.on_positions_changed = app.request_resync
+    service.state_tracker_provider = app.state_tracker_for_account
 
     # Wire every push-event consumer to EVERY client (all shards, both
     # environments) -- slave shards must deliver execution events too, and any
@@ -2419,6 +2780,13 @@ def boot(config: BootConfig, reactor_) -> CopierApp:
     -- is exercised by tests with a fake reactor, not just by hand.
     """
     repo = Repo(config.postgres_dsn)
+    # The writer opens and owns its OWN connection (porting spec D2): the
+    # repo's single cached connection is documented single-threaded, and
+    # the writer batches on a daemon thread.
+    writer = AsyncWriter(config.postgres_dsn)
+    repo.writer = writer
+    writer.start()
+    repo.ensure_partitions()
     token_store = TokenStore(config.postgres_dsn, config.fernet_key)
     client_factory = make_client_factory(config)
 
@@ -2494,6 +2862,57 @@ def boot(config: BootConfig, reactor_) -> CopierApp:
             lambda f: log.error("commission refresh loop failed to start: %s", f))
 
     reactor_.callWhenRunning(_start_commission_loop)
+
+    def _maintain_partitions():
+        """Keep the monthly partition horizon from shrinking.
+
+        Runs INLINE on the reactor, not on a worker thread: there is no
+        connection pool on this base and `Repo._connect()` is explicitly
+        single-threaded (porting spec D1), so handing this to
+        deferToThread would put a second thread on the reactor's own
+        psycopg connection. The bound is instead the transaction-local
+        lock_timeout ensure_partitions() sets around each CREATE (see
+        Repo.PARTITION_LOCK_TIMEOUT): a partition that cannot get its
+        ACCESS EXCLUSIVE lock is skipped and retried tomorrow rather than
+        queueing -- and queueing is the real hazard, because Postgres
+        queues lock requests, so one CREATE blocked behind the nightly
+        pg_dump blocks every later reader behind itself.
+
+        Errors are swallowed rather than returned: a LoopingCall whose
+        Deferred fails stops looping permanently, and partition
+        maintenance is exactly the loop that must survive a bad night.
+        """
+        try:
+            repo.ensure_partitions()
+        except Exception:
+            log.exception("partition maintenance failed")
+
+    partition_call = task.LoopingCall(_maintain_partitions)
+    partition_call.clock = reactor_
+    app.partition_call = partition_call
+
+    def _start_partition_loop():
+        # now=False: boot() above already ran the first pass.
+        d = partition_call.start(PARTITION_MAINTENANCE_INTERVAL_S, now=False)
+        d.addErrback(lambda f: log.error(
+            "partition maintenance loop stopped: %s", f))
+
+    reactor_.callWhenRunning(_start_partition_loop)
+
+    deal_backfill_call = task.LoopingCall(app.backfill_deals_once)
+    deal_backfill_call.clock = reactor_
+    app.deal_backfill_call = deal_backfill_call
+
+    def _start_deal_backfill_loop():
+        d = deal_backfill_call.start(DEAL_BACKFILL_INTERVAL_S, now=False)
+        d.addErrback(lambda f: log.error("deal backfill loop stopped: %s", f))
+
+    reactor_.callWhenRunning(_start_deal_backfill_loop)
+
+    # Drain whatever the writer still holds before the process exits, so a
+    # clean restart loses nothing. Bounded: shutdown must not hang.
+    reactor_.addSystemEventTrigger(
+        'before', 'shutdown', writer.flush_and_stop)
 
     site = make_control_site(app)
     reactor_.listenTCP(CONTROL_PORT, site, interface=CONTROL_BIND_INTERFACE)
