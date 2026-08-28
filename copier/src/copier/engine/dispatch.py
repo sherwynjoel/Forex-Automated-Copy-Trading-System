@@ -422,7 +422,8 @@ class Dispatcher:
         # Send with retries
         self._send_with_retries(account_id, req, attempt=0)
 
-    def send_direct(self, account_id: int, req: message.Message) -> None:
+    def send_direct(self, account_id: int, req: message.Message,
+                    bucket=None) -> None:
         """Send an operator-initiated trade request, bypassing the copy gates.
 
         Deliberately NOT routed through dispatch(): the copying_enabled and
@@ -432,15 +433,25 @@ class Dispatcher:
         kill switch pauses copying first and then flattens through this very
         path.  Keeps the same throttle, retry ladder (SendNotAttempted only),
         and degraded bookkeeping as every copy send.
-        """
-        self._send_with_retries(account_id, req, attempt=0)
 
-    def _send_with_retries(self, account_id: int, req: message.Message, attempt: int) -> None:
+        `bucket` overrides the shared throttle for this send. The kill
+        switch passes its own, because the shared one is the wrong shape
+        for a flatten: TokenBucket starts FULL (throttle.py), so an idle
+        copier hands out its entire 40-token burst in a single reactor
+        turn. That is visible in the production logs as thirteen
+        BLOCKED_PAYLOAD_TYPE rejections inside one millisecond, followed by
+        rejections spaced 25ms apart -- the burst, then the 40/s drain. A
+        smaller burst is what stops the broker refusing the whole wave.
+        """
+        self._send_with_retries(account_id, req, attempt=0, bucket=bucket)
+
+    def _send_with_retries(self, account_id: int, req: message.Message, attempt: int,
+                           bucket=None) -> None:
         """Send a request with retry logic on failure."""
-        d = self._bucket.acquire()
+        d = (bucket if bucket is not None else self._bucket).acquire()
         d.addCallback(lambda _: self._send_for_account(account_id, req))
         d.addCallback(lambda _: self._on_send_success(account_id))
-        d.addErrback(lambda f: self._on_send_failure(f, account_id, req, attempt))
+        d.addErrback(lambda f: self._on_send_failure(f, account_id, req, attempt, bucket))
 
     def _on_send_success(self, account_id: int) -> None:
         """Handle successful send: clear a degraded account (N6).
@@ -474,7 +485,8 @@ class Dispatcher:
                 account_id=account_id,
             )
 
-    def _on_send_failure(self, failure, account_id: int, req: message.Message, attempt: int) -> None:
+    def _on_send_failure(self, failure, account_id: int, req: message.Message,
+                         attempt: int, bucket=None) -> None:
         """Handle send failure: retry only on SendNotAttempted; other failures mark degraded immediately.
 
         Contract: SendNotAttempted means the request never reached the wire (pre-wire failure,
@@ -488,12 +500,16 @@ class Dispatcher:
             # Safe to retry: request never left the wire
             if attempt < 3:  # 3 retries = 4 total attempts
                 retry_delay = RETRY_DELAYS[attempt]
+                # Retries stay on the SAME bucket: a flatten retry that
+                # fell back to the shared burst would reintroduce exactly
+                # the flood this bucket exists to avoid.
                 self._clock.callLater(
                     retry_delay,
                     self._send_with_retries,
                     account_id,
                     req,
-                    attempt + 1
+                    attempt + 1,
+                    bucket,
                 )
             else:
                 # 4th SendNotAttempted failure: mark account degraded

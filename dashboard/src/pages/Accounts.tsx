@@ -215,10 +215,21 @@ export default function Accounts() {
         body: JSON.stringify({ account_id: accountId }),
       })
       const summary = result.accounts[0]
+      const stillOpen = summary.positions_remaining?.length ?? 0
+      if (stillOpen > 0 || summary.error) {
+        // Not 'done'. The row must not go green over an account that is
+        // still carrying the position the operator asked to be rid of.
+        setFlattenStatus((prev) => ({ ...prev, [accountId]: 'error' }))
+        setError(
+          `Account ${account.trader_login}: closed ${summary.positions_closed}, but ` +
+          `${stillOpen} position${stillOpen === 1 ? '' : 's'} could not be closed. ` +
+          `You are still exposed — close ${stillOpen === 1 ? 'it' : 'them'} in the platform.`)
+        return
+      }
       setNotice(
         `Closed ${summary.positions_closed} position${summary.positions_closed === 1 ? '' : 's'} ` +
         `and cancelled ${summary.orders_cancelled} order${summary.orders_cancelled === 1 ? '' : 's'} ` +
-        `on account ${account.trader_login}.`)
+        `on account ${account.trader_login}. Verified flat.`)
       setFlattenStatus((prev) => ({ ...prev, [accountId]: 'done' }))
       window.setTimeout(() => {
         setFlattenStatus((prev) => {

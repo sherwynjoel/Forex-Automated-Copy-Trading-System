@@ -118,6 +118,42 @@ COMMISSION_LEARN_DEBOUNCE_S = 300.0
 # already-closed copy and lands in the per-intent error path -- log noise,
 # no money moved -- because slave mapping updates are not kill-switch-gated.
 CLOSE_ALL_RESUME_GRACE_S = 2.0
+# The kill switch closes, then CHECKS, then closes what is left. These bound
+# that loop.
+#
+# It used to count the close requests it SENT and report them as positions
+# closed. On 28 Aug an operator pressed it and was told 66 positions across
+# four accounts were closed; the broker had refused all 66 with
+# BLOCKED_PAYLOAD_TYPE and every one was still open. A kill switch that
+# reports success while the risk is still on is worse than one that fails
+# loudly, because the operator stops looking.
+#
+# Verifying is the only option available: ProtoOAClosePositionReq carries no
+# clientOrderId (it has three fields -- account, position, volume), and
+# ProtoOAErrorRes names only an account, never a position. So a refusal
+# cannot be attributed to the close that caused it. What CAN be known is
+# what is still open, and the only way to know it is to ask again.
+FLATTEN_ROUNDS = 3
+# The flatten's own throttle. Rate is half the shared bucket's and the burst
+# is a twentieth of it, both on purpose.
+#
+# TokenBucket starts full (throttle.py), so sending a flatten through the
+# shared 40-token bucket puts up to forty requests on the wire in ONE reactor
+# turn. The production logs show precisely that: thirteen
+# BLOCKED_PAYLOAD_TYPE rejections inside a single millisecond, then more at
+# 25ms intervals as the 40/s drain took over. Whatever BLOCKED_PAYLOAD_TYPE
+# turns out to mean -- the SDK ships no documentation for it, and cTrader has
+# a separate REQUEST_FREQUENCY_EXCEEDED code -- a wall of simultaneous
+# requests is what preceded it every time.
+#
+# Shared across the whole flatten rather than per account, so eleven accounts
+# closing at once cannot multiply into eleven times the wire rate.
+FLATTEN_RATE = 20.0
+FLATTEN_BURST = 4.0
+# Time for a round's closes to reach the broker and take effect before asking
+# what survived. Doubles per round: a broker refusing a burst needs longer,
+# not a faster retry.
+FLATTEN_SETTLE_S = 0.6
 # Admin-set account cutoffs: remind this many calendar days before the date.
 # The scan is one cheap SQL query, so hourly keeps the reminder prompt
 # without waiting up to a day like the token-refresh cadence would.
@@ -201,6 +237,10 @@ class CopierApp:
         # very first look -- the one that matters most, on an account
         # connected while the process was already running.
         self._last_commission_learn: float | None = None
+        # Built lazily on first use so an App constructed in a test without
+        # a clock still works; see FLATTEN_RATE for why it is separate from
+        # the shared throttle.
+        self._flatten_bucket = None
         # Required, not optional: reload() builds an engine with it the
         # moment an org acquires a master after boot, and a None here would
         # produce a Reconciler that cannot reach any client at all. Same
@@ -1519,7 +1559,12 @@ class CopierApp:
 
         if account_id is not None:
             self._require_account_in_org(org_id, int(account_id))
-            summary = yield self._flatten_account(int(account_id))
+            # Safely, like the org-wide path: an account that cannot be
+            # reached must come back as a summary saying so, not as a bare
+            # exception. The dashboard reads accounts[0] and now shows what
+            # was left open -- a 500 tells the operator only that something
+            # went wrong, not whether they are still carrying the position.
+            summary = yield self._flatten_account_safely(int(account_id))
             results = [summary]
             paused = False
         else:
@@ -1535,15 +1580,17 @@ class CopierApp:
                     a for a in self.repo.load_accounts()
                     if a.org_id == org_id and a.enabled and a.status != 'paused'
                 ]
-                for account in targets:
-                    try:
-                        summary = yield self._flatten_account(account.account_id)
-                    except Exception as e:
-                        log.error("close_all: flatten %s failed: %s", account.account_id, e)
-                        summary = {"account_id": account.account_id,
-                                   "positions_closed": 0, "orders_cancelled": 0,
-                                   "error": str(e)}
-                    results.append(summary)
+                # CONCURRENTLY, not one account after another. Each flatten
+                # opens with a reconcile round trip (~130ms), and serialising
+                # them meant the last account's closes did not reach the wire
+                # until well over a second after the operator pressed the
+                # button -- measured at 1.4s across 11 accounts, with the
+                # positions live throughout. The dispatcher's token bucket
+                # still paces the wire, so this does not send anything
+                # faster; it just stops each account waiting its turn to be
+                # asked.
+                results = yield defer.gatherResults(
+                    [self._flatten_account_safely(a.account_id) for a in targets])
             finally:
                 # Restore the org's prior copying state -- after a grace
                 # that lets in-flight master close executions arrive while
@@ -1609,41 +1656,168 @@ class CopierApp:
         except Exception:
             log.error("close_all: could not even log the failed restore for org %s", org_id)
 
+    def _flatten_bucket_for_sends(self):
+        """The flatten's dedicated throttle, created on first use."""
+        if self._flatten_bucket is None:
+            clock = self.clock
+            if clock is None:
+                from twisted.internet import reactor as clock
+            self._flatten_bucket = TokenBucket(
+                rate=FLATTEN_RATE, capacity=FLATTEN_BURST, clock=clock)
+        return self._flatten_bucket
+
+    def _flatten_account_safely(self, account_id: int) -> defer.Deferred:
+        """_flatten_account that reports a failure instead of raising it.
+
+        One account's broker refusing to talk must not abandon the other ten
+        -- and with the accounts running concurrently, a raised failure would
+        take the whole gatherResults down with it.
+        """
+        d = defer.maybeDeferred(self._flatten_account, account_id)
+
+        def _as_result(failure):
+            log.error("close_all: flatten %s failed: %s", account_id, failure.value)
+            return {"account_id": account_id, "positions_closed": 0,
+                    "orders_cancelled": 0, "positions_remaining": None,
+                    "orders_remaining": None, "rounds": 0,
+                    "error": str(failure.value)}
+
+        d.addErrback(_as_result)
+        return d
+
     @defer.inlineCallbacks
-    def _flatten_account(self, account_id: int):
-        """Close every open position and cancel every working order in one
-        account, from a FRESH broker snapshot (never this process's
-        mappings -- orphans and manual positions must die too)."""
-        client, _symbols = self._query_context(account_id)
+    def _reconcile_book(self, client, account_id: int):
+        """The account's open positions and working orders, from the broker.
+
+        A FRESH snapshot, never this process's mappings: orphans and
+        positions opened by hand in the platform must die too.
+        """
         req = ProtoOAReconcileReq()
         req.ctidTraderAccountId = account_id
         rec = queries.extract_or_raise((yield client.send(req)), "reconcile")
 
-        positions_closed = 0
-        for p in rec.position:
-            close_req = ProtoOAClosePositionReq()
-            close_req.ctidTraderAccountId = account_id
-            close_req.positionId = p.positionId
-            close_req.volume = p.tradeData.volume
-            self.dispatcher.send_direct(account_id, close_req)
-            positions_closed += 1
+        # This snapshot is the ONLY evidence the kill switch has, and a
+        # verdict built on another account's book would be worse than no
+        # verdict: an empty answer meant for a flat account would read as
+        # "verified flat" over a book that is still open. The SDK matches
+        # responses to requests by the id() of a Deferred, which is a reused
+        # memory address whose entry is dropped on timeout, so a mismatch is
+        # not impossible -- and the response says whose book it is, so there
+        # is no reason to take it on trust.
+        answered_for = getattr(rec, "ctidTraderAccountId", None)
+        if answered_for is not None and answered_for != account_id:
+            raise queries.QueryFailed(
+                f"reconcile for account {account_id} was answered with account "
+                f"{answered_for}'s book")
+        return list(rec.position), list(rec.order)
 
-        orders_cancelled = 0
-        for o in rec.order:
-            cancel_req = ProtoOACancelOrderReq()
-            cancel_req.ctidTraderAccountId = account_id
-            cancel_req.orderId = o.orderId
-            self.dispatcher.send_direct(account_id, cancel_req)
-            orders_cancelled += 1
+    @defer.inlineCallbacks
+    def _flatten_account(self, account_id: int):
+        """Close everything on one account, and VERIFY that it closed.
+
+        Sends closes, waits, asks the broker what survived, and sends again
+        for whatever did -- up to FLATTEN_ROUNDS times. The numbers returned
+        are then MEASURED (what was there minus what is left) rather than
+        assumed from the requests that went out.
+
+        This is the whole point of the change. The previous version counted
+        sends: it reported 66 positions closed across four accounts while the
+        broker had refused all 66 and every one was still open. Because a
+        refusal cannot be tied back to the close that caused it -- a close
+        request carries no correlator and the error names only an account --
+        counting sends can never be made honest. Asking again can.
+
+        Retries are not an optimisation here, they are the recovery: pressing
+        the button repeatedly is exactly what the operator had to do by hand,
+        and it worked, so the loop does it for them. What it still cannot
+        close it NAMES, so the failure is in front of the operator rather
+        than in a log.
+        """
+        client, _symbols = self._query_context(account_id)
+        clock = self.clock
+        if clock is None:
+            from twisted.internet import reactor as clock
+
+        first_positions: set[int] | None = None
+        first_orders: set[int] | None = None
+        open_positions: list[int] = []
+        open_orders: list[int] = []
+        rounds_used = 0
+
+        for attempt in range(FLATTEN_ROUNDS):
+            positions, orders = yield self._reconcile_book(client, account_id)
+            if first_positions is None:
+                first_positions = {p.positionId for p in positions}
+                first_orders = {o.orderId for o in orders}
+
+            open_positions = [p.positionId for p in positions]
+            open_orders = [o.orderId for o in orders]
+            if not positions and not orders:
+                break
+
+            rounds_used = attempt + 1
+            bucket = self._flatten_bucket_for_sends()
+            for p in positions:
+                close_req = ProtoOAClosePositionReq()
+                close_req.ctidTraderAccountId = account_id
+                close_req.positionId = p.positionId
+                close_req.volume = p.tradeData.volume
+                self.dispatcher.send_direct(account_id, close_req, bucket=bucket)
+            for o in orders:
+                cancel_req = ProtoOACancelOrderReq()
+                cancel_req.ctidTraderAccountId = account_id
+                cancel_req.orderId = o.orderId
+                self.dispatcher.send_direct(account_id, cancel_req, bucket=bucket)
+
+            yield task.deferLater(
+                clock, FLATTEN_SETTLE_S * (2 ** attempt), lambda: None)
+        else:
+            # The loop ran out having just sent a round, so the last thing
+            # known is what was open BEFORE it. Ask once more: the number
+            # reported has to be measured even when the news is bad.
+            positions, orders = yield self._reconcile_book(client, account_id)
+            open_positions = [p.positionId for p in positions]
+            open_orders = [o.orderId for o in orders]
+
+        # Counted against what was there to begin with, and only for what
+        # this call set out to close. A position opened DURING the flatten
+        # (a straggler master fill landing before copying paused) is still
+        # reported as open -- it is genuinely open -- but it never inflates
+        # the closed count.
+        first_positions = first_positions or set()
+        first_orders = first_orders or set()
+        still_open = first_positions & set(open_positions)
+        still_working = first_orders & set(open_orders)
+        positions_closed = len(first_positions) - len(still_open)
+        orders_cancelled = len(first_orders) - len(still_working)
+
+        summary = {
+            "account_id": account_id,
+            "positions_closed": positions_closed,
+            "orders_cancelled": orders_cancelled,
+            # Everything still open, whether this call had seen it before or
+            # not. The operator needs the book as it stands, not a diff.
+            "positions_remaining": open_positions,
+            "orders_remaining": open_orders,
+            "rounds": rounds_used,
+            "error": None,
+        }
+        if open_positions or open_orders:
+            summary["error"] = (
+                f"{len(open_positions)} position(s) and {len(open_orders)} "
+                f"order(s) still open after {rounds_used} attempt(s)")
 
         self.repo.log_event(
-            'control', 'warning',
-            {'action': 'kill_switch_flatten', 'positions_closed': positions_closed,
-             'orders_cancelled': orders_cancelled},
+            'control', 'error' if summary["error"] else 'warning',
+            {'action': 'kill_switch_flatten',
+             'positions_closed': positions_closed,
+             'orders_cancelled': orders_cancelled,
+             'positions_remaining': open_positions,
+             'orders_remaining': open_orders,
+             'rounds': rounds_used},
             account_id=account_id,
         )
-        return {"account_id": account_id, "positions_closed": positions_closed,
-                "orders_cancelled": orders_cancelled, "error": None}
+        return summary
 
     def _spot_for(self, account_id: int, symbol_name: str):
         """(bid, ask) for a symbol, resolved in the MASTER's namespace.

@@ -2590,3 +2590,216 @@ def test_the_startup_read_counts_towards_the_debounce(db_seeded, fernet_key):
     app.request_resync(ORG_A)
 
     assert calls == []
+
+
+def _make_broker_refuse_closes(server, accept_after=None):
+    """Model a broker that takes the close request and does nothing.
+
+    This is what production did: 66 ProtoOAClosePositionReq were sent, all
+    answered BLOCKED_PAYLOAD_TYPE, and every position stayed open -- while
+    the dashboard reported all 66 closed. The rejection carries no position
+    id, so the copier cannot see WHICH close failed, only that the position
+    is still there when it asks again.
+
+    accept_after=N refuses the first N closes and lets the rest through, so
+    a test can prove the retry recovers.
+    """
+    key = ProtoOAClosePositionReq().payloadType
+    original = server._handlers[key]
+    seen = []
+
+    def refusing(proto, msg):
+        req = ProtoOAClosePositionReq()
+        req.ParseFromString(msg.payload)
+        seen.append(req)
+        server.requests.append(req)      # it reached the broker...
+        if accept_after is not None and len(seen) > accept_after:
+            original(proto, msg)         # ...and this time it worked
+
+    server._handlers[key] = refusing
+    return seen
+
+
+@pytest_twisted.inlineCallbacks
+def test_a_flatten_the_broker_refuses_is_reported_as_a_failure(db, fernet_key, monkeypatch):
+    """The bug, exactly: sends were counted as closes.
+
+    On 28 Aug the operator was told 66 positions across four accounts had
+    been closed. The broker had refused all 66 and every one was still open.
+    The kill switch must never again report a position closed when it is not.
+    """
+    monkeypatch.setattr(main, "CLOSE_ALL_RESUME_GRACE_S", 0.05)
+    monkeypatch.setattr(main, "FLATTEN_SETTLE_S", 0.05)
+    org_a = seed_db(db, fernet_key)
+
+    server = FakeCTraderServer(auto_fill=True)
+    server.accounts = {MASTER_A: TOKEN_A, SLAVE_A1: TOKEN_A, SLAVE_A2: TOKEN_A}
+    _seed_broker_position(server, SLAVE_A1, 7001)
+    port = server.listen(real_reactor)
+
+    repo = Repo(db)
+    factory, created = make_real_client_factory(port)
+    app = main.build_app(repo, TokenStore(db, fernet_key), factory, shards=1)
+    try:
+        yield app.startup()
+        _make_broker_refuse_closes(server)
+
+        result = yield app.close_all(org_a, account_id=SLAVE_A1)
+
+        summary = result["accounts"][0]
+        assert summary["positions_closed"] == 0, (
+            "reported a position closed that the broker refused to close")
+        assert summary["positions_remaining"] == [7001]
+        assert summary["error"], "a flatten that closed nothing must say so"
+        # It kept trying rather than giving up after one wave.
+        assert len(_closes_for(server, SLAVE_A1)) >= main.FLATTEN_ROUNDS
+    finally:
+        for c in created:
+            c.stop()
+        server.shutdown()
+
+
+@pytest_twisted.inlineCallbacks
+def test_a_flatten_retries_what_the_first_wave_could_not_close(db, fernet_key, monkeypatch):
+    """Pressing the button again is what the operator had to do by hand, and
+    it worked. The loop does it for them."""
+    monkeypatch.setattr(main, "CLOSE_ALL_RESUME_GRACE_S", 0.05)
+    monkeypatch.setattr(main, "FLATTEN_SETTLE_S", 0.05)
+    org_a = seed_db(db, fernet_key)
+
+    server = FakeCTraderServer(auto_fill=True)
+    server.accounts = {MASTER_A: TOKEN_A, SLAVE_A1: TOKEN_A, SLAVE_A2: TOKEN_A}
+    _seed_broker_position(server, SLAVE_A1, 7001)
+    port = server.listen(real_reactor)
+
+    repo = Repo(db)
+    factory, created = make_real_client_factory(port)
+    app = main.build_app(repo, TokenStore(db, fernet_key), factory, shards=1)
+    try:
+        yield app.startup()
+        _make_broker_refuse_closes(server, accept_after=1)   # first wave refused
+
+        result = yield app.close_all(org_a, account_id=SLAVE_A1)
+
+        summary = result["accounts"][0]
+        assert summary["positions_closed"] == 1
+        assert summary["positions_remaining"] == []
+        assert summary["error"] is None
+        assert summary["rounds"] >= 2, "the recovery came from a second wave"
+    finally:
+        for c in created:
+            c.stop()
+        server.shutdown()
+
+
+@pytest_twisted.inlineCallbacks
+def test_a_clean_flatten_reports_verified_flat(db, fernet_key, monkeypatch):
+    """The happy path still reports the truth -- measured, not assumed."""
+    monkeypatch.setattr(main, "CLOSE_ALL_RESUME_GRACE_S", 0.05)
+    monkeypatch.setattr(main, "FLATTEN_SETTLE_S", 0.05)
+    org_a = seed_db(db, fernet_key)
+
+    server = FakeCTraderServer(auto_fill=True)
+    server.accounts = {MASTER_A: TOKEN_A, SLAVE_A1: TOKEN_A, SLAVE_A2: TOKEN_A}
+    _seed_broker_position(server, SLAVE_A1, 7001)
+    _seed_broker_position(server, SLAVE_A1, 7002)
+    port = server.listen(real_reactor)
+
+    repo = Repo(db)
+    factory, created = make_real_client_factory(port)
+    app = main.build_app(repo, TokenStore(db, fernet_key), factory, shards=1)
+    try:
+        yield app.startup()
+
+        result = yield app.close_all(org_a, account_id=SLAVE_A1)
+
+        summary = result["accounts"][0]
+        assert summary["positions_closed"] == 2
+        assert summary["positions_remaining"] == []
+        assert summary["error"] is None
+    finally:
+        for c in created:
+            c.stop()
+        server.shutdown()
+
+
+@pytest_twisted.inlineCallbacks
+def test_an_unreachable_account_is_reported_open_not_flat(db, fernet_key, monkeypatch):
+    """If the copier cannot even ask, it must not claim the account is flat.
+
+    Not knowing and being flat are different, and only one of them is safe
+    to walk away from.
+    """
+    monkeypatch.setattr(main, "CLOSE_ALL_RESUME_GRACE_S", 0.05)
+    org_a = seed_db(db, fernet_key)
+
+    server = FakeCTraderServer(auto_fill=True)
+    server.accounts = {MASTER_A: TOKEN_A, SLAVE_A1: TOKEN_A, SLAVE_A2: TOKEN_A}
+    port = server.listen(real_reactor)
+
+    repo = Repo(db)
+    factory, created = make_real_client_factory(port)
+    app = main.build_app(repo, TokenStore(db, fernet_key), factory, shards=1)
+    try:
+        yield app.startup()
+
+        def _no_answer(client, account_id):
+            return defer.fail(RuntimeError("reconcile failed: TIMEOUT_ERROR"))
+        monkeypatch.setattr(app, "_reconcile_book", _no_answer)
+
+        result = yield app.close_all(org_a, account_id=SLAVE_A1)
+
+        summary = result["accounts"][0]
+        assert summary["positions_closed"] == 0
+        assert summary["error"] and "TIMEOUT_ERROR" in summary["error"]
+        # Null, not [] -- an empty list would read as "verified flat".
+        assert summary["positions_remaining"] is None
+    finally:
+        for c in created:
+            c.stop()
+        server.shutdown()
+
+
+@pytest_twisted.inlineCallbacks
+def test_accounts_are_flattened_concurrently(db, fernet_key, monkeypatch):
+    """Serially, the last account's closes did not reach the wire until well
+    over a second after the button was pressed -- measured at 1.4s across 11
+    accounts in production, with every position live throughout."""
+    monkeypatch.setattr(main, "CLOSE_ALL_RESUME_GRACE_S", 0.05)
+    monkeypatch.setattr(main, "FLATTEN_SETTLE_S", 0.05)
+    org_a = seed_db(db, fernet_key)
+
+    server = FakeCTraderServer(auto_fill=True)
+    server.accounts = {MASTER_A: TOKEN_A, SLAVE_A1: TOKEN_A, SLAVE_A2: TOKEN_A}
+    for account_id, position_id in ((MASTER_A, 7001), (SLAVE_A1, 7002), (SLAVE_A2, 7003)):
+        _seed_broker_position(server, account_id, position_id)
+    port = server.listen(real_reactor)
+
+    repo = Repo(db)
+    factory, created = make_real_client_factory(port)
+    app = main.build_app(repo, TokenStore(db, fernet_key), factory, shards=1)
+    try:
+        yield app.startup()
+
+        timeline = []
+        original = app._flatten_account
+
+        def traced(account_id):
+            timeline.append(("start", account_id))
+            d = defer.maybeDeferred(original, account_id)
+            return d.addCallback(
+                lambda r: (timeline.append(("end", account_id)), r)[1])
+
+        monkeypatch.setattr(app, "_flatten_account", traced)
+
+        yield app.close_all(org_a)
+
+        starts = [i for i, (kind, _) in enumerate(timeline) if kind == "start"]
+        first_end = next(i for i, (kind, _) in enumerate(timeline) if kind == "end")
+        assert max(starts) < first_end, (
+            "accounts were flattened one after another; every account must be "
+            "asked before any of them has finished")
+    finally:
+        for c in created:
+            c.stop()
+        server.shutdown()

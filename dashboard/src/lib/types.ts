@@ -167,8 +167,19 @@ export interface TradeSymbol {
 
 export interface FlattenSummary {
   account_id: number
+  /** VERIFIED closed: what was open when the flatten began, minus what is
+   *  still open now. Not the number of close requests that were sent --
+   *  that was the old meaning, and it reported 66 positions closed on a run
+   *  where the broker refused all 66. */
   positions_closed: number
   orders_cancelled: number
+  /** Still open after every attempt. Empty means the account is flat; a
+   *  non-empty list is risk the operator is still carrying. Null when the
+   *  account could not be reached at all, which is not the same as flat. */
+  positions_remaining?: number[] | null
+  orders_remaining?: number[] | null
+  /** Close-and-verify rounds this account needed. */
+  rounds?: number
   error?: string | null
 }
 

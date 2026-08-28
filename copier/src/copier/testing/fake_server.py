@@ -1081,6 +1081,20 @@ class FakeCTraderServer:
         response.order.tradeData.tradeSide = model.ProtoOATradeSide.BUY
         self.broadcast(response)
 
+        if self.auto_fill:
+            # A cancelled order STOPS BEING WORKING, so it must leave the
+            # book the next reconcile reports -- exactly as a closed position
+            # leaves open_positions in _handle_close_position_req above.
+            # Without this the fake announced ORDER_CANCELLED and then kept
+            # handing the order back forever, so nothing that VERIFIES a
+            # cancellation against the broker could ever pass. The kill
+            # switch now does verify, and this is the difference between the
+            # double modelling a broker and modelling only the announcement.
+            self.pending_orders[req.ctidTraderAccountId] = [
+                o for o in self.pending_orders.get(req.ctidTraderAccountId, [])
+                if o["order_id"] != req.orderId
+            ]
+
     def _handle_heartbeat(self, proto, msg):
         """Handle heartbeat event."""
         self.heartbeats.append(time.time())

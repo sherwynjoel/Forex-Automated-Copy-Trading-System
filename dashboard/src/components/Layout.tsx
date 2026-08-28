@@ -143,14 +143,36 @@ function DeskStrip() {
       })
       const closed = result.accounts.reduce((n, a) => n + a.positions_closed, 0)
       const cancelled = result.accounts.reduce((n, a) => n + a.orders_cancelled, 0)
-      setNotice({
-        kind: 'notice',
-        text:
-          `Closed ${closed} position${closed === 1 ? '' : 's'} and cancelled ` +
-          `${cancelled} order${cancelled === 1 ? '' : 's'} across ` +
-          `${result.accounts.length} account${result.accounts.length === 1 ? '' : 's'}. ` +
-          (result.paused ? 'Copying is stopped.' : 'Copying is still running.'),
-      })
+      // Anything the copier could not close, or could not even check. Both
+      // are risk the operator is still carrying, and both used to be
+      // reported as success -- the button showed a tick over four accounts
+      // whose every close the broker had refused.
+      const stuck = result.accounts.filter(
+        (a) => (a.positions_remaining?.length ?? 0) > 0 ||
+               (a.orders_remaining?.length ?? 0) > 0 || a.error)
+      const copyState = result.paused ? 'Copying is stopped.' : 'Copying is still running.'
+      if (stuck.length > 0) {
+        const stillOpen = stuck.reduce(
+          (n, a) => n + (a.positions_remaining?.length ?? 0), 0)
+        setNotice({
+          kind: 'error',
+          text:
+            `Closed ${closed} position${closed === 1 ? '' : 's'}, but ` +
+            `${stillOpen > 0 ? `${stillOpen} ` : ''}position${stillOpen === 1 ? '' : 's'} ` +
+            `could not be closed on account${stuck.length === 1 ? '' : 's'} ` +
+            `${stuck.map((a) => a.account_id).join(', ')}. ` +
+            `You are still exposed there — close them in the platform. ${copyState}`,
+        })
+      } else {
+        setNotice({
+          kind: 'notice',
+          text:
+            `Closed ${closed} position${closed === 1 ? '' : 's'} and cancelled ` +
+            `${cancelled} order${cancelled === 1 ? '' : 's'} across ` +
+            `${result.accounts.length} account${result.accounts.length === 1 ? '' : 's'}. ` +
+            `Every account verified flat. ${copyState}`,
+        })
+      }
       setDialogOpen(false)
       await refresh()
     } catch (err) {
