@@ -485,9 +485,19 @@ class CopierApp:
             try:
                 history = yield self.get_deal_history(
                     account.account_id, from_ms, to_ms)
+            except queries.QueryFailed as exc:
+                # The broker declining history for one account is an
+                # expected, non-actionable answer -- a demo account with
+                # none, a grant without the right -- and it is already
+                # handled: the rate stays unknown and protection behaves
+                # exactly as it did before. One line, not a traceback
+                # every six hours for the life of the process.
+                log.warning("commission refresh: %s (account %s)",
+                            exc, account.account_id)
+                continue
             except Exception:
-                # One master's broker refusing history must not stop the
-                # others, and must not stop the loop.
+                # One master's broker failing must not stop the others,
+                # and must not stop the loop.
                 log.exception("commission refresh: deal history failed (account %s)",
                               account.account_id)
                 continue
