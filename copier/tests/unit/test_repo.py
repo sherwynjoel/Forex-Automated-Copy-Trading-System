@@ -871,3 +871,46 @@ class TestConnectionReuse:
         repo.load_symbol_cache(100)
         repo.log_event("control", "info", {"action": "burst"}, account_id=100)
         assert probes["n"] == 0
+
+
+def test_commission_rates_roundtrip(db):
+    """What the broker charged, stored and read back per symbol."""
+    repo = Repo(db)
+
+    repo.save_commission_rates(100, {41: (0.28, 3), 1: (0.006, 12)})
+
+    assert repo.load_commission_rates(100) == {41: 0.28, 1: 0.006}
+
+
+def test_commission_rates_upsert_keeps_symbols_absent_from_the_batch(db):
+    """A refresh reads a bounded window, so absence is not deletion.
+
+    A symbol traded once and not since falls out of the seven-day window
+    every later refresh. Replacing the account's set would discard that
+    rate and leave the operator's next stop on it uncorrected -- an old
+    observation of a real charge beats none.
+    """
+    repo = Repo(db)
+    repo.save_commission_rates(100, {41: (0.28, 1), 1: (0.006, 1)})
+
+    # A later refresh sees only gold, with a revised rate.
+    repo.save_commission_rates(100, {41: (0.30, 4)})
+
+    assert repo.load_commission_rates(100) == {41: 0.30, 1: 0.006}
+
+
+def test_commission_rates_are_kept_per_account(db):
+    """Commission is a term of THIS account's agreement, not the symbol's."""
+    repo = Repo(db)
+    repo.save_commission_rates(100, {41: (0.28, 1)})
+    repo.save_commission_rates(101, {41: (0.14, 1)})
+
+    assert repo.load_commission_rates(100) == {41: 0.28}
+    assert repo.load_commission_rates(101) == {41: 0.14}
+
+
+def test_saving_nothing_is_not_an_error(db):
+    """No complete round trip in the window is the common case at boot."""
+    repo = Repo(db)
+    repo.save_commission_rates(100, {})
+    assert repo.load_commission_rates(100) == {}

@@ -160,6 +160,9 @@ export interface TradeSymbol {
   /** Protocol units per 1.00 lot; needed to price a money-denominated
    *  stop or target. Absent on older responses. */
   lot_size?: number | null
+  /** Round-trip commission on one unit, learned from this account's own
+   *  closed trades. Null means never observed -- adjust nothing. */
+  commission_per_unit?: number | null
 }
 
 export interface FlattenSummary {
@@ -262,6 +265,9 @@ export interface MasterPosition {
   account_id: number
   /** Decimals this symbol is quoted to; a price with more is refused. */
   digits?: number | null
+  /** Round-trip commission on one unit, learned from this account's own
+   *  closed trades. Null means never observed -- adjust nothing. */
+  commission_per_unit?: number | null
   stop_loss?: number | null
   take_profit?: number | null
   pnl_quote?: number | null

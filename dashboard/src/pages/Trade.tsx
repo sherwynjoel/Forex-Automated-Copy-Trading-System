@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { orgApi } from '../lib/api'
-import { unitsFor, priceForAmount, quoteCurrencyOf } from '../lib/protection'
+import { unitsFor, priceForAmount, quoteCurrencyOf, feeFor } from '../lib/protection'
 import { actionBurst } from '../lib/refresh'
 import { useOrg } from '../lib/org'
 import { can } from '../lib/roles'
@@ -317,13 +317,31 @@ export default function Trade() {
   const protectionUnits = unitsFor(
     numOrNull(ticket.volumeLots) ?? 0, selectedSymbol?.lot_size)
 
+  // What the broker will take on the round trip, learned from this
+  // account's own closed trades. Zero when the symbol has never been
+  // traded here, which leaves the sum exactly as it was.
+  const protectionFee = feeFor(protectionUnits, selectedSymbol?.commission_per_unit)
+
   const resolveProtection = (raw: string, kind: 'tp' | 'sl'): number | null => {
     const value = numOrNull(raw)
     if (value == null) return null
     if (ticket.protectionMode === 'price') return value
     if (expectedFill == null) return null
     return priceForAmount(ticket.side, kind, expectedFill, value, protectionUnits,
-                          selectedSymbol?.digits)
+                          selectedSymbol?.digits, protectionFee)
+  }
+
+  /** Why an amount could not become a price, in the operator's terms. */
+  const amountHint = (raw: string, kind: 'tp' | 'sl'): string => {
+    const value = numOrNull(raw)
+    // A stop under the commission is not tight, it is unreachable: the
+    // position is already down by the fee the moment it opens. Saying so
+    // beats "cannot price this yet", which reads like a loading state.
+    if (kind === 'sl' && protectionFee > 0 && value != null && value > 0
+        && value <= protectionFee) {
+      return `under the ${protectionFee.toFixed(2)} commission`
+    }
+    return 'cannot price this yet'
   }
 
   const resolvedStopLoss = resolveProtection(ticket.stopLoss, 'sl')
@@ -701,7 +719,7 @@ export default function Trade() {
                 <p className="mt-1 text-xs text-ink-faint">
                   {resolvedStopLoss != null
                     ? <>exits at <span className="num text-ink-soft">{resolvedStopLoss.toFixed(priceDigits)}</span></>
-                    : 'cannot price this yet'}
+                    : amountHint(ticket.stopLoss, 'sl')}
                 </p>
               )}
             </div>
@@ -717,7 +735,7 @@ export default function Trade() {
                 <p className="mt-1 text-xs text-ink-faint">
                   {resolvedTakeProfit != null
                     ? <>exits at <span className="num text-ink-soft">{resolvedTakeProfit.toFixed(priceDigits)}</span></>
-                    : 'cannot price this yet'}
+                    : amountHint(ticket.takeProfit, 'tp')}
                 </p>
               )}
             </div>
@@ -728,6 +746,12 @@ export default function Trade() {
               Closes when the position is that much in profit or loss
               {quoteCurrency ? `, in ${quoteCurrency}` : ''}. Worked out from
               your volume, so it moves with the size you trade.
+              {protectionFee > 0 && (
+                <> Commission of{' '}
+                  <span className="num">{protectionFee.toFixed(2)}</span> is
+                  allowed for, so the figure you type is what reaches the
+                  account.</>
+              )}
             </p>
           )}
 

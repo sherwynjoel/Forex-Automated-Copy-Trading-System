@@ -364,8 +364,13 @@ def create_accounts_router() -> APIRouter:
         require_account_in_org(conn, ctx.org_id, account_id)
 
         rows = conn.execute(
-            """SELECT name, symbol_id, digits, lot_size, min_volume, step_volume
-               FROM symbol_cache WHERE account_id = %s ORDER BY name""",
+            """SELECT c.name, c.symbol_id, c.digits, c.lot_size,
+                      c.min_volume, c.step_volume, k.per_unit
+               FROM symbol_cache c
+               LEFT JOIN symbol_commission k
+                      ON k.account_id = c.account_id
+                     AND k.symbol_id = c.symbol_id
+               WHERE c.account_id = %s ORDER BY c.name""",
             (account_id,),
         ).fetchall()
         return [
@@ -380,6 +385,13 @@ def create_accounts_router() -> APIRouter:
                 # a price: profit = price_move * (lots * lot_size / 100), so
                 # without the contract size that sum cannot be inverted.
                 "lot_size": r[3],
+                # Round-trip commission on ONE unit, learned from this
+                # account's own closed trades. Inverting the P&L formula
+                # gives a GROSS amount, and the broker takes its cut out of
+                # that, so a ticket asking for "$1.50" needs this to place
+                # the target where $1.50 actually arrives. NULL means never
+                # observed -- adjust nothing rather than assume free.
+                "commission_per_unit": float(r[6]) if r[6] is not None else None,
             }
             for r in rows
         ]

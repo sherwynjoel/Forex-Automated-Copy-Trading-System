@@ -26,15 +26,55 @@ export function unitsFor(lots: number, lotSize: number | null | undefined): numb
 }
 
 /**
- * The price at which an open position is `amount` in profit (or loss).
+ * Round-trip commission on `units`, or 0 when it is not known.
+ *
+ * Zero is the honest unknown: it leaves the arithmetic exactly where it
+ * has always been, so a symbol the account has never traded behaves as it
+ * did yesterday rather than moving on a guess.
+ */
+export function feeFor(
+  units: number | null | undefined,
+  perUnit: number | null | undefined,
+): number {
+  if (units == null || perUnit == null) return 0
+  if (!Number.isFinite(units) || !Number.isFinite(perUnit)) return 0
+  if (units <= 0 || perUnit <= 0) return 0
+  return perUnit * units
+}
+
+/**
+ * The price at which an open position nets `amount`, after commission.
+ *
+ * THE AMOUNT IS WHAT ARRIVES, not what the price move is worth. Those are
+ * different numbers and the gap is not small: a $1.50 target on 0.01 lots
+ * of gold paid $1.26, because inverting the P&L formula gives GROSS profit
+ * and the broker then takes its cut out of it. Fixed per lot, the error is
+ * invisible on a big trade and a fifth of a small one.
+ *
+ * The two sides correct in OPPOSITE directions, which is the whole subtlety:
+ *
+ *   TAKE PROFIT -- commission is subtracted from the win, so the move must
+ *   be worth amount + fee. The target sits FURTHER from entry.
+ *
+ *   STOP LOSS -- commission is added to the loss, so the move may only be
+ *   worth amount - fee. The stop sits CLOSER to entry.
+ *
+ * Getting that inversion backwards would widen every stop by twice the
+ * commission instead of tightening it, which is why both directions are
+ * pinned by tests.
  *
  * @param side      BUY or SELL
  * @param kind      'tp' for the winning side, 'sl' for the losing side
  * @param entry     the price the order is expected to fill at
- * @param amount    money in the symbol's quote currency, always positive
+ * @param amount    money in the symbol's quote currency, always positive,
+ *                  understood as NET of commission
  * @param units     from unitsFor()
  * @param digits    the symbol's quoted decimal places
- * @returns the price, or null when it cannot be computed
+ * @param fee       round-trip commission from feeFor(); 0 or omitted keeps
+ *                  the old gross behaviour
+ * @returns the price, or null when it cannot be computed -- including a
+ *          stop smaller than the commission it would have to absorb, which
+ *          is not a tight stop but an impossible one
  */
 export function priceForAmount(
   side: 'BUY' | 'SELL',
@@ -43,11 +83,21 @@ export function priceForAmount(
   amount: number,
   units: number | null,
   digits?: number | null,
+  fee?: number | null,
 ): number | null {
   if (units == null || !Number.isFinite(entry) || entry <= 0) return null
   if (!Number.isFinite(amount) || amount <= 0) return null
 
-  const move = amount / units
+  const cost = fee != null && Number.isFinite(fee) && fee > 0 ? fee : 0
+  // What the PRICE has to be worth for `amount` to survive the commission.
+  const gross = kind === 'tp' ? amount + cost : amount - cost
+  // A stop at or under the commission cannot exist: the position is
+  // already down by the fee the moment it opens, so no price closes it for
+  // less. Refusing is the only honest answer -- silently widening it to
+  // the fee would lose the operator more than they asked to risk.
+  if (!(gross > 0)) return null
+
+  const move = gross / units
   // A BUY wins as price rises and loses as it falls; a SELL is the mirror.
   const up = (side === 'BUY') === (kind === 'tp')
   const price = up ? entry + move : entry - move

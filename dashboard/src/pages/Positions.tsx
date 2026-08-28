@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { ApiState, MasterPosition, PendingOrder, PositionCopy, DriftItem } from '../lib/types'
 import { orgApi } from '../lib/api'
-import { unitsFromVolume, priceForAmount, quoteCurrencyOf } from '../lib/protection'
+import { unitsFromVolume, priceForAmount, quoteCurrencyOf, feeFor } from '../lib/protection'
 import { useOrg } from '../lib/org'
 import Banner from '../components/Banner'
 import { can } from '../lib/roles'
@@ -103,6 +103,10 @@ export default function Positions() {
   // needs nothing beyond the position itself.
   const amendUnits = unitsFromVolume(editing?.volume)
   const amendCurrency = quoteCurrencyOf(editing?.symbol)
+  // The round trip the broker will charge on THIS position, learned from
+  // the master's own closed trades. Zero when never observed, which leaves
+  // the arithmetic exactly where it was.
+  const amendFee = feeFor(amendUnits, editing?.commission_per_unit)
 
   /**
    * The PRICE a draft field means, whichever way it was typed.
@@ -120,7 +124,19 @@ export default function Positions() {
     if (editing?.price == null) return null
     return priceForAmount(
       editing.side === 'SELL' ? 'SELL' : 'BUY', kind, editing.price, value,
-      amendUnits, editing.digits)
+      amendUnits, editing.digits, amendFee)
+  }
+
+  /** Why an amount could not become a price, in the operator's terms. */
+  const amountHint = (raw: string, kind: 'tp' | 'sl'): string => {
+    const value = Number(raw.trim())
+    // A stop under the commission is unreachable, not tight: the position
+    // is already down by the fee. Name the number rather than shrug.
+    if (kind === 'sl' && amendFee > 0 && Number.isFinite(value) && value > 0
+        && value <= amendFee) {
+      return `under the ${amendFee.toFixed(2)} commission`
+    }
+    return 'cannot price this'
   }
 
   // Judged against the live mark, falling back to the entry price.
@@ -394,7 +410,7 @@ export default function Positions() {
               <p className="mt-1 text-xs text-ink-faint">
                 {draftPrice(slDraft, 'sl') != null
                   ? <>exits at <span className="num text-ink-soft">{draftPrice(slDraft, 'sl')}</span></>
-                  : 'cannot price this'}
+                  : amountHint(slDraft, 'sl')}
               </p>
             )}
           </div>
@@ -413,7 +429,7 @@ export default function Positions() {
               <p className="mt-1 text-xs text-ink-faint">
                 {draftPrice(tpDraft, 'tp') != null
                   ? <>exits at <span className="num text-ink-soft">{draftPrice(tpDraft, 'tp')}</span></>
-                  : 'cannot price this'}
+                  : amountHint(tpDraft, 'tp')}
               </p>
             )}
           </div>
@@ -423,6 +439,11 @@ export default function Positions() {
             Measured from this position&rsquo;s entry at{' '}
             <span className="num">{editing?.price}</span> and its size, so it
             closes when the position is that much up or down.
+            {amendFee > 0 && (
+              <> Commission of{' '}
+                <span className="num">{amendFee.toFixed(2)}</span> is allowed
+                for, so the figure you type is what reaches the account.</>
+            )}
           </p>
         )}
         <p className="text-xs text-ink-faint">

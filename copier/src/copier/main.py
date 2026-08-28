@@ -66,6 +66,7 @@ from copier.engine.throttle import TokenBucket
 from copier.engine.control import make_control_site
 from copier.engine import queries
 from copier.engine.analytics import compute_analytics
+from copier.engine.commission import round_trip_rates
 
 log = logging.getLogger(__name__)
 
@@ -83,6 +84,16 @@ TOKEN_REFRESH_INTERVAL_S = 86400.0  # once per day
 BALANCE_REFRESH_INTERVAL_S = 60.0
 RESYNC_INTERVAL_S = 60.0
 RESYNC_DEBOUNCE_S = 0.2
+
+# How often to re-derive each master's real commission from its own closed
+# trades, and how far back to look. Commission is a term of the account's
+# agreement with the broker: it changes when that agreement does, which is
+# to say almost never, so six hours is frequent enough to notice and rare
+# enough to be invisible on the wire. The window is SEVEN DAYS because
+# ProtoOADealListReq will not serve more than a week per request -- the
+# same limit the History page states to the operator.
+COMMISSION_REFRESH_INTERVAL_S = 21600.0
+COMMISSION_HISTORY_DAYS = 7
 
 # How long the org-wide close_all keeps copying transiently paused AFTER the
 # flatten, so the master's close executions drain without fanning out as
@@ -426,6 +437,71 @@ class CopierApp:
                         state.get("equity"), org_id=account.org_id)
             except Exception:
                 log.exception("refresh_balances: snapshot write failed (org %s)", org_id)
+
+    def refresh_commission_rates(self) -> defer.Deferred:
+        """Re-derive every master's real commission from its own trades.
+
+        A money-denominated stop inverts the P&L formula, which yields
+        GROSS profit; the broker's commission then comes out of it, so a
+        "$1.50" target paid $1.26 and a "$1.50" stop lost $1.78. Correcting
+        that needs the commission, and the only trustworthy source is the
+        account's own history -- see engine/commission.py for why the
+        symbol record cannot be read instead.
+
+        MASTERS ONLY, deliberately. The operator sets the amount on the
+        master and every copy mirrors the resulting PRICE, so the master's
+        rate is the one the arithmetic uses. Deriving it for all fifty
+        accounts would put fifty ProtoOADealListReq on the wire to answer a
+        question nothing asks.
+
+        Never raises or errbacks: it is a LoopingCall body, and a
+        LoopingCall whose Deferred fails stops looping permanently.
+        """
+        d = defer.maybeDeferred(self._refresh_commission_rates_body)
+        d.addErrback(lambda f: log.error("commission refresh: unexpected failure: %s", f))
+        return d
+
+    @defer.inlineCallbacks
+    def _refresh_commission_rates_body(self):
+        try:
+            accounts = self.repo.load_accounts()
+        except Exception:
+            log.exception("commission refresh: failed to load accounts")
+            return
+        masters = [a for a in accounts if a.role == 'master' and a.enabled]
+        if not masters:
+            return
+
+        to_ms = int(time.time() * 1000)
+        from_ms = to_ms - int(COMMISSION_HISTORY_DAYS * 86400 * 1000)
+        for account in masters:
+            try:
+                history = yield self.get_deal_history(
+                    account.account_id, from_ms, to_ms)
+            except Exception:
+                # One master's broker refusing history must not stop the
+                # others, and must not stop the loop.
+                log.exception("commission refresh: deal history failed (account %s)",
+                              account.account_id)
+                continue
+
+            rates = round_trip_rates(history.get("deals") or [])
+            if not rates:
+                # No complete round trip in the window. Nothing is written,
+                # so any rate already learned stays in force.
+                continue
+            try:
+                self.repo.save_commission_rates(account.account_id, rates)
+            except Exception:
+                log.exception("commission refresh: save failed (account %s)",
+                              account.account_id)
+                continue
+            log.info(
+                "commission refresh: account %s learned %d symbol rate(s): %s",
+                account.account_id, len(rates),
+                ", ".join(f"symbol {sid}={per_unit:.6g}/unit over {n} trade(s)"
+                          for sid, (per_unit, n) in sorted(rates.items())),
+            )
 
     @defer.inlineCallbacks
     def _connect_and_authorize(self, accounts):
@@ -1749,6 +1825,20 @@ class CopierApp:
                 master_pnl_by_position[tracked['position_id']] = tracked.get('pnl_quote')
                 master_px_by_position[tracked['position_id']] = tracked.get('current_price')
 
+            # What the broker charges the MASTER, learned from its own
+            # closed trades (engine/commission.py). The amend dialog turns
+            # a money amount into a price and has to allow for it, or a
+            # "$1.50 stop" loses $1.50 plus the commission.
+            try:
+                commission_rates = self.repo.load_commission_rates(
+                    reconciler.master_account_id)
+            except Exception:
+                # A rate we cannot read is a rate we do not have, which the
+                # dashboard already handles by not adjusting. Never let it
+                # cost the operator the Positions screen.
+                log.exception("state: could not load commission rates")
+                commission_rates = {}
+
             for pos in reconciler.master_positions:
                 sym = master_symbol(pos.symbol_id)
                 symbol_name = sym.name if sym is not None else None
@@ -1767,6 +1857,10 @@ class CopierApp:
                     # carrying more than the broker quotes is refused
                     # outright, so anything computing one needs this.
                     'digits': sym.digits if sym is not None else None,
+                    # Round-trip commission on ONE unit (protocol volume /
+                    # 100). None means never observed, and the caller must
+                    # then adjust nothing rather than assume free.
+                    'commission_per_unit': commission_rates.get(pos.symbol_id),
                     'stop_loss': pos.stop_loss,
                     'take_profit': pos.take_profit,
                     'pnl_quote': master_pnl_by_position.get(pos.position_id),
@@ -2115,6 +2209,23 @@ def boot(config: BootConfig, reactor_) -> CopierApp:
         start_d.addErrback(lambda f: log.error("cutoff reminder loop failed to start: %s", f))
 
     reactor_.callWhenRunning(_start_cutoff_reminder_loop)
+
+    # What the broker really charges, so a money-denominated stop can be
+    # net of it instead of gross.
+    commission_refresh_call = task.LoopingCall(app.refresh_commission_rates)
+    commission_refresh_call.clock = reactor_
+    app.commission_refresh_call = commission_refresh_call
+
+    def _start_commission_loop():
+        # now=True: the rate is read from the database on every amend, so a
+        # process that boots without one leaves protection uncorrected
+        # until the first interval elapses. One deal-history request per
+        # master at boot is a small price for being right immediately.
+        start_d = commission_refresh_call.start(COMMISSION_REFRESH_INTERVAL_S, now=True)
+        start_d.addErrback(
+            lambda f: log.error("commission refresh loop failed to start: %s", f))
+
+    reactor_.callWhenRunning(_start_commission_loop)
 
     site = make_control_site(app)
     reactor_.listenTCP(CONTROL_PORT, site, interface=CONTROL_BIND_INTERFACE)

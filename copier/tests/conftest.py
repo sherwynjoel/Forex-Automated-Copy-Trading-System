@@ -39,7 +39,7 @@ def db(database):
     with psycopg.connect(database, autocommit=True) as conn:
         conn.execute(
             "TRUNCATE events, portfolio_snapshots, mappings, symbol_cache, "
-            "accounts, ctid_connections, "
+            "symbol_commission, accounts, ctid_connections, "
             "org_invites, org_memberships, orgs, users "
             "RESTART IDENTITY CASCADE"
         )

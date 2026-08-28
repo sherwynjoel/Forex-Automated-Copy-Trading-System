@@ -551,6 +551,48 @@ class Repo:
             for row in rows
         }
 
+    # ---------- learned commission ----------
+
+    def save_commission_rates(
+        self, account_id: int, rates: dict[int, tuple[float, int]]
+    ) -> None:
+        """Record what the broker charged, per symbol, for one account.
+
+        Upserts rather than replacing the account's set: a refresh reads a
+        bounded window of history, so a symbol traded once months ago and
+        not since is simply absent from the batch. Deleting on absence
+        would throw that rate away and leave the operator's next stop on
+        that symbol uncorrected, for no gain -- an old observation of a
+        real charge is worth more than none.
+        """
+        if not rates:
+            return
+        with self._connect() as conn:
+            with conn.transaction():
+                for symbol_id, (per_unit, samples) in rates.items():
+                    conn.execute(
+                        """
+                        INSERT INTO symbol_commission
+                            (account_id, symbol_id, per_unit, sample_count, observed_at)
+                        VALUES (%s, %s, %s, %s, now())
+                        ON CONFLICT (account_id, symbol_id) DO UPDATE
+                        SET per_unit = EXCLUDED.per_unit,
+                            sample_count = EXCLUDED.sample_count,
+                            observed_at = EXCLUDED.observed_at
+                        """,
+                        (account_id, symbol_id, float(per_unit), int(samples)),
+                    )
+
+    def load_commission_rates(self, account_id: int) -> dict[int, float]:
+        """symbol_id -> round-trip commission per unit, for one account."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT symbol_id, per_unit FROM symbol_commission
+                   WHERE account_id = %s""",
+                (account_id,),
+            ).fetchall()
+        return {row[0]: float(row[1]) for row in rows}
+
     # ---------- mappings ----------
 
     def create_position_mapping(
