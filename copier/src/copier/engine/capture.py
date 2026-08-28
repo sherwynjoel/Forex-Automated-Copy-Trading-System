@@ -17,6 +17,7 @@ from typing import Mapping
 
 from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
     ProtoOAExecutionType, ProtoOAOrderStatus, ProtoOAOrderType, ProtoOATradeSide)
+from google.protobuf.json_format import MessageToDict
 from psycopg.types.json import Jsonb
 
 from copier.domain.models import SymbolInfo
@@ -114,6 +115,9 @@ def execution_row(
         'bid_at_exec': bid,
         'ask_at_exec': ask,
         'error_code': evt.errorCode or None,
-        'raw': Jsonb({'execution_type': ProtoOAExecutionType.Name(
-            evt.executionType), 'message': str(evt)}),
+        # The decoded protobuf, not str(evt). Spec 3 requires "nothing lost
+        # to an unanticipated field"; protobuf TEXT format inside a JSON
+        # string is neither queryable by field nor indexable, and is larger
+        # than the structured form it replaces.
+        'raw': Jsonb(MessageToDict(evt, preserving_proto_field_name=True)),
     }
