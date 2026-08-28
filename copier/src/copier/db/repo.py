@@ -1,15 +1,19 @@
 """Repository layer for mappings, events, settings, accounts, and symbol cache."""
 
+import logging
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 import psycopg
 from psycopg.types.json import Jsonb
 
 from copier.domain.models import SymbolInfo, PositionMappingEntry, OrderMappingEntry
+
+log = logging.getLogger(__name__)
 
 
 class MappingNotFound(KeyError):
@@ -58,11 +62,21 @@ class Repo:
     # probe, long enough that a burst of calls within one event does not.
     IDLE_PROBE_S = 2.0
 
-    def __init__(self, dsn: str):
-        """Initialize repository with database connection string."""
+    def __init__(self, dsn: str, writer=None):
+        """Initialize repository with database connection string.
+
+        `writer` is an AsyncWriter or None. When present, writes that
+        nothing waits on (event logs, position/deal upserts, balance
+        samples) are queued on it rather than executed inline on this
+        connection -- see db/writer.py's module docstring for why that
+        writer owns a wholly separate connection rather than sharing this
+        one. Tests construct Repo(dsn) with no writer and get the old
+        synchronous behaviour: every write lands before the call returns.
+        """
         self.dsn = dsn
         self._conn: psycopg.Connection | None = None
         self._last_used = 0.0
+        self.writer = writer
 
     def _open(self) -> psycopg.Connection:
         """Open a connection configured for long-lived, single-threaded use.
@@ -185,8 +199,25 @@ class Repo:
                 reconnects) -- only operator-initiated actions have an actor.
 
         Returns:
-            The new event ID
+            The new event ID, or 0 when the row was queued on the async
+            writer instead of written inline. No copier caller uses this
+            value for anything but truthiness/logging; the only consumer of
+            event ids is the api's WS listener, which reads them off
+            pg_notify, so the live feed simply trails by at most one batch
+            interval when a writer is attached.
         """
+        row = {
+            'account_id': account_id,
+            'org_id': org_id,
+            'category': category,
+            'severity': severity,
+            'latency_ms': latency_ms,
+            'payload': Jsonb(payload),
+            'actor_email': actor,
+        }
+        if self.writer is not None:
+            self.writer.submit('events', row)
+            return 0
         with self._connect() as conn:
             (event_id,) = conn.execute(
                 """
@@ -593,6 +624,341 @@ class Repo:
             ).fetchall()
         return {row[0]: float(row[1]) for row in rows}
 
+    # ---------- positions ----------
+
+    def upsert_positions(
+        self,
+        account_id: int,
+        org_id: int | None,
+        snapshots: Sequence[Any],
+        symbols_by_id: Mapping[int, SymbolInfo],
+    ) -> None:
+        """Record this account's open positions.
+
+        Fed from each resync so the Positions screen survives a restart --
+        before this, positions existed only in Reconciler.master_positions
+        and the in-memory AccountStateTracker, so a fresh process showed
+        nothing until the first broker reconcile landed.
+
+        Queued on the async writer when one is attached: nothing waits on
+        this, and the next resync repairs anything a dropped row would
+        have missed. Falls back to a synchronous inline upsert when there
+        is no writer (tests construct Repo(dsn) with none).
+        """
+        for snap in snapshots:
+            info = symbols_by_id.get(snap.symbol_id)
+            row = {
+                'account_id': account_id,
+                'position_id': snap.position_id,
+                'org_id': org_id,
+                'symbol_id': snap.symbol_id,
+                'symbol': info.name if info else None,
+                'side': snap.side.name,
+                'volume': snap.volume,
+                'entry_price': snap.price,
+                'stop_loss': getattr(snap, 'stop_loss', None),
+                'take_profit': getattr(snap, 'take_profit', None),
+                'label': snap.label or None,
+                'status': 'open',
+            }
+            if self.writer is not None:
+                self.writer.submit(
+                    'positions', row, upsert_key=('account_id', 'position_id'))
+            else:
+                self._upsert_position_inline(row)
+
+    def _upsert_position_inline(self, row: dict) -> None:
+        """Synchronous fallback used when no writer is attached (tests)."""
+        columns = tuple(sorted(row.keys()))
+        cols = ", ".join(columns)
+        placeholders = ", ".join(["%s"] * len(columns))
+        updates = ", ".join(
+            f"{c} = EXCLUDED.{c}" for c in columns
+            if c not in ('account_id', 'position_id'))
+        with self._connect() as conn:
+            conn.execute(
+                f"INSERT INTO positions ({cols}) VALUES ({placeholders}) "
+                f"ON CONFLICT (account_id, position_id) DO UPDATE SET {updates}",
+                [row[c] for c in columns],
+            )
+
+    def close_missing_positions(
+        self, account_id: int, open_position_ids: Sequence[int]
+    ) -> None:
+        """Mark every stored-open position the broker no longer reports as
+        closed. The broker's reconcile response is the truth about what is
+        open; anything else we hold is stale.
+
+        This is an UPDATE, not an insert/upsert, so it always runs
+        synchronously on this connection -- the async writer only emits
+        INSERT/upsert statements (see db/writer.py).
+
+        `position_id = ANY('{}')` is false for every row when
+        open_position_ids is empty, so NOT(...) closes everything the
+        account holds -- the correct reading of "the broker reports this
+        account flat."
+        """
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE positions
+                   SET status = 'closed',
+                       closed_at = COALESCE(closed_at, now()),
+                       updated_at = now()
+                 WHERE account_id = %s
+                   AND status = 'open'
+                   AND NOT (position_id = ANY(%s))
+                """,
+                (account_id, [int(i) for i in open_position_ids]),
+            )
+
+    def load_open_positions(self, org_id: int) -> list[dict]:
+        """This org's stored-open positions.
+
+        Used to hydrate /state before the first resync of a fresh process
+        lands: positions previously existed only in
+        Reconciler.master_positions and the in-memory state tracker, so a
+        restart showed an empty Positions screen until the broker answered.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT account_id, position_id, symbol, side, volume, "
+                "entry_price, stop_loss, take_profit "
+                "FROM positions WHERE org_id = %s AND status = 'open' "
+                "ORDER BY account_id, position_id",
+                (org_id,),
+            ).fetchall()
+        return [
+            {"account_id": r[0], "position_id": r[1], "symbol": r[2],
+             "side": r[3], "volume": r[4], "entry_price": r[5],
+             "stop_loss": r[6], "take_profit": r[7]}
+            for r in rows
+        ]
+
+    # ---------- balance samples ----------
+
+    def record_balance_sample(
+        self,
+        account_id: int,
+        org_id: int | None,
+        balance: float | None,
+        equity: float | None,
+        margin_used: float | None,
+        unrealized_pnl: float | None,
+    ) -> None:
+        """Append one intraday balance/equity sample.
+
+        portfolio_snapshots keeps its daily-close semantics (Overview
+        depends on them); this is the sampled intraday series. Written
+        from the balance-refresh LoopingCall, which is already off the
+        trade path, and queued on the writer when one is attached.
+
+        Same writer-or-inline-fallback pattern as upsert_positions: tests
+        construct Repo(dsn) with no writer and expect the row visible
+        immediately.
+        """
+        row = {
+            'account_id': account_id,
+            'org_id': org_id,
+            'ts': datetime.now(timezone.utc),
+            'balance': balance,
+            'equity': equity,
+            'margin_used': margin_used,
+            'unrealized_pnl': unrealized_pnl,
+        }
+        if self.writer is not None:
+            self.writer.submit(
+                'balance_samples', row, upsert_key=('account_id', 'ts'))
+        else:
+            self._record_balance_sample_inline(row)
+
+    def _record_balance_sample_inline(self, row: dict) -> None:
+        """Synchronous fallback used when no writer is attached (tests)."""
+        columns = tuple(sorted(row.keys()))
+        cols = ", ".join(columns)
+        placeholders = ", ".join(["%s"] * len(columns))
+        updates = ", ".join(
+            f"{c} = EXCLUDED.{c}" for c in columns
+            if c not in ('account_id', 'ts'))
+        with self._connect() as conn:
+            conn.execute(
+                f"INSERT INTO balance_samples ({cols}) VALUES ({placeholders}) "
+                f"ON CONFLICT (account_id, ts) DO UPDATE SET {updates}",
+                [row[c] for c in columns],
+            )
+
+    # ---------- deals ----------
+
+    def upsert_deals(
+        self, account_id: int, org_id: int | None, deals: list[dict]
+    ) -> None:
+        """Store deals in the shape queries._map_deal produces.
+
+        Keyed (account_id, deal_id) and upserted, which is what lets the
+        backfill re-run a window safely after a broker error. Queued on
+        the async writer when one is attached, else written inline.
+        """
+        for d in deals:
+            close = d.get('close') or {}
+            row = {
+                'account_id': account_id,
+                'deal_id': d['deal_id'],
+                'org_id': org_id,
+                'order_id': d.get('order_id'),
+                'position_id': d.get('position_id'),
+                'symbol_id': d.get('symbol_id'),
+                'symbol': d.get('symbol'),
+                'side': d.get('side'),
+                'volume': d.get('volume'),
+                'filled_volume': d.get('filled_volume'),
+                'execution_price': d.get('execution_price'),
+                'status': d.get('status'),
+                'commission': d.get('commission'),
+                'create_timestamp': d.get('create_timestamp'),
+                'execution_timestamp': d['execution_timestamp'],
+                'is_close': bool(d.get('close')),
+                'entry_price': close.get('entry_price'),
+                'gross_profit': close.get('gross_profit'),
+                'swap': close.get('swap'),
+                'balance_after': close.get('balance'),
+                'closed_volume': close.get('closed_volume'),
+            }
+            if self.writer is not None:
+                self.writer.submit(
+                    'deals', row, upsert_key=('account_id', 'deal_id'))
+            else:
+                self._upsert_deal_inline(row)
+
+    def _upsert_deal_inline(self, row: dict) -> None:
+        """Synchronous fallback used when no writer is attached (tests)."""
+        columns = tuple(sorted(row.keys()))
+        cols = ", ".join(columns)
+        placeholders = ", ".join(["%s"] * len(columns))
+        updates = ", ".join(
+            f"{c} = EXCLUDED.{c}" for c in columns
+            if c not in ('account_id', 'deal_id'))
+        with self._connect() as conn:
+            conn.execute(
+                f"INSERT INTO deals ({cols}) VALUES ({placeholders}) "
+                f"ON CONFLICT (account_id, deal_id) DO UPDATE SET {updates}",
+                [row[c] for c in columns],
+            )
+
+    def load_deals(
+        self, account_id: int, since_ms: int | None = None,
+        limit: int = 50_000,
+    ) -> list[dict]:
+        """Deals for one account, reconstructed into the nested shape
+        queries._map_deal produces -- including the `close` sub-dict -- so
+        engine.analytics.compute_analytics runs over them with no change to
+        its input shape.
+
+        Two fields do NOT round-trip through this table, both deliberately:
+        `deals` has a single `commission` column (the deal's own charge),
+        not a second one for the broker's closePositionDetail.commission,
+        so a reconstructed `close["commission"]` here is the SAME value as
+        the row's top-level `commission` rather than that close-specific
+        figure; and `volume_lots` is not reconstructed at all (lot size is
+        a symbol-cache fact, not a stored deal fact, and rebuilding it here
+        would need a join). This is safe for compute_analytics: it reads
+        top-level `commission` once per deal and never reads
+        `close["commission"]` or `volume_lots`. A caller that needs either
+        exact field should query `deals` directly rather than through this
+        method.
+
+        `limit` bounds the result set: on this base, analytics runs
+        synchronously on the reactor connection (see the porting spec's
+        D3), so an account with years of history must not be able to stall
+        the reactor with an unbounded fetch.
+        """
+        sql = (
+            "SELECT deal_id, order_id, position_id, symbol_id, symbol, side, "
+            "volume, filled_volume, execution_price, status, commission, "
+            "create_timestamp, execution_timestamp, is_close, entry_price, "
+            "gross_profit, swap, balance_after, closed_volume "
+            "FROM deals WHERE account_id = %s"
+        )
+        params: list = [account_id]
+        if since_ms is not None:
+            sql += " AND execution_timestamp >= %s"
+            params.append(since_ms)
+        sql += " ORDER BY execution_timestamp LIMIT %s"
+        params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+
+        out = []
+        for r in rows:
+            (deal_id, order_id, position_id, symbol_id, symbol, side, volume,
+             filled_volume, execution_price, status, commission,
+             create_ts, exec_ts, is_close, entry_price, gross_profit, swap,
+             balance_after, closed_volume) = r
+            out.append({
+                "deal_id": deal_id,
+                "order_id": order_id,
+                "position_id": position_id,
+                "symbol_id": symbol_id,
+                "symbol": symbol,
+                "side": side,
+                "volume": volume,
+                "filled_volume": filled_volume,
+                "execution_price": execution_price,
+                "status": status,
+                "commission": float(commission) if commission is not None else None,
+                "create_timestamp": create_ts,
+                "execution_timestamp": exec_ts,
+                "close": {
+                    "entry_price": entry_price,
+                    "gross_profit": float(gross_profit) if gross_profit is not None else 0.0,
+                    "swap": float(swap) if swap is not None else 0.0,
+                    "commission": float(commission) if commission is not None else 0.0,
+                    "balance": float(balance_after) if balance_after is not None else 0.0,
+                    "closed_volume": closed_volume,
+                } if is_close else None,
+            })
+        return out
+
+    def get_backfill_state(self, account_id: int) -> dict | None:
+        """This account's deal-backfill watermark, or None if it has never
+        been backfilled."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT backfilled_from_ms, backfilled_to_ms, exhausted "
+                "FROM deal_backfill_state WHERE account_id = %s",
+                (account_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {'backfilled_from_ms': row[0], 'backfilled_to_ms': row[1],
+                'exhausted': row[2]}
+
+    def set_backfill_state(
+        self, account_id: int, from_ms: int | None, to_ms: int | None,
+        exhausted: bool,
+    ) -> None:
+        """Advance the watermark. from_ms only ever moves backwards and
+        to_ms only forwards, so a re-run of an old window cannot rewind
+        progress."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO deal_backfill_state
+                    (account_id, backfilled_from_ms, backfilled_to_ms,
+                     exhausted, updated_at)
+                VALUES (%s, %s, %s, %s, now())
+                ON CONFLICT (account_id) DO UPDATE SET
+                    backfilled_from_ms = LEAST(
+                        deal_backfill_state.backfilled_from_ms,
+                        EXCLUDED.backfilled_from_ms),
+                    backfilled_to_ms = GREATEST(
+                        deal_backfill_state.backfilled_to_ms,
+                        EXCLUDED.backfilled_to_ms),
+                    exhausted = EXCLUDED.exhausted,
+                    updated_at = now()
+                """,
+                (account_id, from_ms, to_ms, exhausted),
+            )
+
     # ---------- mappings ----------
 
     def create_position_mapping(
@@ -643,6 +1009,51 @@ class Repo:
                 """,
                 (master_position_id, slave_account_id, client_order_id, org_id,
                  symbol),
+            )
+
+    def record_master_fill(
+        self,
+        org_id: int,
+        master_position_id: int,
+        fill_price: float | None,
+        exec_timestamp: int | None,
+    ) -> None:
+        """Stamp the MASTER's fill price and broker clock onto every copy of
+        that position, WITHIN ONE ORG.
+
+        mappings.fill_price is the SLAVE's half; without the master's,
+        realized slippage and true copy latency were not computable from the
+        production database at all (item 4 of the 2026-08-22 slippage
+        diagnosis). COALESCE so a fill event that carries no executionPrice
+        never blanks a price already recorded.
+
+        org_id is REQUIRED and part of the WHERE clause. cTrader position
+        ids are per-account sequences, so two orgs on different brokers or
+        environments routinely hold the same positionId -- without the
+        predicate, org A's master fill price and broker timestamp would be
+        stamped onto org B's mapping rows, and org B's realized-slippage
+        query (the single measurement this table exists to enable) would
+        report slippage computed against another tenant's master price. The
+        bumped updated_at also perturbs reconcile.py's stale-pending drift
+        detector on rows that never changed.
+
+        This is a single UPDATE, not an insert/upsert, so it always runs
+        synchronously on this connection -- the async writer only emits
+        INSERT/upsert statements.
+        """
+        if fill_price is None and exec_timestamp is None:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE mappings
+                   SET master_fill_price = COALESCE(%s, master_fill_price),
+                       master_exec_timestamp = COALESCE(%s, master_exec_timestamp),
+                       updated_at = now()
+                 WHERE master_position_id = %s
+                   AND org_id = %s
+                """,
+                (fill_price, exec_timestamp, master_position_id, org_id),
             )
 
     def activate_position_mapping(
@@ -1000,3 +1411,79 @@ class Repo:
             OrderMappingEntry(slave_account_id=row[0], slave_order_id=row[1])
             for row in rows
         ]
+
+    # ---------- partitions ----------
+
+    PARTITIONED_TABLES = ("executions", "balance_samples")
+
+    # How long a CREATE TABLE ... PARTITION OF may wait for its
+    # ACCESS EXCLUSIVE lock before giving up for the day.
+    #
+    # Postgres queues lock requests, so a partition creation blocked behind
+    # a long ACCESS SHARE holder (the nightly pg_dump that feeds the S3
+    # backups) also blocks every later reader behind ITSELF. Without a
+    # timeout this call -- synchronous, once a day, on the single reactor
+    # connection -- could hold every other repo call for the length of the
+    # whole dump. Migration 012 creates twelve months up front and this
+    # maintains three ahead, so failing one day is harmless; failing to
+    # give up is not.
+    PARTITION_LOCK_TIMEOUT = "2s"
+
+    def ensure_partitions(self, months_ahead: int = 3) -> list[str]:
+        """Create any missing monthly partitions out to `months_ahead`.
+
+        Migration 012 creates a year up front and a DEFAULT partition as a
+        safety net, so this is belt-and-braces -- but a deploy that sits for
+        a year would otherwise start dropping rows into DEFAULT, and moving
+        them back out later needs a strong lock. Cheap to run daily.
+
+        Each CREATE runs in its own transaction with a transaction-local
+        lock_timeout (set_config(..., is_local => true), i.e. SET LOCAL --
+        not a session SET, which would leak the bound onto this cached
+        connection's NEXT caller). A partition that cannot get its lock is
+        skipped and retried on the next daily tick rather than blocking,
+        and one skipped partition does not abandon the others.
+        """
+        created: list[str] = []
+        with self._connect() as conn:
+            for table in self.PARTITIONED_TABLES:
+                for m in range(months_ahead + 1):
+                    row = conn.execute(
+                        "SELECT to_char(date_trunc('month', now()) "
+                        "+ make_interval(months => %s), 'YYYY_MM'), "
+                        "(date_trunc('month', now()) "
+                        "+ make_interval(months => %s))::date, "
+                        "(date_trunc('month', now()) "
+                        "+ make_interval(months => %s))::date",
+                        (m, m, m + 1),
+                    ).fetchone()
+                    suffix, lo, hi = row
+                    name = f"{table}_{suffix}"
+                    exists = conn.execute(
+                        "SELECT 1 FROM pg_class c "
+                        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                        "WHERE c.relname = %s AND n.nspname = ANY(current_schemas(true))",
+                        (name,),
+                    ).fetchone()
+                    if exists:
+                        continue
+                    try:
+                        with conn.transaction():
+                            # set_config(..., is_local => true) is
+                            # SET LOCAL with a bind parameter; plain
+                            # SET LOCAL does not accept one.
+                            conn.execute(
+                                "SELECT set_config('lock_timeout', %s, true)",
+                                (self.PARTITION_LOCK_TIMEOUT,))
+                            conn.execute(
+                                f'CREATE TABLE "{name}" PARTITION OF {table} '
+                                f"FOR VALUES FROM ('{lo}') TO ('{hi}')"
+                            )
+                    except psycopg.errors.LockNotAvailable:
+                        log.warning(
+                            "partition maintenance: could not lock %s to create "
+                            "%s within %s; retrying tomorrow",
+                            table, name, self.PARTITION_LOCK_TIMEOUT)
+                        continue
+                    created.append(name)
+        return created

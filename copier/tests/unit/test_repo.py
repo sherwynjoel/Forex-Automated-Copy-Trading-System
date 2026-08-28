@@ -1,5 +1,6 @@
 """Tests for the repository layer (mappings, events, settings, accounts, symbol cache)."""
 
+from contextlib import contextmanager
 from decimal import Decimal
 import threading
 import time
@@ -8,7 +9,9 @@ import psycopg
 import pytest
 
 from copier.db.repo import Repo, Settings, AccountRow, MappingNotFound
-from copier.domain.models import SymbolInfo, PositionMappingEntry, OrderMappingEntry
+from copier.db.writer import AsyncWriter
+from copier.domain.models import Side, SymbolInfo, PositionMappingEntry, OrderMappingEntry
+from copier.engine.reconcile import PositionSnapshot
 
 
 @pytest.fixture
@@ -914,3 +917,443 @@ def test_saving_nothing_is_not_an_error(db):
     repo = Repo(db)
     repo.save_commission_rates(100, {})
     assert repo.load_commission_rates(100) == {}
+
+
+# ---------- trade persistence: master fill price ----------
+
+def test_record_master_fill_stamps_every_copy_of_that_master_position(
+        repo, org_id):
+    """Slippage is (slave fill - master fill). mappings stored only the
+    slave half, which is why realized slippage was not computable from
+    production."""
+    repo.create_position_mapping(555, 100, "cm555.100", org_id=org_id,
+                                 symbol="EURUSD")
+    repo.create_position_mapping(555, 101, "cm555.101", org_id=org_id,
+                                 symbol="EURUSD")
+
+    repo.record_master_fill(org_id, 555, fill_price=1.0855,
+                            exec_timestamp=1700000000000)
+
+    with psycopg.connect(repo.dsn, autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT slave_account_id, master_fill_price, master_exec_timestamp "
+            "FROM mappings WHERE master_position_id = 555 "
+            "ORDER BY slave_account_id").fetchall()
+    assert len(rows) == 2
+    for _, price, ts in rows:
+        assert float(price) == pytest.approx(1.0855)
+        assert ts == 1700000000000
+
+
+def test_record_master_fill_ignores_a_null_price(repo, org_id):
+    """A fill event without an executionPrice must not blank a price we
+    already recorded."""
+    repo.create_position_mapping(556, 100, "cm556.100", org_id=org_id)
+    repo.record_master_fill(org_id, 556, 1.2345, 1700000000000)
+    repo.record_master_fill(org_id, 556, None, None)
+    with psycopg.connect(repo.dsn, autocommit=True) as conn:
+        (price,) = conn.execute(
+            "SELECT master_fill_price FROM mappings "
+            "WHERE master_position_id = 556").fetchone()
+    assert float(price) == pytest.approx(1.2345)
+
+
+def test_record_master_fill_never_touches_another_orgs_mappings(db, org_id):
+    """cTrader position ids are PER-ACCOUNT sequences, so two orgs on
+    different brokers or environments routinely hold the same positionId.
+    Without an org_id predicate, org A's master fill price and broker
+    timestamp land on org B's mapping rows -- and org B's realized-slippage
+    query, the single measurement this table exists to enable, then reports
+    slippage against another tenant's master price."""
+    repo = Repo(db)
+    with psycopg.connect(db, autocommit=True) as conn:
+        (org_b,) = conn.execute(
+            "INSERT INTO orgs (name) VALUES ('Org B') RETURNING id").fetchone()
+        (other_conn,) = conn.execute(
+            """INSERT INTO ctid_connections (org_id, access_token_enc,
+                   refresh_token_enc, granted_at, expires_at)
+               VALUES (%s, 'tok', 'ref', now(), now() + interval '1 hour')
+               RETURNING id""", (org_b,)).fetchone()
+        conn.execute(
+            """INSERT INTO accounts (ctid_trader_account_id, ctid_connection_id,
+                   org_id, trader_login, is_live, role, enabled, multiplier)
+               VALUES (200, %s, %s, 20000, false, 'slave', true, 1.0)""",
+            (other_conn, org_b))
+
+    # The SAME broker position id in both tenants.
+    repo.create_position_mapping(12345, 100, "cm12345.100", org_id=org_id)
+    repo.create_position_mapping(12345, 200, "cm12345.200", org_id=org_b)
+
+    repo.record_master_fill(org_id, 12345, 1.0855, 1700000000000)
+
+    with psycopg.connect(db, autocommit=True) as conn:
+        rows = dict(conn.execute(
+            "SELECT org_id, master_fill_price FROM mappings "
+            "WHERE master_position_id = 12345").fetchall())
+    assert float(rows[org_id]) == pytest.approx(1.0855)
+    assert rows[org_b] is None, (
+        "org A's master fill price was stamped onto org B's mapping row")
+
+
+# ---------- trade persistence: positions ----------
+
+def _symbols():
+    return {1: SymbolInfo(symbol_id=1, name="EURUSD", digits=5,
+                          lot_size=100000, min_volume=1000, step_volume=1000)}
+
+
+def _position_snapshot(position_id, volume, price, side=Side.BUY):
+    return PositionSnapshot(position_id, 1, side, volume, price, "")
+
+
+def test_upsert_positions_records_open_positions(repo, org_id):
+    snaps = [PositionSnapshot(position_id=555, symbol_id=1, side=Side.BUY,
+                              volume=100000, price=1.0855, label="",
+                              stop_loss=1.08, take_profit=1.09)]
+    repo.upsert_positions(100, org_id, snaps, _symbols())
+
+    with psycopg.connect(repo.dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT symbol, side, volume, entry_price, stop_loss, take_profit, "
+            "status FROM positions WHERE account_id = 100 AND position_id = 555"
+        ).fetchone()
+    assert row == ("EURUSD", "BUY", 100000, 1.0855, 1.08, 1.09, "open")
+
+
+def test_upsert_positions_updates_volume_on_a_second_resync(repo, org_id):
+    repo.upsert_positions(100, org_id, [_position_snapshot(555, 100000, 1.0855)],
+                          _symbols())
+    repo.upsert_positions(100, org_id, [_position_snapshot(555, 200000, 1.0860)],
+                          _symbols())
+
+    with psycopg.connect(repo.dsn, autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT volume FROM positions WHERE account_id = 100").fetchall()
+    assert rows == [(200000,)]
+
+
+def test_close_missing_positions_marks_vanished_positions_closed(repo, org_id):
+    repo.upsert_positions(100, org_id, [
+        _position_snapshot(555, 100000, 1.0855),
+        _position_snapshot(556, 100000, 1.0860, side=Side.SELL),
+    ], _symbols())
+
+    # The broker now reports only 555 open.
+    repo.close_missing_positions(100, [555])
+
+    with psycopg.connect(repo.dsn, autocommit=True) as conn:
+        rows = dict(conn.execute(
+            "SELECT position_id, status FROM positions "
+            "WHERE account_id = 100").fetchall())
+    assert rows == {555: "open", 556: "closed"}
+
+
+def test_close_missing_positions_with_no_open_positions_closes_everything(
+        repo, org_id):
+    repo.upsert_positions(100, org_id,
+                          [_position_snapshot(555, 100000, 1.0855)], _symbols())
+    repo.close_missing_positions(100, [])
+    with psycopg.connect(repo.dsn, autocommit=True) as conn:
+        (status,) = conn.execute(
+            "SELECT status FROM positions WHERE account_id = 100").fetchone()
+    assert status == "closed"
+
+
+def test_load_open_positions_returns_only_this_orgs_open_rows(repo, org_id):
+    repo.upsert_positions(100, org_id, [
+        _position_snapshot(555, 100000, 1.0855),
+        _position_snapshot(556, 50000, 1.0860, side=Side.SELL),
+    ], _symbols())
+    repo.close_missing_positions(100, [555])
+
+    rows = repo.load_open_positions(org_id)
+    assert [r["position_id"] for r in rows] == [555]
+    assert rows[0]["symbol"] == "EURUSD"
+    assert rows[0]["account_id"] == 100
+
+
+def test_load_open_positions_is_empty_for_an_unknown_org(repo):
+    assert repo.load_open_positions(999999) == []
+
+
+# ---------- trade persistence: balance samples ----------
+
+def test_record_balance_sample_writes_a_timestamped_row(repo, org_id):
+    repo.record_balance_sample(100, org_id, balance=10000.0, equity=10125.5,
+                               margin_used=250.0, unrealized_pnl=125.5)
+    with psycopg.connect(repo.dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT balance, equity, margin_used, unrealized_pnl "
+            "FROM balance_samples WHERE account_id = 100").fetchone()
+    assert [float(v) for v in row] == [10000.0, 10125.5, 250.0, 125.5]
+
+
+def test_two_samples_in_the_same_second_do_not_error(repo, org_id):
+    """PK is (account_id, ts); a double refresh must upsert, not raise."""
+    repo.record_balance_sample(100, org_id, 1.0, 1.0, 0.0, 0.0)
+    repo.record_balance_sample(100, org_id, 2.0, 2.0, 0.0, 0.0)
+    with psycopg.connect(repo.dsn, autocommit=True) as conn:
+        (n,) = conn.execute(
+            "SELECT count(*) FROM balance_samples WHERE account_id = 100"
+        ).fetchone()
+    assert n >= 1
+
+
+# ---------- trade persistence: deals ----------
+
+def test_upsert_deals_is_idempotent(repo, org_id):
+    deal = {
+        "deal_id": 999, "order_id": 777, "position_id": 555, "symbol_id": 1,
+        "symbol": "EURUSD", "side": "BUY", "volume": 100000,
+        "filled_volume": 100000, "execution_price": 1.0855, "status": "FILLED",
+        "commission": -0.07, "create_timestamp": 1699999999000,
+        "execution_timestamp": 1700000000000,
+        "close": {"entry_price": 1.08, "gross_profit": 2.75, "swap": -0.12,
+                  "commission": -0.07, "balance": 10002.75,
+                  "closed_volume": 100000},
+    }
+    repo.upsert_deals(100, org_id, [deal])
+    repo.upsert_deals(100, org_id, [deal])
+    with psycopg.connect(repo.dsn, autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT count(*), max(gross_profit), bool_and(is_close) "
+            "FROM deals WHERE account_id = 100").fetchall()
+    (n, gross, is_close) = rows[0]
+    assert n == 1
+    assert float(gross) == pytest.approx(2.75)
+    assert is_close is True
+
+
+def test_upsert_deals_marks_opens_as_not_close(repo, org_id):
+    repo.upsert_deals(100, org_id, [{
+        "deal_id": 1000, "execution_timestamp": 1700000000000, "close": None}])
+    with psycopg.connect(repo.dsn, autocommit=True) as conn:
+        (is_close,) = conn.execute(
+            "SELECT is_close FROM deals WHERE deal_id = 1000").fetchone()
+    assert is_close is False
+
+
+def test_backfill_state_roundtrips(repo):
+    assert repo.get_backfill_state(100) is None
+    repo.set_backfill_state(100, 1000, 2000, exhausted=False)
+    state = repo.get_backfill_state(100)
+    assert state["backfilled_from_ms"] == 1000
+    assert state["backfilled_to_ms"] == 2000
+    assert state["exhausted"] is False
+    repo.set_backfill_state(100, 500, 2500, exhausted=True)
+    state = repo.get_backfill_state(100)
+    assert state["backfilled_from_ms"] == 500
+    assert state["exhausted"] is True
+
+
+def test_set_backfill_state_never_rewinds_progress(repo):
+    """A re-run of an old, already-covered window must not undo progress
+    a later run already made: from_ms only moves backwards (widening the
+    covered range's start), to_ms only forwards."""
+    repo.set_backfill_state(100, 1000, 5000, exhausted=False)
+    repo.set_backfill_state(100, 2000, 3000, exhausted=False)  # a narrower re-run
+    state = repo.get_backfill_state(100)
+    assert state["backfilled_from_ms"] == 1000
+    assert state["backfilled_to_ms"] == 5000
+
+
+def test_load_deals_returns_the_map_deal_shape_compute_analytics_expects(
+        repo, org_id):
+    """analytics.compute_analytics reads d["close"]["gross_profit"] etc.
+    load_deals must rebuild that nested shape or the Performance page
+    silently reports zeros."""
+    from copier.engine.analytics import compute_analytics
+
+    repo.upsert_deals(100, org_id, [{
+        "deal_id": 1, "execution_timestamp": 1700000000000,
+        "symbol": "EURUSD", "commission": -0.07,
+        "close": {"entry_price": 1.08, "gross_profit": 2.75, "swap": -0.12,
+                  "commission": -0.07, "balance": 10002.75,
+                  "closed_volume": 100000},
+    }])
+
+    deals = repo.load_deals(100)
+    assert len(deals) == 1
+    assert deals[0]["close"]["gross_profit"] == pytest.approx(2.75)
+
+    # The real proof: the aggregator runs unchanged over these rows.
+    result = compute_analytics(deals)
+    assert result["net_pnl"] == pytest.approx(2.75 - 0.12 - 0.07)
+
+
+def test_load_deals_returns_none_close_for_opening_deals(repo, org_id):
+    repo.upsert_deals(100, org_id, [{
+        "deal_id": 2, "execution_timestamp": 1700000000000, "close": None}])
+    deals = repo.load_deals(100)
+    assert deals[0]["close"] is None
+
+
+def test_load_deals_since_ms_filters_out_older_deals(repo, org_id):
+    """since_ms is the DB path's replacement for the broker's `weeks`
+    window: everything at or after the cutoff, nothing before it."""
+    repo.upsert_deals(100, org_id, [
+        {"deal_id": 10, "execution_timestamp": 1_000, "close": None},
+        {"deal_id": 11, "execution_timestamp": 2_000, "close": None},
+    ])
+    deals = repo.load_deals(100, since_ms=2_000)
+    assert [d["deal_id"] for d in deals] == [11]
+
+    all_deals = repo.load_deals(100, since_ms=None)
+    assert [d["deal_id"] for d in all_deals] == [10, 11]
+
+
+def test_load_deals_is_bounded_by_limit(repo, org_id):
+    """D3: analytics runs synchronously on the reactor connection, so an
+    account with years of history must not be able to fetch an unbounded
+    result set. The default is generous (50_000); this exercises the
+    parameter directly with a small cap."""
+    repo.upsert_deals(100, org_id, [
+        {"deal_id": i, "execution_timestamp": 1_000 + i, "close": None}
+        for i in range(5)
+    ])
+    deals = repo.load_deals(100, limit=2)
+    assert len(deals) == 2
+    # ORDER BY execution_timestamp -- the oldest two, not an arbitrary two.
+    assert [d["deal_id"] for d in deals] == [0, 1]
+
+
+# ---------- trade persistence: the writer path production actually runs ----------
+#
+# upsert_positions, record_balance_sample and upsert_deals each branch on
+# `self.writer is not None`. Production always attaches a writer, so
+# production always takes the submit branch -- yet every test above
+# constructs Repo(db) without one and therefore exercises only the
+# _*_inline fallbacks, code that never runs in production. These tests
+# attach a real AsyncWriter (its own connection, per the porting spec's
+# D2) and verify the generated ON CONFLICT statements execute cleanly
+# against real Postgres rather than being merely constructed.
+
+@contextmanager
+def _attached_writer(repo):
+    """Attach a real AsyncWriter to `repo`, exactly as boot() does."""
+    writer = AsyncWriter(repo.dsn, batch_interval_s=0.02)
+    repo.writer = writer
+    writer.start()
+    try:
+        yield writer
+    finally:
+        writer.flush_and_stop(timeout_s=5.0)
+        repo.writer = None
+
+
+def test_upsert_positions_through_the_writer_lands_in_postgres(repo, org_id):
+    with _attached_writer(repo) as writer:
+        repo.upsert_positions(
+            100, org_id, [_position_snapshot(555, 100000, 1.0855)], _symbols())
+    assert writer.healthy is True, "the writer batch failed"
+
+    with psycopg.connect(repo.dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT symbol, side, volume, entry_price, status FROM positions "
+            "WHERE account_id = 100 AND position_id = 555").fetchone()
+    assert row == ("EURUSD", "BUY", 100000, 1.0855, "open")
+
+
+def test_upsert_positions_through_the_writer_updates_on_conflict(repo, org_id):
+    """The generated ON CONFLICT (account_id, position_id) DO UPDATE branch,
+    executed against real Postgres rather than string-compared."""
+    with _attached_writer(repo):
+        repo.upsert_positions(
+            100, org_id, [_position_snapshot(555, 100000, 1.0855)], _symbols())
+    with _attached_writer(repo) as writer:
+        repo.upsert_positions(
+            100, org_id, [_position_snapshot(555, 200000, 1.0860)], _symbols())
+    assert writer.healthy is True
+
+    with psycopg.connect(repo.dsn, autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT volume, entry_price FROM positions "
+            "WHERE account_id = 100").fetchall()
+    assert rows == [(200000, 1.0860)]
+
+
+def test_upsert_deals_through_the_writer_lands_and_upserts(repo, org_id):
+    deal = {
+        "deal_id": 999, "order_id": 777, "position_id": 555, "symbol_id": 1,
+        "symbol": "EURUSD", "side": "BUY", "volume": 100000,
+        "filled_volume": 100000, "execution_price": 1.0855, "status": "FILLED",
+        "commission": -0.07, "create_timestamp": 1699999999000,
+        "execution_timestamp": 1700000000000,
+        "close": {"entry_price": 1.08, "gross_profit": 2.75, "swap": -0.12,
+                  "commission": -0.07, "balance": 10002.75,
+                  "closed_volume": 100000},
+    }
+    with _attached_writer(repo):
+        repo.upsert_deals(100, org_id, [deal])
+    with _attached_writer(repo) as writer:
+        repo.upsert_deals(100, org_id, [{**deal, "close": {
+            **deal["close"], "gross_profit": 3.50}}])
+    assert writer.healthy is True
+
+    with psycopg.connect(repo.dsn, autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT count(*), max(gross_profit), bool_and(is_close) "
+            "FROM deals WHERE account_id = 100").fetchall()
+    (n, gross, is_close) = rows[0]
+    assert n == 1
+    assert float(gross) == pytest.approx(3.50)
+    assert is_close is True
+
+
+def test_record_balance_sample_through_the_writer_lands_in_postgres(
+        repo, org_id):
+    """balance_samples is PARTITION BY RANGE (ts). If the generated
+    ON CONFLICT (account_id, ts) were rejected, the writer would log, retry,
+    drop the batch and flip healthy=False -- and the whole balance series
+    would be silently empty in production with a green suite."""
+    with _attached_writer(repo) as writer:
+        repo.record_balance_sample(100, org_id, balance=10000.0,
+                                   equity=10125.5, margin_used=None,
+                                   unrealized_pnl=125.5)
+    assert writer.healthy is True, "the balance_samples batch failed"
+
+    with psycopg.connect(repo.dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT balance, equity, unrealized_pnl FROM balance_samples "
+            "WHERE account_id = 100").fetchone()
+    assert row is not None, "no balance_samples row was written"
+    assert [float(v) for v in row] == [10000.0, 10125.5, 125.5]
+
+
+def test_log_event_through_the_writer_returns_zero_and_still_lands(repo):
+    """log_event on the async writer path cannot hand back a real id (the
+    row has not been written yet), so it returns 0 -- but the row must
+    still land once the batch flushes."""
+    with _attached_writer(repo) as writer:
+        event_id = repo.log_event("control", "info", {"action": "x"},
+                                  account_id=100)
+    assert event_id == 0
+    assert writer.healthy is True
+
+    with psycopg.connect(repo.dsn, autocommit=True) as conn:
+        (n,) = conn.execute(
+            "SELECT count(*) FROM events WHERE account_id = 100 "
+            "AND category = 'control'").fetchone()
+    assert n == 1
+
+
+# ---------- trade persistence: partition maintenance ----------
+
+def test_ensure_partitions_creates_the_requested_months(repo):
+    """Migration 012 already creates a year up front, so months_ahead=0
+    (this month only) should find nothing missing; a far-future window
+    exercises actual creation without depending on which month `now()` is."""
+    future = repo.ensure_partitions(months_ahead=0)
+    assert future == [], "migration 012 already created the current month"
+
+    created = repo.ensure_partitions(months_ahead=36)
+    assert created, "a 3-year window must need at least one new partition"
+    assert all(t.startswith(repo.PARTITIONED_TABLES) for t in created)
+
+    # Idempotent: running again immediately creates nothing new.
+    assert repo.ensure_partitions(months_ahead=36) == []
+
+
+def test_ensure_partitions_is_a_no_op_when_everything_exists(repo):
+    repo.ensure_partitions(months_ahead=0)
+    assert repo.ensure_partitions(months_ahead=0) == []
