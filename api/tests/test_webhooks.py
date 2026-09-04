@@ -11,6 +11,7 @@ import json
 import httpx
 import psycopg
 import pytest
+from starlette.testclient import TestClient
 
 from conftest import default_mock_callback
 from api.routes import webhooks as wh
@@ -124,6 +125,113 @@ def test_an_outsider_never_reaches_the_database(org_client, db, monkeypatch):
 
     assert r.status_code == 403
     assert "not a TradingView address" in r.json()["reason"]
+    assert _receipts(db, org_id) == []
+
+
+# -- the proxy hop -----------------------------------------------------------
+#
+# Production topology: Caddy on the host -> 127.0.0.1:8000 -> docker-proxy ->
+# the api container. The api's PEER for every request is the bridge gateway
+# (172.18.0.1), never loopback; TradingView's address is in the header Caddy
+# appends. The first live alert was refused as "non-TradingView source
+# 172.18.0.1" because this route only believed that header from loopback.
+
+PROD_PROC_NET_ROUTE = (
+    "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n"
+    "eth0\t00000000\t010012AC\t0003\t0\t0\t0\t00000000\t0\t0\t0\n"
+    "eth0\t000012AC\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0\n"
+)
+
+
+def test_gateway_is_read_from_proc_net_route():
+    """Exactly what the production container reports; 010012AC is
+    172.18.0.1 in little-endian hex."""
+    assert wh._gateway_from_proc_route(PROD_PROC_NET_ROUTE) == "172.18.0.1"
+    no_default = ("Iface\tDestination\tGateway\n"
+                  "eth0\t000012AC\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0\n")
+    assert wh._gateway_from_proc_route(no_default) is None
+    assert wh._gateway_from_proc_route("") is None
+
+
+def _behind_proxy(monkeypatch, gateway="172.18.0.1"):
+    monkeypatch.setattr(wh, "TRADINGVIEW_SOURCE_IPS", frozenset({"52.89.214.238"}))
+    monkeypatch.setenv("TRUST_PROXY", "true")
+    monkeypatch.setattr(wh, "_container_gateway", lambda: gateway)
+
+
+def _post_as(app, peer, body, forwarded):
+    """A request whose socket peer is `peer`, carrying the header a proxy
+    would have added."""
+    return TestClient(app, client=(peer, 40000)).post(
+        f"/api/webhooks/tradingview/{HOOK}", json=body,
+        headers={"X-Forwarded-For": forwarded})
+
+
+def test_the_forwarded_address_is_believed_from_the_container_gateway(org_client, db, monkeypatch):
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+    _behind_proxy(monkeypatch)
+    _copier(client)
+
+    r = _post_as(client.app, "172.18.0.1", _alert(), "52.89.214.238")
+
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "accepted"
+    assert [row[4] for row in _receipts(db, org_id)] == ["52.89.214.238"]
+
+
+def test_the_forwarded_address_is_ignored_from_any_other_peer(org_client, db, monkeypatch):
+    """Whoever can open a socket to :8000 directly does not get to say who
+    they are. Keeps the allowlist an allowlist rather than a header check."""
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+    _behind_proxy(monkeypatch)
+
+    r = _post_as(client.app, "10.9.8.7", _alert(), "52.89.214.238")
+
+    assert r.status_code == 403
+    assert _receipts(db, org_id) == []
+
+
+def test_a_client_supplied_hop_ahead_of_caddys_does_not_count(org_client, db, monkeypatch):
+    """Caddy APPENDS the address it saw. A request that arrived carrying its
+    own X-Forwarded-For shows up as 'forged, real' -- the real one is last."""
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+    _behind_proxy(monkeypatch)
+
+    r = _post_as(client.app, "172.18.0.1", _alert(), "52.89.214.238, 203.0.113.9")
+
+    assert r.status_code == 403
+    assert _receipts(db, org_id) == []
+
+
+def test_trusted_proxy_ips_names_any_other_proxy(org_client, db, monkeypatch):
+    """A proxy that is neither loopback nor the gateway -- Caddy inside the
+    compose network, say -- is named by address or CIDR."""
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+    _behind_proxy(monkeypatch, gateway=None)
+    monkeypatch.setenv("TRUSTED_PROXY_IPS", "10.0.0.0/24, 192.0.2.7")
+    _copier(client)
+
+    assert _post_as(client.app, "10.0.0.5", _alert(), "52.89.214.238").status_code == 200
+    assert _post_as(client.app, "192.0.2.7", _alert(id="2"), "52.89.214.238").status_code == 200
+    assert _post_as(client.app, "10.0.1.5", _alert(id="3"), "52.89.214.238").status_code == 403
+
+
+def test_without_trust_proxy_the_gateway_is_just_another_stranger(org_client, db, monkeypatch):
+    """TRUST_PROXY=false means 'nothing in front of me'; then the header is
+    never read, whoever the peer is."""
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+    monkeypatch.setattr(wh, "TRADINGVIEW_SOURCE_IPS", frozenset({"52.89.214.238"}))
+    monkeypatch.setenv("TRUST_PROXY", "false")
+    monkeypatch.setattr(wh, "_container_gateway", lambda: "172.18.0.1")
+
+    r = _post_as(client.app, "172.18.0.1", _alert(), "52.89.214.238")
+
+    assert r.status_code == 403
     assert _receipts(db, org_id) == []
 
 

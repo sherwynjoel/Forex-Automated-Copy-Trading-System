@@ -61,12 +61,16 @@ very likely succeed, and a 422 would lose the alert for good.
 """
 from __future__ import annotations
 
+import functools
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
 import secrets
+import socket
+import struct
 import time
 from decimal import Decimal
 from typing import Any, Dict, Optional
@@ -108,6 +112,20 @@ COPIER_CALL_TIMEOUT_S = 1.0
 # re-entry a minute later goes through.
 DEDUP_WINDOW_S = 20
 # Only what is genuinely a proxy may set X-Forwarded-For for this route.
+# Three kinds of peer qualify, and the middle one is the shipped topology:
+#
+#   loopback              Caddy talking to a bare uvicorn on the same host.
+#   the container's       Caddy on the host -> 127.0.0.1:8000 (published
+#   default gateway       loopback-only) -> docker-proxy -> us. Every such
+#                         connection reaches the container FROM THE BRIDGE
+#                         GATEWAY, never from loopback. The first live alert
+#                         was refused as "non-TradingView source 172.18.0.1"
+#                         for exactly this reason. Trusting the gateway is
+#                         the same trust as loopback ONLY because the port is
+#                         bound to 127.0.0.1 on the host; publish it wider
+#                         and every LAN peer arrives the same way.
+#   TRUSTED_PROXY_IPS     anything else, by address or CIDR -- Caddy running
+#                         inside the compose network, say.
 _LOOPBACK = frozenset({"127.0.0.1", "::1", "localhost"})
 
 SECRET_PREFIX = "tvw_"
@@ -150,17 +168,65 @@ def _source_ips() -> frozenset[str]:
         ip.strip() for ip in extra.split(",") if ip.strip())
 
 
+def _gateway_from_proc_route(text: str) -> Optional[str]:
+    """The default gateway out of /proc/net/route: the row whose Destination
+    is 00000000, with the gateway as little-endian hex (010012AC is
+    172.18.0.1). None when there is no default route or the file is not in
+    the expected shape."""
+    for line in text.splitlines()[1:]:
+        fields = line.split()
+        if len(fields) >= 3 and fields[1] == "00000000":
+            try:
+                return socket.inet_ntoa(struct.pack("<L", int(fields[2], 16)))
+            except (ValueError, struct.error):
+                return None
+    return None
+
+
+@functools.lru_cache(maxsize=1)
+def _container_gateway() -> Optional[str]:
+    """The address host-originated connections arrive from when we run in a
+    container. Read once; a container's default route does not change."""
+    try:
+        with open("/proc/net/route", encoding="ascii") as f:
+            return _gateway_from_proc_route(f.read())
+    except OSError:
+        return None
+
+
+def _is_trusted_proxy(peer: str) -> bool:
+    if peer in _LOOPBACK or peer == _container_gateway():
+        return True
+    try:
+        addr = ipaddress.ip_address(peer)
+    except ValueError:
+        return False
+    for item in os.environ.get("TRUSTED_PROXY_IPS", "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            if addr in ipaddress.ip_network(item, strict=False):
+                return True
+        except ValueError:
+            logger.warning("TRUSTED_PROXY_IPS entry %r is not an address or CIDR", item)
+    return False
+
+
 def _client_ip(request: Request, cfg: ApiConfig) -> str:
     """The address the allowlist judges.
 
-    X-Forwarded-For is believed ONLY when the immediate peer is our own
-    reverse proxy on loopback. The review showed that honouring it from any
+    X-Forwarded-For is believed ONLY when TRUST_PROXY is set AND the
+    immediate peer is one of our own reverse proxy's possible addresses
+    (see _is_trusted_proxy). The review showed that honouring it from any
     peer turns the allowlist into a header check: anyone reaching :8000
     directly could claim to be TradingView. The existing get_client_ip
     honours the header whenever TRUST_PROXY is set; this route is stricter.
+    Of the header's hops the LAST is used -- the one Caddy appended -- so a
+    client that arrives already carrying the header gains nothing.
     """
     peer = request.client.host if request.client else "unknown"
-    if cfg.trust_proxy and peer in _LOOPBACK:
+    if cfg.trust_proxy and _is_trusted_proxy(peer):
         return get_client_ip(request, trust_proxy=True)
     return peer
 
@@ -263,8 +329,15 @@ def create_webhooks_router(rate_limiter: LoginRateLimiter) -> APIRouter:
             # Per-SOURCE bucket. This must never be a bucket a real alert
             # could share, or a URL alone becomes a denial of service.
             if not rate_limiter.is_limited(f"webhook-source:{ip}", 30):
-                logger.warning("webhook from non-TradingView source %s (hook %s)",
-                               ip, hook_id[:6])
+                forwarded = request.headers.get("x-forwarded-for")
+                hint = ""
+                if forwarded and ip == (request.client.host if request.client else None):
+                    hint = (f" -- X-Forwarded-For {forwarded!r} was NOT believed: "
+                            f"peer {ip} is not a trusted proxy "
+                            f"(TRUST_PROXY={'on' if cfg.trust_proxy else 'off'}; "
+                            f"see TRUSTED_PROXY_IPS)")
+                logger.warning("webhook from non-TradingView source %s (hook %s)%s",
+                               ip, hook_id[:6], hint)
             return _json(403, {
                 "status": "rejected",
                 "reason": f"source {ip} is not a TradingView address"})
