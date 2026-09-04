@@ -49,7 +49,7 @@ clipboard; a secret in that many places has already leaked. The URL carries
 an opaque random hook_id -- a mailbox address -- so a stale secret in the
 operator's own template still lands in THEIR log where they can see it.
 
-WHY A RESEND IS THE DANGER. TradingView resends on non-2xx. If an order was
+WHY A RESEND IS THE DANGER. TradingView resends on 5xx. If an order was
 already handed to the copier and we then answer 5xx (say, a slow read), the
 resend is a double trade. So the classification of copier failures is
 strict: a connection that was never made is 503 (nothing sent, resend
