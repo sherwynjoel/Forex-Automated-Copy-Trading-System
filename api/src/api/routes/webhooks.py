@@ -7,9 +7,15 @@
 This is the only unauthenticated, order-placing route in the API, and it is
 written to be safe by default for an operator who is not a security engineer.
 TradingView signs nothing; it sends four fixed source IPs, gives the server
-three seconds, resends on non-2xx, and puts whatever the operator typed into
-the alert message on the wire. Every design decision below follows from one
-of those four facts.
+three seconds, and puts whatever the operator typed into the alert message
+on the wire. Its retry rule, from their own "Webhook resubmission" article,
+is narrower than "resends on error" and the safety logic leans on the exact
+shape: a resend happens ONLY for HTTP 500-599, never for 504 and never for
+any 4xx, up to 3 times, 5 seconds apart. So 503 means "nothing was placed,
+please try again" and is the only status that invites a retry; every refusal
+is a 4xx so TradingView drops it; and "the order may be live" is a 200 so
+nothing is ever resent into it. Every design decision below follows from
+those facts.
 
 THE FRONT DOOR, IN ORDER. Nothing that costs a database write or a bucket
 slot happens before the request has proved it is TradingView carrying the
@@ -96,9 +102,10 @@ MAX_BODY_BYTES = 4096
 # up -- because then it resends, and that is the double trade.
 DEADLINE_S = 2.0
 COPIER_CALL_TIMEOUT_S = 1.0
-# Fingerprint window: covers TradingView's own resend cadence (a few seconds)
-# and two indicators firing the same message in the same second, while
-# staying short enough that a genuine re-entry a minute later goes through.
+# Fingerprint window: TradingView's full resend span is 3 retries x 5 s = 15 s
+# after the first delivery, and two indicators can fire the same message in
+# the same second. 20 s covers both while staying short enough that a genuine
+# re-entry a minute later goes through.
 DEDUP_WINDOW_S = 20
 # Only what is genuinely a proxy may set X-Forwarded-For for this route.
 _LOOPBACK = frozenset({"127.0.0.1", "::1", "localhost"})
