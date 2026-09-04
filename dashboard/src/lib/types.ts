@@ -194,6 +194,48 @@ export interface Settings {
   dry_run: boolean
 }
 
+/** One TradingView alert as the server recorded it. `body` is never
+ *  returned -- only what the operator needs to see what happened. */
+export interface WebhookReceipt {
+  id: number
+  received_at: string
+  outcome: 'accepted' | 'duplicate' | 'unknown' | 'rejected' | 'failed' | 'nothing_to_close' | string
+  reason: string | null
+  action: string | null
+  symbol: string | null
+  lots: number | null
+  source_ip: string | null
+  latency_ms: number | null
+}
+
+export interface WebhookSettings {
+  configured: boolean
+  hook_id: string | null
+  url: string | null
+  url_hint: string | null
+  has_secret: boolean
+  secret_created_at: string | null
+  enabled: boolean
+  max_lots: number
+  max_per_minute: number
+  max_open_positions: number
+  symbol_aliases: Record<string, string>
+  master_account_id: number | null
+  dry_run: boolean
+  copying_enabled: boolean
+  template: string
+  recent: WebhookReceipt[]
+}
+
+/** Returned exactly once by POST .../webhook/secret. Hold it only while
+ *  the reveal dialog is open. */
+export interface WebhookSecret {
+  secret: string
+  hook_id: string
+  url: string | null
+  template: string
+}
+
 export interface EventResponse {
   id: number
   ts: string

@@ -24,6 +24,8 @@ COOLDOWN_S = 900  # one message per (action, account) per 15 minutes
 # (category, severity, payload.action), matched exactly like ALERT_RULES.
 TELEGRAM_RULES: set[tuple[str, str, str]] = {
     ("reminder", "warning", "cutoff_approaching"),
+    ("control", "error", "webhook_alert"),
+    ("control", "warning", "webhook_alert"),
 }
 
 

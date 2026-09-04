@@ -168,6 +168,12 @@ def create_app(http_transport: Optional[httpx.BaseTransport] = None) -> FastAPI:
     trading_router = create_trading_router()
     app.include_router(trading_router)
 
+    # TradingView alerts -> master orders. The receiver shares the login
+    # rate limiter for its per-source and per-hook buckets.
+    from .routes.webhooks import create_webhooks_router, create_webhook_settings_router
+    app.include_router(create_webhooks_router(rate_limiter))
+    app.include_router(create_webhook_settings_router())
+
     # Include insights router (margin, candles, analytics, overview stats)
     insights_router = create_insights_router()
     app.include_router(insights_router)

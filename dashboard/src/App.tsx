@@ -13,6 +13,7 @@ import Overview from './pages/Overview'
 import Accounts from './pages/Accounts'
 import Positions from './pages/Positions'
 import Trade from './pages/Trade'
+import Automation from './pages/Automation'
 import History from './pages/History'
 import Performance from './pages/Performance'
 import Logs from './pages/Logs'
@@ -61,6 +62,7 @@ export default function App() {
           <Route path="accounts" element={<Accounts />} />
           <Route path="positions" element={<Positions />} />
           <Route path="trade" element={<Trade />} />
+          <Route path="automation" element={<Automation />} />
           <Route path="history" element={<History />} />
           <Route path="performance" element={<Performance />} />
           <Route path="logs" element={<Logs />} />

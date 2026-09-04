@@ -46,17 +46,17 @@ class TestParse:
 
     def test_ticker_is_accepted_as_an_alias_for_symbol(self):
         """{{ticker}} is the placeholder TradingView actually offers."""
-        alert = parse_alert({"action": "sell", "ticker": "FX:EURUSD", "lots": 0.5}, 1.0)
+        alert = parse_alert({"action": "sell", "ticker": "FX:EURUSD", "lots": 0.5, "id": "1"}, 1.0)
         assert alert.symbol == "EURUSD"
 
     def test_close_needs_no_size_and_ignores_one_it_is_given(self):
         """A shared template can carry lots harmlessly on a close."""
-        alert = parse_alert({"action": "close", "symbol": "XAUUSD", "lots": 0.01}, 1.0)
-        assert alert == Alert("close", "XAUUSD", None, None, None, None)
+        alert = parse_alert({"action": "close", "symbol": "XAUUSD", "lots": 0.01, "id": "7"}, 1.0)
+        assert alert == Alert("close", "XAUUSD", None, None, None, "7")
 
     def test_strings_from_placeholders_are_accepted(self):
         """TradingView substitutes placeholders as text; "0.01" must work."""
-        alert = parse_alert({"action": "BUY", "symbol": "XAUUSD", "lots": "0.01"}, 1.0)
+        alert = parse_alert({"action": "BUY", "symbol": "XAUUSD", "lots": "0.01", "id": "1"}, 1.0)
         assert alert.action == "buy" and alert.lots == 0.01
 
     # ---- the refusals that matter ----
@@ -67,43 +67,44 @@ class TestParse:
 
     def test_unknown_action_is_refused(self):
         with pytest.raises(AlertError, match="action must be one of"):
-            parse_alert({"action": "long", "symbol": "XAUUSD", "lots": 0.01}, 1.0)
+            parse_alert({"action": "long", "symbol": "XAUUSD", "lots": 0.01, "id": "1"}, 1.0)
 
     def test_missing_lots_on_a_buy_is_refused(self):
         with pytest.raises(AlertError, match="lots is required"):
-            parse_alert({"action": "buy", "symbol": "XAUUSD"}, 1.0)
+            parse_alert({"action": "buy", "symbol": "XAUUSD", "id": "1"}, 1.0)
 
     @pytest.mark.parametrize("lots", [0, -0.01, "abc", float("nan"), float("inf")])
     def test_bad_lots_are_refused(self, lots):
         with pytest.raises(AlertError):
-            parse_alert({"action": "buy", "symbol": "XAUUSD", "lots": lots}, 1.0)
+            parse_alert({"action": "buy", "symbol": "XAUUSD", "lots": lots, "id": "1"}, 1.0)
 
     def test_the_per_org_cap_stops_a_template_typo(self):
         """0.10 meant, 10 sent. The cap is what stands between them."""
         with pytest.raises(AlertError, match="above this workspace's cap of 1"):
-            parse_alert({"action": "buy", "symbol": "XAUUSD", "lots": 10}, max_lots=1.0)
+            parse_alert({"action": "buy", "symbol": "XAUUSD", "lots": 10, "id": "1"}, max_lots=1.0)
 
     def test_the_hard_ceiling_holds_even_if_the_org_cap_is_absurd(self):
         """A corrupted or malicious cap must not unlock a hundred lots."""
         with pytest.raises(AlertError, match=f"cap of {HARD_MAX_LOTS:g}"):
-            parse_alert({"action": "buy", "symbol": "XAUUSD", "lots": 60},
+            parse_alert({"action": "buy", "symbol": "XAUUSD", "lots": 60, "id": "1"},
                         max_lots=1_000_000)
 
-    def test_no_cap_configured_falls_back_to_the_hard_ceiling(self):
-        assert parse_alert({"action": "buy", "symbol": "XAUUSD", "lots": 1}, 0).lots == 1
-        with pytest.raises(AlertError):
-            parse_alert({"action": "buy", "symbol": "XAUUSD", "lots": 51}, 0)
+    @pytest.mark.parametrize("cap", [0, None, -1, float("nan")])
+    def test_a_missing_or_zero_cap_is_a_configuration_error_not_permission(self, cap):
+        """Falling back to the fifty-lot ceiling would be the worst default."""
+        with pytest.raises(AlertError, match="no lot cap configured"):
+            parse_alert({"action": "buy", "symbol": "XAUUSD", "lots": 0.01, "id": "1"}, cap)
 
     @pytest.mark.parametrize("field", ["stop_loss", "take_profit"])
     @pytest.mark.parametrize("value", [0, -1, "x", float("nan")])
     def test_bad_protection_prices_are_refused(self, field, value):
         with pytest.raises(AlertError, match=field):
-            parse_alert({"action": "buy", "symbol": "XAUUSD", "lots": 0.01, field: value}, 1.0)
+            parse_alert({"action": "buy", "symbol": "XAUUSD", "lots": 0.01, field: value, "id": "1"}, 1.0)
 
     def test_empty_protection_fields_mean_none(self):
         """A template with an unfilled {{...}} slot sends "" -- not an error."""
         alert = parse_alert(
-            {"action": "buy", "symbol": "XAUUSD", "lots": 0.01, "stop_loss": "", "take_profit": None},
+            {"action": "buy", "symbol": "XAUUSD", "lots": 0.01, "stop_loss": "", "take_profit": None, "id": "1"},
             1.0)
         assert alert.stop_loss is None and alert.take_profit is None
 
@@ -135,3 +136,31 @@ class TestFindMasterPositions:
                                        {"master_positions": [None, "bad", {"symbol": "XAUUSD"}]}])
     def test_malformed_state_is_treated_as_empty(self, state):
         assert find_master_positions(state, "XAUUSD") == []
+
+
+class TestHardening:
+    """What the adversarial review demanded of the parser."""
+
+    def test_id_is_required(self):
+        """Without it, a re-entry after a stop is silently a 'duplicate'."""
+        with pytest.raises(AlertError, match="id is required"):
+            parse_alert({"action": "buy", "symbol": "XAUUSD", "lots": 0.01}, 1.0)
+
+    @pytest.mark.parametrize("bad", ["{{timenow}}", "{{time}}", "x{{timenow}}y"])
+    def test_an_unexpanded_placeholder_is_refused_with_the_cause(self, bad):
+        """Placeholders inside strategy.entry(alert_message=...) never render.
+        The operator must be told that, not have every signal deduplicated."""
+        with pytest.raises(AlertError, match="did not expand"):
+            parse_alert({"action": "buy", "symbol": "XAUUSD", "lots": 0.01, "id": bad}, 1.0)
+
+    @pytest.mark.parametrize("field", ["lots", "stop_loss", "take_profit"])
+    def test_booleans_are_not_numbers(self, field):
+        """float(True) is 1.0 -- one lot, or a stop at price 1."""
+        body = {"action": "buy", "symbol": "XAUUSD", "lots": 0.01, "id": "1", field: True}
+        with pytest.raises(AlertError, match=field):
+            parse_alert(body, 1.0)
+
+    def test_an_absurdly_long_number_is_refused_before_parsing(self):
+        """float('1'*4000) is legal Python and a slow way to say nothing."""
+        with pytest.raises(AlertError, match="lots"):
+            parse_alert({"action": "buy", "symbol": "XAUUSD", "lots": "1" * 4000, "id": "1"}, 1.0)

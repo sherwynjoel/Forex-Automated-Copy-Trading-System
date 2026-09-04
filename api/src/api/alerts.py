@@ -28,6 +28,12 @@ ALERT_RULES: dict[tuple[str, str, str], str] = {
     ("auth", "error", "token_refresh_failed"): "cTrader token refresh failed",
     ("slave_action", "error", "order_rejected"): "Copy order rejected",
     ("slave_action", "error", "send_failed_degraded"): "Slave degraded",
+    # An automated order whose outcome the copier never confirmed: the
+    # order may be live and nobody pressed a button. Somebody must look.
+    ("control", "error", "webhook_alert"): "TradingView order unconfirmed",
+    # Refusals: a wrong secret, a stopped kill switch, a capped size. One
+    # email per cooldown, not one per retry.
+    ("control", "warning", "webhook_alert"): "TradingView alert refused",
 }
 
 

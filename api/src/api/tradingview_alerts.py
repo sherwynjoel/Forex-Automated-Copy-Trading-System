@@ -79,14 +79,32 @@ def normalise_ticker(raw: object) -> str:
     return ticker
 
 
+_UNEXPANDED = re.compile(r"\{\{.*\}\}")
+
+
+def _number(raw: object, key: str) -> float:
+    """float() that refuses the things float() accepts and a trade should not."""
+    if isinstance(raw, bool):
+        raise AlertError(f"{key} must be a number, got {raw!r}")
+    if isinstance(raw, str) and len(raw) > 32:
+        # float("1" * 4000) is legal and slow; no real price or size is
+        # this long, so refuse before parsing.
+        raise AlertError(f"{key} is not a valid number")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        raise AlertError(f"{key} must be a number, got {raw!r}")
+    return value
+
+
 def _price(body: dict, key: str) -> float | None:
     raw = body.get(key)
     if raw is None or raw == "":
         return None
     try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        raise AlertError(f"{key} must be a number, got {raw!r}")
+        value = _number(raw, key)
+    except AlertError:
+        raise
     if not math.isfinite(value) or value <= 0:
         raise AlertError(f"{key} must be a positive price, got {raw!r}")
     return value
@@ -110,9 +128,24 @@ def parse_alert(body: object, max_lots: float) -> Alert:
 
     symbol = normalise_ticker(body.get("symbol", body.get("ticker")))
 
-    alert_id = body.get("id")
-    if alert_id is not None:
-        alert_id = str(alert_id).strip()[:128] or None
+    # The id is what tells one signal from the next when the trading content
+    # is identical -- a re-entry after a stop, pyramiding, a scalper on a
+    # one-minute chart. Without it every such alert after the first would be
+    # swallowed as a duplicate, silently. So it is required, and a literal
+    # "{{timenow}}" -- the placeholder TradingView failed to expand because
+    # it was put somewhere placeholders do not render -- is refused with the
+    # reason, not deduplicated into oblivion.
+    raw_id = body.get("id")
+    alert_id = str(raw_id).strip()[:128] if raw_id is not None else ""
+    if not alert_id:
+        raise AlertError(
+            'id is required -- add "id": "{{timenow}}" to the alert message so '
+            'repeated signals are not mistaken for one another')
+    if _UNEXPANDED.search(alert_id):
+        raise AlertError(
+            f"id arrived as the literal {alert_id!r}: TradingView did not expand "
+            f"the placeholder. Placeholders only render in the alert dialog's "
+            f"Message box, not inside strategy.entry(alert_message=...)")
 
     if action == "close":
         # A close needs no size, stop or target -- it closes what is there.
@@ -123,14 +156,15 @@ def parse_alert(body: object, max_lots: float) -> Alert:
     raw_lots = body.get("lots")
     if raw_lots is None or raw_lots == "":
         raise AlertError("lots is required for buy and sell, e.g. \"lots\": 0.01")
-    try:
-        lots = float(raw_lots)
-    except (TypeError, ValueError):
-        raise AlertError(f"lots must be a number, got {raw_lots!r}")
+    lots = _number(raw_lots, "lots")
     if not math.isfinite(lots) or lots <= 0:
         raise AlertError(f"lots must be greater than 0, got {raw_lots!r}")
 
-    cap = min(float(max_lots), HARD_MAX_LOTS) if max_lots else HARD_MAX_LOTS
+    # A cap that is missing or zero is a misconfiguration, not permission
+    # to fall back to the ceiling: the ceiling is fifty lots.
+    if max_lots is None or not math.isfinite(float(max_lots)) or float(max_lots) <= 0:
+        raise AlertError("this workspace has no lot cap configured; set one in Automation")
+    cap = min(float(max_lots), HARD_MAX_LOTS)
     if lots > cap:
         raise AlertError(
             f"lots {lots:g} is above this workspace's cap of {cap:g}. "

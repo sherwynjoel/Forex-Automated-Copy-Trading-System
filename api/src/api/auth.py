@@ -221,8 +221,13 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         """Process request and enforce CSRF for mutations."""
         # Only check mutations (POST, PUT, DELETE, PATCH)
         if request.method in ["POST", "PUT", "DELETE", "PATCH"]:
-            # Skip CSRF check for /api/login and /api/register (public endpoints)
-            if request.url.path not in ("/api/login", "/api/register"):
+            # Skip CSRF check for the public endpoints: login, register,
+            # and inbound webhooks. A webhook has no session and no CSRF
+            # cookie by definition -- it authenticates with a per-org
+            # secret in its body (routes/webhooks.py), and the prefix is
+            # its own namespace so nothing else is ever exempted with it.
+            path = request.url.path
+            if path not in ("/api/login", "/api/register") and not path.startswith("/api/webhooks/"):
                 # Get CSRF token from cookie
                 csrf_cookie = request.cookies.get("csrf")
                 if not csrf_cookie:

@@ -15,7 +15,10 @@ const navItems = (orgId: number, role: Role) => [
   { path: `/org/${orgId}`, label: 'Overview' },
   { path: `/org/${orgId}/accounts`, label: 'Accounts' },
   { path: `/org/${orgId}/positions`, label: 'Positions' },
-  ...(can(role, 'trade') ? [{ path: `/org/${orgId}/trade`, label: 'Trade' }] : []),
+  ...(can(role, 'trade') ? [
+    { path: `/org/${orgId}/trade`, label: 'Trade' },
+    { path: `/org/${orgId}/automation`, label: 'Automation' },
+  ] : []),
   { path: `/org/${orgId}/history`, label: 'History' },
   { path: `/org/${orgId}/performance`, label: 'Performance' },
   { path: `/org/${orgId}/logs`, label: 'Logs' },
