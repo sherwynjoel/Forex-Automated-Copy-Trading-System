@@ -68,6 +68,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import secrets
 import socket
 import struct
@@ -251,6 +252,38 @@ def _redact(value: Any) -> Any:
     return value
 
 
+_CURLY_QUOTES = "“”‘’"
+_SECRET_SHAPED = re.compile(re.escape(SECRET_PREFIX) + "[A-Za-z0-9_-]*")
+
+
+def _safe_preview(text: str, limit: int = 30) -> str:
+    # A secret that ended up inside non-JSON text is still a secret. Redact
+    # BEFORE cutting to length, or the cut hides the prefix from the regex.
+    clean = _SECRET_SHAPED.sub("***", text)
+    return "".join(ch if ch.isprintable() else " " for ch in clean[:limit])
+
+
+def _not_json_hint(raw: bytes) -> str:
+    """Why the message did not parse, in the operator's terms and with no
+    secret in it. A non-JSON body is never stored, so this one line is the
+    only clue the Recent list can give. The three shapes seen from phones:
+    TradingView's own default text left in the box, a pasted template whose
+    straight quotes the keyboard turned curly, and a template cut short."""
+    text = raw.decode("utf-8", "replace").strip()
+    if not text:
+        return "the Message box is empty"
+    if any(ch in text for ch in _CURLY_QUOTES):
+        return ("it contains curly quotes -- the phone keyboard replaced the "
+                "straight quotes; delete the box and paste the template again "
+                "without typing into it")
+    if not text.startswith("{"):
+        return ("it begins with " + repr(_safe_preview(text)) + " instead of { "
+                "-- the Message box still has TradingView's own text; delete it "
+                "and paste the template")
+    return ("it begins with { but is not complete JSON -- delete the Message "
+            "box and paste the whole template again, nothing before or after it")
+
+
 def _fingerprint(org_id: int, alert: Alert) -> str:
     """The alert's TRADING content, not its bytes.
 
@@ -364,8 +397,8 @@ def create_webhooks_router(rate_limiter: LoginRateLimiter) -> APIRouter:
             body = json.loads(raw.decode("utf-8"))
         except Exception:
             return _record(conn, org_id, ip, t0, None, None, WebhookRejected(
-                422, "the alert message must be JSON -- check the Message box "
-                     "matches the template in Automation"))
+                422, "the alert message must be JSON: " + _not_json_hint(raw)
+                     + ". Compare the Message box with the template in Automation"))
 
         # ---- 5. the secret ----
         presented = body.get("secret") if isinstance(body, dict) else None

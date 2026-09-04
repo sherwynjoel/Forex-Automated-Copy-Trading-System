@@ -290,6 +290,58 @@ def test_text_plain_that_is_not_json_says_so(org_client, db):
     assert "must be JSON" in r.json()["reason"]
 
 
+
+def test_a_non_json_message_says_what_it_saw(org_client, db):
+    """The body is never stored, so the reason is the operator's only clue.
+    The commonest shape: TradingView's own default text left in the box."""
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+
+    r = _post(client, None, raw=b"XAUUSD Crossing 3500.00")
+
+    assert r.status_code == 422
+    assert "begins with 'XAUUSD Crossing 3500.00' instead of {" in r.json()["reason"]
+    assert "TradingView's own text" in r.json()["reason"]
+
+
+def test_curly_quotes_are_named_as_the_culprit(org_client, db):
+    """iPhone Smart Punctuation turns "secret" into “secret” the moment the
+    operator edits the pasted template. The secret itself must not come
+    back in the reason, nor land in the receipt."""
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+    body = '{“secret”: “' + SECRET + '”, “action”: “close”}'
+
+    r = _post(client, None, raw=body.encode("utf-8"))
+
+    assert r.status_code == 422
+    assert "curly quotes" in r.json()["reason"]
+    assert SECRET not in r.json()["reason"]
+    assert SECRET not in str(_receipts(db, org_id))
+
+
+def test_a_secret_inside_broken_text_never_reaches_the_reason(org_client, db):
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+
+    r = _post(client, None, raw=(SECRET + " buy").encode())
+
+    assert r.status_code == 422
+    assert SECRET not in r.json()["reason"]
+    assert "'*** buy'" in r.json()["reason"]
+    assert SECRET not in str(_receipts(db, org_id))
+    assert SECRET not in str(_events(db, org_id))
+
+
+def test_a_cut_short_template_is_told_apart_from_default_text(org_client, db):
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+
+    r = _post(client, None, raw=b'{"secret": "tvw_x", "action": "close"')
+
+    assert r.status_code == 422
+    assert "not complete JSON" in r.json()["reason"]
+
 def test_works_with_no_csrf_token_or_session(org_client, db):
     """Implicit in every other test, stated once: TradingView has neither."""
     client, org_id, seed = org_client
