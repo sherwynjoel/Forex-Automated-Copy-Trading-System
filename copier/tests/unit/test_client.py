@@ -839,6 +839,47 @@ def test_refusal_reason_is_kept_so_the_caller_can_say_why():
     assert client.account_auth_error(1001) == "RET_ACCOUNT_DISABLED"
 
 
+def test_already_logged_in_is_success_not_refusal():
+    """ALREADY_LOGGED_IN answers a ProtoOAAccountAuthReq for an account this
+    connection has ALREADY authorized -- and reload() re-sends that request
+    for every enabled account on every settings change, so it is the normal
+    answer for all but the first. It arrives as an error message, like a
+    refusal does.
+
+    RED before the fix: it was recorded as a refusal, the T3 gate then
+    enforced that on every query, and the live master sat "not authorized:
+    the broker refused with ALREADY_LOGGED_IN" for 30 hours while it was
+    logged in the whole time. The first TradingView alert with a stop and a
+    target died on it.
+    """
+    sdk, _, client = make()
+    sdk.connect()
+    client.authorize_account(1001, "tok")
+
+    client._on_account_auth_response(
+        _auth_envelope(ProtoOAErrorRes(errorCode="ALREADY_LOGGED_IN")), 1001)
+
+    assert client.is_account_authed(1001)
+    assert client.account_auth_error(1001) is None
+
+
+def test_already_logged_in_clears_an_earlier_refusal():
+    """The broker's latest word wins: an account it refused at boot and now
+    reports as logged in is logged in."""
+    sdk, _, client = make()
+    sdk.connect()
+    client.authorize_account(1001, "tok")
+    client._on_account_auth_response(
+        _auth_envelope(ProtoOAErrorRes(errorCode="RET_ACCOUNT_DISABLED")), 1001)
+    assert client.account_auth_error(1001) == "RET_ACCOUNT_DISABLED"
+
+    client._on_account_auth_response(
+        _auth_envelope(ProtoOAErrorRes(errorCode="ALREADY_LOGGED_IN")), 1001)
+
+    assert client.is_account_authed(1001)
+    assert client.account_auth_error(1001) is None
+
+
 def test_no_refusal_recorded_when_the_broker_has_not_refused():
     sdk, _, client = make()
     sdk.connect()

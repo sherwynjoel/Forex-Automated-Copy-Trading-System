@@ -529,6 +529,21 @@ class CTraderClient:
             )
             return response
         if isinstance(payload, (ProtoOAErrorRes, ProtoErrorRes)):
+            if payload.errorCode == "ALREADY_LOGGED_IN":
+                # NOT a refusal. It is the broker saying this connection has
+                # already authorized the account -- and reload() re-sends
+                # ProtoOAAccountAuthReq for every enabled account on every
+                # settings change, so it is the normal answer for all but
+                # the first. It arrives as an error message exactly like a
+                # refusal does; recording it as one left the live master
+                # "not authorized: the broker refused with ALREADY_LOGGED_IN"
+                # for 30 hours while it was logged in the whole time, and
+                # every order and query on it died at the T3 gate.
+                log.info("account auth %s: already logged in on this connection",
+                         account_id)
+                self._authed_accounts.add(account_id)
+                self._auth_errors.pop(account_id, None)
+                return response
             log.error("account auth %s rejected: %s", account_id, payload.errorCode)
             # Kept so the caller can say WHY. An undecodable response is
             # deliberately not recorded here: it is an unknown, not a
