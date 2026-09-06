@@ -296,6 +296,13 @@ def _fingerprint(org_id: int, alert: Alert) -> str:
     return hashlib.sha256(json.dumps(parts).encode()).hexdigest()
 
 
+def _describe(exc: BaseException) -> str:
+    """httpx.ReadTimeout's str() is empty, which reached the operator as
+    "copier did not confirm: " -- a warning with no content."""
+    text = str(exc)
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
 async def _copier(client: httpx.AsyncClient, method: str, url: str,
                   json_body: Optional[dict], remaining_s: float) -> Dict[str, Any]:
     """One copier call, with the failure classified for TradingView.
@@ -314,9 +321,9 @@ async def _copier(client: httpx.AsyncClient, method: str, url: str,
         else:
             response = await client.post(url, json=json_body or {}, timeout=timeout)
     except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
-        raise CopierDown(str(exc))
+        raise CopierDown(_describe(exc))
     except httpx.HTTPError as exc:
-        raise CopierUnknown(str(exc))
+        raise CopierUnknown(_describe(exc))
 
     if response.status_code >= 500:
         raise CopierUnknown(f"copier answered {response.status_code}")
@@ -551,7 +558,18 @@ def create_webhooks_router(rate_limiter: LoginRateLimiter) -> APIRouter:
             # The reconciler's snapshot lags a fill by a resync. A close that
             # arrives 300ms after the entry it is meant to undo would read an
             # empty book and report success. Ask for a fresh read first.
-            await _copier(client, "POST", f"{base}/resync", {"org_id": org_id}, remaining())
+            #
+            # The resync is a broker round trip per account and took 2 s on
+            # the live system; the read timeout is 1 s. A resync that does
+            # not answer in time is NOT an order that may be live -- nothing
+            # was sent -- so it must not become "unknown", which is what
+            # every close-with-nothing-open in the fast test turned into.
+            # The copier finishes the resync regardless; re-read the book.
+            try:
+                await _copier(client, "POST", f"{base}/resync", {"org_id": org_id}, remaining())
+            except CopierUnknown as exc:
+                logger.warning("org %s resync did not answer in time (%s); "
+                               "closing from the current book", org_id, exc)
             state = await _copier(client, "GET", f"{base}/state?org_id={org_id}", None, remaining())
             held = find_master_positions(state, alert.symbol)
         closed = []

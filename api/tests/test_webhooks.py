@@ -496,6 +496,38 @@ def test_close_flattens_every_master_position_on_the_symbol(org_client, db):
     assert all(c["actor_email"] == "tradingview" for c in closes)
 
 
+def test_a_slow_resync_does_not_turn_a_close_into_unknown(org_client, db):
+    """The org resync is a broker round trip per account and took 2 s on the
+    live system; the copier read timeout is 1 s. Every close-with-nothing-
+    open in the fast test came back "unknown: copier did not confirm: " --
+    an empty reason, and a warning to check Positions for an order that was
+    never sent. A resync that does not answer in time is not a live order.
+    """
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+    calls = _copier(client, raise_on={"/resync": httpx.ReadTimeout("")})
+
+    r = _post(client, _alert(action="close"))
+
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "nothing_to_close"
+    assert [row[0] for row in _receipts(db, org_id)] == ["nothing_to_close"]
+    assert sum("/state" in u for u, _ in calls) == 2, "did not re-read the book after the slow resync"
+
+
+def test_an_unknown_reason_names_the_exception_when_its_message_is_empty(org_client, db):
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+    _copier(client, raise_on={"/order": httpx.ReadTimeout("")})
+
+    r = _post(client, _alert())
+
+    assert r.json()["status"] == "unknown"
+    (row,) = _receipts(db, org_id)
+    assert row[0] == "unknown"
+    assert "ReadTimeout" in row[1]
+
+
 def test_close_with_nothing_open_resyncs_first_then_reports_honestly(org_client, db):
     """A close 300ms after its entry can read a stale, empty book. Ask for a
     fresh one before concluding there is nothing -- then say so as a
