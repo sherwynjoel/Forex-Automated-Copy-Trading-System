@@ -6,7 +6,7 @@ import { useTheme } from '../hooks/useTheme'
 import { can, type Role } from '../lib/roles'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
 import type { TicksPayload } from '../lib/ticks'
-import type { Account, ApiState, CloseAllResult, EventResponse, Settings } from '../lib/types'
+import type { Account, ApiState, CloseAllResult, EventResponse, Settings, WebhookSettings } from '../lib/types'
 import ConfirmDialog from './ConfirmDialog'
 import Logo from './Logo'
 import { money, signed, errorText } from '../lib/format'
@@ -61,6 +61,11 @@ function contractPrices(
 function DeskStrip() {
   const { orgId, role } = useOrg()
   const [settings, setSettings] = useState<Settings | null>(null)
+  // The Automation switch, mirrored on every page next to the copying
+  // state: an operator who left it ON should see that without opening
+  // the page, and one who thinks it is ON should see when it is not.
+  const [automation, setAutomation] =
+    useState<Pick<WebhookSettings, 'enabled' | 'configured'> | null>(null)
   const [masterState, setMasterState] = useState<{ equity?: number | null; open_pnl?: number } | null>(null)
   const masterIdRef = useRef<number | null>(null)
   const [contracts, setContracts] = useState<{ symbol: string; price: number | null }[]>([])
@@ -88,6 +93,15 @@ function DeskStrip() {
       setContracts(contractPrices(masterSnap?.positions))
     } catch {
       // The strip is a passenger; pages surface their own errors.
+    }
+    if (can(role, 'trade')) {
+      try {
+        const hook = await orgApi<WebhookSettings>(orgId, 'webhook')
+        setAutomation({ enabled: hook.enabled, configured: hook.configured })
+      } catch {
+        // Older api without automation: no pill.
+        setAutomation(null)
+      }
     }
     try {
       // A margin call in the last 30 minutes is a right-now problem; show
@@ -118,7 +132,7 @@ function DeskStrip() {
     } catch {
       // Older api without the reminder category: no banner.
     }
-  }, [orgId])
+  }, [orgId, role])
 
   useEffect(() => {
     refresh()
@@ -214,6 +228,23 @@ function DeskStrip() {
             {copying == null ? 'Connecting…' : copying ? 'Copying live' : 'Copying paused'}
           </span>
         </div>
+        {automation && typeof automation.enabled === 'boolean' && (
+          <Link
+            to={`/org/${orgId}/automation`}
+            title="Open Automation"
+            className="order-2 flex items-center gap-2"
+          >
+            <span
+              aria-hidden="true"
+              className={`inline-block w-2 h-2 rounded-full ${
+                automation.enabled ? 'bg-profit' : 'bg-line-strong'
+              }`}
+            />
+            <span className={`font-medium ${automation.enabled ? 'text-ink' : 'text-ink-soft'}`}>
+              {automation.enabled ? 'Automation on' : 'Automation off'}
+            </span>
+          </Link>
+        )}
         {dryRun && (
           <span className="order-2 desk-label text-warn-deep bg-warn-wash px-2 py-0.5 rounded">
             Dry run

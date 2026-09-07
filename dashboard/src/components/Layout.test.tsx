@@ -75,6 +75,9 @@ function mockRoutes(overrides: Record<string, unknown> = {}) {
       })
     if (url.includes('category=reminder')) return respond(overrides['reminderEvents'] ?? [])
     if (url.includes('/events')) return respond(overrides['events'] ?? [])
+    if (url.includes('/webhook')) {
+      return respond(overrides['webhook'] ?? { configured: true, enabled: true })
+    }
     if (url.includes('/settings')) return respond(overrides['settings'] ?? settings)
     if (url.includes('/state')) return respond(overrides['state'] ?? apiState)
     if (url.includes('/accounts')) return respond(overrides['accounts'] ?? accounts)
@@ -121,6 +124,33 @@ test('desk strip shows paused state when copying is disabled', async () => {
   await waitFor(() => {
     expect(screen.getByText(/copying paused/i)).toBeInTheDocument()
   })
+})
+
+test('desk strip shows Automation on next to the copying state, linking to the page', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  mockRoutes({ webhook: { configured: true, enabled: true } })
+  renderLayout()
+
+  const pill = await screen.findByText(/automation on/i)
+  expect(pill.closest('a')).toHaveAttribute('href', '/org/1/automation')
+})
+
+test('desk strip shows Automation off when the switch is off', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  mockRoutes({ webhook: { configured: true, enabled: false } })
+  renderLayout()
+
+  expect(await screen.findByText(/automation off/i)).toBeInTheDocument()
+})
+
+test('viewers, who cannot open Automation, get no automation pill and no request for it', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('viewer'))
+  const fetchMock = mockRoutes()
+  renderLayout()
+
+  await screen.findByText(/copying live/i)
+  expect(screen.queryByText(/automation o/i)).toBeNull()
+  expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/webhook'))).toBe(false)
 })
 
 test('close-all confirms with a single click — no typed phrase required', async () => {
