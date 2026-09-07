@@ -222,6 +222,26 @@ class Mt5AccountCreate(BaseModel):
     nickname: str
 
 
+class SymbolAliasesUpdate(BaseModel):
+    aliases: Dict[str, str]
+
+
+def _aliases_payload(conn: psycopg.Connection, account_id: int) -> Dict[str, Any]:
+    """The mapping the Details panel edits: canonical name (what master
+    events carry) -> the broker's name, tagged auto or manual, beside every
+    symbol the terminal reported (symbol_cache, written by the copier from
+    hello) so the operator picks from real names."""
+    aliases = conn.execute(
+        "SELECT canonical, broker_name, source FROM symbol_aliases "
+        "WHERE account_id = %s ORDER BY canonical", (account_id,)).fetchall()
+    symbols = conn.execute(
+        "SELECT name FROM symbol_cache WHERE account_id = %s ORDER BY name",
+        (account_id,)).fetchall()
+    return {"aliases": [{"canonical": r[0], "broker_name": r[1], "source": r[2]}
+                        for r in aliases],
+            "broker_symbols": [r[0] for r in symbols]}
+
+
 def _new_key() -> str:
     return MT5_KEY_PREFIX + secrets.token_urlsafe(32)
 
@@ -313,5 +333,45 @@ def create_mt5_operator_router() -> APIRouter:
             raise HTTPException(status_code=400, detail="not an MT5 account")
         audit(conn, ctx.org_id, ctx.user_email, "mt5_key_rotated", {}, account_id=account_id)
         return {"key": key}
+
+    @router.get("/accounts/{account_id}/symbol-aliases", response_model=Dict[str, Any])
+    async def get_symbol_aliases(account_id: int,
+                                 ctx: OrgContext = Depends(require_org_role("trader")),
+                                 conn: psycopg.Connection = Depends(get_conn)):
+        require_account_in_org(conn, ctx.org_id, account_id)
+        return _aliases_payload(conn, account_id)
+
+    @router.put("/accounts/{account_id}/symbol-aliases", response_model=Dict[str, Any])
+    async def put_symbol_aliases(account_id: int, body: SymbolAliasesUpdate, request: Request,
+                                 ctx: OrgContext = Depends(require_org_role("admin")),
+                                 conn: psycopg.Connection = Depends(get_conn),
+                                 cfg: ApiConfig = Depends(ApiConfig.from_env)):
+        """Manual overrides: canonical name -> the broker's name; an empty
+        broker name removes the alias. Manual always wins -- the copier's
+        auto-match never overwrites a manual row -- and the copier reloads
+        so the routing keyed by canonical name picks the change up now."""
+        require_account_in_org(conn, ctx.org_id, account_id)
+        changes: Dict[str, Optional[str]] = {}
+        for canonical, broker_name in body.aliases.items():
+            canonical = canonical.strip()
+            if not canonical:
+                raise HTTPException(status_code=400, detail="aliases: a canonical name is empty")
+            changes[canonical] = broker_name.strip() or None
+        with conn.transaction():
+            for canonical, broker_name in changes.items():
+                if broker_name is None:
+                    conn.execute("DELETE FROM symbol_aliases WHERE account_id = %s AND canonical = %s",
+                                 (account_id, canonical))
+                else:
+                    conn.execute(
+                        "INSERT INTO symbol_aliases (account_id, canonical, broker_name, source) "
+                        "VALUES (%s, %s, %s, 'manual') ON CONFLICT (account_id, canonical) "
+                        "DO UPDATE SET broker_name = EXCLUDED.broker_name, source = 'manual'",
+                        (account_id, canonical, broker_name))
+        if changes:
+            audit(conn, ctx.org_id, ctx.user_email, "symbol_aliases_changed",
+                  {"aliases": changes}, account_id=account_id)
+            await _reload_copier(request, cfg)
+        return _aliases_payload(conn, account_id)
 
     return router

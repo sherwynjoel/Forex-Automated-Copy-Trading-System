@@ -467,3 +467,120 @@ def test_a_trader_can_neither_add_nor_rotate(org_client, make_user, login_as, db
     assert _create(client, org_id).status_code == 403
     assert client.post(f"/api/orgs/{org_id}/mt5/accounts/{mine}/key",
                        headers=_csrf(client)).status_code == 403
+
+
+# ================================================ operator: symbol aliases
+
+
+def _broker_symbols(db, account_id, *names):
+    with psycopg.connect(db, autocommit=True) as conn:
+        for i, name in enumerate(names, start=1):
+            conn.execute(
+                "INSERT INTO symbol_cache (account_id, name, symbol_id, digits, lot_size, "
+                "min_volume, step_volume) VALUES (%s, %s, %s, 2, 100, 1, 1)",
+                (account_id, name, i))
+
+
+def _alias_rows(db, account_id):
+    with psycopg.connect(db, autocommit=True) as conn:
+        return conn.execute(
+            "SELECT canonical, broker_name, source FROM symbol_aliases "
+            "WHERE account_id = %s ORDER BY canonical", (account_id,)).fetchall()
+
+
+def test_aliases_are_listed_with_the_brokers_symbols(org_client, db):
+    client, org_id, seed = org_client
+    account_id = seed_mt5(db, org_id, KEY)
+    _broker_symbols(db, account_id, "GOLD.r", "EURUSD.r")
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute("INSERT INTO symbol_aliases (account_id, canonical, broker_name, source) "
+                     "VALUES (%s, 'XAUUSD', 'GOLD.r', 'auto')", (account_id,))
+
+    r = client.get(f"/api/orgs/{org_id}/accounts/{account_id}/symbol-aliases")
+
+    assert r.status_code == 200, r.text
+    assert r.json() == {
+        "aliases": [{"canonical": "XAUUSD", "broker_name": "GOLD.r", "source": "auto"}],
+        "broker_symbols": ["EURUSD.r", "GOLD.r"]}
+
+
+def test_put_sets_manual_aliases_and_an_empty_name_removes_one(org_client, db):
+    client, org_id, seed = org_client
+    account_id = seed_mt5(db, org_id, KEY)
+    calls = _copier(client)
+
+    r = client.put(f"/api/orgs/{org_id}/accounts/{account_id}/symbol-aliases",
+                   json={"aliases": {"XAUUSD": "GOLD.r", " EURUSD ": "EURUSD.r "}},
+                   headers=_csrf(client))
+
+    assert r.status_code == 200, r.text
+    assert r.json()["aliases"] == [
+        {"canonical": "EURUSD", "broker_name": "EURUSD.r", "source": "manual"},
+        {"canonical": "XAUUSD", "broker_name": "GOLD.r", "source": "manual"}]
+    assert any("/reload" in url for url, _ in calls)
+
+    r = client.put(f"/api/orgs/{org_id}/accounts/{account_id}/symbol-aliases",
+                   json={"aliases": {"EURUSD": ""}}, headers=_csrf(client))
+    assert r.status_code == 200
+    assert _alias_rows(db, account_id) == [("XAUUSD", "GOLD.r", "manual")]
+
+    (_, payload, actor), *_ = _events(db, org_id, "symbol_aliases_changed")
+    assert actor == "admin@example.com"
+    assert payload["aliases"] == {"XAUUSD": "GOLD.r", "EURUSD": "EURUSD.r"}
+
+
+def test_a_manual_alias_overrides_an_auto_one(org_client, db):
+    """Manual wins: the copier's auto-match never overwrites a manual row,
+    and an operator's correction replaces the auto row in place."""
+    client, org_id, seed = org_client
+    account_id = seed_mt5(db, org_id, KEY)
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute("INSERT INTO symbol_aliases (account_id, canonical, broker_name, source) "
+                     "VALUES (%s, 'XAUUSD', 'XAUUSD.r', 'auto')", (account_id,))
+
+    r = client.put(f"/api/orgs/{org_id}/accounts/{account_id}/symbol-aliases",
+                   json={"aliases": {"XAUUSD": "GOLD.r"}}, headers=_csrf(client))
+
+    assert r.status_code == 200
+    assert _alias_rows(db, account_id) == [("XAUUSD", "GOLD.r", "manual")]
+
+
+def test_an_empty_canonical_name_is_400_and_nothing_is_written(org_client, db):
+    client, org_id, seed = org_client
+    account_id = seed_mt5(db, org_id, KEY)
+    r = client.put(f"/api/orgs/{org_id}/accounts/{account_id}/symbol-aliases",
+                   json={"aliases": {"XAUUSD": "GOLD.r", "  ": "X"}}, headers=_csrf(client))
+    assert r.status_code == 400
+    assert "canonical" in r.json()["detail"]
+    assert _alias_rows(db, account_id) == []
+
+
+def test_aliases_of_another_orgs_account_are_404(org_client, make_user, make_org, db):
+    client, org_id, seed = org_client
+    other_owner = make_user(email="other@example.com")
+    other_org = make_org(name="Other", members=[(other_owner, "owner")])
+    theirs = seed_mt5(db, other_org, WRONG)
+    assert client.get(f"/api/orgs/{org_id}/accounts/{theirs}/symbol-aliases").status_code == 404
+    assert client.put(f"/api/orgs/{org_id}/accounts/{theirs}/symbol-aliases",
+                      json={"aliases": {"XAUUSD": "GOLD.r"}},
+                      headers=_csrf(client)).status_code == 404
+
+
+def test_a_trader_reads_aliases_but_only_an_admin_writes_them(org_client, make_user, login_as, db):
+    client, org_id, seed = org_client
+    account_id = seed_mt5(db, org_id, KEY)
+    viewer = make_user(email="viewer@example.com")
+    trader = make_user(email="trader@example.com")
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute("INSERT INTO org_memberships (org_id, user_id, role) VALUES (%s, %s, 'viewer')",
+                     (org_id, viewer["id"]))
+        conn.execute("INSERT INTO org_memberships (org_id, user_id, role) VALUES (%s, %s, 'trader')",
+                     (org_id, trader["id"]))
+    path = f"/api/orgs/{org_id}/accounts/{account_id}/symbol-aliases"
+
+    login_as(client, viewer)
+    assert client.get(path).status_code == 403
+    login_as(client, trader)
+    assert client.get(path).status_code == 200
+    assert client.put(path, json={"aliases": {"XAUUSD": "GOLD.r"}},
+                      headers=_csrf(client)).status_code == 403
