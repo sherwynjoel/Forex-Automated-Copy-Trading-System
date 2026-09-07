@@ -264,8 +264,13 @@ POST /api/mt5/sync
  "acks":[{"id":88,"ok":true,"retcode":10009,"msg":"done","pos":669607966,"deal":700001,"order":700000,"price":4468.49,"lots":0.01}]}
 ```
 
-Response (server → EA), `text/plain`, one command per line, tab-separated,
-first line a status line:
+The **hello** reply is the one JSON answer the EA reads: `{"last_deal_ticket": N}`
+(a single integer the EA extracts with a string search, so a restarted terminal
+resumes its deal watermark from the server's); any non-2xx hello answer means
+"back off and retry". The **sync** reply is `text/plain`, one command per line,
+tab-separated, first line a status line; the api turns any copier failure
+(unreachable, timeout, non-200) into `RETRY <server_ms> 2000` so the terminal
+never has to parse JSON on the sync path:
 
 ```
 OK	1757203200400	250
@@ -277,10 +282,8 @@ CMD	92	amend_pending	5551	0.01	4451.00	0	0
 CMD	93	cancel_pending	5551
 ```
 
-Status line: `OK <server_ms> <next_poll_ms>` (the hello response adds a fourth
-field, `<last_deal_ticket>`, so a restarted EA resumes its deal watermark from
-the server's) or `RETRY <server_ms> <next_poll_ms>`
-(copier unreachable; nothing was applied) or `STOP <reason>` (key revoked,
+Status line: `OK <server_ms> <next_poll_ms>` or `RETRY <server_ms> <next_poll_ms>`
+(copier unreachable; nothing was applied) or `STOP <server_ms> <reason>` (key revoked,
 account removed, netting refused — the EA stops polling and shows the reason).
 Command fields are positional and never contain tabs; the copier escapes none
 because symbols, comments and ids cannot contain tabs. Prices use the symbol's

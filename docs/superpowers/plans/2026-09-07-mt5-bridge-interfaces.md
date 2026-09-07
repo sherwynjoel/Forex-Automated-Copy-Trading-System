@@ -159,7 +159,10 @@ def parse_sync(body: dict) -> SyncReport: ...     # lots → centilots; missing 
 def encode_response(status: str, server_ms: int, next_poll_ms: int,
                     commands: list[Command], last_deal_ticket: int | None = None) -> str
     # status: "OK" | "RETRY" | "STOP"; for STOP the third field is the reason text
-    # Lines: "OK\t<server_ms>\t<next_poll_ms>[\t<last_deal_ticket>]" then one "CMD\t..." per command
+    # Lines: "OK\t<server_ms>\t<next_poll_ms>" or "RETRY\t<server_ms>\t<next_poll_ms>" or
+    #        "STOP\t<server_ms>\t<reason>", then one "CMD\t..." per command (OK only).
+    # The sync response never carries last_deal_ticket; the hello reply is JSON (control section below).
+    # (The optional last_deal_ticket fourth field is kept for callers that want it; the EA ignores it.)
 def command_line(cmd: Command) -> str         # exact field order per spec §Wire protocol
 def parse_response(text: str) -> tuple[list[str], list[Command]]   # used by the fake EA and tests
 ```
@@ -240,7 +243,7 @@ Repo additions (`copier/src/copier/db/repo.py`):
 ```python
 def load_mt5_link(self, account_id) -> dict | None
 def upsert_mt5_link_hello(self, account_id, *, login, broker, server, currency, hedging, trade_mode, leverage, ea_version, ea_build) -> None
-def touch_mt5_link(self, account_id, *, balance, equity, seen_at) -> None
+def touch_mt5_link(self, account_id, *, balance, equity, seen_at) -> None   # both the api door and the copier's mt5_sync call it, each throttled to once per 10 s per account
 def enqueue_mt5_command(self, account_id, org_id, kind, payload, client_order_id) -> int
 def mt5_commands_open(self, account_id) -> list[dict]          # status in (queued, sent), id order
 def mark_mt5_commands_sent(self, ids: list[int], sent_at) -> None   # attempts += 1
@@ -249,6 +252,7 @@ def fail_stale_mt5_opens(self, account_id, older_than) -> list[int]
 def load_symbol_aliases(self, account_id) -> dict[str, str]     # canonical -> broker_name
 def save_symbol_aliases(self, account_id, aliases: dict[str, str], source: str) -> None   # upsert; manual never overwritten by auto
 def mt5_watermark(self, account_id) -> tuple[int, int]          # (last_deal_ticket, last_deal_time_ms)
+# mapping_rows() is unchanged; tests that need master_fill_price read it with raw SQL as test_repo.py does
 def set_mt5_watermark(self, account_id, ticket, time_ms) -> None
 def upsert_mt5_deals(self, account_id, org_id, rows: list[dict]) -> int   # into deals; balance_after estimated by caller
 ```
@@ -340,8 +344,12 @@ rotated: same 401 → proxy `POST {copier}/mt5/{hello|sync}` with
 `{"account_id","org_id","report": body}` (timeout 2 s) → pass the copier's
 body and content-type through (200) → throttled write of `last_seen_at`,
 `last_ip`, `balance`, `equity` (at most once per 10 s per account).
-Copier unreachable/timeout → 200 `text/plain` `RETRY\t<ms>\t2000` for sync,
-503 JSON for hello.
+Any copier failure on sync (unreachable, timeout, or ANY non-200 answer) → 200
+`text/plain` `RETRY\t<ms>\t2000`, so the terminal never sees JSON on the sync
+path. On hello, the same rule: any copier failure (unreachable, timeout, or ANY
+non-200 answer, its own 400 included) → 503 JSON `{"status": "failed", "reason":
+"<text for the log>", "retry_ms": 2000}`. A failed proxy never touches the link.
+The EA treats any non-2xx hello as back-off-and-retry.
 
 ### Operator endpoints (session + role)
 
