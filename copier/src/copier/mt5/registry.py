@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 
 from copier.domain.models import Side, SymbolInfo
 from copier.engine.reconcile import OrderSnapshot, PositionSnapshot
+from copier.mt5.ingress import NetLedger, VirtualPosition
 from copier.mt5.protocol import HelloReport, HelloSymbol, ReportPosition, SyncReport
 from copier.mt5.symbols import symbol_infos_from_hello
 
@@ -36,6 +37,7 @@ class _AccountState:
     report: SyncReport | None = None
     last_seen: float | None = None
     persisted_signature: tuple | None = None
+    ledger: NetLedger | None = None            # netting masters; loaded from the repo on first use
 
 
 class MT5Registry:
@@ -90,21 +92,31 @@ class MT5Registry:
             self._repo.save_symbol_cache(account_id, state.symbols)
 
     def update_from_sync(self, account_id: int, org_id: int, report: SyncReport,
-                         now: float) -> None:
-        """Store the report; persist positions when the book changed."""
+                         now: float, persist: bool = True) -> None:
+        """Store the report; persist positions when the book changed.
+
+        persist=False stores the report and writes nothing: a netting
+        master's positions table holds its VIRTUAL positions, which the app
+        persists (persist_virtual_positions) once the ledger has absorbed
+        this report's deals."""
         state = self._state(account_id, org_id)
         state.report = report
         state.last_seen = now
+        if not persist:
+            return
         signature = tuple(sorted(
             (p.ticket, p.volume, p.stop_loss, p.take_profit) for p in report.positions))
         if signature == state.persisted_signature:
             return
         positions, _orders = self.snapshot(account_id)
+        self._persist(account_id, org_id, positions)
+        state.persisted_signature = signature
+
+    def _persist(self, account_id: int, org_id: int, positions: list[PositionSnapshot]) -> None:
         symbols_by_id = {info.symbol_id: info
                          for info in self.symbols_by_name(account_id).values()}
         self._repo.upsert_positions(account_id, org_id, positions, symbols_by_id)
         self._repo.close_missing_positions(account_id, [p.position_id for p in positions])
-        state.persisted_signature = signature
 
     # ---------- reads ----------
 
@@ -137,24 +149,30 @@ class MT5Registry:
                 labels[m["slave_position_id"]] = f"copy:m{m['master_position_id']}"
         return labels
 
-    def snapshot(self, account_id: int, with_labels: bool = True):
+    def snapshot(self, account_id: int, with_labels: bool = True, virtual: bool = False):
         """(positions, orders) as reconcile's snapshot types, or None before
         the first report. with_labels=False skips the mapping lookup (the
-        ingress diff needs only the book)."""
+        ingress diff needs only the book). virtual=True answers a netting
+        MASTER's book as its ledger's virtual positions -- what the
+        followers' mappings and the reconciler line up by -- priced at the
+        net position's open price; the orders are the terminal's."""
         state = self._accounts.get(account_id)
         if state is None or state.report is None:
             return None
         symbols = self.symbols_by_name(account_id)
         labels = self._labels(state, account_id) if with_labels else {}
-        positions = [
-            PositionSnapshot(
-                position_id=p.ticket, symbol_id=self._symbol_id(symbols, p.symbol),
-                side=Side(p.side), volume=p.volume, price=p.open_price,
-                label=labels.get(p.ticket, p.comment),
-                stop_loss=p.stop_loss, take_profit=p.take_profit,
-            )
-            for p in state.report.positions
-        ]
+        if virtual:
+            positions = self._virtual_positions(account_id, state.report, symbols)
+        else:
+            positions = [
+                PositionSnapshot(
+                    position_id=p.ticket, symbol_id=self._symbol_id(symbols, p.symbol),
+                    side=Side(p.side), volume=p.volume, price=p.open_price,
+                    label=labels.get(p.ticket, p.comment),
+                    stop_loss=p.stop_loss, take_profit=p.take_profit,
+                )
+                for p in state.report.positions
+            ]
         orders = [
             OrderSnapshot(
                 order_id=o.ticket, symbol_id=self._symbol_id(symbols, o.symbol),
@@ -167,28 +185,68 @@ class MT5Registry:
         ]
         return positions, orders
 
-    def account_block(self, account_id: int) -> dict | None:
+    def _virtual_positions(self, account_id: int, report: SyncReport,
+                           symbols: dict[str, SymbolInfo]) -> list[PositionSnapshot]:
+        net_by_symbol = {p.symbol: p for p in report.positions}
+        out = []
+        for v in self.net_ledger(account_id).positions():
+            net = net_by_symbol.get(v.symbol)
+            out.append(PositionSnapshot(
+                position_id=v.virtual_id, symbol_id=self._symbol_id(symbols, v.symbol),
+                side=Side(v.side), volume=v.volume_left,
+                price=net.open_price if net is not None else 0.0, label="",
+                stop_loss=v.stop_loss, take_profit=v.take_profit))
+        return out
+
+    def account_block(self, account_id: int, virtual: bool = False) -> dict | None:
         """The account's entry in get_state's `accounts` block, in exactly the
         shape AccountStateTracker.snapshot() produces for a cTrader account
-        -- balance, equity and marks as the terminal reports them."""
+        -- balance, equity and marks as the terminal reports them.
+        virtual=True (a netting master): one entry per virtual position,
+        current price from the net position and its P&L split by volume
+        share, so the Positions screen and the copies line up by virtual id."""
         state = self._accounts.get(account_id)
         if state is None or state.report is None:
             return None
         symbols = self.symbols_by_name(account_id)
         report = state.report
-        return {
-            "balance": report.balance,
-            "equity": report.equity,
-            "open_pnl": sum(p.pnl for p in report.positions),
-            "positions": [
+        if virtual:
+            positions = self._virtual_marks(account_id, report, symbols)
+        else:
+            positions = [
                 {"position_id": p.ticket, "symbol_id": self._symbol_id(symbols, p.symbol),
                  "symbol": p.symbol, "side": p.side, "volume": p.volume,
                  "entry_price": p.open_price, "stop_loss": p.stop_loss,
                  "take_profit": p.take_profit, "pnl_quote": p.pnl,
                  "current_price": p.current_price}
                 for p in report.positions
-            ],
+            ]
+        return {
+            "balance": report.balance,
+            "equity": report.equity,
+            "open_pnl": sum(p.pnl for p in report.positions),
+            "positions": positions,
         }
+
+    def _virtual_marks(self, account_id: int, report: SyncReport,
+                       symbols: dict[str, SymbolInfo]) -> list[dict]:
+        ledger = self.net_ledger(account_id).positions()
+        net_by_symbol = {p.symbol: p for p in report.positions}
+        held: dict[str, int] = {}
+        for v in ledger:
+            held[v.symbol] = held.get(v.symbol, 0) + v.volume_left
+        out = []
+        for v in ledger:
+            net = net_by_symbol.get(v.symbol)
+            share = v.volume_left / held[v.symbol] if held.get(v.symbol) else 0.0
+            out.append({
+                "position_id": v.virtual_id, "symbol_id": self._symbol_id(symbols, v.symbol),
+                "symbol": v.symbol, "side": v.side, "volume": v.volume_left,
+                "entry_price": net.open_price if net is not None else None,
+                "stop_loss": v.stop_loss, "take_profit": v.take_profit,
+                "pnl_quote": round(net.pnl * share, 2) if net is not None else 0.0,
+                "current_price": net.current_price if net is not None else None})
+        return out
 
     def last_seen(self, account_id: int) -> float | None:
         state = self._accounts.get(account_id)
@@ -218,3 +276,25 @@ class MT5Registry:
         if hedging is None:
             return None
         return "hedging" if hedging else "netting"
+
+    # ---------- netting masters ----------
+
+    def net_ledger(self, account_id: int) -> NetLedger:
+        """The netting master's virtual positions, rebuilt from mt5_net_ledger
+        on first use (a restart keeps them) and held from then on. The app
+        persists ledger.dirty_rows() after every report (main.py)."""
+        state = self._state(account_id)
+        if state.ledger is None:
+            state.ledger = NetLedger(
+                [VirtualPosition.from_row(r) for r in self._repo.load_net_ledger(account_id)])
+        return state.ledger
+
+    def persist_virtual_positions(self, account_id: int) -> None:
+        """A netting master's positions table holds its virtual positions
+        (what the Positions page and a restart read); called by the app
+        once the ledger has absorbed the report's deals."""
+        state = self._accounts.get(account_id)
+        if state is None or state.report is None:
+            return
+        positions, _orders = self.snapshot(account_id, with_labels=False, virtual=True)
+        self._persist(account_id, state.org_id, positions)

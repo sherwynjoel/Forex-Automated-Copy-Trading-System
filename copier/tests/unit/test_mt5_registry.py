@@ -207,3 +207,61 @@ class TestOnline:
         assert registry.is_online(mt5_id, now=100.0 + OFFLINE_AFTER_S) is False
         registry.update_from_sync(mt5_id, org_id, report(seq=2), now=200.0)
         assert registry.is_online(mt5_id, now=201.0) is True
+
+
+class TestNettingMasterViews:
+    """A netting MASTER's book as the reconciler and get_state see it: the
+    ledger's virtual positions, marked from the net position."""
+
+    def _netting_master(self, world):
+        repo, org_id, mt5_id, registry = world
+        registry.update_from_hello(mt5_id, org_id, _hello([XAUUSD], hedging=False), now=1.0)
+        repo.upsert_net_ledger(mt5_id, [
+            {"virtual_id": 1, "symbol": "XAUUSD.r", "side": "BUY", "volume_open": 50,
+             "volume_left": 50, "stop_loss": 2390.0, "take_profit": None, "opened_at_ms": 1000},
+            {"virtual_id": 2, "symbol": "XAUUSD.r", "side": "BUY", "volume_open": 30,
+             "volume_left": 30, "stop_loss": 2390.0, "take_profit": None, "opened_at_ms": 2000}])
+        registry.update_from_sync(mt5_id, org_id, report([
+            position(5, symbol="XAUUSD.r", volume=80, open_price=2400.4, sl=2390.0, price=2410.0,
+                     pnl=80.0)]), now=2.0, persist=False)
+        return repo, org_id, mt5_id, registry
+
+    def test_the_ledger_is_loaded_from_postgres_on_first_use_and_held(self, world):
+        repo, org_id, mt5_id, registry = self._netting_master(world)
+        assert registry.margin_mode(mt5_id) == "netting"
+        assert [v.virtual_id for v in registry.net_ledger(mt5_id).positions()] == [1, 2]
+        assert registry.net_ledger(mt5_id) is registry.net_ledger(mt5_id)
+
+    def test_the_virtual_snapshot_is_priced_from_the_net_position(self, world):
+        repo, org_id, mt5_id, registry = self._netting_master(world)
+        xau_id = registry.symbol_by_name(mt5_id, "XAUUSD.r").symbol_id
+        positions, orders = registry.snapshot(mt5_id, virtual=True)
+        assert positions == [
+            PositionSnapshot(position_id=1, symbol_id=xau_id, side=Side.BUY, volume=50,
+                             price=2400.4, label="", stop_loss=2390.0, take_profit=None),
+            PositionSnapshot(position_id=2, symbol_id=xau_id, side=Side.BUY, volume=30,
+                             price=2400.4, label="", stop_loss=2390.0, take_profit=None)]
+        assert orders == []
+        # The terminal's own book is still there for the ingress diff.
+        assert [p.position_id for p in registry.snapshot(mt5_id, with_labels=False)[0]] == [5]
+
+    def test_the_virtual_account_block_splits_pnl_by_volume_share(self, world):
+        repo, org_id, mt5_id, registry = self._netting_master(world)
+        block = registry.account_block(mt5_id, virtual=True)
+        assert (block["balance"], block["equity"], block["open_pnl"]) == (10000.0, 10000.0, 80.0)
+        assert [(p["position_id"], p["volume"], p["pnl_quote"], p["current_price"],
+                 p["entry_price"], p["stop_loss"]) for p in block["positions"]] == [
+            (1, 50, 50.0, 2410.0, 2400.4, 2390.0), (2, 30, 30.0, 2410.0, 2400.4, 2390.0)]
+        assert [p["position_id"] for p in registry.account_block(mt5_id)["positions"]] == [5]
+
+    def test_persist_writes_the_virtual_book_not_the_net_ticket(self, world):
+        repo, org_id, mt5_id, registry = self._netting_master(world)
+        with psycopg.connect(repo.dsn, autocommit=True) as conn:
+            assert conn.execute("SELECT count(*) FROM positions WHERE account_id = %s",
+                                (mt5_id,)).fetchone() == (0,)        # persist=False wrote nothing
+        registry.persist_virtual_positions(mt5_id)
+        with psycopg.connect(repo.dsn, autocommit=True) as conn:
+            rows = conn.execute(
+                "SELECT position_id, volume, status FROM positions WHERE account_id = %s"
+                " ORDER BY position_id", (mt5_id,)).fetchall()
+        assert rows == [(1, 50, "open"), (2, 30, "open")]
