@@ -71,7 +71,8 @@ def _position_closed(e: m.MasterPositionClosed, mappings: m.MappingState,
             out.append(m.Alert(s.account_id,
                        f"partial close of position {e.position_id} rounds to 0 on slave"))
             continue
-        out.append(m.ClosePosition(s.account_id, entry.slave_position_id, vol))
+        out.append(m.ClosePosition(s.account_id, entry.slave_position_id, vol,
+                                   master_position_id=e.position_id))
     for account_id in enabled.keys() - covered:
         out.append(m.Alert(account_id,
                    f"master closed position {e.position_id} but slave has no mapped copy"))

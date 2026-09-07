@@ -65,7 +65,8 @@ def test_full_close_closes_entire_mapped_volume():
     ev = m.MasterPositionClosed(position_id=11, symbol_name="EURUSD",
                                 closed_volume=10_000_000, remaining_volume=0)
     out = decide(ev, st, [slave(101)])
-    assert out == [m.ClosePosition(slave_account_id=101, position_id=555, volume=10_000_000)]
+    assert out == [m.ClosePosition(slave_account_id=101, position_id=555, volume=10_000_000,
+                                   master_position_id=11)]
 
 
 def test_partial_close_closes_same_fraction_of_slave_volume():
@@ -73,7 +74,8 @@ def test_partial_close_closes_same_fraction_of_slave_volume():
     ev = m.MasterPositionClosed(position_id=11, symbol_name="EURUSD",
                                 closed_volume=5_000_000, remaining_volume=5_000_000)
     out = decide(ev, st, [slave(101)])
-    assert out == [m.ClosePosition(slave_account_id=101, position_id=555, volume=3_000_000)]
+    assert out == [m.ClosePosition(slave_account_id=101, position_id=555, volume=3_000_000,
+                                   master_position_id=11)]
 
 
 def test_close_with_no_mapping_alerts():
@@ -120,7 +122,8 @@ def test_sequential_partial_closes_track_slave_volume():
     ev1 = m.MasterPositionClosed(position_id=11, symbol_name="EURUSD",
                                  closed_volume=5_000_000, remaining_volume=5_000_000)
     out1 = decide(ev1, st1, [slave(101)])
-    assert out1 == [m.ClosePosition(slave_account_id=101, position_id=555, volume=3_000_000)]
+    assert out1 == [m.ClosePosition(slave_account_id=101, position_id=555, volume=3_000_000,
+                                    master_position_id=11)]
 
     # Second close: 50% of remaining master (2.5M out of 5M)
     # The mapping entry should now reflect slave has 3M remaining
@@ -129,7 +132,8 @@ def test_sequential_partial_closes_track_slave_volume():
                                  closed_volume=2_500_000, remaining_volume=2_500_000)
     out2 = decide(ev2, st2, [slave(101)])
     # Should close 1.5M (50% of remaining 3M)
-    assert out2 == [m.ClosePosition(slave_account_id=101, position_id=555, volume=1_500_000)]
+    assert out2 == [m.ClosePosition(slave_account_id=101, position_id=555, volume=1_500_000,
+                                    master_position_id=11)]
 
 
 def test_sltp_amend_no_mapping_alerts():

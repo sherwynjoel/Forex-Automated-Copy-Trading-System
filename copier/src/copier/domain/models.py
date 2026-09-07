@@ -166,6 +166,12 @@ class ClosePosition:
     slave_account_id: int
     position_id: int
     volume: int
+    # The master position this close is a copy of. decide() stamps it; the
+    # MT5 outbox needs it on a NETTING follower, where every copy on a
+    # symbol shares one net ticket and only the mapping's own id says which
+    # copy is being closed. Defaulted so every existing construction (the
+    # reconciler's orphan close, operator closes, tests) stays valid.
+    master_position_id: int | None = None
 
 
 @dataclass(frozen=True)
