@@ -23,7 +23,7 @@ VPS. Once connected, the account behaves like any other MirrorFleet account:
 - **It shows live** on Overview, Positions and the top strip: balance, equity,
   open P&L, positions with current price.
 
-Non-goals for this build: MT4; netting accounts; MT5→MT5 copying; copying
+Non-goals for this build: MT4; MT5→MT5 copying; copying
 pending-order *expiry* changes; MetaApi.
 
 ## Ground truth the design rests on
@@ -145,7 +145,8 @@ data shapes changes.
   `set_account_status` semantics: `ok` while a report arrived within
   `OFFLINE_AFTER_S = 15`; `degraded` "terminal offline since …" after that
   (checked by a 5 s timer); `degraded` with the broker reason on a rejected
-  command; netting account → `degraded` "netting account not supported".
+  command. Netting accounts are accepted in both roles; see "Netting
+  accounts" under Behaviour rules.
 
 **db/migrations/014_mt5_bridge.sql**
 
@@ -213,8 +214,8 @@ data shapes changes.
 
 - Inputs: `InpKey` (string), `InpServer` (default `https://mirrorfleet.com`),
   `InpPollMs` (250, min 100), `InpMagic` (20260907), `InpDeviationPoints` (50).
-- `OnInit`: refuse if not hedging (report it in hello so the dashboard says
-  why); probe `WebRequest` and print the exact "allow this URL" instruction on
+- `OnInit`: report the margin mode in hello (hedging and netting are both
+  accepted and shown on the Accounts page); probe `WebRequest` and print the exact "allow this URL" instruction on
   error 4014; send hello (account, broker, server, currency, trade mode,
   symbols in chunks of 300); start `EventSetMillisecondTimer(InpPollMs)`.
 - `OnTimer`: one `sync`. `OnTradeTransaction`: on `TRADE_TRANSACTION_DEAL_ADD`
@@ -284,7 +285,7 @@ CMD	93	cancel_pending	5551
 
 Status line: `OK <server_ms> <next_poll_ms>` or `RETRY <server_ms> <next_poll_ms>`
 (copier unreachable; nothing was applied) or `STOP <server_ms> <reason>` (key revoked,
-account removed, netting refused — the EA stops polling and shows the reason).
+account removed — the EA stops polling and shows the reason).
 Command fields are positional and never contain tabs; the copier escapes none
 because symbols, comments and ids cannot contain tabs. Prices use the symbol's
 digits; `0` means "none".
@@ -298,11 +299,14 @@ on ack, and re-delivers a `sent` command without an ack after 10 s at most
 
 - **Sizing**: MT5 follower volume = `mirror_volume(master_volume, master_lot_size, multiplier, 100, step_centilots)`; a result below the symbol's min is an `Alert` "mirrored volume rounds to 0", like cTrader.
 - **Protection on copies**: SL/TP travel inside the `open` command (MT5 accepts absolute prices on market orders), so a copy is protected from its first tick; the `_protect_new_copy` amend is skipped for MT5 targets. If the master's protection changes before the copy is acked, the pending change is applied on ack (same rule as today).
-- **Opposite positions, hedging**: followers copy exactly what the master does; two opposite copies may coexist, as on cTrader.
+- **Opposite positions, hedging**: followers copy exactly what the master does; two opposite copies may coexist, as on cTrader. On a netting follower they net against each other inside the symbol's single position; see "Netting accounts".
 - **Disconnected terminal**: commands queue; `open`/`place_pending` expire after 30 s (mapping failed, `slave_action` warning); the account shows *offline* after 15 s without a report; on reconnect the EA's first sync re-sends the full snapshot and any deals since the watermark, so History catches up and reconcile sees the truth.
 - **Restart safety (EA)**: executed command ids persist to a file; re-delivered ids are re-acked without execution. **Restart safety (copier)**: outbox and watermark are in Postgres; the registry rebuilds from the next report.
 - **Kill switch**: Close all includes MT5 accounts; each MT5 account's summary reports verified counts from the terminal's reports, never sends.
-- **Netting account**: hello says `hedging:false` → account `degraded`, reason shown, no commands ever queued.
+- **Netting accounts** (`ACCOUNT_MARGIN_MODE_RETAIL_NETTING`; hello says `hedging:false`): supported in both roles. `mt5_links.hedging` records the mode; `mt5_status` and the Accounts page show it; the EA never stops on netting.
+  - *As a follower.* Every copy on a symbol lives inside that symbol's single net position; a mapping keeps its own `slave_volume`, and its side is recorded on its `open` command. A master close for a mapping is executed as a **market order on the opposite side for the mapping's volume** (that is how a netting account reduces, closes or flips), queued as an `open` command whose `client_order_id` is the mapping's id with the suffix `:close`, so the ack is matched to exactly that mapping. A close the terminal reports on its own (stop, target, manual close) reduces the mappings that share that net position **oldest-first** (`reduce_position_mappings_fifo`). One stop and one target per symbol: the most recently opened or amended master position on that symbol sets them, and an info event records each override. Reconcile compares the sum of active mapping volumes per net position with the terminal's net volume; a shortfall is `missing_slave_copy`, an excess `orphan_slave_position`, as today.
+  - *As a master.* The terminal's net position is expanded into **virtual master positions** kept in `mt5_net_ledger` (persisted, so a restart keeps them). A deal with entry `IN` opens a virtual position whose id is the deal ticket → `MasterPositionOpened`; entry `OUT` consumes that symbol's virtual positions oldest-first → one `MasterPositionClosed` per consumed position (partial when it survives); `INOUT` closes them all and opens the remainder in the new direction; a stop/target change on the net position → `MasterPositionSLTPAmended` for every virtual position of that symbol. The reconciler and `get_state` see the virtual positions (current price from the net position, P&L split by volume share), so drift and copies line up by virtual id.
+  - *Trade page and Close all* act on the net position (`close` = `PositionClose` on the net ticket), on both modes.
 - **Symbol without a match**: an intent for an unmatched symbol becomes an `Alert` naming the symbol and the Details panel where the mapping is set; nothing is sent.
 - **Balance-after on deals**: MT5 stores no per-deal balance. On ingest the copier computes `balance_after` for the batch backwards from the reported current balance (each deal's `profit + swap + commission` subtracted in reverse order), stores it, and marks the field approximate in the API (`balance_after_estimated: true`); the History page shows it unchanged.
 - **Money**: `profit`, `swap`, `commission` are in the account currency as MT5 reports them; `gross_profit` = `profit`.
@@ -311,7 +315,7 @@ on ack, and re-delivers a `sent` command without an ack after 10 s at most
 ## Testing
 
 - **copier unit** (`tests/unit/test_mt5_*.py`): protocol encode/decode; outbox enqueue from each intent type; ack → mapping activate/reduce/fail; expiry; ingress deal → MasterEvent (IN/OUT/INOUT, partials, SL/TP, pendings) with alias translation; symbol auto-match table and crc32 ids; registry snapshot → reconciler; get_state block; queries from DB (deals, orders derived, cashflow, balance_after estimation); flatten via outbox; offline detection.
-- **copier integration**: `copier/src/copier/testing/fake_ea.py` — a Python stand-in for the EA speaking the exact wire protocol against an in-memory hedging book (opens, partial closes, SL/TP, pendings, rejections, disconnects, restarts). Scenarios: cTrader master (existing fake server) → MT5 follower; MT5 master → cTrader followers; Trade-page order on MT5; Close all across both platforms; terminal offline then back; duplicate delivery; command expiry.
+- **copier integration**: `copier/src/copier/testing/fake_ea.py` — a Python stand-in for the EA speaking the exact wire protocol against an in-memory book in hedging or netting mode (opens, partial closes, SL/TP, pendings, rejections, disconnects, restarts). Scenarios: cTrader master (existing fake server) → MT5 follower; MT5 master → cTrader followers; Trade-page order on MT5; Close all across both platforms; terminal offline then back; duplicate delivery; command expiry.
 - **api tests** (`api/tests/test_mt5.py`): door ordering (size → key → lookup → proxy), bad-key bucket, CSRF exemption, last-seen throttling, 503/RETRY mapping; operator endpoints (create, key shown once, rotate, aliases, accounts listing with platform, details merge, cross-org 404s).
 - **dashboard tests**: Accounts (add dialog, key once, badges, MT5 details, symbol mapping edit), Layout caption, History labels.
 - **EA**: cannot be compiled in this environment (no MetaEditor). Written to compile on build 4400+, with a `#property strict`-equivalent discipline; the owner compiles once in MetaEditor and reports errors, which are fixed before release. The fake EA keeps the server side honest in the meantime.

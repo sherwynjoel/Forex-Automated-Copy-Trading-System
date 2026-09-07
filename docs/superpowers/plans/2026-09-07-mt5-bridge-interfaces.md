@@ -66,7 +66,24 @@ CREATE TABLE mt5_deal_watermark (
     last_deal_time_ms BIGINT NOT NULL DEFAULT 0,
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Netting masters: the net position expanded into virtual master positions (spec "Netting accounts")
+CREATE TABLE mt5_net_ledger (
+    account_id   BIGINT NOT NULL REFERENCES accounts(ctid_trader_account_id) ON DELETE CASCADE,
+    virtual_id   BIGINT NOT NULL,                 -- the IN deal's ticket
+    symbol       TEXT NOT NULL,                   -- broker name
+    side         TEXT NOT NULL CHECK (side IN ('BUY','SELL')),
+    volume_open  INTEGER NOT NULL,                -- centilots at open
+    volume_left  INTEGER NOT NULL,                -- centilots still open
+    stop_loss    DOUBLE PRECISION,
+    take_profit  DOUBLE PRECISION,
+    opened_at_ms BIGINT NOT NULL,
+    PRIMARY KEY (account_id, virtual_id)
+);
+CREATE INDEX mt5_net_ledger_by_symbol ON mt5_net_ledger (account_id, symbol, opened_at_ms);
 ```
+
+(Migration 014 has already landed without this table: ship it as `db/migrations/015_mt5_net_ledger.sql`.)
 
 `payload` shapes by `kind` (all prices are floats already rounded to the
 symbol's digits; `0`/absent = none; `lots` is a float in lots, NOT centilots):
@@ -207,6 +224,8 @@ class MT5Registry:
     def last_seen(self, account_id: int) -> float | None
     def is_online(self, account_id: int, now: float) -> bool
     def hedging(self, account_id: int) -> bool | None
+    def margin_mode(self, account_id: int) -> str | None      # "hedging" | "netting" | None (no hello yet)
+    def net_ledger(self, account_id: int) -> NetLedger            # netting masters; loaded from repo on first use
     def symbol_by_name(self, account_id: int, name: str) -> SymbolInfo | None
 ```
 
@@ -236,6 +255,15 @@ class MT5Outbox:
     def apply_acks(self, account_id: int, acks: list[Ack]) -> list[AckOutcome]
         # unknown/duplicate command ids are ignored (idempotent)
     def pending_count(self, account_id: int) -> int
+
+# Netting followers (registry.margin_mode(account) == "netting"):
+#   enqueue_intent(ClosePosition) → kind "open" on the OPPOSITE side of the mapping's open command
+#   (side read via repo.mapping_side(coid)), lots = intent volume, comment "close:m<master>",
+#   client_order_id = "<mapping coid>:close". apply_acks strips the ":close" suffix and returns
+#   AckOutcome(kind="close", client_order_id=<mapping coid>, volume=<centilots closed>), so the
+#   service reduces exactly that mapping. Hedging followers keep kind "close" (position ticket).
+#   enqueue_intent(AmendPositionSLTP) on netting → kind "amend" on the net position ticket
+#   (last writer wins; the caller logs the override event).
 ```
 
 Repo additions (`copier/src/copier/db/repo.py`):
@@ -254,6 +282,14 @@ def save_symbol_aliases(self, account_id, aliases: dict[str, str], source: str) 
 def mt5_watermark(self, account_id) -> tuple[int, int]          # (last_deal_ticket, last_deal_time_ms)
 # mapping_rows() is unchanged; tests that need master_fill_price read it with raw SQL as test_repo.py does
 def set_mt5_watermark(self, account_id, ticket, time_ms) -> None
+# netting support
+def mapping_side(self, client_order_id) -> str | None            # side of the 'open' mt5_command with that coid ("BUY"|"SELL")
+def reduce_position_mappings_fifo(self, slave_account_id, slave_position_id, closed_volume) -> list[dict]
+    # active mappings sharing that slave position, oldest first (created_at, id); reduces slave_volume,
+    # closes rows that reach 0; returns the rows touched with their closed volumes
+def load_net_ledger(self, account_id) -> list[dict]              # ordered by (opened_at_ms, virtual_id)
+def upsert_net_ledger(self, account_id, rows: list[dict]) -> None
+def delete_net_ledger(self, account_id, virtual_ids: list[int]) -> None
 def upsert_mt5_deals(self, account_id, org_id, rows: list[dict]) -> int   # into deals; balance_after estimated by caller
 ```
 
@@ -274,6 +310,27 @@ def master_events_from_report(report: SyncReport, previous: tuple[list[PositionS
     # positions vs previous: SL/TP changed → MasterPositionSLTPAmended
     # orders vs previous: new → MasterPendingPlaced; changed → MasterPendingReplaced; gone without a deal → MasterPendingCancelled;
     #        gone with a deal whose order == ticket → MasterPendingFilled(order_id, position_id)
+
+@dataclass
+class VirtualPosition:                          # one row of mt5_net_ledger
+    virtual_id: int; symbol: str; side: str; volume_open: int; volume_left: int
+    stop_loss: float | None; take_profit: float | None; opened_at_ms: int
+
+class NetLedger:                                # netting MASTER bookkeeping; pure, persisted through repo by the caller
+    def __init__(self, rows: list[VirtualPosition]): ...
+    def apply_deal(self, deal: ReportDeal, canonical_symbol: str) -> list[MasterEvent]
+        # IN    → new VirtualPosition(virtual_id=deal.ticket, ...) + MasterPositionOpened(position_id=deal.ticket, ...)
+        # OUT   → consume this symbol's virtual positions oldest-first → MasterPositionClosed per consumed
+        #         (closed_volume, remaining_volume of THAT virtual position)
+        # INOUT → close all of the symbol, then open the remainder as a new virtual position
+    def apply_protection(self, symbol: str, stop_loss, take_profit) -> list[MasterEvent]
+        # MasterPositionSLTPAmended for every virtual position of the symbol
+    def positions(self) -> list[VirtualPosition]
+    def dirty_rows(self) -> tuple[list[VirtualPosition], list[int]]   # (upserts, deleted virtual ids) since last call
+
+def master_events_from_report(..., ledger: NetLedger | None = None) -> list[MasterEvent]
+    # ledger given (netting master) → deals go through ledger.apply_deal and net-position SL/TP diffs
+    # through ledger.apply_protection; the snapshot the reconciler sees is ledger.positions()
 ```
 
 ### `lane.py` — operator actions and queries for one MT5 account
