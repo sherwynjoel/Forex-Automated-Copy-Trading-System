@@ -37,8 +37,8 @@ import logging
 import math
 import os
 import time
-from dataclasses import dataclass
-from datetime import datetime, timedelta
+from dataclasses import dataclass, replace as dc_replace
+from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 from twisted.internet import defer, task
@@ -58,9 +58,10 @@ from copier.ctrader.symbols import fetch_symbol_map, by_id as symbols_by_id
 from copier.db.repo import Repo
 from copier.db.writer import AsyncWriter
 from copier.domain.models import MANUAL_ORDER_LABEL, Side
-from copier.engine.service import CopierService
+from copier.engine.service import CopierService, SlaveFill
 from copier.engine.reconcile import Reconciler
-from copier.engine.routing import OrgRouting, RoutingCache, build_routing
+from copier.engine.routing import (
+    OrgRouting, RoutingCache, build_routing, mt5_symbols_by_canonical)
 from copier.engine.state import AccountStateTracker, PositionSnapshot as StatePositionSnapshot
 from copier.engine.backfill import next_window, reached_history_bound, WEEK_MS
 from copier.engine.dispatch import Dispatcher, relative_protection, SendNotAttempted
@@ -69,6 +70,13 @@ from copier.engine.control import make_control_site
 from copier.engine import queries
 from copier.engine.analytics import compute_analytics
 from copier.engine.commission import round_trip_rates
+from copier.mt5 import protocol as mt5_protocol
+from copier.mt5.deals import CLOSE_ENTRIES, TRADE_TYPES, deal_rows
+from copier.mt5.ingress import master_events_from_report
+from copier.mt5.lane import MT5Lane, validated_price
+from copier.mt5.outbox import MT5Outbox
+from copier.mt5.registry import MT5Registry
+from copier.mt5.symbols import auto_match
 
 log = logging.getLogger(__name__)
 
@@ -172,6 +180,14 @@ CONTROL_PORT = 8080
 # One account, one window per tick. Deliberately slow: the broker caps
 # DealList at a week and 500 rows, and the queued send path is 10 msg/s.
 DEAL_BACKFILL_INTERVAL_S = 30
+# How often to notice that an MT5 terminal has stopped reporting (spec: a
+# 5 s timer; the account reads offline OFFLINE_AFTER_S after its last report).
+MT5_OFFLINE_CHECK_INTERVAL_S = 5.0
+# The mt5_links balance/equity/last_seen_at write from a sync is throttled to
+# this per account -- the same window the api uses for its own write of those
+# columns (contract §3) -- so a terminal polling four times a second is not
+# four UPDATEs a second on one row.
+MT5_LINK_TOUCH_INTERVAL_S = 10.0
 DEAL_BACKFILL_MAX_YEARS = int(os.environ.get("DEAL_BACKFILL_MAX_YEARS", "2"))
 # A window the broker answers with has_more is bisected and re-fetched
 # rather than skipped (advancing the watermark past it would lose those
@@ -243,6 +259,8 @@ class CopierApp:
         master_symbols_by_org: dict[int, dict],
         routing_provider: Callable[[], OrgRouting],
         clients_by_account: Callable[[int], CTraderClient],
+        mt5_registry: MT5Registry,
+        mt5_outbox: MT5Outbox,
         clock=None,
     ):
         self.repo = repo
@@ -275,6 +293,27 @@ class CopierApp:
         # _build_clients_by_account), so it is a real ctor dependency rather
         # than something patched on afterwards.
         self._clients_by_account = clients_by_account
+        self.mt5_registry = mt5_registry
+        self.mt5_outbox = mt5_outbox
+        # Answers an MT5 account's book to the reconcilers, and which MT5
+        # followers are netting accounts (their net positions are compared
+        # with the sum of their copies, Task 12b); built here so reload()
+        # hands new Reconcilers the same callables.
+        self._mt5_snapshot_provider = _build_mt5_snapshot_provider(routing_provider, mt5_registry)
+        self._mt5_netting_slaves = _build_mt5_netting_slaves(routing_provider, mt5_registry)
+        self.mt5_lane = MT5Lane(self)
+        # canonical -> broker name per MT5 account; cleared on reload() and
+        # after every hello, the two moments aliases can change.
+        self._mt5_aliases_cache: dict[int, dict[str, str]] = {}
+        # account_id -> clock seconds of the last touch_mt5_link write
+        # (MT5_LINK_TOUCH_INTERVAL_S throttle).
+        self._mt5_last_touch: dict[int, float] = {}
+        # account_id -> deal tickets acked by a command that names a copy
+        # (an open's fill, a ':close') and not yet seen in a report: the
+        # ack did their bookkeeping, so _mt5_slave_deals must not book them
+        # again when the terminal reports them -- in the same sync as the
+        # ack or, past MAX_DEALS_PER_SYNC, the next one.
+        self._mt5_settled_deals: dict[int, set[int]] = {}
         self.clock = clock
         self._resync_in_flight = False
         # Debounce keys: an org id, or None for the fleet-wide sweep.
@@ -355,6 +394,27 @@ class CopierApp:
         if org_id is None:
             return None
         return self.state_trackers.get(org_id)
+
+    def _clock_seconds(self) -> float:
+        clock = self.clock
+        if clock is None:
+            from twisted.internet import reactor as clock
+        return clock.seconds()
+
+    def _account_row(self, account_id: int):
+        return next((a for a in self.repo.load_accounts() if a.account_id == account_id), None)
+
+    def _is_mt5(self, account_id: int) -> bool:
+        """From the routing snapshot: at most one second stale and no
+        database round trip, so it can sit on every operator path."""
+        return self.routing_provider().platform_by_account.get(account_id) == "mt5"
+
+    def _mt5_aliases(self, account_id: int) -> dict[str, str]:
+        aliases = self._mt5_aliases_cache.get(account_id)
+        if aliases is None:
+            aliases = self.repo.load_symbol_aliases(account_id)
+            self._mt5_aliases_cache[account_id] = aliases
+        return aliases
 
     # ---------- client event wiring ----------
 
@@ -539,8 +599,6 @@ class CopierApp:
         routing = None
 
         for org_id, tracker in self.state_trackers.items():
-            if tracker is None:
-                continue
             if only_org_id is not None and org_id != only_org_id:
                 continue
             # Each org's tracker only ever reads ITS OWN accounts: the
@@ -548,36 +606,47 @@ class CopierApp:
             # account id here would leak one tenant's balance into another's
             # Overview.
             org_accounts = [a for a in accounts if a.org_id == org_id and a.enabled]
-            enabled_ids = [a.account_id for a in org_accounts]
-            if not enabled_ids:
+            # MT5 terminals report their own balance and equity on every
+            # poll; only cTrader accounts are asked over the wire.
+            ctrader_accounts = [a for a in org_accounts if a.platform != 'mt5']
+            enabled_ids = [a.account_id for a in ctrader_accounts]
+            if not org_accounts:
                 continue
-            try:
-                # refresh_balances() fans out one ProtoOATraderReq per
-                # account and DeferredLists them; the SDK queue paces the
-                # wire. Each request must ride ITS account's environment
-                # client -- an org can mix demo and live accounts, and the
-                # master's client only serves the master's environment.
-                clients_by_account = {}
-                for a in org_accounts:
-                    client = self._client_for_account(a)
-                    if client is not None:
-                        clients_by_account[a.account_id] = client
-                yield tracker.refresh_balances(
-                    enabled_ids, clients_by_account=clients_by_account)
-            except Exception:
-                log.exception("refresh_balances: broker request failed (org %s)", org_id)
-                continue
+            snapshot: dict = {}
+            if tracker is not None and enabled_ids:
+                try:
+                    # refresh_balances() fans out one ProtoOATraderReq per
+                    # account and DeferredLists them; the SDK queue paces the
+                    # wire. Each request must ride ITS account's environment
+                    # client -- an org can mix demo and live accounts, and the
+                    # master's client only serves the master's environment.
+                    clients_by_account = {}
+                    for a in ctrader_accounts:
+                        client = self._client_for_account(a)
+                        if client is not None:
+                            clients_by_account[a.account_id] = client
+                    yield tracker.refresh_balances(
+                        enabled_ids, clients_by_account=clients_by_account)
+                except Exception:
+                    log.exception("refresh_balances: broker request failed (org %s)", org_id)
+                    continue
 
-            # Fetched once and shared by the daily snapshot write below and
-            # the intraday balance-sample write further down, so a failure
-            # in either write never leaves `snapshot` undefined for the
-            # other. Defaults to empty on failure so both writes below are
-            # no-ops rather than raising out of the per-org loop.
-            try:
-                snapshot = tracker.snapshot()
-            except Exception:
-                log.exception("refresh_balances: snapshot read failed (org %s)", org_id)
-                snapshot = {}
+                # Fetched once and shared by the daily snapshot write below
+                # and the intraday balance-sample write further down, so a
+                # failure in either write never leaves `snapshot` undefined
+                # for the other. Defaults to empty on failure so both writes
+                # below are no-ops rather than raising out of the per-org loop.
+                try:
+                    snapshot = dict(tracker.snapshot())
+                except Exception:
+                    log.exception("refresh_balances: snapshot read failed (org %s)", org_id)
+                    snapshot = {}
+            for a in org_accounts:
+                if a.platform != 'mt5':
+                    continue
+                block = self.mt5_registry.account_block(a.account_id)
+                if block is not None:
+                    snapshot[a.account_id] = block
 
             # Daily portfolio snapshot: upsert each refreshed account under
             # today's UTC date -- the last write of a day wins, so yesterday's
@@ -733,7 +802,8 @@ class CopierApp:
                     continue
                 shard_accounts = [
                     a for a in accounts
-                    if a.is_live == is_live and a.account_id % self.shards == shard
+                    if a.platform != 'mt5'
+                    and a.is_live == is_live and a.account_id % self.shards == shard
                 ]
                 for account in shard_accounts:
                     yield self._authorize_one(client, account)
@@ -800,6 +870,16 @@ class CopierApp:
         unnoticed indefinitely.
         """
         for account in accounts:
+            if account.platform == 'mt5':
+                # No broker to ask: the terminal's hello fills the symbol
+                # cache. An MT5 MASTER's map still has to reach get_state,
+                # the tracker and the alias matcher from that cache.
+                if account.role == 'master':
+                    org_symbols = self.master_symbols_by_org.setdefault(account.org_id, {})
+                    org_symbols.clear()
+                    org_symbols.update(symbols_by_id(
+                        self.repo.load_symbol_cache(account.account_id)))
+                continue
             if not force and self.repo.load_symbol_cache(account.account_id):
                 continue
             client = self._client_for_account(account)
@@ -825,6 +905,8 @@ class CopierApp:
                 )
 
     def _client_for_account(self, account) -> CTraderClient | None:
+        if account.platform == 'mt5':
+            return None   # reached through its own polls, never a cTrader client
         shard = account.account_id % self.shards
         return self.clients.get(account.is_live, {}).get(shard)
 
@@ -1003,21 +1085,36 @@ class CopierApp:
                 log.exception("resync: org %s failed; continuing the sweep", oid)
                 continue
             all_items.extend(items or [])
+            if routing is None:
+                routing = self.routing_provider()
+                slave_symbols = {
+                    s.account_id: symbols_by_id(s.symbols)
+                    for slaves in routing.slaves_by_org.values()
+                    for s in slaves
+                }
+            # MT5 accounts' books live in the registry, which persists them
+            # itself and serves get_state directly; the tracker only ever
+            # marks cTrader positions.
+            mt5_ids = {aid for aid, platform in routing.platform_by_account.items()
+                       if platform == 'mt5'}
             tracker = self.state_trackers.get(oid)
             if tracker is not None:
-                positions = [
-                    StatePositionSnapshot(
-                        position_id=p.position_id, symbol_id=p.symbol_id, side=p.side,
-                        volume=p.volume, price=p.price, label=p.label,
-                        stop_loss=p.stop_loss, take_profit=p.take_profit,
-                    )
-                    for p in reconciler.master_positions
-                ]
-                tracker.set_positions(reconciler.master_account_id, positions)
+                if reconciler.master_account_id not in mt5_ids:
+                    positions = [
+                        StatePositionSnapshot(
+                            position_id=p.position_id, symbol_id=p.symbol_id, side=p.side,
+                            volume=p.volume, price=p.price, label=p.label,
+                            stop_loss=p.stop_loss, take_profit=p.take_profit,
+                        )
+                        for p in reconciler.master_positions
+                    ]
+                    tracker.set_positions(reconciler.master_account_id, positions)
                 # The slaves' books too: the dashboard's per-account position
                 # counts and open P&L read from this tracker, and a slave
                 # holding live copies must never report an empty book.
                 for slave_id, slave_pos in reconciler.slave_positions.items():
+                    if slave_id in mt5_ids:
+                        continue
                     tracker.set_positions(slave_id, [
                         StatePositionSnapshot(
                             position_id=p.position_id, symbol_id=p.symbol_id,
@@ -1035,27 +1132,23 @@ class CopierApp:
                 # next broker reconcile lands. Best-effort: a bookkeeping
                 # write must never cost the operator the resync itself.
                 try:
-                    if routing is None:
-                        routing = self.routing_provider()
-                        slave_symbols = {
-                            s.account_id: symbols_by_id(s.symbols)
-                            for slaves in routing.slaves_by_org.values()
-                            for s in slaves
-                        }
                     master_org = routing.org_by_account.get(
                         reconciler.master_account_id)
-                    self.repo.upsert_positions(
-                        reconciler.master_account_id, master_org,
-                        reconciler.master_positions,
-                        self.master_symbols_by_org.get(master_org, {}))
-                    # The broker's reconcile response is the truth about
-                    # what is open; anything else we hold is stale. One
-                    # UPDATE per account -- close_missing_positions is
-                    # per-account on this base.
-                    self.repo.close_missing_positions(
-                        reconciler.master_account_id,
-                        [p.position_id for p in reconciler.master_positions])
+                    if reconciler.master_account_id not in mt5_ids:
+                        self.repo.upsert_positions(
+                            reconciler.master_account_id, master_org,
+                            reconciler.master_positions,
+                            self.master_symbols_by_org.get(master_org, {}))
+                        # The broker's reconcile response is the truth about
+                        # what is open; anything else we hold is stale. One
+                        # UPDATE per account -- close_missing_positions is
+                        # per-account on this base.
+                        self.repo.close_missing_positions(
+                            reconciler.master_account_id,
+                            [p.position_id for p in reconciler.master_positions])
                     for slave_id, slave_pos in reconciler.slave_positions.items():
+                        if slave_id in mt5_ids:
+                            continue
                         self.repo.upsert_positions(
                             slave_id, routing.org_by_account.get(slave_id),
                             slave_pos, slave_symbols.get(slave_id, {}))
@@ -1105,6 +1198,7 @@ class CopierApp:
         invalidate = getattr(self.routing_provider, "invalidate", None)
         if invalidate is not None:
             invalidate()
+        self._mt5_aliases_cache.clear()
 
         accounts = self.repo.load_accounts()
         envs_needed = {a.is_live for a in accounts}
@@ -1124,6 +1218,8 @@ class CopierApp:
                     log.error("reload: client for is_live=%s shard=%s failed to become ready", is_live, shard)
 
         for account in accounts:
+            if account.platform == 'mt5':
+                continue   # no cTrader client to (de)authorize
             client = self._client_for_account(account)
             if client is None:
                 continue
@@ -1186,18 +1282,29 @@ class CopierApp:
                 self.reconcilers[org_id] = Reconciler(
                     clients_by_account=self._clients_by_account, repo=self.repo,
                     dispatcher=self.dispatcher, master_account_id=master_id,
-                    org_id=org_id,
+                    org_id=org_id, snapshot_provider=self._mt5_snapshot_provider,
+                    netting_slaves=self._mt5_netting_slaves,
                 )
-            elif reconciler.master_account_id != master_id:
-                reconciler.master_account_id = master_id
+            else:
+                if reconciler.master_account_id != master_id:
+                    reconciler.master_account_id = master_id
+                # reload() is also the moment a pre-existing reconciler (one
+                # build_app constructed before this CopierApp existed, or one
+                # built by an earlier reload) picks up THIS app's current MT5
+                # callables, so e.g. a snapshot provider closing over a freshly
+                # rebuilt routing_provider is never left stale on it.
+                reconciler.snapshot_provider = self._mt5_snapshot_provider
+                reconciler.netting_slaves = self._mt5_netting_slaves
 
             tracker = self.state_trackers.get(org_id)
             if tracker is None or tracker._master_account_id != master_id:
-                master_client = self._client_for_account(master_account)
-                self.state_trackers[org_id] = AccountStateTracker(
-                    master_client=master_client, repo=self.repo,
-                    master_account_id=master_id, symbols_by_id=org_symbols,
-                )
+                tracker_client = _tracker_client_for(
+                    self.clients, accounts, master_account, self.shards)
+                self.state_trackers[org_id] = (
+                    AccountStateTracker(
+                        master_client=tracker_client, repo=self.repo,
+                        master_account_id=master_id, symbols_by_id=org_symbols,
+                    ) if tracker_client is not None else None)
 
         # Orgs that lost their master (or were deleted) lose their engines:
         # leaving a reconciler behind would keep reconciling -- and keep
@@ -1393,7 +1500,7 @@ class CopierApp:
         LoopingCall whose Deferred fails stops looping permanently.
         """
         try:
-            accounts = sorted(self.repo.load_accounts(),
+            accounts = sorted((a for a in self.repo.load_accounts() if a.platform != 'mt5'),
                               key=lambda a: a.account_id)
             if not accounts:
                 return
@@ -1441,6 +1548,10 @@ class CopierApp:
             (a for a in self.repo.load_accounts() if a.account_id == account_id), None)
         if account is None:
             raise ValueError(f"account {account_id} not found")
+        if account.platform == 'mt5':
+            # The lane stands in for the client: it answers the same read
+            # models from the registry and the deals table.
+            return self.mt5_lane, symbols_by_id(self.repo.load_symbol_cache(account_id))
         client = self._client_for_account(account)
         if client is None:
             raise ValueError(f"no client for account {account_id}")
@@ -1462,12 +1573,16 @@ class CopierApp:
 
     def get_account_details(self, account_id: int) -> defer.Deferred:
         """Full broker-side profile for one account (see engine/queries.py)."""
+        if self._is_mt5(account_id):
+            return defer.maybeDeferred(self.mt5_lane.details, account_id)
         d = defer.maybeDeferred(self._query_context, account_id)
         d.addCallback(lambda ctx: queries.account_details(ctx[0], account_id, ctx[1]))
         return d
 
     def get_deal_history(self, account_id: int, from_ms: int, to_ms: int) -> defer.Deferred:
         """Deal (fill) history for one account in [from_ms, to_ms]."""
+        if self._is_mt5(account_id):
+            return defer.maybeDeferred(self.mt5_lane.deal_history, account_id, from_ms, to_ms)
         d = defer.maybeDeferred(self._query_context, account_id)
         d.addCallback(lambda ctx: queries.deal_history(
             ctx[0], account_id, ctx[1], from_ms, to_ms))
@@ -1475,6 +1590,8 @@ class CopierApp:
 
     def get_order_history(self, account_id: int, from_ms: int, to_ms: int) -> defer.Deferred:
         """Order history for one account in [from_ms, to_ms]."""
+        if self._is_mt5(account_id):
+            return defer.maybeDeferred(self.mt5_lane.order_history, account_id, from_ms, to_ms)
         d = defer.maybeDeferred(self._query_context, account_id)
         d.addCallback(lambda ctx: queries.order_history(
             ctx[0], account_id, ctx[1], from_ms, to_ms))
@@ -1556,6 +1673,16 @@ class CopierApp:
             raise ValueError(
                 "this workspace is in dry-run: manual orders are disabled "
                 "until dry-run is turned off")
+
+        if self._is_mt5(account_id):
+            if org_id is None:
+                raise ValueError(f"account {account_id} not found")
+            return self.mt5_lane.place_order(
+                account_id, org_id, str(params.get("symbol")), side_name, type_name,
+                volume_lots, limit_price, stop_price,
+                validated_price("stop_loss", params.get("stop_loss")),
+                validated_price("take_profit", params.get("take_profit")),
+                params.get("actor_email"))
 
         symbol_name = params.get("symbol")
         sym = self.repo.load_symbol_cache(account_id).get(symbol_name)
@@ -1656,6 +1783,8 @@ class CopierApp:
         (ProtoOAReconcileReq) rather than trusting the caller: a full close
         sends exactly the live volume, and a partial close is clamped to it.
         """
+        if self._is_mt5(account_id):
+            return self.mt5_lane.close_position(account_id, position_id, volume_lots, actor)
         client, symbols = self._query_context(account_id)
         req = ProtoOAReconcileReq()
         req.ctidTraderAccountId = account_id
@@ -1734,19 +1863,11 @@ class CopierApp:
         account_id = int(account_id)
         position_id = int(position_id)
 
-        def _price(name, raw):
-            if raw is None or raw == "":
-                return None
-            try:
-                value = float(raw)
-            except (TypeError, ValueError):
-                raise ValueError(f"{name} must be a number")
-            if not math.isfinite(value) or value <= 0:
-                raise ValueError(f"{name} must be a positive, finite price")
-            return value
+        sl = validated_price("stop_loss", stop_loss)
+        tp = validated_price("take_profit", take_profit)
 
-        sl = _price("stop_loss", stop_loss)
-        tp = _price("take_profit", take_profit)
+        if self._is_mt5(account_id):
+            return self.mt5_lane.amend_position_sltp(account_id, position_id, sl, tp, actor)
 
         # Resolves the client too, so an unknown account fails here.
         _client, symbols = self._query_context(account_id)
@@ -1792,6 +1913,9 @@ class CopierApp:
     def cancel_order(self, account_id: int, order_id: int,
                      actor: str | None = None) -> defer.Deferred:
         """Cancel one working order on any account."""
+        if self._is_mt5(account_id):
+            return defer.maybeDeferred(self.mt5_lane.cancel_order, account_id, order_id, actor)
+
         def _send(_ctx):
             req = ProtoOACancelOrderReq()
             req.ctidTraderAccountId = account_id
@@ -2016,6 +2140,9 @@ class CopierApp:
         close it NAMES, so the failure is in front of the operator rather
         than in a log.
         """
+        if self._is_mt5(account_id):
+            summary = yield self.mt5_lane.flatten(account_id)
+            return summary
         client, _symbols = self._query_context(account_id)
         clock = self.clock
         if clock is None:
@@ -2146,6 +2273,10 @@ class CopierApp:
         if sym is None:
             raise ValueError(
                 f"unknown symbol {symbol_name!r} for account {account_id}")
+        if account.platform == 'mt5':
+            # The terminal reports marks only for open positions; there is
+            # no quote feed for a symbol nobody holds.
+            return {"symbol": symbol_name, "bid": None, "ask": None}
 
         tracker = self.state_trackers.get(account.org_id)
         if tracker is None:
@@ -2166,6 +2297,8 @@ class CopierApp:
         """Pre-trade margin estimate for volume_lots of symbol_name."""
         def go(ctx):
             client, _symbols = ctx
+            if isinstance(client, MT5Lane):
+                raise ValueError(f"margin estimates are not available for MT5 account {account_id}")
             sym = self.repo.load_symbol_cache(account_id).get(symbol_name)
             if sym is None:
                 raise ValueError(
@@ -2184,6 +2317,8 @@ class CopierApp:
         """Historical candles for one of the account's symbols."""
         def go(ctx):
             client, _symbols = ctx
+            if isinstance(client, MT5Lane):
+                raise ValueError(f"trendbars are not available for MT5 account {account_id}")
             sym = self.repo.load_symbol_cache(account_id).get(symbol_name)
             if sym is None:
                 raise ValueError(
@@ -2196,6 +2331,8 @@ class CopierApp:
 
     def get_cash_flow(self, account_id: int, from_ms: int, to_ms: int) -> defer.Deferred:
         """Deposit/withdrawal history for one account."""
+        if self._is_mt5(account_id):
+            return defer.maybeDeferred(self.mt5_lane.cash_flow, account_id, from_ms, to_ms)
         d = defer.maybeDeferred(self._query_context, account_id)
         d.addCallback(lambda ctx: queries.cash_flow_history(
             ctx[0], account_id, from_ms, to_ms))
@@ -2204,6 +2341,9 @@ class CopierApp:
     def get_position_deals(self, account_id: int, position_id: int,
                            from_ms: int, to_ms: int) -> defer.Deferred:
         """Every deal of one position (the drill-down view)."""
+        if self._is_mt5(account_id):
+            return defer.maybeDeferred(
+                self.mt5_lane.position_deals, account_id, position_id, from_ms, to_ms)
         d = defer.maybeDeferred(self._query_context, account_id)
         d.addCallback(lambda ctx: queries.position_deals(
             ctx[0], account_id, position_id, ctx[1], from_ms, to_ms))
@@ -2350,16 +2490,51 @@ class CopierApp:
         """
         state_tracker = self.state_trackers.get(org_id)
         reconciler = self.reconcilers.get(org_id)
-        accounts_snapshot = state_tracker.snapshot() if state_tracker is not None else {}
+        accounts_snapshot = dict(state_tracker.snapshot()) if state_tracker is not None else {}
+        routing = self.routing_provider()
+        mt5_ids = {aid for aid, platform in routing.platform_by_account.items()
+                   if platform == 'mt5' and routing.org_by_account.get(aid) == org_id}
+        # MT5 accounts' balance, equity, open P&L and marked positions come
+        # from the terminal's own reports, not from the state tracker.
+        # A netting MASTER is marked by virtual position (the ids its copies
+        # carry), its P&L split by volume share.
+        netting_master = (
+            reconciler.master_account_id
+            if reconciler is not None and reconciler.master_account_id in mt5_ids
+            and self.mt5_registry.margin_mode(reconciler.master_account_id) == "netting"
+            else None)
+        for account_id in mt5_ids:
+            block = self.mt5_registry.account_block(
+                account_id, virtual=(account_id == netting_master))
+            if block is not None:
+                accounts_snapshot[account_id] = block
         mappings = self.repo.mapping_rows(org_id=org_id)
 
+        # An MT5 master's symbols are broker names; its mapping rows carry
+        # the canonical names its events were translated to (ingress.py).
+        master_reverse_aliases: dict[str, str] = {}
+        if reconciler is not None and reconciler.master_account_id in mt5_ids:
+            master_reverse_aliases = {
+                broker: canonical
+                for canonical, broker in self._mt5_aliases(reconciler.master_account_id).items()}
+
+        def canonical(symbol_name: str | None) -> str | None:
+            if symbol_name is None:
+                return None
+            return master_reverse_aliases.get(symbol_name, symbol_name)
+
         # Per-call memo: several copies usually belong to the same slave, and
-        # load_symbol_cache() is a database round trip each time.
+        # load_symbol_cache() is a database round trip each time. An MT5
+        # slave's cache is keyed by broker name; re-key it by the canonical
+        # names the master rows carry, exactly as build_routing does.
         slave_symbol_caches: dict[int, dict] = {}
 
         def slave_symbols(account_id: int) -> dict:
             if account_id not in slave_symbol_caches:
-                slave_symbol_caches[account_id] = self.repo.load_symbol_cache(account_id)
+                symbols = self.repo.load_symbol_cache(account_id)
+                if account_id in mt5_ids:
+                    symbols = mt5_symbols_by_canonical(symbols, self._mt5_aliases(account_id))
+                slave_symbol_caches[account_id] = symbols
             return slave_symbol_caches[account_id]
 
         def lots(volume, lot_size) -> str | None:
@@ -2409,7 +2584,7 @@ class CopierApp:
 
         master_positions = []
         pending_orders = []
-        if state_tracker is not None and reconciler is not None:
+        if reconciler is not None:
             # Live per-position P&L, keyed by position id, from the same
             # snapshot the accounts block is built from -- so the Positions
             # screen and the Overview never disagree about a position.
@@ -2461,7 +2636,7 @@ class CopierApp:
                     'pnl_quote': master_pnl_by_position.get(pos.position_id),
                     'current_price': master_px_by_position.get(pos.position_id),
                     'label': pos.label,
-                    'copies': copies_for('master_position_id', pos.position_id, symbol_name),
+                    'copies': copies_for('master_position_id', pos.position_id, canonical(symbol_name)),
                 })
             for order in reconciler.master_orders:
                 sym = master_symbol(order.symbol_id)
@@ -2476,7 +2651,7 @@ class CopierApp:
                     'volume': order.volume,
                     'volume_lots': lots(order.volume, sym.lot_size if sym is not None else None),
                     'label': order.label,
-                    'copies': copies_for('master_order_id', order.order_id, symbol_name),
+                    'copies': copies_for('master_order_id', order.order_id, canonical(symbol_name)),
                 })
 
         # A fresh process has no reconciler snapshot until the first resync
@@ -2525,6 +2700,462 @@ class CopierApp:
                 for item in (reconciler.current if reconciler is not None else [])
             ],
         }
+
+    # ---------- MT5 terminals ----------
+
+    def mt5_hello(self, account_id: int, body: dict) -> dict:
+        """A terminal introduced itself (once per EA start, in chunks). The
+        symbol list becomes the account's symbol cache, its canonical names
+        are auto-matched, the link row records the terminal, and the
+        response tells a restarted EA where its deal watermark stands."""
+        account = self._account_row(account_id)
+        if account is None or account.platform != 'mt5':
+            raise ValueError(f"account {account_id} is not an MT5 account")
+        hello = mt5_protocol.parse_hello(body)
+        now = self._clock_seconds()
+        self.mt5_registry.update_from_hello(account_id, account.org_id, hello, now)
+        if hello.chunk >= hello.chunks:
+            self.repo.upsert_mt5_link_hello(
+                account_id, login=hello.login, broker=hello.broker, server=hello.server,
+                currency=hello.currency, hedging=hello.hedging, trade_mode=hello.trade_mode,
+                leverage=hello.leverage, ea_version=hello.ea_version, ea_build=hello.ea_build)
+            # The symbol cache changed and routing bakes it in.
+            invalidate = getattr(self.routing_provider, "invalidate", None)
+            if invalidate is not None:
+                invalidate()
+            self._auto_match_aliases(account_id, account)
+            if account.role == 'master':
+                # Mutated in place: the org's tracker and the service hold
+                # this very dict (see _fetch_and_cache_symbols).
+                org_symbols = self.master_symbols_by_org.setdefault(account.org_id, {})
+                org_symbols.clear()
+                org_symbols.update(symbols_by_id(self.mt5_registry.symbols_by_name(account_id)))
+            # Hedging and netting are both accepted (spec "Netting accounts");
+            # the mode is recorded on the link row and reported by mt5_status.
+            # A reconnecting terminal clears an earlier offline/rejection status.
+            if self.repo.clear_degraded(account_id):
+                self.repo.log_event(
+                    'slave_action', 'info',
+                    {'action': 'degraded_cleared', 'reason': 'terminal reconnected'},
+                    account_id=account_id, org_id=account.org_id)
+            self.repo.log_event(
+                'connection', 'info',
+                {'action': 'mt5_hello', 'login': hello.login, 'broker': hello.broker,
+                 'server': hello.server, 'hedging': hello.hedging,
+                 'ea_version': hello.ea_version,
+                 'symbols': len(self.mt5_registry.symbols_by_name(account_id))},
+                account_id=account_id, org_id=account.org_id)
+        last_ticket, _time_ms = self.repo.mt5_watermark(account_id)
+        return {"last_deal_ticket": last_ticket}
+
+    def _canonical_names_for(self, routing: OrgRouting, account) -> list[str]:
+        """The names the org's master events carry: for a follower, the
+        master's own symbols; for an MT5 master, the union of its cTrader
+        followers' symbols."""
+        org_id = account.org_id
+        master_id = routing.master_by_org.get(org_id)
+        if master_id is not None and master_id != account.account_id:
+            names = {info.name for info in self.master_symbols_by_org.get(org_id, {}).values()}
+            return sorted(names or set(self.repo.load_symbol_cache(master_id)))
+        names: set[str] = set()
+        for slave in routing.slaves_by_org.get(org_id, []):
+            if routing.platform_by_account.get(slave.account_id) == 'mt5':
+                continue
+            names.update(slave.symbols)
+        return sorted(names)
+
+    def _auto_match_aliases(self, account_id: int, account) -> None:
+        routing = self.routing_provider()
+        canonical_names = self._canonical_names_for(routing, account)
+        broker_names = list(self.mt5_registry.symbols_by_name(account_id))
+        if canonical_names:
+            self.repo.save_symbol_aliases(
+                account_id, auto_match(canonical_names, broker_names), "auto")
+        self._mt5_aliases_cache.pop(account_id, None)
+        invalidate = getattr(self.routing_provider, "invalidate", None)
+        if invalidate is not None:
+            invalidate()
+
+    def mt5_sync(self, account_id: int, body: dict) -> str:
+        """One poll from a terminal: its report in, its next commands out.
+
+        Order matters. The report is stored first (so everything below
+        sees the terminal's current book); acks settle commands and drive
+        mapping bookkeeping; deals are ingested once (watermark) and, for
+        the org's master, turned into MasterEvents -- through the net
+        ledger when the master is a netting account, whose dirty rows and
+        virtual positions are then persisted; finally the outbox hands
+        over what is due. The link row's balance/equity/last_seen_at are
+        written at most once per MT5_LINK_TOUCH_INTERVAL_S per account
+        (the api throttles its own write of those columns the same way).
+        """
+        now = self._clock_seconds()
+        server_ms = int(now * 1000)
+        account = self._account_row(account_id)
+        if account is None or account.platform != 'mt5':
+            return mt5_protocol.encode_response("STOP", server_ms, 0, [], reason="account removed")
+        report = mt5_protocol.parse_sync(body)
+        org_id = account.org_id
+        registry = self.mt5_registry
+        netting = registry.margin_mode(account_id) == "netting"
+        is_master = self.routing_provider().master_by_org.get(org_id) == account_id
+
+        was_online = registry.is_online(account_id, now)
+        previous = registry.snapshot(account_id, with_labels=False)
+        previous_report = registry.report(account_id)
+        # A netting master's positions table holds its VIRTUAL positions,
+        # written by _persist_net_ledger once the ledger has absorbed this
+        # report's deals; everyone else persists the terminal's book here.
+        registry.update_from_sync(account_id, org_id, report, now,
+                                  persist=not (netting and is_master))
+        if now - self._mt5_last_touch.get(account_id, float("-inf")) >= MT5_LINK_TOUCH_INTERVAL_S:
+            self.repo.touch_mt5_link(
+                account_id, balance=report.balance, equity=report.equity,
+                seen_at=datetime.fromtimestamp(now, tz=timezone.utc))
+            self._mt5_last_touch[account_id] = now
+        if not was_online:
+            self._mt5_back_online(account_id, org_id)
+
+        outcomes = self.mt5_outbox.apply_acks(account_id, report.acks)
+        # An ack is paired with the deal it produced by the deal ticket
+        # (contract §2): the EA reports the deal in the same sync as the
+        # ack, or the next one past MAX_DEALS_PER_SYNC.
+        deals_by_ticket = {d.ticket: d for d in report.deals}
+        for outcome in outcomes:
+            self._apply_mt5_outcome(org_id, account_id, outcome, netting=netting,
+                                    deals_by_ticket=deals_by_ticket)
+
+        fresh = self._ingest_mt5_deals(account_id, org_id, report, previous_report)
+        if is_master:
+            self._mt5_master_events(account_id, org_id, dc_replace(report, deals=fresh), previous,
+                                    netting=netting)
+            if netting:
+                self._persist_net_ledger(account_id)
+        elif account.role == 'slave' and (fresh or outcomes):
+            # Called on acks too: an acked deal not in this report is
+            # remembered so the next report does not book it again.
+            self._mt5_slave_deals(org_id, account_id, fresh, outcomes, netting=netting)
+
+        commands = self.mt5_outbox.deliverable(account_id, now)
+        if fresh or outcomes:
+            self.request_resync(org_id)
+        return mt5_protocol.encode_response(
+            "OK", server_ms, mt5_protocol.DEFAULT_POLL_MS, commands)
+
+    def _mt5_back_online(self, account_id: int, org_id: int) -> None:
+        if self.repo.clear_degraded(account_id):
+            self.repo.log_event('connection', 'info', {'action': 'mt5_online'},
+                                account_id=account_id, org_id=org_id)
+
+    def _apply_mt5_outcome(self, org_id: int, account_id: int, outcome,
+                           netting: bool = False, deals_by_ticket: dict | None = None) -> None:
+        """One settled command -> the same mapping bookkeeping a cTrader
+        execution event drives, plus the account's degraded status.
+
+        `deals_by_ticket` is this report's deals: an ack is paired with the
+        deal it produced (AckOutcome.deal), which on a netting follower
+        says what the fill did to the net position (its entry) and names
+        the position when the ack could not (pos 0: the fill emptied it)."""
+        deal = (deals_by_ticket or {}).get(outcome.deal) if outcome.deal else None
+        if not outcome.ok:
+            reason = f"terminal rejected {outcome.kind}: {outcome.message}"
+            # A refused close or amend leaves the copy open: only a refused
+            # open/place_pending fails its mapping. (A netting follower's
+            # close is reported as kind "close" under the mapping's coid.)
+            coid = outcome.client_order_id if outcome.kind in ('open', 'place_pending') else None
+            self.service.handle_slave_rejection(org_id, account_id, coid, reason)
+            self.repo.set_account_status(account_id, 'degraded', reason)
+            return
+        if outcome.kind == 'open':
+            # The EA acks the position the fill landed in. On a netting
+            # follower that is the net position the terminal shows AFTER
+            # the fill -- 0 when the fill emptied it (plan 04 DoOpen) -- and
+            # the deal still names it (contract §2).
+            ticket = outcome.position or (deal.position if deal is not None else None)
+            if not ticket:
+                self.repo.log_event(
+                    'slave_action', 'warning',
+                    {'action': 'mt5_open_ack_without_position', 'command_id': outcome.command_id,
+                     'deal': outcome.deal},
+                    account_id=account_id, org_id=org_id)
+            else:
+                pos = self.mt5_registry.position(account_id, ticket)
+                self.service.handle_slave_fill(org_id, SlaveFill(
+                    account_id=account_id, client_order_id=outcome.client_order_id,
+                    position_id=ticket, filled_volume=outcome.volume or 0,
+                    fill_price=outcome.price, closed_volume=None,
+                    # An operator's open carries no client_order_id; every copy does.
+                    label=MANUAL_ORDER_LABEL if outcome.client_order_id is None else "",
+                    order_id=outcome.order,
+                    stop_loss=pos.stop_loss if pos is not None else None,
+                    take_profit=pos.take_profit if pos is not None else None))
+                if netting:
+                    # The fill went into the symbol's single net position and
+                    # the deal's entry says what it did to it: IN grew it, OUT
+                    # reduced or emptied it, INOUT flipped it. An opposite-side
+                    # COPY (spec "Opposite positions": the master holds BUY and
+                    # opens SELL) is still a copy -- its mapping is active on
+                    # the net ticket, and the older copies it netted against
+                    # are the master's to close, not this fill's: the deal is
+                    # settled by this ack and never reaches the FIFO reduction
+                    # (_mt5_slave_deals). Recorded so the operator can see why
+                    # the net position shrank without any copy closing.
+                    if (outcome.client_order_id and deal is not None
+                            and deal.entry in CLOSE_ENTRIES):
+                        self.repo.log_event(
+                            'slave_action', 'info',
+                            {'action': 'mt5_netting_opposite_copy',
+                             'client_order_id': outcome.client_order_id, 'position': ticket,
+                             'entry': deal.entry, 'volume': outcome.volume or 0,
+                             'nets_against': self._copies_sharing(
+                                 org_id, account_id, ticket, outcome.client_order_id)},
+                            account_id=account_id, org_id=org_id)
+                    self._record_netting_override(
+                        org_id, account_id, ticket, outcome.client_order_id)
+        elif outcome.kind == 'close' and outcome.client_order_id:
+            # A netting follower's close of ONE copy: the outbox queued it as
+            # an opposite-side open under the mapping's coid + ':close' and
+            # reports its ack as this close. Reduce exactly that mapping --
+            # by its coid alone (Task 4): the ack's ticket is the net
+            # position AFTER the fill, 0 when this close emptied it. The
+            # OUT/INOUT deal it produced is settled by this ack and skipped
+            # by ticket in _mt5_slave_deals (AckOutcome.deal).
+            self.service.handle_slave_fill(org_id, SlaveFill(
+                account_id=account_id, client_order_id=outcome.client_order_id,
+                position_id=outcome.position or (deal.position if deal is not None else 0),
+                filled_volume=outcome.volume or 0,
+                fill_price=outcome.price, closed_volume=outcome.volume or 0, label=""))
+        elif outcome.kind == 'place_pending':
+            self.service.handle_slave_order_accepted(
+                org_id, account_id, outcome.client_order_id, outcome.order)
+        elif outcome.kind == 'cancel_pending' and outcome.order is not None:
+            self.service.handle_slave_order_cancelled(org_id, account_id, outcome.order)
+        else:
+            # close / amend / amend_pending: the deal or the next report says
+            # what changed; the ack is only the receipt.
+            self.repo.log_event(
+                'slave_action', 'info',
+                {'action': f'mt5_{outcome.kind}_done', 'command_id': outcome.command_id,
+                 'position': outcome.position, 'order': outcome.order},
+                account_id=account_id, org_id=org_id)
+            if netting and outcome.kind == 'amend' and outcome.position is not None:
+                self._record_netting_override(org_id, account_id, outcome.position, None)
+        if self.repo.clear_degraded(account_id):
+            self.repo.log_event(
+                'slave_action', 'info',
+                {'action': 'degraded_cleared', 'reason': 'terminal executed a command'},
+                account_id=account_id, org_id=org_id)
+
+    def _record_netting_override(self, org_id: int, account_id: int, position: int,
+                                 set_by: str | None) -> None:
+        """One stop and one target per symbol on a netting account: the
+        latest open or amend sets them for every copy sharing the net
+        position (spec "Netting accounts"). Recorded whenever other active
+        copies share the ticket, so the operator can see whose levels they
+        now carry. `set_by` is the coid of the copy that set them, None for
+        an amend (which names no copy)."""
+        others = self._copies_sharing(org_id, account_id, position, set_by)
+        if not others:
+            return
+        pos = self.mt5_registry.position(account_id, position)
+        self.repo.log_event(
+            'slave_action', 'info',
+            {'action': 'mt5_netting_protection_override', 'position': position,
+             'set_by': set_by, 'overrides': others,
+             'stop_loss': pos.stop_loss if pos is not None else None,
+             'take_profit': pos.take_profit if pos is not None else None,
+             'detail': 'one stop and one target per symbol on a netting account: the latest '
+                       'open or amend sets them for every copy sharing the net position'},
+            account_id=account_id, org_id=org_id)
+
+    def _copies_sharing(self, org_id: int, account_id: int, position: int,
+                        except_coid: str | None) -> list[int]:
+        """Master ids of the OTHER active copies on a net ticket (every copy
+        on a symbol shares it on a netting follower), sorted."""
+        return sorted({
+            m['master_position_id'] for m in self.repo.mapping_rows(org_id=org_id)
+            if m['slave_account_id'] == account_id and m['slave_position_id'] == position
+            and m['status'] == 'active' and m['master_position_id']
+            and m['client_order_id'] != except_coid})
+
+    def _ingest_mt5_deals(self, account_id: int, org_id: int, report, previous_report) -> list:
+        """Store the deals past the watermark, estimate balance_after for
+        them, advance the watermark. Returns the fresh deals (time order).
+        Entry prices for the close rows come from the position as it stood
+        in the previous report (a fully closed position is gone from this
+        one) or in this one."""
+        last_ticket, _time_ms = self.repo.mt5_watermark(account_id)
+        fresh = sorted((d for d in report.deals if d.ticket > last_ticket),
+                       key=lambda d: (d.time_ms, d.ticket))
+        if not fresh:
+            return []
+        symbols = self.mt5_registry.symbols_by_name(account_id)
+        entry_prices = {p.ticket: p.open_price
+                        for p in (previous_report.positions if previous_report is not None else [])}
+        entry_prices.update({p.ticket: p.open_price for p in report.positions})
+        rows = deal_rows(fresh, report.balance, symbols, entry_prices.get)
+        inserted = self.repo.upsert_mt5_deals(account_id, org_id, rows)
+        self.repo.set_mt5_watermark(
+            account_id, max(d.ticket for d in fresh), max(d.time_ms for d in fresh))
+        # get_analytics reads deal_backfill_state to say whether history is
+        # complete; an MT5 account's history is whatever the terminal has
+        # sent, complete from its first deal.
+        self.repo.set_backfill_state(
+            account_id, min(d.time_ms for d in fresh), max(d.time_ms for d in fresh),
+            exhausted=True)
+        log.info("mt5 account %s: %d new deal(s) ingested", account_id, inserted)
+        return fresh
+
+    def _mt5_master_events(self, account_id: int, org_id: int, report, previous,
+                           netting: bool = False) -> None:
+        """The org's MT5 master reported: derive and act on its events, then
+        stamp the master half of the slippage measurement onto the copies.
+        A netting master's deals go through its ledger (virtual positions,
+        ids = deal tickets)."""
+        reverse = {broker: canonical
+                   for canonical, broker in self._mt5_aliases(account_id).items()}
+        symbols = self.mt5_registry.symbols_by_name(account_id)
+        ledger = self.mt5_registry.net_ledger(account_id) if netting else None
+        for event in master_events_from_report(report, previous, reverse, symbols, ledger=ledger):
+            try:
+                self.service.act_on_master_event(org_id, account_id, event, source="mt5")
+            except Exception as e:
+                # The sync must answer the terminal whatever one event did;
+                # the failure is logged exactly as handle_execution logs its own.
+                self.repo.log_event(
+                    'connection', 'error',
+                    {'action': 'event_processing_failed', 'account_id': account_id,
+                     'error': f"{type(e).__name__}: {e}", 'error_type': type(e).__name__},
+                    org_id=org_id)
+        for d in report.deals:
+            if d.deal_type not in TRADE_TYPES:
+                continue
+            # On a netting master the copies are keyed by the deal ticket
+            # (the virtual id), a reversal's remainder included.
+            if netting and d.entry in ("IN", "INOUT"):
+                self.repo.record_master_fill(org_id, d.ticket, d.price, d.time_ms)
+            elif not netting and d.entry == "IN":
+                self.repo.record_master_fill(org_id, d.position, d.price, d.time_ms)
+
+    def _persist_net_ledger(self, account_id: int) -> None:
+        """A netting master's ledger after this report: dirty virtual
+        positions to mt5_net_ledger (a restart rebuilds the ledger from
+        them), then the positions table from the virtual book (what the
+        Positions page and a restart read)."""
+        ledger = self.mt5_registry.net_ledger(account_id)
+        upserts, deleted = ledger.dirty_rows()
+        if upserts:
+            self.repo.upsert_net_ledger(account_id, [v.row() for v in upserts])
+        if deleted:
+            self.repo.delete_net_ledger(account_id, deleted)
+        if upserts or deleted:
+            self.mt5_registry.persist_virtual_positions(account_id)
+
+    def _mt5_slave_deals(self, org_id: int, account_id: int, deals, outcomes,
+                         netting: bool = False) -> None:
+        """A follower terminal's own deals: an OUT on a mapped position (a
+        stop hit, the owner closing by hand) reduces the mapping -- on a
+        netting follower the copies sharing the net position, oldest first
+        (reduce_position_mappings_fifo); an IN not already activated by an
+        ack is a pending copy filling, an operator's order, or an unmatched
+        fill.
+
+        A deal produced by a command that NAMES A COPY is never the
+        terminal's own doing, so it is skipped by its ticket: the ack did
+        the bookkeeping already -- a copy's open activated its mapping
+        whatever the fill did to a net position (grew, reduced, emptied or
+        flipped it: an opposite-side copy is a copy, not a close of the
+        older ones), a ':close' reduced its mapping under its coid. The
+        tickets are kept per account until the terminal reports the deal,
+        in the same sync as the ack or the next one (MAX_DEALS_PER_SYNC).
+        An operator's own open on the net position is NOT in the set: its
+        OUT/INOUT deal really did take volume from the copies, and goes
+        through the FIFO reduction like a close by hand."""
+        settled = self._mt5_settled_deals.setdefault(account_id, set())
+        settled.update(o.deal for o in outcomes
+                       if o.ok and o.deal and o.client_order_id and o.kind in ('open', 'close'))
+        acked_positions = {o.position for o in outcomes if o.ok and o.kind == 'open' and o.position}
+        known = {m['slave_position_id'] for m in self.repo.mapping_rows(org_id=org_id)
+                 if m['slave_account_id'] == account_id and m['slave_position_id']}
+        for d in deals:
+            if d.deal_type not in TRADE_TYPES:
+                continue
+            if d.ticket in settled:
+                settled.discard(d.ticket)
+                continue
+            if d.entry == "IN":
+                # On a netting follower every copy on a symbol shares the net
+                # ticket, so an add to a mapped ticket is never a fill of its own.
+                if d.position in known or d.position in acked_positions:
+                    continue
+                pos = self.mt5_registry.position(account_id, d.position)
+                fill = SlaveFill(
+                    account_id=account_id, client_order_id=None, position_id=d.position,
+                    filled_volume=d.volume, fill_price=d.price, closed_volume=None,
+                    label=MANUAL_ORDER_LABEL if d.comment == MANUAL_ORDER_LABEL else "",
+                    order_id=d.order or None,
+                    stop_loss=pos.stop_loss if pos is not None else None,
+                    take_profit=pos.take_profit if pos is not None else None)
+            elif d.entry in CLOSE_ENTRIES:
+                if netting:
+                    for row in self.repo.reduce_position_mappings_fifo(
+                            account_id, d.position, d.volume):
+                        self.repo.log_event(
+                            'slave_action', 'info',
+                            {'action': 'position_closed', 'slave_position_id': d.position,
+                             'client_order_id': row['client_order_id'],
+                             'closed_volume': row['closed_volume']},
+                            account_id=account_id, org_id=org_id)
+                    continue
+                fill = SlaveFill(
+                    account_id=account_id, client_order_id=None, position_id=d.position,
+                    filled_volume=d.volume, fill_price=d.price, closed_volume=d.volume,
+                    label="", order_id=d.order or None)
+            else:
+                continue
+            try:
+                self.service.handle_slave_fill(org_id, fill)
+            except Exception:
+                log.exception("mt5 account %s: deal %s bookkeeping failed", account_id, d.ticket)
+
+    def mt5_status(self, account_id: int) -> dict:
+        if self._account_row(account_id) is None:
+            raise ValueError(f"account {account_id} not found")
+        now = self._clock_seconds()
+        last = self.mt5_registry.last_seen(account_id)
+        return {
+            "online": self.mt5_registry.is_online(account_id, now),
+            "last_seen_at": (datetime.fromtimestamp(last, tz=timezone.utc)
+                             .isoformat(timespec='seconds') if last is not None else None),
+            "pending_commands": self.mt5_outbox.pending_count(account_id),
+            "hedging": self.mt5_registry.hedging(account_id),
+        }
+
+    def check_mt5_offline(self) -> None:
+        """LoopingCall body (MT5_OFFLINE_CHECK_INTERVAL_S): an MT5 account
+        whose terminal has not reported for OFFLINE_AFTER_S reads degraded
+        "terminal offline since ..."; its next report clears it
+        (_mt5_back_online). A paused account is the operator's and is left
+        alone. Never raises: a LoopingCall whose Deferred fails stops."""
+        try:
+            now = self._clock_seconds()
+            for account in self.repo.load_accounts():
+                if account.platform != 'mt5' or account.status == 'paused':
+                    continue
+                last = self.mt5_registry.last_seen(account.account_id)
+                if last is None or self.mt5_registry.is_online(account.account_id, now):
+                    continue
+                if (account.status == 'degraded'
+                        and (account.last_error or '').startswith('terminal offline')):
+                    continue
+                since = datetime.fromtimestamp(last, tz=timezone.utc).isoformat(timespec='seconds')
+                self.repo.set_account_status(
+                    account.account_id, 'degraded', f"terminal offline since {since}")
+                self.repo.log_event(
+                    'connection', 'warning', {'action': 'mt5_offline', 'since': since},
+                    account_id=account.account_id, org_id=account.org_id)
+        except Exception:
+            log.exception("mt5 offline check failed")
 
 
 # ---------- composition ----------
@@ -2620,6 +3251,77 @@ def _build_send_for_account(
     return send_for_account
 
 
+def _build_mt5_targets(routing_provider: Callable[[], OrgRouting]):
+    """account_id -> {symbol_id: broker symbol name} for an MT5 slave, None
+    for anything else. Read off the cached routing (the slave's symbols
+    are already there, keyed by canonical name AND broker name), so the
+    dispatcher pays no database round trip per intent."""
+    def mt5_targets(account_id: int):
+        routing = routing_provider()
+        if routing.platform_by_account.get(account_id) != 'mt5':
+            return None
+        for slaves in routing.slaves_by_org.values():
+            for slave in slaves:
+                if slave.account_id == account_id:
+                    return {info.symbol_id: info.name for info in slave.symbols.values()}
+        return {}
+
+    return mt5_targets
+
+
+def _build_mt5_snapshot_provider(routing_provider: Callable[[], OrgRouting], registry: MT5Registry):
+    """The reconciler's snapshot_provider: an MT5 account's book from the
+    registry (empty before its first report -- the terminal is the only
+    source, and asking a cTrader client would answer for the wrong
+    account), None for a cTrader account. A netting MASTER's book is its
+    ledger's virtual positions: the ids its followers' mappings carry, so
+    drift lines up by virtual id."""
+    def provider(account_id: int):
+        routing = routing_provider()
+        if routing.platform_by_account.get(account_id) != 'mt5':
+            return None
+        org_id = routing.org_by_account.get(account_id)
+        virtual = (routing.master_by_org.get(org_id) == account_id
+                   and registry.margin_mode(account_id) == "netting")
+        return registry.snapshot(account_id, virtual=virtual) or ([], [])
+
+    return provider
+
+
+def _build_mt5_netting_slaves(routing_provider: Callable[[], OrgRouting], registry: MT5Registry):
+    """The reconcilers' netting_slaves (Task 12b): the MT5 FOLLOWERS whose
+    terminal said hello as a netting account -- the accounts whose net
+    positions compute_drift compares with the signed sum of their copies.
+    A master is not a follower; an account with no hello yet has no mode
+    and is left to the existence checks until it reports."""
+    def netting_slaves() -> set[int]:
+        routing = routing_provider()
+        return {
+            account_id for account_id, platform in routing.platform_by_account.items()
+            if platform == 'mt5'
+            and routing.master_by_org.get(routing.org_by_account.get(account_id)) != account_id
+            and registry.margin_mode(account_id) == "netting"}
+
+    return netting_slaves
+
+
+def _tracker_client_for(clients: dict, accounts, master_account, shards: int):
+    """The connection an org's state tracker subscribes quotes on: the
+    master's own for a cTrader master; for an MT5 master, any cTrader
+    account of the org (the MT5 master's own book is served by the
+    registry); None when the org has no cTrader account at all."""
+    candidates = [master_account] + [
+        a for a in accounts
+        if a.org_id == master_account.org_id and a.account_id != master_account.account_id]
+    for a in candidates:
+        if a.platform == 'mt5':
+            continue
+        client = clients.get(a.is_live, {}).get(a.account_id % shards)
+        if client is not None:
+            return client
+    return None
+
+
 def build_app(
     repo: Repo,
     token_store: TokenStore,
@@ -2629,13 +3331,16 @@ def build_app(
 ) -> CopierApp:
     """Build a fully-wired CopierApp, with one engine per org that has a master.
 
-    Construction order matters: repo -> token_store -> clients -> dispatcher
-    (with a real send_for_account from the very first line, never a
-    None/placeholder patched in afterward) -> service -> per-org reconcilers
-    (with a real dispatcher) -> per-org state_trackers -> CopierApp.
+    Construction order matters: repo -> token_store -> clients -> routing
+    -> MT5 registry/outbox -> dispatcher (with a real send_for_account and a
+    real outbox from the very first line, never a None/placeholder patched
+    in afterward) -> service -> per-org reconcilers (with a real dispatcher
+    and snapshot provider) -> per-org state_trackers -> CopierApp.
     """
     accounts = repo.load_accounts()
-    envs_needed = sorted({a.is_live for a in accounts})
+    # MT5 accounts are reached through their own polls: no cTrader client
+    # is built for an environment only they occupy.
+    envs_needed = sorted({a.is_live for a in accounts if a.platform != 'mt5'})
 
     clients: dict[bool, dict[int, CTraderClient]] = {}
     for is_live in envs_needed:
@@ -2644,11 +3349,6 @@ def build_app(
     clients_by_account = _build_clients_by_account(repo, clients, shards)
     send_for_account = _build_send_for_account(clients_by_account)
 
-    bucket = TokenBucket(clock=clock)
-    dispatcher = Dispatcher(send_for_account=send_for_account, repo=repo, bucket=bucket, clock=clock)
-
-    master_symbols_by_org: dict[int, dict] = {}
-
     # Cached for up to a second: routing used to be rebuilt from the
     # database on every event, which put ~200ms of queries and symbol
     # parsing in front of every copy. reload() invalidates it, so
@@ -2656,32 +3356,49 @@ def build_app(
     # most TTL-stale, which the freshness contract (edits apply on the
     # next event) comfortably absorbs.
     routing_provider = RoutingCache(
-        lambda: build_routing(repo.load_accounts(), repo.load_symbol_cache),
+        lambda: build_routing(repo.load_accounts(), repo.load_symbol_cache,
+                              repo.load_symbol_aliases),
         clock=clock,
     )
+
+    mt5_registry = MT5Registry(repo, clock=clock)
+    # The outbox asks the registry for an account's margin mode: a netting
+    # follower's close is an opposite-side open (copier/mt5/outbox.py).
+    mt5_outbox = MT5Outbox(repo, clock=clock, margin_mode=mt5_registry.margin_mode)
+    mt5_snapshot_provider = _build_mt5_snapshot_provider(routing_provider, mt5_registry)
+    mt5_netting_slaves = _build_mt5_netting_slaves(routing_provider, mt5_registry)
+
+    bucket = TokenBucket(clock=clock)
+    dispatcher = Dispatcher(
+        send_for_account=send_for_account, repo=repo, bucket=bucket, clock=clock,
+        mt5_targets=_build_mt5_targets(routing_provider), mt5_outbox=mt5_outbox)
+
+    master_symbols_by_org: dict[int, dict] = {}
 
     service = CopierService(
         repo=repo, dispatcher=dispatcher, routing_provider=routing_provider,
         master_symbols_by_org=master_symbols_by_org, clock=clock,
     )
 
-    initial_routing = build_routing(accounts, repo.load_symbol_cache)
+    initial_routing = build_routing(accounts, repo.load_symbol_cache, repo.load_symbol_aliases)
     reconcilers: dict[int, Reconciler] = {}
-    state_trackers: dict[int, AccountStateTracker] = {}
+    state_trackers: dict[int, AccountStateTracker | None] = {}
     for org_id, master_id in initial_routing.master_by_org.items():
         master_account = next(a for a in accounts if a.account_id == master_id)
         reconcilers[org_id] = Reconciler(
             clients_by_account=clients_by_account, repo=repo,
             dispatcher=dispatcher, master_account_id=master_id, org_id=org_id,
+            snapshot_provider=mt5_snapshot_provider, netting_slaves=mt5_netting_slaves,
         )
         # The inner dict is created here and mutated in place from then on, so
         # the tracker and the service keep seeing this org's current symbols.
         org_symbols = master_symbols_by_org.setdefault(org_id, {})
-        master_client = clients[master_account.is_live][master_id % shards]
-        state_trackers[org_id] = AccountStateTracker(
-            master_client=master_client, repo=repo,
-            master_account_id=master_id, symbols_by_id=org_symbols,
-        )
+        tracker_client = _tracker_client_for(clients, accounts, master_account, shards)
+        state_trackers[org_id] = (
+            AccountStateTracker(
+                master_client=tracker_client, repo=repo,
+                master_account_id=master_id, symbols_by_id=org_symbols,
+            ) if tracker_client is not None else None)
 
     app = CopierApp(
         repo=repo, token_store=token_store, clients=clients, service=service,
@@ -2689,6 +3406,7 @@ def build_app(
         dispatcher=dispatcher, client_factory=client_factory, shards=shards,
         master_symbols_by_org=master_symbols_by_org,
         routing_provider=routing_provider, clients_by_account=clients_by_account,
+        mt5_registry=mt5_registry, mt5_outbox=mt5_outbox,
         clock=clock,
     )
 
@@ -2908,6 +3626,18 @@ def boot(config: BootConfig, reactor_) -> CopierApp:
         d.addErrback(lambda f: log.error("deal backfill loop stopped: %s", f))
 
     reactor_.callWhenRunning(_start_deal_backfill_loop)
+
+    # An MT5 terminal that stops polling is noticed within 5 s and shown
+    # as "terminal offline since ..." until it reports again.
+    mt5_offline_call = task.LoopingCall(app.check_mt5_offline)
+    mt5_offline_call.clock = reactor_
+    app.mt5_offline_call = mt5_offline_call
+
+    def _start_mt5_offline_loop():
+        d = mt5_offline_call.start(MT5_OFFLINE_CHECK_INTERVAL_S, now=False)
+        d.addErrback(lambda f: log.error("mt5 offline check loop stopped: %s", f))
+
+    reactor_.callWhenRunning(_start_mt5_offline_loop)
 
     # Drain whatever the writer still holds before the process exits, so a
     # clean restart loses nothing. Bounded: shutdown must not hang.

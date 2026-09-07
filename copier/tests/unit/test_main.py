@@ -448,9 +448,10 @@ def test_boot_composes_without_crashing_and_binds_all_interfaces(db, fernet_key)
     assert call["interface"] != "127.0.0.1"
     # startup + token-refresh loop + balance-refresh loop (N9) + resync
     # loop + cutoff-reminder loop + commission-refresh loop +
-    # partition-maintenance loop + deal-backfill loop were scheduled, not
-    # run inline (no reactor loop here).
-    assert len(fake_reactor.callWhenRunning_calls) == 8
+    # partition-maintenance loop + deal-backfill loop + MT5 offline check
+    # were scheduled, not run inline (no reactor loop here).
+    assert len(fake_reactor.callWhenRunning_calls) == 9
+    assert app.mt5_offline_call.interval is None       # not started until the reactor runs
     assert app.balance_refresh_call.interval is None   # not started until the reactor runs
     assert app.resync_call.interval is None            # not started until the reactor runs
     assert app.cutoff_reminder_call.interval is None   # not started until the reactor runs
