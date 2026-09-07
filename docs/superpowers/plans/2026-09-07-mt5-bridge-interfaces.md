@@ -174,8 +174,10 @@ class ProtocolError(ValueError): ...
 def parse_hello(body: dict) -> HelloReport: ...   # raises ProtocolError on shape errors
 def parse_sync(body: dict) -> SyncReport: ...     # lots → centilots; missing optional fields → None/0
 def encode_response(status: str, server_ms: int, next_poll_ms: int,
-                    commands: list[Command], last_deal_ticket: int | None = None) -> str
-    # status: "OK" | "RETRY" | "STOP"; for STOP the third field is the reason text
+                    commands: list[Command], last_deal_ticket: int | None = None,
+                    reason: str | None = None) -> str
+    # status: "OK" | "RETRY" | "STOP"; for STOP the third field is the reason text -- `reason`,
+    # defaulting to "stopped" (next_poll_ms is not emitted on a STOP line)
     # Lines: "OK\t<server_ms>\t<next_poll_ms>" or "RETRY\t<server_ms>\t<next_poll_ms>" or
     #        "STOP\t<server_ms>\t<reason>", then one "CMD\t..." per command (OK only).
     # The sync response never carries last_deal_ticket; the hello reply is JSON (control section below).
@@ -241,6 +243,7 @@ class AckOutcome:
     command_id: int; kind: str; client_order_id: str | None
     ok: bool; message: str; position: int | None; order: int | None
     price: float | None; volume: int | None      # centilots
+    deal: int | None = None                      # the fill's deal ticket: pairs the ack with the deal it reports
 
 class MT5Outbox:
     def __init__(self, repo, clock=None): ...
@@ -264,6 +267,22 @@ class MT5Outbox:
 #   service reduces exactly that mapping. Hedging followers keep kind "close" (position ticket).
 #   enqueue_intent(AmendPositionSLTP) on netting → kind "amend" on the net position ticket
 #   (last writer wins; the caller logs the override event).
+#
+# Acks of an "open" on a netting follower (the EA's DoOpen, plan 04): the fill lands in the
+#   symbol's single net position and may grow it (deal entry IN), reduce or empty it (OUT) or
+#   flip it (INOUT). The ack's `position` is the ticket the terminal shows AFTER the fill, 0/None
+#   when nothing is left; `deal` is the fill's deal ticket. The EA does not classify the fill:
+#   the copier pairs the ack with that deal by ticket (same sync or the next) and reads the entry.
+#   - A COPY's open (client_order_id "cm...") activates its mapping on the net ticket -- the
+#     deal's position when the ack's is 0 -- whatever the entry. An opposite-side copy nets
+#     against the older copies inside the position but does NOT close them: their masters are
+#     still open (spec "Opposite positions").
+#   - A ":close" reduces its mapping by client_order_id ALONE (Repo.reduce_position_mapping with
+#     client_order_id given does not consult the ticket): the ack's ticket is 0 when the close
+#     emptied the position.
+#   - A deal an ack settled (a copy's fill, a ":close"'s OUT/INOUT) is never a terminal-side
+#     close. Only deals no such ack claims -- stops, targets, the owner's own orders, an
+#     operator's open on the net position -- reach reduce_position_mappings_fifo.
 ```
 
 Repo additions (`copier/src/copier/db/repo.py`):

@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Give the copier an MT5 lane: migration 014, the `copier.mt5` package (protocol, symbols, registry, outbox, ingress, deals, lane), the service/dispatcher/routing/reconciler seams, the `CopierApp` wiring (`mt5_hello` / `mt5_sync` / `mt5_status`, operator actions, `get_state`, offline detection), the three control endpoints, and a Python fake EA with end-to-end tests — so an MT5 account copies from and to cTrader accounts through the existing decision engine.
+**Goal:** Give the copier an MT5 lane: migrations 014 and 015, the `copier.mt5` package (protocol, symbols, registry, outbox, ingress with the netting ledger, deals, lane), the service/dispatcher/routing/reconciler seams, the `CopierApp` wiring (`mt5_hello` / `mt5_sync` / `mt5_status`, operator actions, `get_state`, offline detection), the three control endpoints, and a Python fake EA (hedging and netting books) with end-to-end tests — so an MT5 account, hedging or netting, copies from and to cTrader accounts through the existing decision engine.
 
-**Architecture:** The decision core (`domain/decision.py`) already turns platform-neutral `MasterEvent`s into `SlaveIntent`s; cTrader is bound only in `dispatch.build_request` (intent → protobuf), `normalize.normalize` (protobuf → event) and the snapshot/query paths. The MT5 lane plugs in at exactly those points: intents whose slave is MT5 go to a Postgres-backed command outbox delivered on the terminal's next 250 ms poll; the terminal's sync reports feed an in-memory registry (positions, balance, symbols), ack the outbox (mapping activation through a platform-neutral `SlaveFill`), and — for an MT5 master — are diffed into `MasterEvent`s by `ingress.py`. Everything else (sizing, mapping bookkeeping, drift, the dashboard shapes) is unchanged.
+**Architecture:** The decision core (`domain/decision.py`) already turns platform-neutral `MasterEvent`s into `SlaveIntent`s; cTrader is bound only in `dispatch.build_request` (intent → protobuf), `normalize.normalize` (protobuf → event) and the snapshot/query paths. The MT5 lane plugs in at exactly those points: intents whose slave is MT5 go to a Postgres-backed command outbox delivered on the terminal's next 250 ms poll; the terminal's sync reports feed an in-memory registry (positions, balance, symbols), ack the outbox (mapping activation through a platform-neutral `SlaveFill`), and — for an MT5 master — are diffed into `MasterEvent`s by `ingress.py`. Everything else (sizing, mapping bookkeeping, drift, the dashboard shapes) is unchanged. A netting terminal rides the same lane with two additions: as a follower its copies share one net position per symbol (a mapping's close is an opposite-side `open` that names the mapping; a close the terminal makes itself reduces the mappings oldest-first), and as a master its net position is expanded into virtual master positions kept in `mt5_net_ledger`, so followers copy every add and reduction exactly as they copy a hedging master's positions.
 
 **Tech Stack:** Python 3.12, Twisted (reactor/Deferreds, `task.Clock` in tests), psycopg 3, Postgres 16, pytest + pytest-twisted; all copier tests run inside the `copier` Docker image against the compose `postgres` service.
 
@@ -23,12 +23,14 @@ Copied from the spec — every task's requirements implicitly include these:
 - MT5 has no numeric symbol id. The bridge assigns `symbol_id = crc32(name)` per account (collision within one account's list resolved by +1 probing).
 - Copy lineage rests on **our mapping table** (position ticket ↔ mapping row) and the EA's magic number, never on the comment. The comment is still set (`copy:m<id>`) as a courtesy.
 - MT5 accounts get a **synthetic id** from a sequence starting at 1 000 000 000 000; the MT5 login lives in `mt5_links.login` and is copied into `accounts.trader_login` once known.
-- One master per org is a database constraint and stays so. MT5→MT5 copying is out of scope. Netting accounts are refused (`degraded` "netting account not supported", no commands ever queued).
+- One master per org is a database constraint and stays so. MT5→MT5 copying is out of scope. Netting accounts (`hedging:false` in the hello, `ACCOUNT_MARGIN_MODE_RETAIL_NETTING`) are accepted in both roles and never degraded for their mode; `mt5_links.hedging` records the mode and `mt5_status` reports it.
 - `open` and `place_pending` commands not delivered within `OPEN_COMMAND_TTL_S = 30` are failed with "terminal offline" and the mapping marked failed. `close`, `amend`, `cancel` never expire. A `sent` command without an ack is re-delivered after 10 s at most 3 times before failing as "no ack from terminal". Commands are delivered in id order.
-- Status line: `OK <server_ms> <next_poll_ms>` (hello adds `<last_deal_ticket>`), `RETRY <server_ms> <next_poll_ms>`, `STOP <server_ms> <reason>`. The STOP form is the contract's, not the spec's: the spec's Wire protocol paragraph writes the shorthand `STOP <reason>`, but contract §2 `encode_response` says "for STOP the third field is the reason text", and the contract wins — every status line carries `<server_ms>` as its second field and a STOP reason is read from the third (Task 2's `encode_response`/`parse_response`, Task 14's STOP answers and the fake EA in Task 16 all emit and parse that order; the real EA must too). Command fields are positional and never contain tabs. Prices `0` means "none".
+- Status line: `OK <server_ms> <next_poll_ms>` (hello adds `<last_deal_ticket>`), `RETRY <server_ms> <next_poll_ms>`, `STOP <server_ms> <reason>`. The STOP form is the contract's, not the spec's: the spec's Wire protocol paragraph writes the shorthand `STOP <reason>`, but contract §2 `encode_response` says "for STOP the third field is the reason text", and the contract wins — every status line carries `<server_ms>` as its second field and a STOP reason is read from the third (Task 2's `encode_response`/`parse_response`, Task 15's STOP answers and the fake EA in Task 17 all emit and parse that order; the real EA must too). Command fields are positional and never contain tabs. Prices `0` means "none".
 - `set_account_status` semantics: `ok` while a report arrived within `OFFLINE_AFTER_S = 15`; `degraded` "terminal offline since …" after that (checked by a 5 s timer); `degraded` with the broker reason on a rejected command.
 - **Sizing**: MT5 follower volume = `mirror_volume(master_volume, master_lot_size, multiplier, 100, step_centilots)`; below the symbol's min is an `Alert` "mirrored volume rounds to 0".
 - **Protection on copies**: SL/TP travel inside the `open` command; the `_protect_new_copy` amend is skipped for a copy that already carries the master's levels. If the master's protection changes before the copy is acked, the pending change is applied on ack.
+- **Netting follower**: every copy on a symbol lives inside that symbol's single net position; a mapping keeps its own `slave_volume`, and its side is recorded on its `open` command (`Repo.mapping_side`). A master close for a mapping is queued as an `open` on the opposite side for the mapping's volume, `client_order_id` `<mapping coid>:close`, comment `close:m<master>`; its ack is matched to exactly that mapping and reduces it alone. A close the terminal reports on its own (stop, target, manual close) reduces the mappings sharing the net position oldest-first (`Repo.reduce_position_mappings_fifo`). One stop and one target per symbol: the most recently opened or amended copy sets them, and an info event `mt5_netting_protection_override` records each override. Trade page and Close all act on the net position (`close` on the net ticket) on both modes. A netting close never expires: it is a close whatever its command kind.
+- **Netting master**: the net position is expanded into virtual master positions kept in `mt5_net_ledger` (persisted, so a restart keeps them): an `IN` deal opens one whose id is the deal ticket → `MasterPositionOpened`; `OUT` consumes the symbol's virtual positions oldest-first → one `MasterPositionClosed` per consumed position (partial when it survives); `INOUT` closes them all and opens the remainder in the new direction; a stop/target change on the net position → `MasterPositionSLTPAmended` for every virtual position of the symbol. The reconciler and `get_state` see the virtual positions (current price from the net position, P&L split by volume share), so drift and copies line up by virtual id.
 - **Balance-after on deals**: computed for the batch backwards from the reported current balance (each deal's `profit + swap + commission` subtracted in reverse order), stored, and marked `balance_after_estimated: true`.
 - **Money**: `profit`, `swap`, `commission` are in the account currency as MT5 reports them; `gross_profit` = `profit`.
 - **Kill switch**: Close all includes MT5 accounts; each MT5 account's summary reports verified counts from the terminal's reports, never sends.
@@ -47,33 +49,35 @@ Copied from the spec — every task's requirements implicitly include these:
   ```bash
   cd "/c/Users/Sherwyn joel/OneDrive/Desktop/Forex-Automated-Copy-Trading-System" && export MSYS_NO_PATHCONV=1 && docker compose run --rm -v "$(pwd -W):/repo" -w /repo/copier --entrypoint sh copier -c 'export PYTHONUSERBASE=/tmp/pyuser; pip install -q --user "pytest>=8" "pytest-twisted>=1.14" "pytest-timeout>=2" >/dev/null 2>&1; export PYTHONPATH=/repo/copier/src TEST_POSTGRES_ADMIN_DSN="$POSTGRES_DSN" TEST_POSTGRES_DSN="${POSTGRES_DSN%/copytrader}/copytrader_test"; python -m pytest tests/unit/<file>.py -q -p no:cacheprovider'
   ```
-  For integration files replace `tests/unit/<file>.py` with `tests/integration/<file>.py`. Below, "Run PURE `tests/unit/x.py`" / "Run DB `tests/unit/x.py`" mean the command above with that path substituted. The whole unit suite (`tests/unit -q`) takes ~9 minutes; run the named files during a task and the full suite at the end of a task that touches shared code (Tasks 4, 9, 10, 11, 14).
+  For integration files replace `tests/unit/<file>.py` with `tests/integration/<file>.py`. Below, "Run PURE `tests/unit/x.py`" / "Run DB `tests/unit/x.py`" mean the command above with that path substituted. The whole unit suite (`tests/unit -q`) takes ~9 minutes; run the named files during a task and the full suite at the end of a task that touches shared code (Tasks 4, 10, 11, 12, 15).
 
 ## File Structure
 
 New:
 - `db/migrations/014_mt5_bridge.sql` — schema (Task 1)
+- `db/migrations/015_mt5_net_ledger.sql` — the netting master's ledger table (Task 5)
 - `copier/src/copier/mt5/__init__.py`, `protocol.py` — wire format (Task 2)
 - `copier/src/copier/mt5/symbols.py` — normalisation, crc32 ids, auto-match (Task 3)
-- `copier/src/copier/mt5/registry.py` — `MT5Registry` (Task 5)
-- `copier/src/copier/testing/mt5_fixtures.py` — report builders shared by tests (Task 5)
-- `copier/src/copier/mt5/outbox.py` — `MT5Outbox`, `AckOutcome`, `command_for_intent` (Task 6)
-- `copier/src/copier/mt5/ingress.py` — `master_events_from_report` (Task 8)
-- `copier/src/copier/mt5/deals.py` — deal rows + `balance_after` estimate (Task 12)
-- `copier/src/copier/mt5/lane.py` — `MT5Lane` (Task 13)
-- `copier/src/copier/testing/fake_ea.py` — `FakeEA` (Task 16)
-- Tests: `copier/tests/unit/test_migration_014.py`, `test_mt5_protocol.py`, `test_mt5_symbols.py`, `test_repo_mt5.py`, `test_mt5_registry.py`, `test_mt5_outbox.py`, `test_dispatch_mt5.py`, `test_mt5_ingress.py`, `test_service_mt5.py`, `test_mt5_deals.py`, `test_mt5_lane.py`, `test_main_mt5.py`, `test_control_mt5.py`; `copier/tests/integration/test_mt5_bridge.py`
+- `copier/src/copier/mt5/registry.py` — `MT5Registry` (Task 6; the netting master's ledger views are added in Task 9, where `NetLedger` exists)
+- `copier/src/copier/testing/mt5_fixtures.py` — report builders shared by tests (Task 6)
+- `copier/src/copier/mt5/outbox.py` — `MT5Outbox`, `AckOutcome`, `command_for_intent` (Task 7)
+- `copier/src/copier/mt5/ingress.py` — `master_events_from_report`, `VirtualPosition`, `NetLedger` (Task 9)
+- `copier/src/copier/mt5/deals.py` — deal rows + `balance_after` estimate (Task 13)
+- `copier/src/copier/mt5/lane.py` — `MT5Lane` (Task 14)
+- `copier/src/copier/testing/fake_ea.py` — `FakeEA`, hedging and netting books (Task 17)
+- Tests: `copier/tests/unit/test_migration_014.py`, `test_migration_015.py`, `test_mt5_protocol.py`, `test_mt5_symbols.py`, `test_repo_mt5.py`, `test_mt5_registry.py`, `test_mt5_outbox.py`, `test_dispatch_mt5.py`, `test_mt5_ingress.py`, `test_service_mt5.py`, `test_mt5_deals.py`, `test_mt5_lane.py`, `test_main_mt5.py`, `test_control_mt5.py`; `copier/tests/integration/test_mt5_bridge.py`
 
 Modified:
-- `copier/src/copier/db/repo.py` — `AccountRow.platform`, MT5 repo methods, `_deal_row`, `load_deals` filters (Task 4)
+- `copier/src/copier/db/repo.py` — `AccountRow.platform`, MT5 repo methods, `_deal_row`, `load_deals` filters, `reduce_position_mapping(client_order_id=)`, `mapping_side`, `reduce_position_mappings_fifo` (Task 4); `mt5_net_ledger` accessors (Task 5)
+- `copier/src/copier/domain/models.py` — `ClosePosition.master_position_id` (Task 7); `copier/src/copier/domain/decision.py:74` stamps it; `copier/tests/unit/test_decision_positions.py` (four assertions)
 - `copier/tests/unit/conftest.py` — `seed_mt5_account` fixture (Task 4)
-- `copier/src/copier/engine/reconcile.py` — `OrderSnapshot.stop_loss/take_profit` (Task 5), `snapshot_provider` (Task 11)
-- `copier/src/copier/engine/dispatch.py` — MT5 routing before `build_request` (Task 7)
-- `copier/src/copier/engine/service.py` — `SlaveFill`, `act_on_master_event`, `handle_slave_*` (Task 9)
-- `copier/src/copier/engine/routing.py` — `platform_by_account`, canonical keys (Task 10)
-- `copier/src/copier/main.py` — wiring (Task 14)
-- `copier/src/copier/engine/control.py` — `/mt5/*` (Task 15)
-- `copier/tests/unit/test_routing.py`, `test_reconcile.py`, `test_main.py:453`
+- `copier/src/copier/engine/reconcile.py` — `OrderSnapshot.stop_loss/take_profit` (Task 6), `snapshot_provider` (Task 12), the netting follower's net-volume comparison — `DriftItem.volume`, `compute_drift(netting_slave_ids=, mapping_sides=)`, `Reconciler(netting_slaves=)` (Task 12b)
+- `copier/src/copier/engine/dispatch.py` — MT5 routing before `build_request` (Task 8)
+- `copier/src/copier/engine/service.py` — `SlaveFill`, `act_on_master_event`, `handle_slave_*` (Task 10)
+- `copier/src/copier/engine/routing.py` — `platform_by_account`, canonical keys (Task 11)
+- `copier/src/copier/main.py` — wiring (Task 15)
+- `copier/src/copier/engine/control.py` — `/mt5/*` (Task 16)
+- `copier/tests/unit/test_routing.py`, `test_reconcile.py`, `test_decision_positions.py`, `test_main.py:453`
 
 ---
 
@@ -369,7 +373,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: nothing from the copier (pure module).
-- Produces (contract §2 `protocol.py`, used by Tasks 5, 6, 8, 12, 13, 14, 16): constants `MT5_KEY_PREFIX`, `PROTOCOL_VERSION`, `CENTILOTS`, `DEFAULT_POLL_MS`, `RETRY_POLL_MS`, `MAX_DEALS_PER_SYNC`; dataclasses `HelloSymbol`, `HelloReport`, `ReportPosition`, `ReportOrder`, `ReportDeal`, `Ack`, `SyncReport`, `Command`; `ProtocolError(ValueError)`; `centilots(lots) -> int`, `lots(volume: int) -> float`; `parse_hello(body: dict) -> HelloReport`; `parse_sync(body: dict) -> SyncReport`; `encode_response(status, server_ms, next_poll_ms, commands, last_deal_ticket=None, reason=None) -> str` (`reason` is the STOP line's third field — an addition to the contract signature, keyword-only, defaulted); `command_line(cmd: Command) -> str`; `parse_response(text) -> tuple[list[str], list[Command]]`.
+- Produces (contract §2 `protocol.py`, used by Tasks 6, 7, 9, 13, 14, 15, 17): constants `MT5_KEY_PREFIX`, `PROTOCOL_VERSION`, `CENTILOTS`, `DEFAULT_POLL_MS`, `RETRY_POLL_MS`, `MAX_DEALS_PER_SYNC`; dataclasses `HelloSymbol`, `HelloReport`, `ReportPosition`, `ReportOrder`, `ReportDeal`, `Ack`, `SyncReport`, `Command`; `ProtocolError(ValueError)`; `centilots(lots) -> int`, `lots(volume: int) -> float`; `parse_hello(body: dict) -> HelloReport`; `parse_sync(body: dict) -> SyncReport`; `encode_response(status, server_ms, next_poll_ms, commands, last_deal_ticket=None, reason=None) -> str` (`reason` is the STOP line's third field, as contract §2 declares it; defaulted); `command_line(cmd: Command) -> str`; `parse_response(text) -> tuple[list[str], list[Command]]`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1081,7 +1085,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: `SymbolInfo` (`copier/src/copier/domain/models.py:26-33`), `HelloSymbol`, `CENTILOTS` (Task 2).
-- Produces (contract §2 `symbols.py`): `SYNONYMS: dict[str, str]`, `SUFFIXES`, `normalise_symbol(name) -> str`, `symbol_id_for(name, taken: set[int]) -> int`, `symbol_infos_from_hello(symbols: list[HelloSymbol]) -> list[SymbolInfo]`, `auto_match(canonical_names, broker_names) -> dict[str, str]`. Used by Tasks 5 and 14.
+- Produces (contract §2 `symbols.py`): `SYNONYMS: dict[str, str]`, `SUFFIXES`, `normalise_symbol(name) -> str`, `symbol_id_for(name, taken: set[int]) -> int`, `symbol_infos_from_hello(symbols: list[HelloSymbol]) -> list[SymbolInfo]`, `auto_match(canonical_names, broker_names) -> dict[str, str]`. Used by Tasks 6 and 15.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1325,13 +1329,14 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ### Task 4: Repo additions — `AccountRow.platform`, links, command queue, aliases, watermark, MT5 deals
 
 **Files:**
-- Modify: `copier/src/copier/db/repo.py:39-51` (AccountRow), `:352-377` (load_accounts), `:792-830` (upsert_deals → `_deal_row`), `:847-919` (load_deals filters), append a new `# ---------- MT5 bridge ----------` section before `# ---------- partitions ----------` (line 1415)
+- Modify: `copier/src/copier/db/repo.py:39-51` (AccountRow), `:352-377` (load_accounts), `:792-830` (upsert_deals → `_deal_row`), `:847-919` (load_deals filters), `:1129-1153` (`reduce_position_mapping` gains `client_order_id`), append a new `# ---------- MT5 bridge ----------` section before `# ---------- partitions ----------` (line 1415)
 - Modify: `copier/tests/unit/conftest.py` (append the `seed_mt5_account` fixture)
 - Test: `copier/tests/unit/test_repo_mt5.py`
 
 **Interfaces:**
 - Consumes: migration 014 tables (Task 1).
-- Produces (contract §2 "Repo additions", used by Tasks 5, 6, 12, 13, 14): `AccountRow.platform: str = "ctrader"`, `AccountRow.connection_id: int | None`; `Repo.load_mt5_link(account_id) -> dict | None`; `Repo.upsert_mt5_link_hello(account_id, *, login, broker, server, currency, hedging, trade_mode, leverage, ea_version, ea_build) -> None`; `Repo.touch_mt5_link(account_id, *, balance, equity, seen_at) -> None`; `Repo.enqueue_mt5_command(account_id, org_id, kind, payload, client_order_id) -> int`; `Repo.mt5_commands_open(account_id) -> list[dict]` (keys `id, account_id, org_id, kind, payload, client_order_id, status, attempts, created_at, sent_at`); `Repo.mark_mt5_commands_sent(ids, sent_at) -> None`; `Repo.complete_mt5_command(command_id, ok, result, done_at, account_id=None) -> dict | None` (keys `id, account_id, org_id, kind, client_order_id, payload`); `Repo.fail_stale_mt5_opens(account_id, older_than) -> list[int]`; `Repo.load_symbol_aliases(account_id) -> dict[str, str]`; `Repo.save_symbol_aliases(account_id, aliases, source) -> None`; `Repo.mt5_watermark(account_id) -> tuple[int, int]`; `Repo.set_mt5_watermark(account_id, ticket, time_ms) -> None`; `Repo.upsert_mt5_deals(account_id, org_id, rows) -> int`; private additions `Repo.load_mt5_cash_flow(account_id, from_ms, to_ms) -> list[dict]`, `Repo.load_deals(..., until_ms=None, position_id=None)`, module function `_deal_row(account_id, org_id, d) -> dict`; test fixture `seed_mt5_account(org_id, role="slave", multiplier="1.0", enabled=True) -> int`.
+- Produces (contract §2 "Repo additions", used by Tasks 6, 7, 13, 14, 15): `AccountRow.platform: str = "ctrader"`, `AccountRow.connection_id: int | None`; `Repo.load_mt5_link(account_id) -> dict | None`; `Repo.upsert_mt5_link_hello(account_id, *, login, broker, server, currency, hedging, trade_mode, leverage, ea_version, ea_build) -> None`; `Repo.touch_mt5_link(account_id, *, balance, equity, seen_at) -> None`; `Repo.enqueue_mt5_command(account_id, org_id, kind, payload, client_order_id) -> int`; `Repo.mt5_commands_open(account_id) -> list[dict]` (keys `id, account_id, org_id, kind, payload, client_order_id, status, attempts, created_at, sent_at`); `Repo.mark_mt5_commands_sent(ids, sent_at) -> None`; `Repo.complete_mt5_command(command_id, ok, result, done_at, account_id=None) -> dict | None` (keys `id, account_id, org_id, kind, client_order_id, payload`); `Repo.fail_stale_mt5_opens(account_id, older_than) -> list[int]`; `Repo.load_symbol_aliases(account_id) -> dict[str, str]`; `Repo.save_symbol_aliases(account_id, aliases, source) -> None`; `Repo.mt5_watermark(account_id) -> tuple[int, int]`; `Repo.set_mt5_watermark(account_id, ticket, time_ms) -> None`; `Repo.upsert_mt5_deals(account_id, org_id, rows) -> int`; private additions `Repo.load_mt5_cash_flow(account_id, from_ms, to_ms) -> list[dict]`, `Repo.load_deals(..., until_ms=None, position_id=None)`, module function `_deal_row(account_id, org_id, d) -> dict`; test fixture `seed_mt5_account(org_id, role="slave", multiplier="1.0", enabled=True) -> int`.
+- Netting support (contract §2 "Repo additions", used by Tasks 7, 10 and 15): `Repo.mapping_side(client_order_id) -> str | None` (the side of the `open` command with that coid); private `Repo.mt5_open_payload(client_order_id) -> dict | None` (that command's whole payload — the outbox needs the broker symbol too); `Repo.reduce_position_mappings_fifo(slave_account_id, slave_position_id, closed_volume) -> list[dict]` (active mappings sharing that slave position reduced oldest first by `(created_at, id)`, rows reaching 0 closed; returns the rows touched, oldest first, each with `id, client_order_id, master_position_id, closed_volume, slave_volume, status`); and the existing `Repo.reduce_position_mapping(slave_account_id, slave_position_id, closed_volume, client_order_id=None)` gains the optional predicate so one of several mappings sharing a slave position can be reduced alone — and when it is given it is the ONLY predicate besides the account: the ticket argument is not consulted, because the EA acks a netting close that emptied the net position with ticket 0 (plan 04 `DoOpen` reports the position the terminal shows after the fill, none), and a client_order_id is unique on its own. `fail_stale_mt5_opens` never expires an `open` whose `client_order_id` ends in `:close` (a netting follower's close, Task 7). The `mt5_net_ledger` accessors (`load_net_ledger` / `upsert_net_ledger` / `delete_net_ledger`) ship with their table in Task 5, so this task leaves the suite green on its own.
 
 - [ ] **Step 1: Add the shared test fixture**
 
@@ -1518,18 +1523,26 @@ class TestCommandQueue:
             mt5_id, org_id, "place_pending", {"symbol": "EURUSD.r"}, f"co43.{mt5_id}")
         old_close = repo.enqueue_mt5_command(
             mt5_id, org_id, "close", {"position": 5, "lots": 0}, None)
+        # A netting follower's close is an opposite-side open named after its
+        # mapping with the ':close' suffix (Task 7): a close, so it never expires.
+        old_netting_close = repo.enqueue_mt5_command(
+            mt5_id, org_id, "open",
+            {"symbol": "EURUSD.r", "side": "SELL", "lots": 1.0, "sl": 0, "tp": 0,
+             "comment": "close:m42"}, f"cm42.{mt5_id}:close")
         fresh_open = repo.enqueue_mt5_command(
             mt5_id, org_id, "open", {"symbol": "EURUSD.r"}, f"cm44.{mt5_id}")
         with psycopg.connect(repo.dsn, autocommit=True) as conn:
             conn.execute(
                 "UPDATE mt5_commands SET created_at = now() - interval '60 seconds'"
-                " WHERE id = ANY(%s)", ([old_open, old_pending, old_close],))
+                " WHERE id = ANY(%s)",
+                ([old_open, old_pending, old_close, old_netting_close],))
 
         older_than = datetime.now(timezone.utc) - timedelta(seconds=30)
         expired = repo.fail_stale_mt5_opens(mt5_id, older_than)
 
         assert sorted(expired) == sorted([old_open, old_pending])
-        assert [r["id"] for r in repo.mt5_commands_open(mt5_id)] == [old_close, fresh_open]
+        assert [r["id"] for r in repo.mt5_commands_open(mt5_id)] == [
+            old_close, old_netting_close, fresh_open]
         with psycopg.connect(repo.dsn, autocommit=True) as conn:
             (message,) = conn.execute(
                 "SELECT result->>'message' FROM mt5_commands WHERE id = %s", (old_open,)
@@ -1631,6 +1644,87 @@ class TestMt5Deals:
              "timestamp": 3000},
         ]
         assert repo.load_mt5_cash_flow(mt5_id, 1500, 5000) == entries[1:]
+
+
+class TestNetting:
+    """A netting follower's copies share one net position: several mapping
+    rows with the same slave_position_id (ticket 9001 here)."""
+
+    def _three_copies(self, repo, org_id, mt5_id):
+        # Oldest first: 42 (100), 43 (50), 44 (30). created_at is what
+        # "oldest" means, so it is made unambiguous rather than left to the
+        # millisecond the rows happened to land in.
+        for n, (master_id, volume) in enumerate(((42, 100), (43, 50), (44, 30))):
+            coid = f"cm{master_id}.{mt5_id}"
+            repo.create_position_mapping(master_id, mt5_id, coid, org_id=org_id)
+            repo.activate_position_mapping(mt5_id, coid, 9001, volume)
+            with psycopg.connect(repo.dsn, autocommit=True) as conn:
+                conn.execute(
+                    "UPDATE mappings SET created_at = now() - interval '10 seconds'"
+                    " + %s * interval '1 second' WHERE client_order_id = %s",
+                    (n, coid))
+
+    def _by_coid(self, repo, org_id):
+        return {m["client_order_id"]: (m["status"], m["slave_volume"])
+                for m in repo.mapping_rows(org_id=org_id)}
+
+    def test_mapping_side_reads_the_open_commands_payload(self, world):
+        repo, org_id, mt5_id = world
+        repo.enqueue_mt5_command(
+            mt5_id, org_id, "open",
+            {"symbol": "EURUSD.r", "side": "SELL", "lots": 0.5, "sl": 0, "tp": 0,
+             "comment": "copy:m42"}, f"cm42.{mt5_id}")
+        # The mapping's later close is an opposite-side open under the
+        # ':close' suffix; it never answers for the mapping's own side.
+        repo.enqueue_mt5_command(
+            mt5_id, org_id, "open",
+            {"symbol": "EURUSD.r", "side": "BUY", "lots": 0.5, "sl": 0, "tp": 0,
+             "comment": "close:m42"}, f"cm42.{mt5_id}:close")
+        assert repo.mapping_side(f"cm42.{mt5_id}") == "SELL"
+        assert repo.mt5_open_payload(f"cm42.{mt5_id}")["symbol"] == "EURUSD.r"
+        assert repo.mapping_side(f"cm43.{mt5_id}") is None
+        assert repo.mt5_open_payload(f"cm43.{mt5_id}") is None
+
+    def test_fifo_reduction_consumes_the_oldest_mapping_first(self, world):
+        repo, org_id, mt5_id = world
+        self._three_copies(repo, org_id, mt5_id)
+        touched = repo.reduce_position_mappings_fifo(mt5_id, 9001, 120)
+        assert [(t["client_order_id"], t["master_position_id"], t["closed_volume"],
+                 t["slave_volume"], t["status"]) for t in touched] == [
+            (f"cm42.{mt5_id}", 42, 100, 0, "closed"), (f"cm43.{mt5_id}", 43, 20, 30, "active")]
+        assert self._by_coid(repo, org_id) == {
+            f"cm42.{mt5_id}": ("closed", 0), f"cm43.{mt5_id}": ("active", 30),
+            f"cm44.{mt5_id}": ("active", 30)}
+
+    def test_fifo_reduction_closes_everything_and_then_finds_nothing(self, world):
+        repo, org_id, mt5_id = world
+        self._three_copies(repo, org_id, mt5_id)
+        touched = repo.reduce_position_mappings_fifo(mt5_id, 9001, 500)   # more than the copies hold
+        assert [t["closed_volume"] for t in touched] == [100, 50, 30]
+        assert {status for status, _v in self._by_coid(repo, org_id).values()} == {"closed"}
+        assert repo.reduce_position_mappings_fifo(mt5_id, 9001, 10) == []
+        assert repo.reduce_position_mappings_fifo(mt5_id, 9002, 10) == []
+        assert repo.reduce_position_mappings_fifo(mt5_id, 9001, 0) == []
+
+    def test_reduce_by_client_order_id_touches_only_that_mapping(self, world):
+        repo, org_id, mt5_id = world
+        self._three_copies(repo, org_id, mt5_id)
+        repo.reduce_position_mapping(mt5_id, 9001, 20, client_order_id=f"cm43.{mt5_id}")
+        assert self._by_coid(repo, org_id)[f"cm43.{mt5_id}"] == ("active", 30)
+        # The coid alone names the mapping: a netting close that EMPTIES the
+        # net position is acked with ticket 0 (plan 04 DoOpen reports the
+        # position the terminal shows after the fill -- none), and the
+        # ticket the ack carries must not decide whether the reduction lands.
+        repo.reduce_position_mapping(mt5_id, 0, 30, client_order_id=f"cm43.{mt5_id}")
+        assert self._by_coid(repo, org_id) == {
+            f"cm42.{mt5_id}": ("active", 100), f"cm43.{mt5_id}": ("closed", 0),
+            f"cm44.{mt5_id}": ("active", 30)}
+        # Without the predicate the old behaviour stands: every active row on
+        # the ticket is reduced (one mapping per position on a hedging account).
+        repo.reduce_position_mapping(mt5_id, 9001, 30)
+        assert self._by_coid(repo, org_id) == {
+            f"cm42.{mt5_id}": ("active", 70), f"cm43.{mt5_id}": ("closed", 0),
+            f"cm44.{mt5_id}": ("closed", 0)}
 ```
 
 - [ ] **Step 3: Run the test to verify it fails**
@@ -1773,6 +1867,52 @@ and, right after the `since_ms` block (`params.append(since_ms)`) and before `sq
             params.append(position_id)
 ```
 
+Replace `reduce_position_mapping` (lines 1129-1153) with:
+
+```python
+    def reduce_position_mapping(
+        self,
+        slave_account_id: int,
+        slave_position_id: int,
+        closed_volume: int,
+        client_order_id: str | None = None,
+    ) -> None:
+        """Reduce a position mapping by the closed volume.
+
+        Sets status to 'closed' when slave_volume reaches 0.
+        Atomic: uses single UPDATE with GREATEST to avoid TOCTOU race on concurrent reduces.
+
+        `client_order_id`, when given, pins the reduction to ONE mapping. On
+        a hedging account a slave position has exactly one mapping, so the
+        (account, position) pair is enough; on a netting MT5 follower every
+        copy on a symbol shares the symbol's single net position, and a close
+        the copier itself queued names its mapping (the outbox's ':close'
+        suffix, Task 7) -- reducing every row on that ticket would close
+        copies the master still holds. When it is given it is the ONLY
+        predicate besides the account -- the ticket is not consulted: the
+        EA acks the net position the terminal shows AFTER the fill, which
+        is 0 when that close emptied it (plan 04 DoOpen), and a
+        client_order_id is unique on its own.
+        """
+        with self._connect() as conn:
+            # Atomic single-statement update: decrement slave_volume safely,
+            # set status='closed' when volume <= 0, update timestamp
+            row = conn.execute(
+                """
+                UPDATE mappings
+                SET slave_volume = GREATEST(slave_volume - %s, 0),
+                    status = CASE WHEN slave_volume - %s <= 0 THEN 'closed' ELSE 'active' END,
+                    updated_at = now()
+                WHERE slave_account_id = %s AND status = 'active'
+                  AND CASE WHEN %s::text IS NULL THEN slave_position_id = %s
+                           ELSE client_order_id = %s END
+                RETURNING slave_volume, status
+                """,
+                (closed_volume, closed_volume, slave_account_id,
+                 client_order_id, slave_position_id, client_order_id),
+            ).fetchone()
+```
+
 Insert the new section before `# ---------- partitions ----------` (line 1415):
 
 ```python
@@ -1905,7 +2045,9 @@ Insert the new section before `# ---------- partitions ----------` (line 1415):
         is failed ("terminal offline"), and the pending mapping rows those
         commands were created for are failed with it -- otherwise the
         Positions screen would show a copy pending forever. Closes, amends
-        and cancels never expire. Returns the expired command ids.
+        and cancels never expire -- nor does a netting follower's close,
+        which is an `open` whose client_order_id ends in ':close' (Task 7).
+        Returns the expired command ids.
         """
         result = Jsonb({"ok": False, "retcode": 0, "message": "terminal offline",
                         "position": None, "deal": None, "order": None, "price": None,
@@ -1917,6 +2059,7 @@ Insert the new section before `# ---------- partitions ----------` (line 1415):
                    SET status = 'failed', result = %s, done_at = now()
                  WHERE account_id = %s AND kind IN ('open', 'place_pending')
                    AND status IN ('queued', 'sent') AND created_at < %s
+                   AND (client_order_id IS NULL OR client_order_id NOT LIKE '%%:close')
                 RETURNING id, client_order_id
                 """,
                 (result, account_id, older_than),
@@ -2036,12 +2179,97 @@ Insert the new section before `# ---------- partitions ----------` (line 1415):
              "timestamp": r[4]}
             for r in rows
         ]
+
+    # ---------- netting followers ----------
+
+    def mt5_open_payload(self, client_order_id: str) -> dict | None:
+        """The payload of the 'open' command queued under that coid (symbol,
+        side, lots, ...), or None. A position increase queues a second open
+        with the same coid and the same symbol and side, so the first is as
+        good as any; the ':close' commands carry a different coid and never
+        answer here."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT payload FROM mt5_commands
+                 WHERE client_order_id = %s AND kind = 'open'
+                 ORDER BY id LIMIT 1
+                """,
+                (client_order_id,),
+            ).fetchone()
+        return row[0] if row else None
+
+    def mapping_side(self, client_order_id: str) -> str | None:
+        """The side a copy was opened on ("BUY" | "SELL"), read from its open
+        command: the mapping row has no side, and a netting terminal's net
+        position may not even show the copy's side."""
+        payload = self.mt5_open_payload(client_order_id) or {}
+        side = payload.get("side")
+        return side if side in ("BUY", "SELL") else None
+
+    def reduce_position_mappings_fifo(
+        self, slave_account_id: int, slave_position_id: int, closed_volume: int,
+    ) -> list[dict]:
+        """A close the terminal reported on a netting follower's net position
+        (a stop, a target, the owner closing by hand): the copies sharing
+        that ticket are reduced OLDEST FIRST until the closed volume is used
+        up; a row that reaches 0 is closed. Returns the rows touched (oldest
+        first) with the volume taken from each as `closed_volume`, so the
+        caller can log one event per copy.
+
+        One transaction with the rows locked, so a concurrent ack on the
+        same ticket cannot interleave with the walk.
+        """
+        touched: list[dict] = []
+        remaining = int(closed_volume)
+        if remaining <= 0:
+            return touched
+        with self._connect() as conn:
+            with conn.transaction():
+                with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                    rows = cur.execute(
+                        """
+                        SELECT id, client_order_id, master_position_id, slave_volume
+                          FROM mappings
+                         WHERE slave_account_id = %s AND slave_position_id = %s
+                           AND status = 'active'
+                         ORDER BY created_at, id
+                         FOR UPDATE
+                        """,
+                        (slave_account_id, slave_position_id),
+                    ).fetchall()
+                    for row in rows:
+                        if remaining <= 0:
+                            break
+                        held = int(row["slave_volume"] or 0)
+                        if held <= 0:
+                            continue
+                        take = min(held, remaining)
+                        remaining -= take
+                        left = held - take
+                        cur.execute(
+                            """
+                            UPDATE mappings
+                               SET slave_volume = %s,
+                                   status = CASE WHEN %s <= 0 THEN 'closed' ELSE 'active' END,
+                                   updated_at = now()
+                             WHERE id = %s
+                            """,
+                            (left, left, row["id"]),
+                        )
+                        touched.append({
+                            "id": row["id"], "client_order_id": row["client_order_id"],
+                            "master_position_id": row["master_position_id"],
+                            "closed_volume": take, "slave_volume": left,
+                            "status": "closed" if left <= 0 else "active",
+                        })
+        return touched
 ```
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run DB `tests/unit/test_repo_mt5.py`.
-Expected: `17 passed`.
+Expected: `21 passed`.
 
 Run DB `tests/unit/test_repo.py`, DB `tests/unit/test_repo_orgs.py`, DB `tests/unit/test_routing.py`, DB `tests/unit/test_main.py`.
 Expected: all pass — `AccountRow.platform` is defaulted, `_deal_row` reproduces the old row exactly for cTrader dicts.
@@ -2056,14 +2284,274 @@ connection_id. The command queue settles on ack exactly once (duplicate
 and foreign acks are no-ops), stale opens expire with their pending
 mappings, manual aliases survive auto passes, the watermark never
 rewinds, and MT5 deals insert idempotently with an estimated
-balance_after.
+balance_after. Netting followers: a mapping's side comes from its open
+command, copies sharing a net position are reduced oldest-first or one
+at a time by client_order_id, and a netting close never expires.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 5: `copier.mt5.registry` — the terminal's book in memory
+### Task 5: Migration 015 — `mt5_net_ledger` and its repo accessors
+
+**Files:**
+- Create: `db/migrations/015_mt5_net_ledger.sql`
+- Modify: `copier/src/copier/db/repo.py` — append to the `# ---------- MT5 bridge ----------` section (Task 4), after `reduce_position_mappings_fifo`
+- Test: `copier/tests/unit/test_migration_015.py`; `copier/tests/unit/test_repo_mt5.py` (append a class)
+
+**Interfaces:**
+- Consumes: migration 014 (Task 1); `db/migrate.py` applies every `db/migrations/*.sql` in filename order and records it in `schema_migrations`.
+- Produces (contract §1 `mt5_net_ledger`, contract §2 "Repo additions", used by Tasks 9 and 15): the table `mt5_net_ledger(account_id, virtual_id, symbol, side, volume_open, volume_left, stop_loss, take_profit, opened_at_ms)` with primary key `(account_id, virtual_id)` and index `mt5_net_ledger_by_symbol`; `Repo.load_net_ledger(account_id) -> list[dict]` (keys `virtual_id, symbol, side, volume_open, volume_left, stop_loss, take_profit, opened_at_ms`, ordered by `(opened_at_ms, virtual_id)`), `Repo.upsert_net_ledger(account_id, rows) -> None` (rows in that key shape; `volume_left`, `stop_loss`, `take_profit` updated on conflict), `Repo.delete_net_ledger(account_id, virtual_ids) -> None`.
+- Why here and not in Task 4: the accessors need the table, and every task must leave the suite green on its own. Deploy note: migrations run in the `migrate` compose service — rebuild it (`docker compose build migrate`) when deploying; building `api`/`copier` alone silently skips a new migration.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `copier/tests/unit/test_migration_015.py`:
+
+```python
+"""Migration 015: the netting master's ledger table (mt5_net_ledger).
+
+Schema-level assertions only -- the ledger's behaviour is covered by
+test_mt5_ingress.py (NetLedger) and test_repo_mt5.py (the accessors)."""
+
+import psycopg
+import pytest
+
+
+def _seed_mt5_account(conn):
+    (org_id,) = conn.execute(
+        "INSERT INTO orgs (name) VALUES ('MT5 Org') RETURNING id").fetchone()
+    (account_id,) = conn.execute(
+        "INSERT INTO accounts (ctid_trader_account_id, org_id, ctid_connection_id,"
+        " trader_login, is_live, role, platform)"
+        " VALUES (nextval('mt5_account_id_seq'), %s, NULL, 0, false, 'master', 'mt5')"
+        " RETURNING ctid_trader_account_id", (org_id,)).fetchone()
+    return account_id
+
+
+def _row(account_id, virtual_id, **extra):
+    row = {"account_id": account_id, "virtual_id": virtual_id, "symbol": "XAUUSD.r",
+           "side": "BUY", "volume_open": 50, "volume_left": 50, "stop_loss": None,
+           "take_profit": None, "opened_at_ms": 1_757_203_100_000}
+    row.update(extra)
+    return row
+
+
+def _insert(conn, row):
+    conn.execute(
+        "INSERT INTO mt5_net_ledger (account_id, virtual_id, symbol, side, volume_open,"
+        " volume_left, stop_loss, take_profit, opened_at_ms)"
+        " VALUES (%(account_id)s, %(virtual_id)s, %(symbol)s, %(side)s, %(volume_open)s,"
+        " %(volume_left)s, %(stop_loss)s, %(take_profit)s, %(opened_at_ms)s)", row)
+
+
+def test_migration_015_is_recorded_right_after_014(db):
+    with psycopg.connect(db, autocommit=True) as conn:
+        names = [r[0] for r in conn.execute(
+            "SELECT filename FROM schema_migrations ORDER BY filename").fetchall()]
+    assert "015_mt5_net_ledger.sql" in names
+    assert names.index("015_mt5_net_ledger.sql") == names.index("014_mt5_bridge.sql") + 1
+
+
+def test_table_has_the_contracts_columns(db):
+    with psycopg.connect(db, autocommit=True) as conn:
+        columns = dict(conn.execute(
+            "SELECT column_name, is_nullable FROM information_schema.columns"
+            " WHERE table_name = 'mt5_net_ledger'").fetchall())
+    assert set(columns) == {"account_id", "virtual_id", "symbol", "side", "volume_open",
+                            "volume_left", "stop_loss", "take_profit", "opened_at_ms"}
+    assert {c for c, nullable in columns.items() if nullable == "YES"} == {
+        "stop_loss", "take_profit"}
+
+
+def test_one_row_per_virtual_position_per_account(db):
+    with psycopg.connect(db, autocommit=True) as conn:
+        account_id = _seed_mt5_account(conn)
+        _insert(conn, _row(account_id, 700001))
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            _insert(conn, _row(account_id, 700001))
+        _insert(conn, _row(account_id, 700002, side="SELL"))
+        (n,) = conn.execute("SELECT count(*) FROM mt5_net_ledger").fetchone()
+    assert n == 2
+
+
+def test_side_is_constrained(db):
+    with psycopg.connect(db, autocommit=True) as conn:
+        account_id = _seed_mt5_account(conn)
+        with pytest.raises(psycopg.errors.CheckViolation):
+            _insert(conn, _row(account_id, 700001, side="LONG"))
+
+
+def test_rows_cascade_from_accounts(db):
+    with psycopg.connect(db, autocommit=True) as conn:
+        account_id = _seed_mt5_account(conn)
+        _insert(conn, _row(account_id, 700001))
+        conn.execute("DELETE FROM accounts WHERE ctid_trader_account_id = %s", (account_id,))
+        (n,) = conn.execute("SELECT count(*) FROM mt5_net_ledger").fetchone()
+    assert n == 0
+
+
+def test_the_symbol_index_exists(db):
+    with psycopg.connect(db, autocommit=True) as conn:
+        (n,) = conn.execute(
+            "SELECT count(*) FROM pg_indexes WHERE tablename = 'mt5_net_ledger'"
+            " AND indexname = 'mt5_net_ledger_by_symbol'").fetchone()
+    assert n == 1
+```
+
+Append to `copier/tests/unit/test_repo_mt5.py` (after `TestNetting`):
+
+```python
+
+
+class TestNetLedger:
+    """The netting master's virtual positions, persisted so a restart keeps them."""
+
+    def _row(self, virtual_id, **extra):
+        row = {"virtual_id": virtual_id, "symbol": "XAUUSD.r", "side": "BUY", "volume_open": 50,
+               "volume_left": 50, "stop_loss": None, "take_profit": None,
+               "opened_at_ms": 1_757_203_100_000 + virtual_id}
+        row.update(extra)
+        return row
+
+    def test_roundtrip_in_open_order(self, world):
+        repo, _org_id, mt5_id = world
+        assert repo.load_net_ledger(mt5_id) == []
+        repo.upsert_net_ledger(mt5_id, [self._row(700003), self._row(700001, stop_loss=2390.0)])
+        assert repo.load_net_ledger(mt5_id) == [
+            self._row(700001, stop_loss=2390.0), self._row(700003)]
+
+    def test_upsert_updates_volume_and_protection_in_place(self, world):
+        repo, _org_id, mt5_id = world
+        repo.upsert_net_ledger(mt5_id, [self._row(700001)])
+        repo.upsert_net_ledger(mt5_id, [self._row(700001, volume_left=20, take_profit=2420.0)])
+        repo.upsert_net_ledger(mt5_id, [])                        # nothing to do, no error
+        (row,) = repo.load_net_ledger(mt5_id)
+        assert (row["volume_open"], row["volume_left"], row["take_profit"]) == (50, 20, 2420.0)
+
+    def test_delete_removes_only_the_named_rows_of_that_account(self, world, seed_mt5_account):
+        repo, org_id, mt5_id = world
+        other = seed_mt5_account(org_id)
+        repo.upsert_net_ledger(mt5_id, [self._row(700001), self._row(700002)])
+        repo.upsert_net_ledger(other, [self._row(700001)])
+        repo.delete_net_ledger(mt5_id, [700001, 424242])
+        repo.delete_net_ledger(mt5_id, [])
+        assert [r["virtual_id"] for r in repo.load_net_ledger(mt5_id)] == [700002]
+        assert [r["virtual_id"] for r in repo.load_net_ledger(other)] == [700001]
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run DB `tests/unit/test_migration_015.py`.
+Expected: FAIL — `test_migration_015_is_recorded_right_after_014` with `AssertionError` (`'015_mt5_net_ledger.sql' in names`), the rest with `UndefinedTable: relation "mt5_net_ledger" does not exist`.
+
+Run DB `tests/unit/test_repo_mt5.py`.
+Expected: `21 passed`, and the three `TestNetLedger` tests FAIL with `AttributeError: 'Repo' object has no attribute 'load_net_ledger'`.
+
+- [ ] **Step 3: Write the migration and the accessors**
+
+Create `db/migrations/015_mt5_net_ledger.sql` (the DDL verbatim from contract §1):
+
+```sql
+-- Netting masters: the net position expanded into virtual master positions (spec "Netting accounts")
+CREATE TABLE mt5_net_ledger (
+    account_id   BIGINT NOT NULL REFERENCES accounts(ctid_trader_account_id) ON DELETE CASCADE,
+    virtual_id   BIGINT NOT NULL,                 -- the IN deal's ticket
+    symbol       TEXT NOT NULL,                   -- broker name
+    side         TEXT NOT NULL CHECK (side IN ('BUY','SELL')),
+    volume_open  INTEGER NOT NULL,                -- centilots at open
+    volume_left  INTEGER NOT NULL,                -- centilots still open
+    stop_loss    DOUBLE PRECISION,
+    take_profit  DOUBLE PRECISION,
+    opened_at_ms BIGINT NOT NULL,
+    PRIMARY KEY (account_id, virtual_id)
+);
+CREATE INDEX mt5_net_ledger_by_symbol ON mt5_net_ledger (account_id, symbol, opened_at_ms);
+```
+
+In `copier/src/copier/db/repo.py`, append to the `# ---------- MT5 bridge ----------` section, right after `reduce_position_mappings_fifo` (Task 4) and before `# ---------- partitions ----------`:
+
+```python
+    # ---------- netting masters: the virtual-position ledger ----------
+
+    _NET_LEDGER_COLUMNS = ("virtual_id", "symbol", "side", "volume_open", "volume_left",
+                           "stop_loss", "take_profit", "opened_at_ms")
+
+    def load_net_ledger(self, account_id: int) -> list[dict]:
+        """Every virtual master position of a netting account, oldest first
+        -- the order the ledger consumes them in (copier/mt5/ingress.py)."""
+        with self._connect() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                return cur.execute(
+                    f"SELECT {', '.join(self._NET_LEDGER_COLUMNS)} FROM mt5_net_ledger "
+                    "WHERE account_id = %s ORDER BY opened_at_ms, virtual_id",
+                    (account_id,),
+                ).fetchall()
+
+    def upsert_net_ledger(self, account_id: int, rows: list[dict]) -> None:
+        """Insert new virtual positions; refresh what changes on an existing
+        one (what is left of it and its protection). One transaction, so a
+        report's worth of ledger changes lands whole or not at all."""
+        if not rows:
+            return
+        with self._connect() as conn:
+            with conn.transaction():
+                for row in rows:
+                    conn.execute(
+                        """
+                        INSERT INTO mt5_net_ledger (account_id, virtual_id, symbol, side,
+                                                    volume_open, volume_left, stop_loss,
+                                                    take_profit, opened_at_ms)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (account_id, virtual_id) DO UPDATE SET
+                            volume_left = EXCLUDED.volume_left,
+                            stop_loss = EXCLUDED.stop_loss,
+                            take_profit = EXCLUDED.take_profit
+                        """,
+                        (account_id, row["virtual_id"], row["symbol"], row["side"],
+                         row["volume_open"], row["volume_left"], row.get("stop_loss"),
+                         row.get("take_profit"), row["opened_at_ms"]),
+                    )
+
+    def delete_net_ledger(self, account_id: int, virtual_ids: list[int]) -> None:
+        """Virtual positions that were consumed to zero."""
+        if not virtual_ids:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM mt5_net_ledger WHERE account_id = %s AND virtual_id = ANY(%s)",
+                (account_id, [int(v) for v in virtual_ids]),
+            )
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run DB `tests/unit/test_migration_015.py`.
+Expected: `6 passed`.
+
+Run DB `tests/unit/test_repo_mt5.py`.
+Expected: `24 passed`.
+
+Run DB `tests/unit/test_migration_014.py`.
+Expected: all pass (the 014 checks are unaffected by a later migration).
+
+- [ ] **Step 5: Commit**
+
+```bash
+cd "/c/Users/Sherwyn joel/OneDrive/Desktop/Forex-Automated-Copy-Trading-System" && git add db/migrations/015_mt5_net_ledger.sql copier/src/copier/db/repo.py copier/tests/unit/test_migration_015.py copier/tests/unit/test_repo_mt5.py && git commit -m "feat(db): migration 015 -- the netting master's virtual-position ledger
+
+A netting MT5 master's single net position per symbol is expanded into
+virtual master positions so followers copy every add and reduction one
+by one; the ledger persists them across a copier restart. The repo
+loads, upserts and deletes its rows.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 6: `copier.mt5.registry` — the terminal's book in memory
 
 **Files:**
 - Create: `copier/src/copier/mt5/registry.py`, `copier/src/copier/testing/mt5_fixtures.py`
@@ -2072,7 +2560,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: `Repo.save_symbol_cache/load_symbol_cache/upsert_positions/close_missing_positions/mapping_rows/load_mt5_link` (`copier/src/copier/db/repo.py`), `PositionSnapshot`/`OrderSnapshot` (`engine/reconcile.py:46-97`), `symbol_infos_from_hello` (Task 3), the protocol dataclasses (Task 2).
-- Produces (contract §2 `registry.py`, used by Tasks 8, 11, 13, 14): `OFFLINE_AFTER_S = 15.0`; `MT5Registry(repo, clock=None)` with `update_from_hello(account_id, org_id, hello, now)`, `update_from_sync(account_id, org_id, report, now)`, `snapshot(account_id, with_labels=True) -> tuple[list[PositionSnapshot], list[OrderSnapshot]] | None`, `account_block(account_id) -> dict | None`, `last_seen(account_id) -> float | None`, `is_online(account_id, now) -> bool`, `hedging(account_id) -> bool | None`, `symbol_by_name(account_id, name) -> SymbolInfo | None`; private additions `symbols_by_name(account_id) -> dict[str, SymbolInfo]`, `report(account_id) -> SyncReport | None`, `position(account_id, ticket) -> ReportPosition | None`. `OrderSnapshot.stop_loss: float | None = None`, `OrderSnapshot.take_profit: float | None = None`. Test builders `copier.testing.mt5_fixtures.position/order/deal/ack/report`.
+- Produces (contract §2 `registry.py`, used by Tasks 9, 12, 14, 15): `OFFLINE_AFTER_S = 15.0`; `MT5Registry(repo, clock=None)` with `update_from_hello(account_id, org_id, hello, now)`, `update_from_sync(account_id, org_id, report, now)`, `snapshot(account_id, with_labels=True) -> tuple[list[PositionSnapshot], list[OrderSnapshot]] | None`, `account_block(account_id) -> dict | None`, `last_seen(account_id) -> float | None`, `is_online(account_id, now) -> bool`, `hedging(account_id) -> bool | None`, `margin_mode(account_id) -> str | None` (`"hedging"` | `"netting"`; `None` before any hello — read from the link row after a restart, like `hedging`), `symbol_by_name(account_id, name) -> SymbolInfo | None`; private additions `symbols_by_name(account_id) -> dict[str, SymbolInfo]`, `report(account_id) -> SyncReport | None`, `position(account_id, ticket) -> ReportPosition | None`. The netting master's ledger views — `net_ledger(account_id)`, `snapshot(..., virtual=True)`, `account_block(..., virtual=True)`, `persist_virtual_positions(account_id)`, `update_from_sync(..., persist=)` — are added to this module in Task 9, where `NetLedger` exists. `OrderSnapshot.stop_loss: float | None = None`, `OrderSnapshot.take_profit: float | None = None`. Test builders `copier.testing.mt5_fixtures.position/order/deal/ack/report`.
 
 - [ ] **Step 1: Add the report builders shared by the MT5 tests**
 
@@ -2181,6 +2669,7 @@ class TestHello:
         cached = repo.load_symbol_cache(mt5_id)
         assert set(cached) == {"EURUSD.r", "XAUUSD.r"} and cached["XAUUSD.r"] == info
         assert registry.hedging(mt5_id) is True and registry.last_seen(mt5_id) == 100.0
+        assert registry.margin_mode(mt5_id) == "hedging"
 
     def test_chunks_accumulate_and_persist_on_the_last_one(self, world):
         repo, org_id, mt5_id, registry = world
@@ -2207,13 +2696,14 @@ class TestRestart:
             trade_mode="demo", leverage=100, ea_version="1.0.0", ea_build=4400)
         fresh = MT5Registry(repo)   # the copier restarted: memory is gone
         assert fresh.symbol_by_name(mt5_id, "EURUSD.r").lot_size == 100
-        assert fresh.hedging(mt5_id) is False
+        assert fresh.hedging(mt5_id) is False and fresh.margin_mode(mt5_id) == "netting"
         assert fresh.report(mt5_id) is None and fresh.snapshot(mt5_id) is None
         assert fresh.account_block(mt5_id) is None and fresh.position(mt5_id, 1) is None
 
     def test_unknown_account_answers_nothing(self, world):
         _repo, _org_id, _mt5_id, registry = world
         assert registry.hedging(424242) is None and registry.last_seen(424242) is None
+        assert registry.margin_mode(424242) is None
         assert registry.is_online(424242, now=5.0) is False
 
 
@@ -2594,6 +3084,14 @@ class MT5Registry:
         state.hedging = link["hedging"]
         state.hedging_loaded = True
         return state.hedging
+
+    def margin_mode(self, account_id: int) -> str | None:
+        """"hedging" | "netting" from the hello's flag (spec "Netting
+        accounts": both are accepted); None before any hello."""
+        hedging = self.hedging(account_id)
+        if hedging is None:
+            return None
+        return "hedging" if hedging else "netting"
 ```
 
 - [ ] **Step 5: Run the tests to verify they pass**
@@ -2612,25 +3110,81 @@ cd "/c/Users/Sherwyn joel/OneDrive/Desktop/Forex-Automated-Copy-Trading-System" 
 Symbols from the hello (persisted on the last chunk), positions persisted
 through the resync's own repo calls only when the book changed, labels
 from the mapping table, and the get_state accounts block in the
-tracker's exact shape. Symbols and the hedging flag come back from
-Postgres after a restart.
+tracker's exact shape. Symbols and the hedging flag -- margin_mode(),
+hedging or netting -- come back from Postgres after a restart.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 6: `copier.mt5.outbox` — the command queue
+### Task 7: `copier.mt5.outbox` — the command queue
 
 **Files:**
 - Create: `copier/src/copier/mt5/outbox.py`
+- Modify: `copier/src/copier/domain/models.py:164-168` (`ClosePosition` gains `master_position_id`), `copier/src/copier/domain/decision.py:74` (stamps it), `copier/tests/unit/test_decision_positions.py:68,76,123,132` (the four `ClosePosition` expectations)
 - Test: `copier/tests/unit/test_mt5_outbox.py`
 
 **Interfaces:**
-- Consumes: `Repo.enqueue_mt5_command/mt5_commands_open/mark_mt5_commands_sent/complete_mt5_command/fail_stale_mt5_opens/fail_mapping/log_event` (Task 4), `client_order_id_for` (`engine/dispatch.py:43-55`), the intent dataclasses (`domain/models.py:145-210`), `Ack`, `Command`, `lots` (Task 2).
-- Produces (contract §2 `outbox.py`, used by Tasks 7, 13, 14): `OPEN_COMMAND_TTL_S = 30.0`, `REDELIVER_AFTER_S = 10.0`, `MAX_ATTEMPTS = 3`, `NO_ACK_MESSAGE`, `OFFLINE_MESSAGE`; `AckOutcome(command_id, kind, client_order_id, ok, message, position, order, price, volume)`; `command_for_intent(intent, broker_symbol) -> tuple[str, dict]`; `MT5Outbox(repo, clock=None)` with `enqueue_intent(intent, org_id, broker_symbol) -> int`, `enqueue(account_id, org_id, kind, payload, client_order_id=None) -> int`, `deliverable(account_id, now) -> list[Command]`, `apply_acks(account_id, acks) -> list[AckOutcome]`, `pending_count(account_id) -> int`. `now` is epoch seconds (what `reactor.seconds()` returns), compared with the rows' `created_at`/`sent_at`.
+- Consumes: `Repo.enqueue_mt5_command/mt5_commands_open/mark_mt5_commands_sent/complete_mt5_command/fail_stale_mt5_opens/fail_mapping/log_event/mapping_side/mt5_open_payload` (Task 4), `client_order_id_for` (`engine/dispatch.py:43-55`), the intent dataclasses (`domain/models.py:145-210`), `Ack`, `Command`, `lots` (Task 2), `MT5Registry.margin_mode` (Task 6, injected as a callable).
+- Produces (contract §2 `outbox.py`, used by Tasks 8, 14, 15): `OPEN_COMMAND_TTL_S = 30.0`, `REDELIVER_AFTER_S = 10.0`, `MAX_ATTEMPTS = 3`, `NO_ACK_MESSAGE`, `OFFLINE_MESSAGE`, `CLOSE_SUFFIX = ":close"`; `AckOutcome(command_id, kind, client_order_id, ok, message, position, order, price, volume, deal=None)` (`deal` is the terminal's deal ticket for the executed command — Task 15 uses it to skip the deal an ack already settled); `command_for_intent(intent, broker_symbol) -> tuple[str, dict]`; `MT5Outbox(repo, clock=None, margin_mode=None)` where `margin_mode: Callable[[int], str | None] | None` is the registry's `margin_mode` (None = every account hedging), with `enqueue_intent(intent, org_id, broker_symbol) -> int`, `enqueue(account_id, org_id, kind, payload, client_order_id=None) -> int`, `deliverable(account_id, now) -> list[Command]`, `apply_acks(account_id, acks) -> list[AckOutcome]`, `pending_count(account_id) -> int`. `now` is epoch seconds (what `reactor.seconds()` returns), compared with the rows' `created_at`/`sent_at`.
+- Netting followers (contract §2, the outbox comment): `enqueue_intent(ClosePosition)` on an account whose `margin_mode` is `"netting"` becomes kind `open` on the OPPOSITE side of the mapping's open command (`repo.mapping_side(coid)`; the broker symbol from `repo.mt5_open_payload(coid)`), `lots` = the intent's volume, comment `close:m<master>`, `client_order_id = "<mapping coid>:close"`; `apply_acks` strips the suffix and returns `AckOutcome(kind="close", client_order_id=<mapping coid>, volume=<centilots closed>)`. A `ClosePosition` without a `master_position_id` (an operator's or the reconciler's close of the net position) stays kind `close` on the ticket, on both modes; so does a netting close whose mapping has no open command (logged as `slave_action/warning mt5_netting_close_unsided`). `AmendPositionSLTP` on netting is kind `amend` on the net ticket (last writer wins; Task 15 logs the override). Hedging followers keep kind `close`.
+- `ClosePosition.master_position_id: int | None = None` (`domain/models.py`), stamped by `decide()` at `decision.py:74` with the master event's `position_id` — the only way the outbox can name the mapping a close belongs to, since several mappings share one net ticket. The four `test_decision_positions.py` expectations gain `master_position_id=11`.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Give `ClosePosition` its master id**
+
+In `copier/tests/unit/test_decision_positions.py`, the four `ClosePosition` expectations (lines 68, 76, 123, 132) gain the master's id, in this order:
+
+```python
+    assert out == [m.ClosePosition(slave_account_id=101, position_id=555, volume=10_000_000,
+                                   master_position_id=11)]
+```
+
+```python
+    assert out == [m.ClosePosition(slave_account_id=101, position_id=555, volume=3_000_000,
+                                   master_position_id=11)]
+```
+
+```python
+    assert out1 == [m.ClosePosition(slave_account_id=101, position_id=555, volume=3_000_000,
+                                    master_position_id=11)]
+```
+
+```python
+    assert out2 == [m.ClosePosition(slave_account_id=101, position_id=555, volume=1_500_000,
+                                    master_position_id=11)]
+```
+
+Run PURE `tests/unit/test_decision_positions.py`.
+Expected: FAIL — those four with `TypeError: ClosePosition.__init__() got an unexpected keyword argument 'master_position_id'`.
+
+In `copier/src/copier/domain/models.py`, replace the `ClosePosition` dataclass (lines 164-168) with:
+
+```python
+@dataclass(frozen=True)
+class ClosePosition:
+    slave_account_id: int
+    position_id: int
+    volume: int
+    # The master position this close is a copy of. decide() stamps it; the
+    # MT5 outbox needs it on a NETTING follower, where every copy on a
+    # symbol shares one net ticket and only the mapping's own id says which
+    # copy is being closed. Defaulted so every existing construction (the
+    # reconciler's orphan close, operator closes, tests) stays valid.
+    master_position_id: int | None = None
+```
+
+In `copier/src/copier/domain/decision.py`, line 74 becomes:
+
+```python
+        out.append(m.ClosePosition(s.account_id, entry.slave_position_id, vol,
+                                   master_position_id=e.position_id))
+```
+
+Run PURE `tests/unit/test_decision_positions.py`, PURE `tests/unit/test_models.py`, DB `tests/unit/test_dispatch.py`.
+Expected: all pass (the field is defaulted; only `decide()` sets it).
+
+- [ ] **Step 2: Write the failing test**
 
 Create `copier/tests/unit/test_mt5_outbox.py`:
 
@@ -2650,8 +3204,8 @@ from copier.domain.models import (
     Alert, AmendPending, AmendPositionSLTP, CancelPending, ClosePosition, OpenMarket,
     PendingType, PlacePending, Side)
 from copier.mt5.outbox import (
-    MAX_ATTEMPTS, NO_ACK_MESSAGE, OPEN_COMMAND_TTL_S, REDELIVER_AFTER_S, AckOutcome, MT5Outbox,
-    command_for_intent)
+    CLOSE_SUFFIX, MAX_ATTEMPTS, NO_ACK_MESSAGE, OPEN_COMMAND_TTL_S, REDELIVER_AFTER_S, AckOutcome,
+    MT5Outbox, command_for_intent)
 from copier.mt5.protocol import Command
 from copier.testing.mt5_fixtures import ack
 
@@ -2822,7 +3376,7 @@ class TestApplyAcks:
             ack(command_id, position=7001, deal=8, order=9, price=1.1001, volume=100)])
         assert outcomes == [AckOutcome(
             command_id=command_id, kind="open", client_order_id=f"cm42.{mt5_id}", ok=True,
-            message="done", position=7001, order=9, price=1.1001, volume=100)]
+            message="done", position=7001, order=9, price=1.1001, volume=100, deal=8)]
         row = _row(repo, command_id)
         assert row["status"] == "done" and row["done_at"] is not None
         assert row["result"] == {"ok": True, "retcode": 10009, "message": "done",
@@ -2855,14 +3409,110 @@ class TestApplyAcks:
         assert outbox.apply_acks(mt5_id, [ack(424242)]) == []          # unknown
         assert outbox.apply_acks(mt5_id, [ack(theirs)]) == []          # another account's
         assert _row(repo, theirs)["status"] == "queued"
+
+    def test_a_volume_the_ack_omits_falls_back_to_the_payloads_lots(self, world):
+        repo, org_id, mt5_id, outbox = world
+        command_id = outbox.enqueue(mt5_id, org_id, "close", {"position": 7001, "lots": 0.4})
+        (outcome,) = outbox.apply_acks(mt5_id, [ack(command_id, deal=8)])
+        assert (outcome.volume, outcome.deal) == (40, 8)
+
+
+def _open(mt5_id, master_position_id=42, side=Side.BUY):
+    return OpenMarket(slave_account_id=mt5_id, master_position_id=master_position_id, symbol_id=7,
+                      side=side, volume=100, stop_loss=1.09, take_profit=1.12,
+                      label=f"copy:m{master_position_id}", symbol_name="EURUSD")
+
+
+class TestNetting:
+    """A netting follower: every copy on a symbol shares one net position,
+    so a mapping's close is an opposite-side open that names the mapping."""
+
+    @pytest.fixture
+    def netting(self, world):
+        repo, org_id, mt5_id, _outbox = world
+        return repo, org_id, mt5_id, MT5Outbox(repo, clock=Clock(), margin_mode=lambda _a: "netting")
+
+    def test_a_close_becomes_an_opposite_open_named_after_its_mapping(self, netting):
+        repo, org_id, mt5_id, outbox = netting
+        outbox.enqueue_intent(_open(mt5_id), org_id, "EURUSD.r")
+        close_id = outbox.enqueue_intent(
+            ClosePosition(mt5_id, 9001, 40, master_position_id=42), org_id, "")
+        row = _row(repo, close_id)
+        assert (row["kind"], row["client_order_id"]) == ("open", f"cm42.{mt5_id}{CLOSE_SUFFIX}")
+        assert row["payload"] == {"symbol": "EURUSD.r", "side": "SELL", "lots": 0.4, "sl": 0.0,
+                                  "tp": 0.0, "comment": "close:m42"}
+
+    def test_a_sell_copy_closes_with_a_buy(self, netting):
+        repo, org_id, mt5_id, outbox = netting
+        outbox.enqueue_intent(_open(mt5_id, side=Side.SELL), org_id, "XAUUSD.r")
+        close_id = outbox.enqueue_intent(
+            ClosePosition(mt5_id, 9001, 100, master_position_id=42), org_id, "")
+        assert _row(repo, close_id)["payload"]["side"] == "BUY"
+        assert _row(repo, close_id)["payload"]["symbol"] == "XAUUSD.r"
+
+    def test_the_close_ack_is_reported_under_the_mappings_own_coid(self, netting):
+        repo, org_id, mt5_id, outbox = netting
+        outbox.enqueue_intent(_open(mt5_id), org_id, "EURUSD.r")
+        close_id = outbox.enqueue_intent(
+            ClosePosition(mt5_id, 9001, 40, master_position_id=42), org_id, "")
+        outbox.deliverable(mt5_id, time.time())
+        (outcome,) = outbox.apply_acks(
+            mt5_id, [ack(close_id, position=9001, deal=700005, order=700004, price=1.101, volume=40)])
+        assert outcome == AckOutcome(
+            command_id=close_id, kind="close", client_order_id=f"cm42.{mt5_id}", ok=True,
+            message="done", position=9001, order=700004, price=1.101, volume=40, deal=700005)
+        assert _row(repo, close_id)["status"] == "done"
+
+    def test_a_close_without_a_master_id_is_a_plain_close_on_the_net_ticket(self, netting):
+        """Trade page, Close all and the reconciler's orphan close act on the
+        net position on both modes."""
+        repo, org_id, mt5_id, outbox = netting
+        close_id = outbox.enqueue_intent(ClosePosition(mt5_id, 9001, 40), org_id, "")
+        row = _row(repo, close_id)
+        assert (row["kind"], row["payload"], row["client_order_id"]) == (
+            "close", {"position": 9001, "lots": 0.4}, None)
+
+    def test_a_mapping_without_an_open_command_falls_back_to_a_plain_close(self, netting):
+        """An adopted mapping has no open command to read a side from."""
+        repo, org_id, mt5_id, outbox = netting
+        close_id = outbox.enqueue_intent(
+            ClosePosition(mt5_id, 9001, 40, master_position_id=77), org_id, "")
+        assert _row(repo, close_id)["kind"] == "close"
+        (event,) = _events(repo, "mt5_netting_close_unsided")
+        assert event[0] == "warning" and event[1]["client_order_id"] == f"cm77.{mt5_id}"
+
+    def test_an_amend_goes_to_the_net_ticket(self, netting):
+        repo, org_id, mt5_id, outbox = netting
+        amend_id = outbox.enqueue_intent(AmendPositionSLTP(mt5_id, 9001, 1.095, None), org_id, "")
+        row = _row(repo, amend_id)
+        assert (row["kind"], row["payload"]) == ("amend", {"position": 9001, "sl": 1.095, "tp": 0.0})
+
+    def test_a_netting_close_never_expires(self, netting):
+        repo, org_id, mt5_id, outbox = netting
+        outbox.enqueue_intent(_open(mt5_id), org_id, "EURUSD.r")
+        close_id = outbox.enqueue_intent(
+            ClosePosition(mt5_id, 9001, 100, master_position_id=42), org_id, "")
+        with psycopg.connect(repo.dsn, autocommit=True) as conn:
+            conn.execute("UPDATE mt5_commands SET created_at = now() - interval '60 seconds'")
+        delivered = outbox.deliverable(mt5_id, time.time())
+        assert [c.id for c in delivered] == [close_id]        # the stale open expired, the close did not
+        assert _row(repo, close_id)["status"] == "sent"
+
+    def test_hedging_followers_keep_a_plain_close(self, world):
+        repo, org_id, mt5_id, _outbox = world
+        outbox = MT5Outbox(repo, clock=Clock(), margin_mode=lambda _a: "hedging")
+        close_id = outbox.enqueue_intent(
+            ClosePosition(mt5_id, 7001, 50, master_position_id=42), org_id, "")
+        assert _row(repo, close_id)["kind"] == "close"
+        assert _row(repo, close_id)["payload"] == {"position": 7001, "lots": 0.5}
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [ ] **Step 3: Run the test to verify it fails**
 
 Run DB `tests/unit/test_mt5_outbox.py`.
 Expected: FAIL at collection with `ModuleNotFoundError: No module named 'copier.mt5.outbox'`.
 
-- [ ] **Step 3: Write the module**
+- [ ] **Step 4: Write the module**
 
 Create `copier/src/copier/mt5/outbox.py`:
 
@@ -2881,6 +3531,16 @@ most MAX_ATTEMPTS times, then failed as "no ack from terminal". An `open`
 or `place_pending` not delivered within OPEN_COMMAND_TTL_S is failed as
 "terminal offline" and its mapping with it -- a market copy placed minutes
 late is a different trade. close/amend/cancel never expire.
+
+Netting followers (spec "Netting accounts"): every copy on a symbol lives
+inside the symbol's single net position, so a mapping cannot be closed by
+ticket -- the ticket is shared. Its close is an OPEN on the opposite side
+for the mapping's volume (that is how a netting account reduces), queued
+under the mapping's own client_order_id plus CLOSE_SUFFIX, so the ack
+comes back naming exactly that mapping; apply_acks strips the suffix and
+reports it as a close. A close without a master id (an operator's, Close
+all's, the reconciler's) is a plain close on the net ticket, on both
+modes. The ':close' opens never expire (repo.fail_stale_mt5_opens).
 """
 
 import logging
@@ -2901,6 +3561,7 @@ REDELIVER_AFTER_S = 10.0
 MAX_ATTEMPTS = 3
 NO_ACK_MESSAGE = "no ack from terminal"
 OFFLINE_MESSAGE = "terminal offline"
+CLOSE_SUFFIX = ":close"
 
 
 @dataclass(frozen=True)
@@ -2914,6 +3575,9 @@ class AckOutcome:
     order: int | None
     price: float | None
     volume: int | None                # centilots
+    # The terminal's deal ticket for the executed command, so the deal it
+    # reports in the same sync is not booked a second time (main.py).
+    deal: int | None = None
 
 
 def _price(value) -> float:
@@ -2960,9 +3624,12 @@ def _ts(now: float) -> datetime:
 
 
 class MT5Outbox:
-    def __init__(self, repo, clock=None):
+    def __init__(self, repo, clock=None, margin_mode=None):
+        """margin_mode: account_id -> "hedging" | "netting" | None (the
+        registry's margin_mode). None means every account is hedging."""
         self._repo = repo
         self._clock = clock
+        self._margin_mode = margin_mode
 
     def _now(self) -> float:
         clock = self._clock
@@ -2970,10 +3637,46 @@ class MT5Outbox:
             from twisted.internet import reactor as clock
         return clock.seconds()
 
+    def _is_netting(self, account_id: int) -> bool:
+        return self._margin_mode is not None and self._margin_mode(account_id) == "netting"
+
     def enqueue_intent(self, intent: SlaveIntent, org_id: int, broker_symbol: str) -> int:
+        account_id = intent.slave_account_id
+        if (isinstance(intent, ClosePosition) and intent.master_position_id is not None
+                and self._is_netting(account_id)):
+            queued = self._enqueue_netting_close(intent, org_id)
+            if queued is not None:
+                return queued
         kind, payload = command_for_intent(intent, broker_symbol)
-        return self.enqueue(intent.slave_account_id, org_id, kind, payload,
-                            client_order_id_for(intent))
+        return self.enqueue(account_id, org_id, kind, payload, client_order_id_for(intent))
+
+    def _enqueue_netting_close(self, intent: ClosePosition, org_id: int) -> int | None:
+        """A netting follower's close of ONE copy: an open on the opposite
+        side of the mapping's own open, for the closed volume, under the
+        mapping's coid + CLOSE_SUFFIX. None when the mapping has no open
+        command to read a side from (an adopted mapping): the caller falls
+        back to a plain close on the net ticket and the operator is told."""
+        account_id = intent.slave_account_id
+        coid = f"cm{intent.master_position_id}.{account_id}"     # client_order_id_for's scheme
+        side = self._repo.mapping_side(coid)
+        payload = self._repo.mt5_open_payload(coid) or {}
+        symbol = payload.get("symbol")
+        if side is None or not symbol:
+            self._repo.log_event(
+                'slave_action', 'warning',
+                {'action': 'mt5_netting_close_unsided', 'client_order_id': coid,
+                 'position': intent.position_id, 'volume': intent.volume,
+                 'detail': 'no open command records this copy\'s side; closing the net '
+                           'position by volume instead, which reduces the copies oldest-first'},
+                account_id=account_id, org_id=org_id)
+            return None
+        # SL/TP 0 leaves the net position's levels alone; the real EA passes
+        # them as given (Task 17's fake does the same).
+        return self.enqueue(account_id, org_id, "open", {
+            "symbol": symbol, "side": "SELL" if side == "BUY" else "BUY",
+            "lots": lots(intent.volume), "sl": 0.0, "tp": 0.0,
+            "comment": f"close:m{intent.master_position_id}",
+        }, coid + CLOSE_SUFFIX)
 
     def enqueue(self, account_id: int, org_id: int, kind: str, payload: dict,
                 client_order_id: str | None = None) -> int:
@@ -3029,7 +3732,9 @@ class MT5Outbox:
         """Settle acked commands. Unknown, duplicate and foreign ids change
         nothing (the terminal re-acks re-delivered ids by design). A ticket
         the ack omits falls back to the payload's, so a close/cancel ack
-        always names what it settled."""
+        always names what it settled; a volume it omits falls back to the
+        payload's lots. A netting follower's ':close' open is reported as
+        kind "close" under the mapping's own coid."""
         out: list[AckOutcome] = []
         for ack in acks:
             result = {"ok": ack.ok, "retcode": ack.retcode, "message": ack.message,
@@ -3041,12 +3746,18 @@ class MT5Outbox:
             if row is None:
                 continue
             payload = row["payload"] or {}
+            kind, coid = row["kind"], row["client_order_id"]
+            if kind == "open" and coid and coid.endswith(CLOSE_SUFFIX):
+                kind, coid = "close", coid[:-len(CLOSE_SUFFIX)]
+            volume = ack.volume
+            if volume is None and payload.get("lots"):
+                volume = int(round(float(payload["lots"]) * 100))
             out.append(AckOutcome(
-                command_id=row["id"], kind=row["kind"], client_order_id=row["client_order_id"],
+                command_id=row["id"], kind=kind, client_order_id=coid,
                 ok=ack.ok, message=ack.message,
                 position=ack.position if ack.position is not None else payload.get("position"),
                 order=ack.order if ack.order is not None else payload.get("order"),
-                price=ack.price, volume=ack.volume,
+                price=ack.price, volume=volume, deal=ack.deal,
             ))
         return out
 
@@ -3054,35 +3765,38 @@ class MT5Outbox:
         return len(self._repo.mt5_commands_open(account_id))
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [ ] **Step 5: Run the tests to verify they pass**
 
 Run DB `tests/unit/test_mt5_outbox.py`.
-Expected: `15 passed`.
+Expected: `24 passed`.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-cd "/c/Users/Sherwyn joel/OneDrive/Desktop/Forex-Automated-Copy-Trading-System" && git add copier/src/copier/mt5/outbox.py copier/tests/unit/test_mt5_outbox.py && git commit -m "feat(mt5): the command outbox -- queued, sent, acked, re-delivered, expired
+cd "/c/Users/Sherwyn joel/OneDrive/Desktop/Forex-Automated-Copy-Trading-System" && git add copier/src/copier/mt5/outbox.py copier/tests/unit/test_mt5_outbox.py copier/src/copier/domain/models.py copier/src/copier/domain/decision.py copier/tests/unit/test_decision_positions.py && git commit -m "feat(mt5): the command outbox -- queued, sent, acked, re-delivered, expired
 
 Every slave intent maps to the contract's payload (lots as floats,
 symbol = broker name); delivery is in id order with re-delivery after
 10 s up to three attempts, market opens expire after 30 s with their
-mapping, and acks settle a command exactly once.
+mapping, and acks settle a command exactly once. On a netting follower
+a mapping's close is an opposite-side open under the mapping's coid
+plus ':close' (ClosePosition now carries the master's id so the outbox
+can name it); its ack comes back as a close of exactly that mapping.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 7: Dispatcher — MT5 slaves go to the outbox before `build_request`
+### Task 8: Dispatcher — MT5 slaves go to the outbox before `build_request`
 
 **Files:**
 - Modify: `copier/src/copier/engine/dispatch.py:4` (typing import), `:221-243` (`__init__`), `:411-423` (`_handle_live_send`), add `_enqueue_for_mt5` right after it
 - Test: `copier/tests/unit/test_dispatch_mt5.py`
 
 **Interfaces:**
-- Consumes: `MT5Outbox.enqueue_intent` (Task 6), `Repo.log_event/create_position_mapping/create_order_mapping`.
-- Produces (used by Task 14): `Dispatcher(send_for_account, repo, bucket, clock=None, mt5_targets=None, mt5_outbox=None)` where `mt5_targets: Callable[[int], Mapping[int, str] | None]` returns `{symbol_id: broker symbol name}` for an MT5 account and `None` for a cTrader one. Behaviour: an intent for an MT5 slave creates its mapping exactly as the live path does, is enqueued, and logs `slave_action/info {'action': 'mt5_command_queued', 'command_id', 'intent_type'}`; an `OpenMarket`/`PlacePending` whose `symbol_id` the account cannot serve logs `slave_action/warning {'action': 'mt5_symbol_unmatched', 'symbol', 'message'}` (naming the Details panel) and creates nothing.
+- Consumes: `MT5Outbox.enqueue_intent` (Task 7), `Repo.log_event/create_position_mapping/create_order_mapping`.
+- Produces (used by Task 15): `Dispatcher(send_for_account, repo, bucket, clock=None, mt5_targets=None, mt5_outbox=None)` where `mt5_targets: Callable[[int], Mapping[int, str] | None]` returns `{symbol_id: broker symbol name}` for an MT5 account and `None` for a cTrader one. Behaviour: an intent for an MT5 slave creates its mapping exactly as the live path does, is enqueued, and logs `slave_action/info {'action': 'mt5_command_queued', 'command_id', 'intent_type'}`; an `OpenMarket`/`PlacePending` whose `symbol_id` the account cannot serve logs `slave_action/warning {'action': 'mt5_symbol_unmatched', 'symbol', 'message'}` (naming the Details panel) and creates nothing.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -3363,15 +4077,18 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 ---
 
-### Task 8: `copier.mt5.ingress` — an MT5 master's report becomes MasterEvents
+### Task 9: `copier.mt5.ingress` — an MT5 master's report becomes MasterEvents
 
 **Files:**
 - Create: `copier/src/copier/mt5/ingress.py`
-- Test: `copier/tests/unit/test_mt5_ingress.py`
+- Modify: `copier/src/copier/mt5/registry.py` (Task 6) — the netting master's ledger views
+- Test: `copier/tests/unit/test_mt5_ingress.py`; `copier/tests/unit/test_mt5_registry.py` (append a class)
 
 **Interfaces:**
-- Consumes: the `Master*` event dataclasses (`domain/models.py:46-120`), `PositionSnapshot`/`OrderSnapshot` (Task 5's shape), `SyncReport`, `CENTILOTS` (Task 2).
-- Produces (contract §2 `ingress.py`, used by Task 14): `master_events_from_report(report, previous, aliases_reverse, symbols) -> list[MasterEvent]`, plus constants `CLOSE_ENTRIES = ("OUT", "OUT_BY", "INOUT")`, `TRADE_TYPES = ("BUY", "SELL")`. `report.deals` must already be filtered to deals not yet ingested (Task 14 does that); `previous` is the registry snapshot taken BEFORE this report was applied, `None` on the first report after a restart (then only deals produce events).
+- Consumes: the `Master*` event dataclasses (`domain/models.py:46-120`), `PositionSnapshot`/`OrderSnapshot` (Task 6's shape), `SyncReport`, `ReportDeal`, `CENTILOTS` (Task 2), `Repo.load_net_ledger/upsert_positions/close_missing_positions` (Tasks 4–5) for the registry views.
+- Produces (contract §2 `ingress.py`, used by Task 15): `master_events_from_report(report, previous, aliases_reverse, symbols, ledger=None) -> list[MasterEvent]`, plus constants `CLOSE_ENTRIES = ("OUT", "OUT_BY", "INOUT")`, `TRADE_TYPES = ("BUY", "SELL")`. `report.deals` must already be filtered to deals not yet ingested (Task 15 does that); `previous` is the registry snapshot of the TERMINAL'S OWN BOOK taken BEFORE this report was applied (net positions, never virtual ones), `None` on the first report after a restart (then only deals produce events).
+- Netting masters (contract §2 `ingress.py`): `VirtualPosition(virtual_id, symbol, side, volume_open, volume_left, stop_loss, take_profit, opened_at_ms)` (one row of `mt5_net_ledger`; `row() -> dict` / `VirtualPosition.from_row(dict)` in the repo's key shape); `NetLedger(rows)` (rows as `VirtualPosition`s or repo dicts) with `apply_deal(deal, canonical_symbol, stop_loss=None, take_profit=None) -> list[MasterEvent]` (`IN` → a new virtual position, id = the deal ticket, + `MasterPositionOpened`; `OUT`/`OUT_BY` → consume the symbol's virtual positions oldest-first, one `MasterPositionClosed` each with THAT position's `remaining_volume`; `INOUT` → close all of the symbol, then open the remainder as a new virtual position; the optional levels are the net position's, stamped on a new virtual position), `apply_protection(symbol, stop_loss, take_profit) -> list[MasterEvent]` (`MasterPositionSLTPAmended` for every virtual position of the broker symbol whose levels differ), `positions() -> list[VirtualPosition]` (oldest first), `dirty_rows() -> tuple[list[VirtualPosition], list[int]]` (upserts, deleted virtual ids since the last call; clears). With `ledger` given, `master_events_from_report` routes deals through `ledger.apply_deal` (a deal whose order is a known pending order is `MasterPendingFilled(order_id, position_id=<deal ticket>)` instead of the open) and net-position SL/TP diffs through `ledger.apply_protection`; the pending-order diff is unchanged.
+- Registry views (added here, contract §2 `registry.py`): `MT5Registry.net_ledger(account_id) -> NetLedger` (loaded from `repo.load_net_ledger` on first use, then held), `snapshot(account_id, with_labels=True, virtual=False)` (`virtual=True`: the ledger's positions as `PositionSnapshot`s — `position_id` = virtual id, `volume` = `volume_left`, `price` = the net position's open price, SL/TP the virtual position's — with the terminal's orders), `account_block(account_id, virtual=False)` (`virtual=True`: one entry per virtual position, `current_price` from the net position, `pnl_quote` = the net position's P&L split by volume share), `update_from_sync(..., persist=True)` (`persist=False`: store the report, write nothing — the app persists a netting master's book once the ledger has absorbed the report), `persist_virtual_positions(account_id)` (the virtual book into `positions` via `upsert_positions`/`close_missing_positions`).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -3388,7 +4105,7 @@ from copier.domain.models import (
     MasterPositionClosed, MasterPositionOpened, MasterPositionSLTPAmended, PendingType, Side,
     SymbolInfo)
 from copier.engine.reconcile import OrderSnapshot, PositionSnapshot
-from copier.mt5.ingress import master_events_from_report
+from copier.mt5.ingress import NetLedger, VirtualPosition, master_events_from_report
 from copier.testing.mt5_fixtures import deal, order, position, report
 
 XAU = SymbolInfo(symbol_id=7, name="XAUUSD.r", digits=2, lot_size=100, min_volume=1, step_volume=1)
@@ -3533,6 +4250,164 @@ class TestFirstReport:
                                  entry="IN", volume=10)])
         events = master_events_from_report(rep, None, REVERSE, SYMBOLS)
         assert [type(e).__name__ for e in events] == ["MasterPositionOpened"]
+
+
+def _vp(virtual_id, volume, side="BUY", symbol="XAUUSD.r", sl=None, tp=None, opened_at_ms=None):
+    return VirtualPosition(virtual_id=virtual_id, symbol=symbol, side=side, volume_open=volume,
+                           volume_left=volume, stop_loss=sl, take_profit=tp,
+                           opened_at_ms=opened_at_ms if opened_at_ms is not None else virtual_id * 1000)
+
+
+def _xau(ticket, entry, volume, side="BUY", price=2400.0, time_ms=None):
+    return deal(ticket, position=5, symbol="XAUUSD.r", deal_type=side, entry=entry, volume=volume,
+                price=price, time_ms=time_ms if time_ms is not None else ticket * 1000)
+
+
+class TestNetLedger:
+    """A netting master's single net position per symbol, expanded into the
+    virtual positions its followers copy."""
+
+    def test_add_add_reduce_consumes_the_oldest_first_and_partially(self):
+        ledger = NetLedger([])
+        first = ledger.apply_deal(_xau(1, "IN", 50), "XAUUSD", stop_loss=2390.0, take_profit=None)
+        second = ledger.apply_deal(_xau(2, "IN", 30, price=2401.0), "XAUUSD")
+        assert first == [MasterPositionOpened(
+            position_id=1, symbol_name="XAUUSD", side=Side.BUY, volume=50, lot_size=100,
+            stop_loss=2390.0, take_profit=None, entry_price=2400.0)]
+        assert (second[0].position_id, second[0].volume, second[0].entry_price) == (2, 30, 2401.0)
+
+        reduced = ledger.apply_deal(_xau(3, "OUT", 60, side="SELL"), "XAUUSD")
+
+        assert reduced == [
+            MasterPositionClosed(position_id=1, symbol_name="XAUUSD", closed_volume=50,
+                                 remaining_volume=0),
+            MasterPositionClosed(position_id=2, symbol_name="XAUUSD", closed_volume=10,
+                                 remaining_volume=20)]
+        (left,) = ledger.positions()
+        assert (left.virtual_id, left.volume_open, left.volume_left) == (2, 30, 20)
+        upserts, deleted = ledger.dirty_rows()
+        assert [(v.virtual_id, v.volume_left) for v in upserts] == [(2, 20)] and deleted == [1]
+        assert ledger.dirty_rows() == ([], [])
+
+    def test_full_close_empties_the_symbol(self):
+        ledger = NetLedger([_vp(1, 50), _vp(2, 30)])
+        events = ledger.apply_deal(_xau(3, "OUT", 80, side="SELL"), "XAUUSD")
+        assert [(e.position_id, e.closed_volume, e.remaining_volume) for e in events] == [
+            (1, 50, 0), (2, 30, 0)]
+        assert ledger.positions() == []
+        assert ledger.dirty_rows() == ([], [1, 2])
+
+    def test_a_close_beyond_what_the_ledger_holds_closes_what_it_has(self):
+        ledger = NetLedger([_vp(1, 50)])
+        events = ledger.apply_deal(_xau(3, "OUT", 80, side="SELL"), "XAUUSD")
+        assert [(e.position_id, e.closed_volume) for e in events] == [(1, 50)]
+        assert ledger.positions() == []
+
+    def test_reversal_closes_everything_and_opens_the_remainder_the_other_way(self):
+        ledger = NetLedger([_vp(1, 50)])
+        events = ledger.apply_deal(_xau(9, "INOUT", 80, side="SELL", price=2410.0), "XAUUSD",
+                                   stop_loss=2420.0)
+        assert events == [
+            MasterPositionClosed(position_id=1, symbol_name="XAUUSD", closed_volume=50,
+                                 remaining_volume=0),
+            MasterPositionOpened(position_id=9, symbol_name="XAUUSD", side=Side.SELL, volume=30,
+                                 lot_size=100, stop_loss=2420.0, take_profit=None,
+                                 entry_price=2410.0)]
+        (left,) = ledger.positions()
+        assert (left.virtual_id, left.side, left.volume_left, left.opened_at_ms) == (9, "SELL", 30, 9000)
+        upserts, deleted = ledger.dirty_rows()
+        assert [v.virtual_id for v in upserts] == [9] and deleted == [1]
+
+    def test_other_symbols_are_untouched(self):
+        ledger = NetLedger([_vp(1, 50), _vp(2, 100, symbol="EURUSD.r")])
+        ledger.apply_deal(_xau(3, "OUT", 50, side="SELL"), "XAUUSD")
+        assert [v.virtual_id for v in ledger.positions()] == [2]
+
+    def test_a_protection_change_fans_out_to_every_virtual_position_of_the_symbol(self):
+        ledger = NetLedger([_vp(1, 50, sl=2390.0), _vp(2, 30, sl=2390.0), _vp(3, 30, symbol="EURUSD.r")])
+        events = ledger.apply_protection("XAUUSD.r", 2395.0, 2420.0)
+        assert events == [
+            MasterPositionSLTPAmended(position_id=1, stop_loss=2395.0, take_profit=2420.0),
+            MasterPositionSLTPAmended(position_id=2, stop_loss=2395.0, take_profit=2420.0)]
+        assert ledger.apply_protection("XAUUSD.r", 2395.0, 2420.0) == []      # nothing changed
+        upserts, _deleted = ledger.dirty_rows()
+        assert sorted((v.virtual_id, v.stop_loss) for v in upserts) == [(1, 2395.0), (2, 2395.0)]
+
+    def test_balance_operations_and_zero_volume_deals_are_ignored(self):
+        ledger = NetLedger([])
+        assert ledger.apply_deal(deal(3, deal_type="BALANCE", entry="", volume=0, profit=500.0), "") == []
+        assert ledger.apply_deal(_xau(4, "IN", 0), "XAUUSD") == []
+        assert ledger.positions() == [] and ledger.dirty_rows() == ([], [])
+
+    def test_restart_rebuilds_the_ledger_from_its_rows(self):
+        before = NetLedger([])
+        before.apply_deal(_xau(1, "IN", 50), "XAUUSD")
+        before.apply_deal(_xau(2, "IN", 30), "XAUUSD")
+        before.apply_deal(_xau(3, "OUT", 20, side="SELL"), "XAUUSD")
+        upserts, deleted = before.dirty_rows()
+        rows = [v.row() for v in upserts]                       # what repo.upsert_net_ledger stored
+        assert deleted == [] and [(r["virtual_id"], r["volume_left"]) for r in rows] == [(1, 30), (2, 30)]
+        assert set(rows[0]) == {"virtual_id", "symbol", "side", "volume_open", "volume_left",
+                                "stop_loss", "take_profit", "opened_at_ms"}
+
+        after = NetLedger(rows)                                 # the copier restarted
+
+        assert [(v.virtual_id, v.volume_left) for v in after.positions()] == [(1, 30), (2, 30)]
+        events = after.apply_deal(_xau(4, "OUT", 40, side="SELL"), "XAUUSD")
+        assert [(e.position_id, e.closed_volume, e.remaining_volume) for e in events] == [
+            (1, 30, 0), (2, 10, 20)]
+
+
+class TestNettingMaster:
+    """master_events_from_report with a ledger: deals expand through it and
+    the net position's protection fans out to every virtual position."""
+
+    def test_deals_go_through_the_ledger_with_the_net_positions_levels(self):
+        ledger = NetLedger([])
+        rep = report(positions=[position(5, symbol="XAUUSD.r", volume=80, sl=2390.0)],
+                     deals=[_xau(1, "IN", 50), _xau(2, "IN", 30, price=2401.0)])
+        events = master_events_from_report(rep, _prev(), REVERSE, SYMBOLS, ledger=ledger)
+        assert [(type(e).__name__, e.position_id, e.stop_loss) for e in events] == [
+            ("MasterPositionOpened", 1, 2390.0), ("MasterPositionOpened", 2, 2390.0)]
+        assert [v.virtual_id for v in ledger.positions()] == [1, 2]
+
+    def test_a_net_stop_change_amends_every_virtual_position(self):
+        ledger = NetLedger([_vp(1, 50, sl=2390.0), _vp(2, 30, sl=2390.0)])
+        rep = report(positions=[position(5, symbol="XAUUSD.r", volume=80, sl=2395.0)])
+        prev = _prev([PositionSnapshot(position_id=5, symbol_id=7, side=Side.BUY, volume=80,
+                                       price=2400.0, label="", stop_loss=2390.0)])
+        assert master_events_from_report(rep, prev, REVERSE, SYMBOLS, ledger=ledger) == [
+            MasterPositionSLTPAmended(position_id=1, stop_loss=2395.0, take_profit=None),
+            MasterPositionSLTPAmended(position_id=2, stop_loss=2395.0, take_profit=None)]
+
+    def test_deals_are_absorbed_before_the_protection_diff(self):
+        """A reversal in the same report as a stop change: the old virtual
+        positions are closed first, so the amend reaches only the new one."""
+        ledger = NetLedger([_vp(1, 50, sl=2390.0)])
+        rep = report(positions=[position(5, symbol="XAUUSD.r", side="SELL", volume=30, sl=2420.0)],
+                     deals=[_xau(9, "INOUT", 80, side="SELL", price=2410.0)])
+        prev = _prev([PositionSnapshot(position_id=5, symbol_id=7, side=Side.BUY, volume=50,
+                                       price=2400.0, label="", stop_loss=2390.0)])
+        events = master_events_from_report(rep, prev, REVERSE, SYMBOLS, ledger=ledger)
+        assert [type(e).__name__ for e in events] == ["MasterPositionClosed", "MasterPositionOpened"]
+        assert events[1].stop_loss == 2420.0                     # carried by the open, not re-amended
+
+    def test_a_pending_fill_links_to_the_virtual_id(self):
+        ledger = NetLedger([])
+        rep = report(positions=[position(5, symbol="XAUUSD.r")],
+                     deals=[deal(90001, position=5, order=5551, symbol="XAUUSD.r", deal_type="BUY",
+                                 entry="IN", volume=100, price=2390.0)])
+        assert master_events_from_report(
+            rep, _prev(orders=[_order_snap(5551)]), REVERSE, SYMBOLS, ledger=ledger) == [
+            MasterPendingFilled(order_id=5551, position_id=90001)]
+        assert [v.virtual_id for v in ledger.positions()] == [90001]
+
+    def test_the_first_report_after_a_restart_still_diffs_nothing(self):
+        ledger = NetLedger([_vp(1, 50, sl=2390.0)])
+        rep = report(positions=[position(5, symbol="XAUUSD.r", sl=2395.0)],
+                     orders=[order(5551, symbol="XAUUSD.r")])
+        assert master_events_from_report(rep, None, REVERSE, SYMBOLS, ledger=ledger) == []
+        assert ledger.positions()[0].stop_loss == 2390.0
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -3553,17 +4428,169 @@ difference between this report's book and the previous one says what was
 amended, placed, replaced or cancelled. Symbol names are translated from
 the broker's to the canonical names the followers know before anything
 reaches decide().
+
+Netting masters (spec "Netting accounts"): the terminal holds ONE position
+per symbol, so its deals cannot be copied as positions one-to-one. The
+NetLedger expands the net position into VIRTUAL master positions: an IN
+deal opens one (its id is the deal ticket), an OUT deal consumes them
+oldest-first, an INOUT closes them all and opens the remainder the other
+way, and a stop/target change on the net position reaches every virtual
+position of the symbol. Followers see MasterPositionOpened/Closed/
+SLTPAmended by virtual id exactly as they would a hedging master's, and
+the ledger's rows are persisted by the caller (mt5_net_ledger) so a
+restart keeps them.
 """
+
+from dataclasses import dataclass
 
 from copier.domain.models import (
     MasterEvent, MasterPendingCancelled, MasterPendingFilled, MasterPendingPlaced,
     MasterPendingReplaced, MasterPositionClosed, MasterPositionOpened,
     MasterPositionSLTPAmended, PendingType, Side, SymbolInfo)
 from copier.engine.reconcile import OrderSnapshot, PositionSnapshot
-from copier.mt5.protocol import CENTILOTS, SyncReport
+from copier.mt5.protocol import CENTILOTS, ReportDeal, SyncReport
 
 CLOSE_ENTRIES = ("OUT", "OUT_BY", "INOUT")
 TRADE_TYPES = ("BUY", "SELL")
+
+
+@dataclass
+class VirtualPosition:
+    """One row of mt5_net_ledger: a slice of a netting master's net position
+    that followers copy as a position of its own. Its id is the IN deal's
+    ticket, which is what the followers' mapping rows carry as
+    master_position_id."""
+    virtual_id: int
+    symbol: str                       # broker name
+    side: str                         # "BUY" | "SELL"
+    volume_open: int                  # centilots at open
+    volume_left: int                  # centilots still open
+    stop_loss: float | None
+    take_profit: float | None
+    opened_at_ms: int
+
+    def row(self) -> dict:
+        """The repo's key shape (Repo.upsert_net_ledger)."""
+        return {"virtual_id": self.virtual_id, "symbol": self.symbol, "side": self.side,
+                "volume_open": self.volume_open, "volume_left": self.volume_left,
+                "stop_loss": self.stop_loss, "take_profit": self.take_profit,
+                "opened_at_ms": self.opened_at_ms}
+
+    @classmethod
+    def from_row(cls, row: dict) -> "VirtualPosition":
+        return cls(virtual_id=int(row["virtual_id"]), symbol=row["symbol"], side=row["side"],
+                   volume_open=int(row["volume_open"]), volume_left=int(row["volume_left"]),
+                   stop_loss=row.get("stop_loss"), take_profit=row.get("take_profit"),
+                   opened_at_ms=int(row["opened_at_ms"]))
+
+
+def _order_key(v: VirtualPosition) -> tuple[int, int]:
+    return (v.opened_at_ms, v.virtual_id)
+
+
+class NetLedger:
+    """Netting MASTER bookkeeping. Pure: nothing here touches the database;
+    the caller persists dirty_rows() after every report."""
+
+    def __init__(self, rows):
+        self._positions: list[VirtualPosition] = sorted(
+            (r if isinstance(r, VirtualPosition) else VirtualPosition.from_row(r) for r in rows),
+            key=_order_key)
+        self._dirty: dict[int, VirtualPosition] = {}
+        self._deleted: list[int] = []
+
+    def positions(self) -> list[VirtualPosition]:
+        """Oldest first: the order OUT deals consume them in."""
+        return list(self._positions)
+
+    def _of_symbol(self, symbol: str) -> list[VirtualPosition]:
+        return [v for v in self._positions if v.symbol == symbol]
+
+    def _open(self, deal: ReportDeal, volume: int, stop_loss, take_profit) -> VirtualPosition:
+        vp = VirtualPosition(
+            virtual_id=deal.ticket, symbol=deal.symbol, side=deal.deal_type, volume_open=volume,
+            volume_left=volume, stop_loss=stop_loss, take_profit=take_profit,
+            opened_at_ms=deal.time_ms)
+        self._positions.append(vp)
+        self._positions.sort(key=_order_key)
+        self._dirty[vp.virtual_id] = vp
+        self._deleted = [d for d in self._deleted if d != vp.virtual_id]
+        return vp
+
+    def _consume(self, symbol: str, canonical: str, volume: int) -> list[MasterEvent]:
+        """Take `volume` out of the symbol's virtual positions oldest-first.
+        A close beyond what the ledger holds (a position opened while the
+        copier was down) closes what it has and stops."""
+        events: list[MasterEvent] = []
+        remaining = volume
+        for vp in self._of_symbol(symbol):
+            if remaining <= 0:
+                break
+            take = min(vp.volume_left, remaining)
+            if take <= 0:
+                continue
+            vp.volume_left -= take
+            remaining -= take
+            events.append(MasterPositionClosed(
+                position_id=vp.virtual_id, symbol_name=canonical, closed_volume=take,
+                remaining_volume=vp.volume_left))
+            if vp.volume_left <= 0:
+                self._positions.remove(vp)
+                self._dirty.pop(vp.virtual_id, None)
+                self._deleted.append(vp.virtual_id)
+            else:
+                self._dirty[vp.virtual_id] = vp
+        return events
+
+    def apply_deal(self, deal: ReportDeal, canonical_symbol: str,
+                   stop_loss: float | None = None, take_profit: float | None = None,
+                   ) -> list[MasterEvent]:
+        """One trade deal of the net position -> the events its followers act
+        on. `stop_loss`/`take_profit` are the net position's current levels
+        (from the report), stamped on a virtual position this deal opens."""
+        if deal.deal_type not in TRADE_TYPES or deal.volume <= 0:
+            return []
+        if deal.entry == "IN":
+            vp = self._open(deal, deal.volume, stop_loss, take_profit)
+            return [MasterPositionOpened(
+                position_id=vp.virtual_id, symbol_name=canonical_symbol, side=Side(vp.side),
+                volume=vp.volume_open, lot_size=CENTILOTS, stop_loss=stop_loss,
+                take_profit=take_profit, entry_price=deal.price)]
+        if deal.entry in ("OUT", "OUT_BY"):
+            return self._consume(deal.symbol, canonical_symbol, deal.volume)
+        if deal.entry == "INOUT":
+            held = sum(v.volume_left for v in self._of_symbol(deal.symbol))
+            events = self._consume(deal.symbol, canonical_symbol, held)
+            remainder = deal.volume - held
+            if remainder > 0:
+                vp = self._open(deal, remainder, stop_loss, take_profit)
+                events.append(MasterPositionOpened(
+                    position_id=vp.virtual_id, symbol_name=canonical_symbol, side=Side(vp.side),
+                    volume=remainder, lot_size=CENTILOTS, stop_loss=stop_loss,
+                    take_profit=take_profit, entry_price=deal.price))
+            return events
+        return []
+
+    def apply_protection(self, symbol: str, stop_loss: float | None,
+                         take_profit: float | None) -> list[MasterEvent]:
+        """The net position's stop/target changed: every virtual position of
+        the (broker) symbol takes the new levels, and each one's followers
+        are told."""
+        events: list[MasterEvent] = []
+        for vp in self._of_symbol(symbol):
+            if (vp.stop_loss, vp.take_profit) == (stop_loss, take_profit):
+                continue
+            vp.stop_loss, vp.take_profit = stop_loss, take_profit
+            self._dirty[vp.virtual_id] = vp
+            events.append(MasterPositionSLTPAmended(
+                position_id=vp.virtual_id, stop_loss=stop_loss, take_profit=take_profit))
+        return events
+
+    def dirty_rows(self) -> tuple[list[VirtualPosition], list[int]]:
+        """(upserts, deleted virtual ids) since the last call; clears both."""
+        upserts, deleted = list(self._dirty.values()), list(self._deleted)
+        self._dirty, self._deleted = {}, []
+        return upserts, deleted
 
 
 def _side_of(order_type: str) -> Side:
@@ -3579,6 +4606,7 @@ def master_events_from_report(
     previous: tuple[list[PositionSnapshot], list[OrderSnapshot]] | None,
     aliases_reverse: dict[str, str],
     symbols: dict[str, SymbolInfo],
+    ledger: NetLedger | None = None,
 ) -> list[MasterEvent]:
     """
     deals (in time order; the caller passes only deals not yet ingested):
@@ -3588,13 +4616,20 @@ def master_events_from_report(
                    MasterPendingFilled, as cTrader's LIMIT/STOP fill would be
       entry OUT / OUT_BY / INOUT -> MasterPositionClosed with remaining_volume
                    = what this report still shows for the position, else 0
-    positions vs previous: SL/TP changed -> MasterPositionSLTPAmended
+      with `ledger` (a netting master): every trade deal goes through
+      ledger.apply_deal instead -- virtual positions, ids = deal tickets; a
+      pending order's fill is MasterPendingFilled(position_id=deal ticket)
+    positions vs previous: SL/TP changed -> MasterPositionSLTPAmended; with
+      `ledger`, through ledger.apply_protection (one amend per virtual
+      position of the symbol), AFTER the deals so a reversal in the same
+      report does not amend positions it just closed
     orders vs previous: new -> MasterPendingPlaced; volume/price/SL/TP changed
       -> MasterPendingReplaced; gone without a deal -> MasterPendingCancelled
       (gone WITH its deal was emitted as MasterPendingFilled above)
     previous is None (the first report after a copier restart): no diff
       events -- every pending order would otherwise look new and be copied
-      twice.
+      twice. `previous` is always the terminal's own book (net positions),
+      never the virtual one.
     """
     events: list[MasterEvent] = []
     prev_positions = {p.position_id: p for p in previous[0]} if previous is not None else {}
@@ -3613,11 +4648,21 @@ def master_events_from_report(
     for d in sorted(report.deals, key=lambda d: (d.time_ms, d.ticket)):
         if d.deal_type not in TRADE_TYPES:
             continue
+        pos = cur_positions.get(d.position)
+        if ledger is not None:
+            produced = ledger.apply_deal(
+                d, canonical(d.symbol),
+                stop_loss=pos.stop_loss if pos is not None else None,
+                take_profit=pos.take_profit if pos is not None else None)
+            if d.entry == "IN" and d.order in prev_orders:
+                events.append(MasterPendingFilled(order_id=d.order, position_id=d.ticket))
+                continue
+            events.extend(produced)
+            continue
         if d.entry == "IN":
             if d.order in prev_orders:
                 events.append(MasterPendingFilled(order_id=d.order, position_id=d.position))
                 continue
-            pos = cur_positions.get(d.position)
             events.append(MasterPositionOpened(
                 position_id=d.position, symbol_name=canonical(d.symbol), side=Side(d.deal_type),
                 volume=d.volume, lot_size=lot_size(d.symbol),
@@ -3626,7 +4671,6 @@ def master_events_from_report(
                 entry_price=d.price,
             ))
         elif d.entry in CLOSE_ENTRIES:
-            pos = cur_positions.get(d.position)
             events.append(MasterPositionClosed(
                 position_id=d.position, symbol_name=canonical(d.symbol), closed_volume=d.volume,
                 remaining_volume=pos.volume if pos is not None else 0,
@@ -3640,8 +4684,11 @@ def master_events_from_report(
         if prev is None:
             continue
         if (prev.stop_loss, prev.take_profit) != (pos.stop_loss, pos.take_profit):
-            events.append(MasterPositionSLTPAmended(
-                position_id=ticket, stop_loss=pos.stop_loss, take_profit=pos.take_profit))
+            if ledger is not None:
+                events.extend(ledger.apply_protection(pos.symbol, pos.stop_loss, pos.take_profit))
+            else:
+                events.append(MasterPositionSLTPAmended(
+                    position_id=ticket, stop_loss=pos.stop_loss, take_profit=pos.take_profit))
 
     for ticket, o in cur_orders.items():
         prev = prev_orders.get(ticket)
@@ -3668,27 +4715,276 @@ def master_events_from_report(
     return events
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [ ] **Step 4: Extend the registry with the netting master's ledger views**
+
+The registry (Task 6) could not hold a `NetLedger` before this module existed. In `copier/src/copier/mt5/registry.py`:
+
+(a) Add the import after `from copier.engine.reconcile import OrderSnapshot, PositionSnapshot`:
+
+```python
+from copier.mt5.ingress import NetLedger, VirtualPosition
+```
+
+(b) `_AccountState` gains a field after `persisted_signature`:
+
+```python
+    ledger: NetLedger | None = None            # netting masters; loaded from the repo on first use
+```
+
+(c) Replace `update_from_sync` with:
+
+```python
+    def update_from_sync(self, account_id: int, org_id: int, report: SyncReport,
+                         now: float, persist: bool = True) -> None:
+        """Store the report; persist positions when the book changed.
+
+        persist=False stores the report and writes nothing: a netting
+        master's positions table holds its VIRTUAL positions, which the app
+        persists (persist_virtual_positions) once the ledger has absorbed
+        this report's deals."""
+        state = self._state(account_id, org_id)
+        state.report = report
+        state.last_seen = now
+        if not persist:
+            return
+        signature = tuple(sorted(
+            (p.ticket, p.volume, p.stop_loss, p.take_profit) for p in report.positions))
+        if signature == state.persisted_signature:
+            return
+        positions, _orders = self.snapshot(account_id)
+        self._persist(account_id, org_id, positions)
+        state.persisted_signature = signature
+
+    def _persist(self, account_id: int, org_id: int, positions: list[PositionSnapshot]) -> None:
+        symbols_by_id = {info.symbol_id: info
+                         for info in self.symbols_by_name(account_id).values()}
+        self._repo.upsert_positions(account_id, org_id, positions, symbols_by_id)
+        self._repo.close_missing_positions(account_id, [p.position_id for p in positions])
+```
+
+(d) Replace `snapshot` with:
+
+```python
+    def snapshot(self, account_id: int, with_labels: bool = True, virtual: bool = False):
+        """(positions, orders) as reconcile's snapshot types, or None before
+        the first report. with_labels=False skips the mapping lookup (the
+        ingress diff needs only the book). virtual=True answers a netting
+        MASTER's book as its ledger's virtual positions -- what the
+        followers' mappings and the reconciler line up by -- priced at the
+        net position's open price; the orders are the terminal's."""
+        state = self._accounts.get(account_id)
+        if state is None or state.report is None:
+            return None
+        symbols = self.symbols_by_name(account_id)
+        labels = self._labels(state, account_id) if with_labels else {}
+        if virtual:
+            positions = self._virtual_positions(account_id, state.report, symbols)
+        else:
+            positions = [
+                PositionSnapshot(
+                    position_id=p.ticket, symbol_id=self._symbol_id(symbols, p.symbol),
+                    side=Side(p.side), volume=p.volume, price=p.open_price,
+                    label=labels.get(p.ticket, p.comment),
+                    stop_loss=p.stop_loss, take_profit=p.take_profit,
+                )
+                for p in state.report.positions
+            ]
+        orders = [
+            OrderSnapshot(
+                order_id=o.ticket, symbol_id=self._symbol_id(symbols, o.symbol),
+                volume=o.volume, label=labels.get(o.ticket, o.comment),
+                side=Side.BUY if o.order_type.startswith("BUY") else Side.SELL,
+                order_type=o.order_type.split("_", 1)[1], price=o.price,
+                stop_loss=o.stop_loss, take_profit=o.take_profit,
+            )
+            for o in state.report.orders
+        ]
+        return positions, orders
+
+    def _virtual_positions(self, account_id: int, report: SyncReport,
+                           symbols: dict[str, SymbolInfo]) -> list[PositionSnapshot]:
+        net_by_symbol = {p.symbol: p for p in report.positions}
+        out = []
+        for v in self.net_ledger(account_id).positions():
+            net = net_by_symbol.get(v.symbol)
+            out.append(PositionSnapshot(
+                position_id=v.virtual_id, symbol_id=self._symbol_id(symbols, v.symbol),
+                side=Side(v.side), volume=v.volume_left,
+                price=net.open_price if net is not None else 0.0, label="",
+                stop_loss=v.stop_loss, take_profit=v.take_profit))
+        return out
+```
+
+(e) Replace `account_block` with:
+
+```python
+    def account_block(self, account_id: int, virtual: bool = False) -> dict | None:
+        """The account's entry in get_state's `accounts` block, in exactly the
+        shape AccountStateTracker.snapshot() produces for a cTrader account
+        -- balance, equity and marks as the terminal reports them.
+        virtual=True (a netting master): one entry per virtual position,
+        current price from the net position and its P&L split by volume
+        share, so the Positions screen and the copies line up by virtual id."""
+        state = self._accounts.get(account_id)
+        if state is None or state.report is None:
+            return None
+        symbols = self.symbols_by_name(account_id)
+        report = state.report
+        if virtual:
+            positions = self._virtual_marks(account_id, report, symbols)
+        else:
+            positions = [
+                {"position_id": p.ticket, "symbol_id": self._symbol_id(symbols, p.symbol),
+                 "symbol": p.symbol, "side": p.side, "volume": p.volume,
+                 "entry_price": p.open_price, "stop_loss": p.stop_loss,
+                 "take_profit": p.take_profit, "pnl_quote": p.pnl,
+                 "current_price": p.current_price}
+                for p in report.positions
+            ]
+        return {
+            "balance": report.balance,
+            "equity": report.equity,
+            "open_pnl": sum(p.pnl for p in report.positions),
+            "positions": positions,
+        }
+
+    def _virtual_marks(self, account_id: int, report: SyncReport,
+                       symbols: dict[str, SymbolInfo]) -> list[dict]:
+        ledger = self.net_ledger(account_id).positions()
+        net_by_symbol = {p.symbol: p for p in report.positions}
+        held: dict[str, int] = {}
+        for v in ledger:
+            held[v.symbol] = held.get(v.symbol, 0) + v.volume_left
+        out = []
+        for v in ledger:
+            net = net_by_symbol.get(v.symbol)
+            share = v.volume_left / held[v.symbol] if held.get(v.symbol) else 0.0
+            out.append({
+                "position_id": v.virtual_id, "symbol_id": self._symbol_id(symbols, v.symbol),
+                "symbol": v.symbol, "side": v.side, "volume": v.volume_left,
+                "entry_price": net.open_price if net is not None else None,
+                "stop_loss": v.stop_loss, "take_profit": v.take_profit,
+                "pnl_quote": round(net.pnl * share, 2) if net is not None else 0.0,
+                "current_price": net.current_price if net is not None else None})
+        return out
+```
+
+(f) Append after `margin_mode`:
+
+```python
+    # ---------- netting masters ----------
+
+    def net_ledger(self, account_id: int) -> NetLedger:
+        """The netting master's virtual positions, rebuilt from mt5_net_ledger
+        on first use (a restart keeps them) and held from then on. The app
+        persists ledger.dirty_rows() after every report (main.py)."""
+        state = self._state(account_id)
+        if state.ledger is None:
+            state.ledger = NetLedger(
+                [VirtualPosition.from_row(r) for r in self._repo.load_net_ledger(account_id)])
+        return state.ledger
+
+    def persist_virtual_positions(self, account_id: int) -> None:
+        """A netting master's positions table holds its virtual positions
+        (what the Positions page and a restart read); called by the app
+        once the ledger has absorbed the report's deals."""
+        state = self._accounts.get(account_id)
+        if state is None or state.report is None:
+            return
+        positions, _orders = self.snapshot(account_id, with_labels=False, virtual=True)
+        self._persist(account_id, state.org_id, positions)
+```
+
+Append to `copier/tests/unit/test_mt5_registry.py`:
+
+```python
+
+
+class TestNettingMasterViews:
+    """A netting MASTER's book as the reconciler and get_state see it: the
+    ledger's virtual positions, marked from the net position."""
+
+    def _netting_master(self, world):
+        repo, org_id, mt5_id, registry = world
+        registry.update_from_hello(mt5_id, org_id, _hello([XAUUSD], hedging=False), now=1.0)
+        repo.upsert_net_ledger(mt5_id, [
+            {"virtual_id": 1, "symbol": "XAUUSD.r", "side": "BUY", "volume_open": 50,
+             "volume_left": 50, "stop_loss": 2390.0, "take_profit": None, "opened_at_ms": 1000},
+            {"virtual_id": 2, "symbol": "XAUUSD.r", "side": "BUY", "volume_open": 30,
+             "volume_left": 30, "stop_loss": 2390.0, "take_profit": None, "opened_at_ms": 2000}])
+        registry.update_from_sync(mt5_id, org_id, report([
+            position(5, symbol="XAUUSD.r", volume=80, open_price=2400.4, sl=2390.0, price=2410.0,
+                     pnl=80.0)]), now=2.0, persist=False)
+        return repo, org_id, mt5_id, registry
+
+    def test_the_ledger_is_loaded_from_postgres_on_first_use_and_held(self, world):
+        repo, org_id, mt5_id, registry = self._netting_master(world)
+        assert registry.margin_mode(mt5_id) == "netting"
+        assert [v.virtual_id for v in registry.net_ledger(mt5_id).positions()] == [1, 2]
+        assert registry.net_ledger(mt5_id) is registry.net_ledger(mt5_id)
+
+    def test_the_virtual_snapshot_is_priced_from_the_net_position(self, world):
+        repo, org_id, mt5_id, registry = self._netting_master(world)
+        xau_id = registry.symbol_by_name(mt5_id, "XAUUSD.r").symbol_id
+        positions, orders = registry.snapshot(mt5_id, virtual=True)
+        assert positions == [
+            PositionSnapshot(position_id=1, symbol_id=xau_id, side=Side.BUY, volume=50,
+                             price=2400.4, label="", stop_loss=2390.0, take_profit=None),
+            PositionSnapshot(position_id=2, symbol_id=xau_id, side=Side.BUY, volume=30,
+                             price=2400.4, label="", stop_loss=2390.0, take_profit=None)]
+        assert orders == []
+        # The terminal's own book is still there for the ingress diff.
+        assert [p.position_id for p in registry.snapshot(mt5_id, with_labels=False)[0]] == [5]
+
+    def test_the_virtual_account_block_splits_pnl_by_volume_share(self, world):
+        repo, org_id, mt5_id, registry = self._netting_master(world)
+        block = registry.account_block(mt5_id, virtual=True)
+        assert (block["balance"], block["equity"], block["open_pnl"]) == (10000.0, 10000.0, 80.0)
+        assert [(p["position_id"], p["volume"], p["pnl_quote"], p["current_price"],
+                 p["entry_price"], p["stop_loss"]) for p in block["positions"]] == [
+            (1, 50, 50.0, 2410.0, 2400.4, 2390.0), (2, 30, 30.0, 2410.0, 2400.4, 2390.0)]
+        assert [p["position_id"] for p in registry.account_block(mt5_id)["positions"]] == [5]
+
+    def test_persist_writes_the_virtual_book_not_the_net_ticket(self, world):
+        repo, org_id, mt5_id, registry = self._netting_master(world)
+        with psycopg.connect(repo.dsn, autocommit=True) as conn:
+            assert conn.execute("SELECT count(*) FROM positions WHERE account_id = %s",
+                                (mt5_id,)).fetchone() == (0,)        # persist=False wrote nothing
+        registry.persist_virtual_positions(mt5_id)
+        with psycopg.connect(repo.dsn, autocommit=True) as conn:
+            rows = conn.execute(
+                "SELECT position_id, volume, status FROM positions WHERE account_id = %s"
+                " ORDER BY position_id", (mt5_id,)).fetchall()
+        assert rows == [(1, 50, "open"), (2, 30, "open")]
+```
+
+- [ ] **Step 5: Run the tests to verify they pass**
 
 Run PURE `tests/unit/test_mt5_ingress.py`.
-Expected: `17 passed`.
+Expected: `30 passed`.
 
-- [ ] **Step 5: Commit**
+Run DB `tests/unit/test_mt5_registry.py`.
+Expected: `16 passed`.
+
+- [ ] **Step 6: Commit**
 
 ```bash
-cd "/c/Users/Sherwyn joel/OneDrive/Desktop/Forex-Automated-Copy-Trading-System" && git add copier/src/copier/mt5/ingress.py copier/tests/unit/test_mt5_ingress.py && git commit -m "feat(mt5): ingress -- an MT5 master's deals and book diffs as MasterEvents
+cd "/c/Users/Sherwyn joel/OneDrive/Desktop/Forex-Automated-Copy-Trading-System" && git add copier/src/copier/mt5/ingress.py copier/src/copier/mt5/registry.py copier/tests/unit/test_mt5_ingress.py copier/tests/unit/test_mt5_registry.py && git commit -m "feat(mt5): ingress -- an MT5 master's deals and book diffs as MasterEvents
 
 IN/OUT/INOUT deals open and close (remaining volume from the report), a
 changed stop or target amends, and the pending book is diffed into
 placed/replaced/cancelled/filled -- all in canonical symbol names. The
-first report after a restart yields deal events only.
+first report after a restart yields deal events only. A netting master's
+net position is expanded by the NetLedger into virtual positions (IN
+opens, OUT consumes oldest-first, INOUT reverses, a net stop change fans
+out); the registry serves them as the master's snapshot and marks.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 9: CopierService — `act_on_master_event`, `SlaveFill`, `handle_slave_*`
+### Task 10: CopierService — `act_on_master_event`, `SlaveFill`, `handle_slave_*`
 
 **Files:**
 - Modify: `copier/src/copier/engine/service.py:15-32` (imports), `:45-52` (add `SlaveFill` + `_same_level` after `master_position_of`), `:156-186` (`_protect_new_copy`), `:315-417` (`_handle_master_event` → four methods), `:562-703` (`_handle_slave_fill` → wrapper + `handle_slave_fill`), `:705-746` (`_handle_slave_order_accepted` → wrapper + `handle_slave_order_accepted`), `:748-786` (cancelled likewise), `:788-827` (rejected → wrapper + `handle_slave_rejection`)
@@ -3696,7 +4992,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: everything the service already uses.
-- Produces (contract §2 "Service and control", used by Task 14): `SlaveFill(account_id, client_order_id, position_id, filled_volume, fill_price, closed_volume, label, order_id=None, stop_loss=None, take_profit=None)` (the last three are defaulted additions: the slave's own order ticket, and the protection the copy already carries); `CopierService.act_on_master_event(org_id, master_account_id, normalized, *, source) -> None`; `handle_slave_fill(org_id, fill) -> None`; `handle_slave_rejection(org_id, account_id, client_order_id, reason, error_code=None) -> None`; private additions `handle_slave_order_accepted(org_id, account_id, client_order_id, slave_order_id)`, `handle_slave_order_cancelled(org_id, account_id, slave_order_id)`. The cTrader protobuf path keeps every event payload it writes today.
+- Produces (contract §2 "Service and control", used by Task 15): `SlaveFill(account_id, client_order_id, position_id, filled_volume, fill_price, closed_volume, label, order_id=None, stop_loss=None, take_profit=None)` (the last three are defaulted additions: the slave's own order ticket, and the protection the copy already carries); `CopierService.act_on_master_event(org_id, master_account_id, normalized, *, source) -> None`; `handle_slave_fill(org_id, fill) -> None` (a closing fill whose `client_order_id` starts with `cm` reduces exactly that mapping — `reduce_position_mapping(..., client_order_id=)`, Task 4 — which is how a netting MT5 follower's `:close` ack, reported under the mapping's own coid, reduces one of several copies sharing a net ticket; a closing fill without one reduces by position as before, and the `position_closed` event names the coid when it had one); `handle_slave_rejection(org_id, account_id, client_order_id, reason, error_code=None) -> None`; private additions `handle_slave_order_accepted(org_id, account_id, client_order_id, slave_order_id)`, `handle_slave_order_cancelled(org_id, account_id, slave_order_id)`. The cTrader protobuf path keeps every event payload it writes today.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -3832,6 +5128,23 @@ class TestHandleSlaveFill:
         (event,) = _events(repo, "position_closed")
         assert event[2] == {"action": "position_closed", "slave_position_id": 55,
                             "closed_volume": 4_000_000}
+
+    def test_a_closing_fill_that_names_its_mapping_reduces_only_that_one(self, service, repo):
+        """A netting MT5 follower's copies share one net position; the
+        outbox's ':close' ack comes back under the mapping's own coid."""
+        repo.create_position_mapping(11, 100, "cm11.100", org_id=ORG_ID)
+        repo.activate_position_mapping(100, "cm11.100", 55, 6_000_000)
+        repo.create_position_mapping(12, 100, "cm12.100", org_id=ORG_ID)
+        repo.activate_position_mapping(100, "cm12.100", 55, 4_000_000)
+        service.handle_slave_fill(ORG_ID, SlaveFill(
+            account_id=100, client_order_id="cm12.100", position_id=55, filled_volume=4_000_000,
+            fill_price=1.11, closed_volume=4_000_000, label=""))
+        assert repo.position_entries(12) == []
+        (entry,) = repo.position_entries(11)
+        assert entry.slave_volume == 6_000_000
+        (event,) = _events(repo, "position_closed")
+        assert event[2] == {"action": "position_closed", "slave_position_id": 55,
+                            "closed_volume": 4_000_000, "client_order_id": "cm12.100"}
 
     def test_a_pending_copy_fills_by_its_order_ticket(self, service, repo):
         repo.create_order_mapping(42, 100, "co42.100", org_id=ORG_ID)
@@ -4156,7 +5469,10 @@ def _same_level(a: float | None, b: float | None) -> bool:
     def handle_slave_fill(self, org_id: int, fill: SlaveFill) -> None:
         """A slave's fill, from whichever platform reported it.
 
-        - closed_volume set -> reduce_position_mapping
+        - closed_volume set -> reduce_position_mapping; pinned to the one mapping
+          when the fill names a "cm" client_order_id (a netting MT5 follower's
+          copies share one net ticket, and the outbox's ':close' ack names the
+          copy it closed), else every active mapping on that position as before
         - client_order_id "cm..." -> activate_position_mapping (+ the master's protection)
         - else a pending copy filling: activate_pending_fill by the slave's order ticket
         - else an operator's manual order (expected) or an unmatched fill (warning)
@@ -4164,18 +5480,19 @@ def _same_level(a: float | None, b: float | None) -> bool:
         account_id = fill.account_id
 
         if fill.closed_volume is not None:
-            self._repo.reduce_position_mapping(account_id, fill.position_id, fill.closed_volume)
-            self._repo.log_event(
-                'slave_action',
-                'info',
-                {
-                    'action': 'position_closed',
-                    'slave_position_id': fill.position_id,
-                    'closed_volume': fill.closed_volume,
-                },
-                account_id=account_id,
-                org_id=org_id,
-            )
+            coid = fill.client_order_id
+            coid = coid if coid and coid.startswith("cm") else None
+            self._repo.reduce_position_mapping(
+                account_id, fill.position_id, fill.closed_volume, client_order_id=coid)
+            payload = {
+                'action': 'position_closed',
+                'slave_position_id': fill.position_id,
+                'closed_volume': fill.closed_volume,
+            }
+            if coid:
+                payload['client_order_id'] = coid
+            self._repo.log_event('slave_action', 'info', payload,
+                                 account_id=account_id, org_id=org_id)
             return
 
         client_order_id = fill.client_order_id
@@ -4408,7 +5725,7 @@ def _same_level(a: float | None, b: float | None) -> bool:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run DB `tests/unit/test_service_mt5.py`.
-Expected: `13 passed`.
+Expected: `14 passed`.
 
 Run DB `tests/unit/test_service.py`.
 Expected: all pass — the cTrader path writes the same payloads in the same order (audit after dispatch, execution row after the audit, `record_master_fill` after both, pending-fill check and notify last).
@@ -4422,14 +5739,15 @@ The cTrader handlers now normalize/extract and hand a MasterEvent or a
 SlaveFill to the same code the MT5 lane calls directly. A copy that
 already carries the master's protection (an MT5 open travels with its
 SL/TP) is no longer amended again; one whose level moved before its ack
-still is.
+still is. A closing fill that names its mapping reduces that mapping
+alone (a netting MT5 follower's copies share one net ticket).
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 10: Routing — canonical keys for MT5 slaves, `platform_by_account`
+### Task 11: Routing — canonical keys for MT5 slaves, `platform_by_account`
 
 **Files:**
 - Modify: `copier/src/copier/engine/routing.py:5-43`
@@ -4437,7 +5755,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: `AccountRow.platform` (Task 4), `Repo.load_symbol_aliases` (Task 4, passed in as a callable).
-- Produces (contract §2, used by Tasks 11 and 14): `OrgRouting.platform_by_account: Mapping[int, str]` (defaulted to `{}` so `make_routing` keeps working); `build_routing(accounts, symbol_loader, alias_loader=None)`; `mt5_symbols_by_canonical(symbols, aliases) -> dict[str, SymbolInfo]` (an MT5 account's symbol cache re-keyed: every aliased canonical name maps to the broker symbol's `SymbolInfo`, and every broker name keeps mapping to itself).
+- Produces (contract §2, used by Tasks 12 and 15): `OrgRouting.platform_by_account: Mapping[int, str]` (defaulted to `{}` so `make_routing` keeps working); `build_routing(accounts, symbol_loader, alias_loader=None)`; `mt5_symbols_by_canonical(symbols, aliases) -> dict[str, SymbolInfo]` (an MT5 account's symbol cache re-keyed: every aliased canonical name maps to the broker symbol's `SymbolInfo`, and every broker name keeps mapping to itself).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -4602,7 +5920,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 ---
 
-### Task 11: Reconciler — a `snapshot_provider` for accounts without a client
+### Task 12: Reconciler — a `snapshot_provider` for accounts without a client
 
 **Files:**
 - Modify: `copier/src/copier/engine/reconcile.py:389-436` (`Reconciler.__init__`), `:438-443` (`_fetch_snapshot` head)
@@ -4610,7 +5928,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: nothing new.
-- Produces (contract §2 "Reconciler._fetch_snapshot", used by Task 14): `Reconciler(clients_by_account, repo, dispatcher, master_account_id, org_id, snapshot_provider=None)` where `snapshot_provider: Callable[[int], tuple[list[PositionSnapshot], list[OrderSnapshot]] | None] | None`; when it answers anything but `None` for an account, that is the account's book and no client is asked.
+- Produces (contract §2 "Reconciler._fetch_snapshot", used by Task 15): `Reconciler(clients_by_account, repo, dispatcher, master_account_id, org_id, snapshot_provider=None)` where `snapshot_provider: Callable[[int], tuple[list[PositionSnapshot], list[OrderSnapshot]] | None] | None`; when it answers anything but `None` for an account, that is the account's book and no client is asked.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -4752,7 +6070,363 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 ---
 
-### Task 12: `copier.mt5.deals` — deal rows and the `balance_after` estimate
+### Task 12b: Reconciler — a netting follower's net position against the sum of its copies
+
+**Files:**
+- Modify: `copier/src/copier/engine/reconcile.py` — `DriftItem` (gains `volume`), `compute_drift` (gains `netting_slave_ids` and `mapping_sides`, a sixth check, and check 2 skips the tickets the sixth compares), `Reconciler.__init__` (gains `netting_slaves`), `run` (reads the sides), `close_orphan` (closes `item.volume` when the item carries one)
+- Modify: `copier/tests/unit/test_reconcile.py` (append a test class)
+
+**Interfaces:**
+- Consumes: `Repo.mapping_side` (Task 4), `snapshot_provider` (Task 12).
+- Produces (spec "Netting accounts / As a follower", used by Task 15): `compute_drift(..., dry_run=False, netting_slave_ids=frozenset(), mapping_sides=None)` where `mapping_sides: dict[str, str] | None` maps a client_order_id to `"BUY"|"SELL"`; `DriftItem.volume: int | None = None` (the centilots a net-volume item is about; `None` on every other item, so nothing that builds or reads items today changes); `Reconciler(..., snapshot_provider=None, netting_slaves=None)` where `netting_slaves: Callable[[], set[int]] | None` answers the account ids of the NETTING MT5 FOLLOWERS (all orgs; `run` keeps its own org's enabled ones); `close_orphan` dispatches `ClosePosition` for `item.volume` when the item carries one, else for the position's live volume as today.
+- The rule (spec): every copy on a symbol lives inside the symbol's single net position, so "does the position exist" (checks 1 and 2) says nothing about whether it still holds what the copies say. For a netting follower `compute_drift` compares, per net ticket that has active copies, the SIGNED sum of those copies (`+slave_volume` for a BUY copy, `-slave_volume` for a SELL one — opposite copies net against each other there, spec "Opposite positions") with the terminal's signed net volume (`0` when the position is gone): a shortfall is `missing_slave_copy`, an excess `orphan_slave_position`, one item per net ticket with the delta in `volume` and `position_id` = the net ticket. Check 2 skips the tickets so compared (it would otherwise call every copy of a correctly flat position "vanished"); a ticket with a copy whose side is unknown (`mapping_side` None: no open command) is not compared and keeps checks 1 and 2. cTrader and hedging accounts are untouched: volumes are not compared there, as today. A copy whose close is in flight (queued, not yet acked) shows as a transient excess for one run at most — exactly as today a cTrader copy whose master has just closed shows for one run in check 1.
+
+- [ ] **Step 1: Write the failing test**
+
+Append to `copier/tests/unit/test_reconcile.py` (after `TestSnapshotProvider`, Task 12):
+
+```python
+
+
+class TestNettingVolumeDrift:
+    """A netting MT5 follower (account 2001 here): copies of master
+    positions share net ticket 9001. The net position the terminal shows
+    is compared, as a whole, with the signed sum of its copies."""
+
+    MASTER = [PositionSnapshot(1, 1, Side.BUY, 100, 1.1, ""),
+              PositionSnapshot(2, 1, Side.BUY, 50, 1.1, "")]
+    SIDES = {"cm1.2001": "BUY", "cm2.2001": "BUY", "cm3.2001": "SELL"}
+
+    @staticmethod
+    def _copies(*rows):
+        return [{'id': i, 'master_position_id': master, 'slave_account_id': 2001,
+                 'slave_position_id': 9001, 'slave_volume': volume, 'status': 'active',
+                 'client_order_id': f"cm{master}.2001"}
+                for i, (master, volume) in enumerate(rows, start=1)]
+
+    def _drift(self, net, mappings, master=None, netting=frozenset({2001}), sides=SIDES):
+        return compute_drift(
+            self.MASTER if master is None else master, [], {2001: net}, {2001: []},
+            mappings, {2001}, netting_slave_ids=netting, mapping_sides=sides)
+
+    def test_a_net_position_equal_to_the_sum_of_its_copies_is_not_drift(self):
+        net = [PositionSnapshot(9001, 1, Side.BUY, 150, 1.1, "copy:m2")]
+        assert self._drift(net, self._copies((1, 100), (2, 50))) == []
+
+    def test_a_shortfall_is_a_missing_copy_for_the_delta(self):
+        net = [PositionSnapshot(9001, 1, Side.BUY, 120, 1.1, "copy:m2")]
+        (item,) = self._drift(net, self._copies((1, 100), (2, 50)))
+        assert (item.kind, item.account_id, item.position_id, item.volume) == (
+            'missing_slave_copy', 2001, 9001, 30)
+        assert "BUY 120" in item.detail and "BUY 150" in item.detail and "short 30" in item.detail
+
+    def test_an_excess_is_an_orphan_for_the_delta(self):
+        net = [PositionSnapshot(9001, 1, Side.BUY, 200, 1.1, "copy:m2")]
+        (item,) = self._drift(net, self._copies((1, 100), (2, 50)))
+        assert (item.kind, item.position_id, item.volume) == ('orphan_slave_position', 9001, 50)
+
+    def test_opposite_copies_net_against_each_other(self):
+        master = [PositionSnapshot(1, 1, Side.BUY, 100, 1.1, ""),
+                  PositionSnapshot(3, 1, Side.SELL, 100, 1.1, "")]
+        # BUY 100 and SELL 100 copies: the terminal shows nothing, and that
+        # is right -- no item, and no per-copy "vanished" from check 2.
+        copies = self._copies((1, 100), (3, 100))
+        assert self._drift([], copies, master=master) == []
+        # A residue on either side is an orphan for what it holds.
+        net = [PositionSnapshot(9001, 1, Side.SELL, 20, 1.1, "copy:m3")]
+        (item,) = self._drift(net, copies, master=master)
+        assert (item.kind, item.volume) == ('orphan_slave_position', 20)
+        # BUY 100 against SELL 50: the terminal should show BUY 50 ...
+        copies = self._copies((1, 100), (3, 50))
+        net = [PositionSnapshot(9001, 1, Side.BUY, 50, 1.1, "copy:m3")]
+        assert self._drift(net, copies, master=master) == []
+        # ... and a terminal on the WRONG side is short by both volumes.
+        net = [PositionSnapshot(9001, 1, Side.SELL, 50, 1.1, "copy:m3")]
+        (item,) = self._drift(net, copies, master=master)
+        assert (item.kind, item.volume) == ('missing_slave_copy', 100)
+
+    def test_a_vanished_net_position_with_copies_that_do_not_cancel_is_one_shortfall(self):
+        (item,) = self._drift([], self._copies((1, 100), (2, 50)))
+        assert (item.kind, item.position_id, item.volume) == ('missing_slave_copy', 9001, 150)
+
+    def test_hedging_and_ctrader_accounts_are_not_compared(self):
+        net = [PositionSnapshot(9001, 1, Side.BUY, 120, 1.1, "copy:m2")]
+        assert self._drift(net, self._copies((1, 100), (2, 50)), netting=frozenset()) == []
+        assert self._drift(net, self._copies((1, 100), (2, 50)), sides=None) == []
+
+    def test_a_copy_of_unknown_side_leaves_the_ticket_to_checks_one_and_two(self):
+        net = [PositionSnapshot(9001, 1, Side.BUY, 120, 1.1, "copy:m2")]
+        copies = self._copies((1, 100), (2, 50))
+        assert self._drift(net, copies, sides={"cm1.2001": "BUY"}) == []
+        items = self._drift([], copies, sides={"cm1.2001": "BUY"})
+        assert [(i.kind, i.volume) for i in items] == [
+            ('missing_slave_copy', None), ('missing_slave_copy', None)]
+
+    def test_the_net_volume_item_is_stable_and_distinct_from_check_ones_orphan(self):
+        net = [PositionSnapshot(9001, 1, Side.BUY, 200, 1.1, "copy:m2")]
+        first = self._drift(net, self._copies((1, 100), (2, 50)))
+        again = self._drift(net, self._copies((1, 100), (2, 50)))
+        assert [i.id for i in first] == [i.id for i in again]
+        # The same ticket with NO mapping at all is check 1's orphan: a
+        # different item, closing the whole position.
+        (orphan,) = self._drift(net, [], master=[])
+        assert orphan.id != first[0].id and orphan.volume is None
+
+    @pytest_twisted.inlineCallbacks
+    def test_run_reads_the_sides_from_the_open_commands(self, repo, db):
+        """End to end through run(): the netting follower is an MT5 account
+        (no client; its book comes from the snapshot_provider), the copies'
+        sides come from their open commands (Repo.mapping_side)."""
+        with psycopg.connect(db, autocommit=True) as conn:
+            conn.execute(
+                """
+                INSERT INTO accounts (ctid_trader_account_id, org_id, ctid_connection_id,
+                                      trader_login, is_live, role, enabled, multiplier, platform)
+                VALUES (3001, %s, NULL, 0, false, 'slave', true, 1.0, 'mt5')
+                """, (ORG_ID,))
+            conn.execute(
+                """
+                INSERT INTO mappings (master_position_id, slave_account_id, slave_position_id,
+                                      slave_volume, client_order_id, org_id, status)
+                VALUES (1, 3001, 9001, 100, 'cm1.3001', %(org)s, 'active'),
+                       (3, 3001, 9001, 50, 'cm3.3001', %(org)s, 'active')
+                """, {"org": ORG_ID})
+        for master, side in ((1, "BUY"), (3, "SELL")):
+            repo.enqueue_mt5_command(
+                3001, ORG_ID, "open",
+                {"symbol": "EURUSD.r", "side": side, "lots": 1.0, "sl": 0, "tp": 0,
+                 "comment": f"copy:m{master}"}, f"cm{master}.3001")
+        books = {
+            MASTER_ID: ([PositionSnapshot(1, 1, Side.BUY, 100, 1.1, ""),
+                         PositionSnapshot(3, 1, Side.SELL, 50, 1.1, "")], []),
+            # BUY 100 and SELL 50 copies should net to BUY 50; the terminal shows BUY 80.
+            3001: ([PositionSnapshot(9001, 1, Side.BUY, 80, 1.1, "copy:m3")], []),
+        }
+        reconciler = Reconciler(
+            clients_by_account=lambda _account_id: _EmptyBookClient(), repo=repo,
+            dispatcher=Mock(), master_account_id=MASTER_ID, org_id=ORG_ID,
+            snapshot_provider=books.get, netting_slaves=lambda: {3001})
+
+        items = yield reconciler.run()
+
+        (item,) = [i for i in items if i.account_id == 3001]
+        assert (item.kind, item.position_id, item.volume) == ('orphan_slave_position', 9001, 30)
+
+    @pytest_twisted.inlineCallbacks
+    def test_close_orphan_closes_only_the_excess_of_a_net_position(self, repo):
+        """The copies live INSIDE the net position: the remedy closes the
+        excess, never the whole ticket."""
+        dispatcher = Mock()
+        reconciler = Reconciler(
+            clients_by_account=Mock(), repo=repo, dispatcher=dispatcher,
+            master_account_id=MASTER_ID, org_id=ORG_ID)
+        reconciler.current = [DriftItem(
+            id="net-9001", kind='orphan_slave_position', account_id=3001, position_id=9001,
+            order_id=None, detail="excess", volume=30)]
+
+        yield reconciler.close_orphan("net-9001")
+
+        dispatcher.dispatch.assert_called_once_with(
+            [ClosePosition(slave_account_id=3001, position_id=9001, volume=30)], org_id=ORG_ID)
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run DB `tests/unit/test_reconcile.py`.
+Expected: FAIL — the `TestNettingVolumeDrift` pure tests with `TypeError: compute_drift() got an unexpected keyword argument 'netting_slave_ids'`, `test_run_reads_the_sides_from_the_open_commands` with `TypeError: Reconciler.__init__() got an unexpected keyword argument 'netting_slaves'`, `test_close_orphan_closes_only_the_excess_of_a_net_position` with `TypeError: DriftItem.__init__() got an unexpected keyword argument 'volume'`.
+
+- [ ] **Step 3: Implement**
+
+In `copier/src/copier/engine/reconcile.py`:
+
+(a) `DriftItem` gains a defaulted last field:
+
+```python
+@dataclass(frozen=True)
+class DriftItem:
+    """Immutable drift detection result."""
+    id: str  # Stable hash of (kind, account_id, position_id, order_id)
+    # 'orphan_slave_position', 'missing_slave_copy', 'unmapped_master_position',
+    # 'unfilled_slave_order', 'stale_pending_copy'
+    kind: str
+    account_id: int | None
+    position_id: int | None
+    order_id: int | None
+    detail: str
+    # The centilots the item is about, when it is about a volume rather than
+    # a whole position: a netting follower's net position holding less or
+    # more than the sum of its copies (check 6). close_orphan closes exactly
+    # this much then. None everywhere else.
+    volume: int | None = None
+
+
+def _signed_volume(volume: int) -> str:
+    """'BUY 150' / 'SELL 20' / 'flat' for a side-signed centilot volume."""
+    if volume == 0:
+        return "flat"
+    return f"{'BUY' if volume > 0 else 'SELL'} {abs(volume)}"
+```
+
+(b) `compute_drift` gains two keyword parameters after `dry_run`:
+
+```python
+    dry_run: bool = False,
+    netting_slave_ids: frozenset[int] | set[int] = frozenset(),
+    mapping_sides: dict[str, str] | None = None,
+) -> list[DriftItem]:
+```
+
+its docstring's category list gains `6. net volume drift (netting MT5 followers only): a net position holding less (missing_slave_copy) or more (orphan_slave_position) than the signed sum of its active copies` and its Args gain:
+
+```python
+        netting_slave_ids: Accounts that are NETTING MT5 followers -- every
+            copy on a symbol lives inside the symbol's single net position
+            there, so check 6 compares volumes for them. Empty (the
+            default) for a fleet without netting followers: nothing changes.
+        mapping_sides: client_order_id -> "BUY"|"SELL" for those accounts'
+            active copies (Repo.mapping_side); a copy with no entry leaves
+            its ticket to checks 1 and 2.
+```
+
+Right after the `slave_pos_by_account` index is built (before `# 1. Check for orphan slave positions`), add:
+
+```python
+    # 6 is prepared here and reported after 5: a netting MT5 follower's net
+    # tickets, each compared AS A WHOLE with the signed sum of its copies.
+    # Those tickets are skipped by check 2, which would otherwise report
+    # every copy of a correctly flat net position (opposite copies that
+    # cancel) as vanished.
+    sides = mapping_sides or {}
+    net_groups: dict[tuple[int, int], list[dict]] = {}
+    for m in mappings:
+        if (m.get('status') == 'active' and m.get('slave_position_id')
+                and m.get('slave_account_id') in netting_slave_ids):
+            net_groups.setdefault((m['slave_account_id'], m['slave_position_id']), []).append(m)
+    compared = {key for key, rows in net_groups.items()
+                if all(sides.get(m.get('client_order_id')) in ('BUY', 'SELL') for m in rows)}
+```
+
+In check 2, right after `if account_id not in enabled_slave_ids: continue`, add:
+
+```python
+        if (account_id, slave_pos_id) in compared:
+            continue        # a netting follower's net ticket: check 6 compares it as a whole
+```
+
+After check 5 (before `# Sort for stable output`), add:
+
+```python
+    # 6. A netting MT5 follower's net position against its copies (spec
+    #    "Netting accounts / As a follower"). Every copy on a symbol lives
+    #    inside the symbol's single net position, so whether the position
+    #    EXISTS (checks 1 and 2) says nothing about whether it still holds
+    #    what the copies say. Signed by side: opposite copies net against
+    #    each other there, and a flat terminal is right when they cancel.
+    #    Measured along the copies' side (the terminal's when the copies
+    #    cancel): less than the copies hold is a shortfall, more an excess.
+    for account_id, ticket in sorted(compared):
+        if account_id not in enabled_slave_ids:
+            continue
+        rows = net_groups[(account_id, ticket)]
+        expected = sum(int(m.get('slave_volume') or 0)
+                       * (1 if sides[m['client_order_id']] == 'BUY' else -1) for m in rows)
+        pos = slave_pos_by_account.get(account_id, {}).get(ticket)
+        actual = 0 if pos is None else int(pos.volume) * (1 if pos.side == Side.BUY else -1)
+        if actual == expected:
+            continue
+        direction = 1 if (expected or actual) > 0 else -1
+        held, want = actual * direction, abs(expected)
+        short = want - held
+        drift_items.append(DriftItem(
+            id=_stable_id('net_volume', account_id, ticket),
+            kind='missing_slave_copy' if short > 0 else 'orphan_slave_position',
+            account_id=account_id,
+            position_id=ticket,
+            order_id=None,
+            detail=(f"Netting position {ticket} holds {_signed_volume(actual)} but its "
+                    f"{len(rows)} active cop{'y' if len(rows) == 1 else 'ies'} sum to "
+                    f"{_signed_volume(expected)} ({'short' if short > 0 else 'excess'} "
+                    f"{abs(short)} centilots)"),
+            volume=abs(short),
+        ))
+```
+
+(c) `Reconciler.__init__` gains, after `snapshot_provider` (Task 12):
+
+```python
+        netting_slaves: Callable[[], set[int]] | None = None,
+```
+
+with the docstring Arg:
+
+```python
+            netting_slaves: Answers the account ids of the netting MT5
+                followers (compute_drift compares their net positions with
+                the sum of their copies, check 6). Optional: a process with
+                no MT5 lane passes nothing and compares no volumes.
+```
+
+and, after `self.snapshot_provider = snapshot_provider`:
+
+```python
+        self.netting_slaves = netting_slaves
+```
+
+(d) In `run`, replace the `items = compute_drift(...)` call with:
+
+```python
+        # A netting follower's copies are compared by side (check 6); the
+        # side of a copy is on its open command (Repo.mapping_side).
+        netting_ids = (set(self.netting_slaves()) & enabled_slave_ids
+                       if self.netting_slaves is not None else set())
+        mapping_sides = {
+            m['client_order_id']: self.repo.mapping_side(m['client_order_id'])
+            for m in mappings
+            if m.get('status') == 'active' and m.get('client_order_id')
+            and m.get('slave_account_id') in netting_ids}
+
+        items = compute_drift(
+            master_positions, master_orders, slave_positions, slave_orders,
+            mappings, enabled_slave_ids, dry_run=dry_run,
+            netting_slave_ids=netting_ids, mapping_sides=mapping_sides,
+        )
+```
+
+(e) In `close_orphan`, replace `volume = self._lookup_slave_volume(item.account_id, item.position_id)` with:
+
+```python
+        # A net-volume item (a netting follower's net position holding MORE
+        # than its copies) names the excess: the copies live inside that
+        # position, so closing the whole ticket would close them too.
+        volume = item.volume or self._lookup_slave_volume(item.account_id, item.position_id)
+```
+
+and its docstring's "dispatches a full-volume ClosePosition intent" becomes "dispatches a ClosePosition intent for the position's full volume, or for `item.volume` when the item names one (a netting follower's excess over its copies)".
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run DB `tests/unit/test_reconcile.py`.
+Expected: all pass — every existing test passes `netting_slave_ids` empty by default, so checks 1–5 run exactly as before.
+
+- [ ] **Step 5: Commit**
+
+```bash
+cd "/c/Users/Sherwyn joel/OneDrive/Desktop/Forex-Automated-Copy-Trading-System" && git add copier/src/copier/engine/reconcile.py copier/tests/unit/test_reconcile.py && git commit -m "feat(reconcile): compare a netting follower's net position with the sum of its copies
+
+On a netting MT5 follower every copy on a symbol lives inside the
+symbol's single net position, so existence checks cannot see a position
+that drifted from its copies. Per net ticket the signed sum of the
+active copies is compared with the terminal's net volume: a shortfall is
+missing_slave_copy, an excess orphan_slave_position, each carrying the
+delta, and close_orphan closes exactly that much. cTrader and hedging
+accounts are not compared, as before.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 13: `copier.mt5.deals` — deal rows and the `balance_after` estimate
 
 **Files:**
 - Create: `copier/src/copier/mt5/deals.py`
@@ -4760,7 +6434,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: `queries._lots` (`engine/queries.py:53-56`), `ReportDeal`, `CENTILOTS` (Task 2), `SymbolInfo`.
-- Produces (used by Tasks 13 and 14): `CLOSE_ENTRIES = ("OUT", "OUT_BY", "INOUT")`, `TRADE_TYPES = ("BUY", "SELL")`, `sort_deals(deals) -> list[ReportDeal]`, `balance_after_estimates(deals, current_balance) -> dict[int, float]` (ticket → estimate), `deal_rows(deals, current_balance, symbols, entry_price_for) -> list[dict]` — rows in `queries._map_deal`'s shape plus top-level `balance_after` (every row) and `gross_profit` (BALANCE/CREDIT rows only), which `Repo.upsert_mt5_deals` (Task 4) stores.
+- Produces (used by Tasks 14 and 15): `CLOSE_ENTRIES = ("OUT", "OUT_BY", "INOUT")`, `TRADE_TYPES = ("BUY", "SELL")`, `sort_deals(deals) -> list[ReportDeal]`, `balance_after_estimates(deals, current_balance) -> dict[int, float]` (ticket → estimate), `deal_rows(deals, current_balance, symbols, entry_price_for) -> list[dict]` — rows in `queries._map_deal`'s shape plus top-level `balance_after` (every row) and `gross_profit` (BALANCE/CREDIT rows only), which `Repo.upsert_mt5_deals` (Task 4) stores.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -4949,15 +6623,15 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 ---
 
-### Task 13: `copier.mt5.lane` — operator actions and read models for one MT5 account
+### Task 14: `copier.mt5.lane` — operator actions and read models for one MT5 account
 
 **Files:**
 - Create: `copier/src/copier/mt5/lane.py`
 - Test: `copier/tests/unit/test_mt5_lane.py`
 
 **Interfaces:**
-- Consumes: `MT5Registry.report/position/symbol_by_name/symbols_by_name/is_online` (Task 5), `MT5Outbox.enqueue` (Task 6), `Repo.load_deals/load_mt5_cash_flow/load_mt5_link/mt5_commands_open/log_event/org_for_account` (Task 4), `queries._lots`, `main.FLATTEN_ROUNDS`/`FLATTEN_SETTLE_S` (imported lazily inside `flatten`: `main` imports this module).
-- Produces (contract §2 `lane.py`, used by Task 14): `validated_price(name, raw) -> float | None`; `MT5Lane(app)` reading `app.repo`, `app.mt5_registry`, `app.mt5_outbox`, `app.clock`, `app._org_for_account(account_id)`; methods `place_order(account_id, org_id, symbol, side, order_type, volume_lots, limit_price, stop_price, stop_loss, take_profit, actor) -> dict`, `close_position(account_id, position_id, volume_lots, actor) -> dict`, `amend_position_sltp(account_id, position_id, stop_loss, take_profit, actor) -> dict`, `cancel_order(account_id, order_id, actor) -> dict`, `flatten(account_id) -> Deferred[dict]` (same summary keys as `CopierApp._flatten_account`), `details(account_id) -> dict`, `deal_history(account_id, from_ms, to_ms) -> dict`, `order_history(...) -> dict`, `cash_flow(...) -> dict`, `position_deals(account_id, position_id, from_ms, to_ms) -> dict`. Every action's dict carries `"status": "submitted"` and a `"command_id"`; every deal dict carries `"balance_after_estimated": True`.
+- Consumes: `MT5Registry.report/position/symbol_by_name/symbols_by_name/is_online` (Task 6), `MT5Outbox.enqueue` (Task 7), `Repo.load_deals/load_mt5_cash_flow/load_mt5_link/mt5_commands_open/log_event/org_for_account` (Task 4), `queries._lots`, `main.FLATTEN_ROUNDS`/`FLATTEN_SETTLE_S` (imported lazily inside `flatten`: `main` imports this module).
+- Produces (contract §2 `lane.py`, used by Task 15): `validated_price(name, raw) -> float | None`; `MT5Lane(app)` reading `app.repo`, `app.mt5_registry`, `app.mt5_outbox`, `app.clock`, `app._org_for_account(account_id)`; methods `place_order(account_id, org_id, symbol, side, order_type, volume_lots, limit_price, stop_price, stop_loss, take_profit, actor) -> dict`, `close_position(account_id, position_id, volume_lots, actor) -> dict`, `amend_position_sltp(account_id, position_id, stop_loss, take_profit, actor) -> dict`, `cancel_order(account_id, order_id, actor) -> dict`, `flatten(account_id) -> Deferred[dict]` (same summary keys as `CopierApp._flatten_account`), `details(account_id) -> dict`, `deal_history(account_id, from_ms, to_ms) -> dict`, `order_history(...) -> dict`, `cash_flow(...) -> dict`, `position_deals(account_id, position_id, from_ms, to_ms) -> dict`. Every action's dict carries `"status": "submitted"` and a `"command_id"`; every deal dict carries `"balance_after_estimated": True`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -5628,7 +7302,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 ---
 
-### Task 14: `CopierApp` wiring — hello/sync/status, the lane, `get_state`, offline detection
+### Task 15: `CopierApp` wiring — hello/sync/status, the lane, `get_state`, offline detection
 
 **Files:**
 - Modify: `copier/src/copier/main.py` — imports `:40-41`, `:55-71`; constants after `:174`; `CopierApp.__init__` `:232-291`; new helpers after `:357`; `_connect_and_authorize` `:734-737`; `_fetch_and_cache_symbols` `:802`; `_client_for_account` `:827-829`; `_refresh_balances_body` `:516-632`; `resync` `:1006-1071`; `_reload_inner` `:1107`, `:1126-1134`, `:1184-1200`; `backfill_deals_once` `:1396-1397`; `_query_context` `:1438-1461`; query wrappers `:1463-1481`, `:2134-2210`; `place_order` `:1558`; `close_position` `:1650-1660`; `amend_position_sltp` `:1718-1790`; `cancel_order` `:1792-1811`; `_flatten_account` `:1997-2020`; `get_state` `:2326-2527`; new MT5 methods after `get_state`; module functions after `_build_send_for_account` `:2620`; `build_app` `:2623-2708`; `boot` before `:2912`
@@ -5636,8 +7310,9 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Test: `copier/tests/unit/test_main_mt5.py`
 
 **Interfaces:**
-- Consumes: everything from Tasks 2–13.
-- Produces (contract §2 "main.py (CopierApp)", used by Tasks 15 and 16): `CopierApp(..., clients_by_account, mt5_registry, mt5_outbox, clock=None)` with attributes `mt5_registry`, `mt5_outbox`, `mt5_lane`; `mt5_hello(account_id, body) -> {"last_deal_ticket": int}`; `mt5_sync(account_id, body) -> str`; `mt5_status(account_id) -> {"online", "last_seen_at", "pending_commands", "hedging"}`; `check_mt5_offline() -> None` (LoopingCall body, `app.mt5_offline_call`); `MT5_OFFLINE_CHECK_INTERVAL_S = 5.0`, `MT5_LINK_TOUCH_INTERVAL_S = 10.0` (the `touch_mt5_link` write from `mt5_sync` happens at most once per interval per account, tracked in `CopierApp._mt5_last_touch`); private helpers `_clock_seconds`, `_account_row`, `_is_mt5`, `_mt5_aliases`, `_auto_match_aliases`, `_canonical_names_for`, `_apply_mt5_outcome`, `_ingest_mt5_deals`, `_mt5_master_events`, `_mt5_slave_deals`, `_mt5_back_online`; module functions `_build_mt5_targets(routing_provider)`, `_build_mt5_snapshot_provider(routing_provider, registry)`, `_tracker_client_for(clients, accounts, master_account, shards)`. `build_app` now also passes `repo.load_symbol_aliases` to `build_routing`, `snapshot_provider` to every `Reconciler`, and `mt5_targets`/`mt5_outbox` to the `Dispatcher`; `state_trackers[org]` is `None` for an org whose accounts are all MT5.
+- Consumes: everything from Tasks 2–14.
+- Produces (contract §2 "main.py (CopierApp)", used by Tasks 16 and 17): `CopierApp(..., clients_by_account, mt5_registry, mt5_outbox, clock=None)` with attributes `mt5_registry`, `mt5_outbox`, `mt5_lane`; `mt5_hello(account_id, body) -> {"last_deal_ticket": int}`; `mt5_sync(account_id, body) -> str`; `mt5_status(account_id) -> {"online", "last_seen_at", "pending_commands", "hedging"}`; `check_mt5_offline() -> None` (LoopingCall body, `app.mt5_offline_call`); `MT5_OFFLINE_CHECK_INTERVAL_S = 5.0`, `MT5_LINK_TOUCH_INTERVAL_S = 10.0` (the `touch_mt5_link` write from `mt5_sync` happens at most once per interval per account, tracked in `CopierApp._mt5_last_touch`); private helpers `_clock_seconds`, `_account_row`, `_is_mt5`, `_mt5_aliases`, `_auto_match_aliases`, `_canonical_names_for`, `_apply_mt5_outcome(org_id, account_id, outcome, netting=False, deals_by_ticket=None)` (`deals_by_ticket: dict[int, ReportDeal]` — this report's deals, so an ack is paired with the deal it produced by `AckOutcome.deal`), `_ingest_mt5_deals(account_id, org_id, report, previous_report)`, `_mt5_master_events(account_id, org_id, report, previous, netting=False)`, `_mt5_slave_deals(org_id, account_id, deals, outcomes, netting=False)` (with `CopierApp._mt5_settled_deals: dict[int, set[int]]` — per account, the deal tickets acked by a command that names a copy and not yet seen in a report), `_mt5_back_online`, `_copies_sharing(org_id, account_id, position, except_coid) -> list[int]`, `_record_netting_override(org_id, account_id, position, set_by)`, `_persist_net_ledger(account_id)`; module functions `_build_mt5_targets(routing_provider)`, `_build_mt5_snapshot_provider(routing_provider, registry)`, `_build_mt5_netting_slaves(routing_provider, registry)` (the reconcilers' `netting_slaves`, Task 12b: the MT5 followers whose hello said netting), `_tracker_client_for(clients, accounts, master_account, shards)`. `build_app` now also passes `repo.load_symbol_aliases` to `build_routing`, `snapshot_provider` and `netting_slaves` to every `Reconciler`, `mt5_targets`/`mt5_outbox` to the `Dispatcher`, and `margin_mode=mt5_registry.margin_mode` to the `MT5Outbox`; `state_trackers[org]` is `None` for an org whose accounts are all MT5.
+- Netting (spec "Netting accounts"): a netting hello is accepted like a hedging one — `mt5_hello` never degrades an account for its mode and `mt5_sync` never answers `STOP` for it. Follower (the ack rules of contract §2 "Acks of an open on a netting follower"): an `open` outcome is paired with its deal by ticket (`deals_by_ticket`) and the mapping activates on the net ticket — `AckOutcome.position`, or the deal's position when the EA acked `pos` 0 because the fill emptied the net position — whatever the deal's entry; an opposite-side COPY whose fill is an OUT/INOUT (spec "Opposite positions": the master holds BUY and opens SELL) is activated like any other and logs `slave_action/info mt5_netting_opposite_copy {client_order_id, position, entry, volume, nets_against}`, and the older copies it netted against are NOT reduced — their masters are still open. A `close` outcome carrying a `client_order_id` (the outbox's `:close` open) goes through `handle_slave_fill` with `closed_volume`, reducing exactly that mapping by its coid alone (Task 4: the ack's ticket is 0 when the close emptied the position). The deal of any acked command that names a copy is never a terminal-side close: its ticket is remembered in `_mt5_settled_deals` until the terminal reports it (same sync or the next) and skipped then; a close the terminal reports on its own — a stop, a target, the owner's or an operator's own order on the net position — reduces the copies via `reduce_position_mappings_fifo` (hedging keeps the `SlaveFill` → `reduce_position_mapping` path), one `position_closed` event per copy; a refused close or amend fails no mapping; every acked `open`/`amend` on a net ticket shared with other active copies logs `slave_action/info mt5_netting_protection_override {position, set_by, overrides, stop_loss, take_profit}`. Master: `update_from_sync(..., persist=False)`, `master_events_from_report(..., ledger=registry.net_ledger(account))`, `record_master_fill` keyed by the deal ticket (`IN` and `INOUT`), then `_persist_net_ledger` writes the ledger's dirty rows and the virtual positions; `_build_mt5_snapshot_provider` and `get_state` use `snapshot(virtual=True)` / `account_block(virtual=True)` for a netting master.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -5663,7 +7338,7 @@ import copier.main as main
 from copier.ctrader.symbols import by_id as symbols_by_id
 from copier.ctrader.tokens import TokenStore
 from copier.db.repo import Repo
-from copier.domain.models import OpenMarket, Side
+from copier.domain.models import AmendPositionSLTP, ClosePosition, OpenMarket, Side
 from copier.engine.reconcile import PositionSnapshot
 from copier.mt5 import protocol as p
 
@@ -5722,9 +7397,9 @@ def _commands(repo, mt5_id):
             ).fetchall()
 
 
-def _open_intent(mt5_id, master_position_id=42, symbol_id=EURUSD_R_ID):
+def _open_intent(mt5_id, master_position_id=42, symbol_id=EURUSD_R_ID, side=Side.BUY):
     return OpenMarket(slave_account_id=mt5_id, master_position_id=master_position_id,
-                      symbol_id=symbol_id, side=Side.BUY, volume=100, stop_loss=1.09,
+                      symbol_id=symbol_id, side=side, volume=100, stop_loss=1.09,
                       take_profit=1.12, label=f"copy:m{master_position_id}",
                       symbol_name="EURUSD", entry_price=1.1)
 
@@ -5737,6 +7412,22 @@ def mt5_world(repo, token_store, seed_mt5_account):
     mt5_id = seed_mt5_account(ORG_A)
     app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1, clock=Clock())
     return repo, mt5_id, app
+
+
+@pytest.fixture
+def netting_master_world(db_seeded, fernet_key, seed_mt5_account):
+    """Org B: a NETTING MT5 master and the cTrader slave 200, plus a way to
+    build a second app on the same database (a copier restart)."""
+    org_b = seed_org_b(db_seeded, fernet_key, with_master=False)
+    master_id = seed_mt5_account(org_b, role="master")
+    repo = Repo(db_seeded)
+    _seed_symbol_cache(repo, [SLAVE_B1])
+
+    def build():
+        return main.build_app(repo, TokenStore(db_seeded, fernet_key), make_stub_client_factory(),
+                              shards=1, clock=Clock())
+
+    return repo, org_b, master_id, build
 
 
 class TestHello:
@@ -5763,13 +7454,18 @@ class TestHello:
         repo.set_mt5_watermark(mt5_id, 700005, 1)
         assert app.mt5_hello(mt5_id, _hello()) == {"last_deal_ticket": 700005}
 
-    def test_a_netting_account_is_refused(self, mt5_world):
+    def test_a_netting_account_is_accepted_and_never_degraded_for_its_mode(self, mt5_world):
         repo, mt5_id, app = mt5_world
         app.mt5_hello(mt5_id, _hello(hedging=False))
         account = _account(repo, mt5_id)
-        assert (account.status, account.last_error) == ("degraded", "netting account not supported")
+        assert (account.status, account.last_error) == ("ok", None)
+        assert repo.load_mt5_link(mt5_id)["hedging"] is False
+        assert app.mt5_registry.margin_mode(mt5_id) == "netting"
         text = app.mt5_sync(mt5_id, _sync())
-        assert text.startswith("STOP\t") and text.endswith("\tnetting account not supported\n")
+        assert text.startswith("OK\t")
+        assert app.mt5_status(mt5_id)["hedging"] is False
+        (event,) = _events(repo.dsn, "mt5_hello")
+        assert event["payload"]["hedging"] is False
 
     def test_hello_for_a_ctrader_account_is_refused(self, mt5_world):
         _repo, _mt5_id, app = mt5_world
@@ -5952,6 +7648,305 @@ class TestMt5Master:
         assert state["accounts"][master_id]["equity"] == 5003.0
 
 
+class TestNettingFollower:
+    """Every copy on a symbol lives inside the symbol's single net position
+    (ticket 9001 here): two master positions, two mappings, one net ticket."""
+
+    def _two_copies(self, repo, mt5_id, app):
+        app.mt5_hello(mt5_id, _hello(hedging=False))
+        app.mt5_sync(mt5_id, _sync(seq=1))
+        app.dispatcher.dispatch([_open_intent(mt5_id, master_position_id=42)], org_id=ORG_A)
+        (first,) = p.parse_response(app.mt5_sync(mt5_id, _sync(seq=2)))[1]
+        app.mt5_sync(mt5_id, _sync(
+            seq=3, positions=[_pos(9001, lots=1.0, sl=1.09, tp=1.12)],
+            deals=[_deal(700001, 9001, order=700000)],
+            acks=[_ack(first.id, pos=9001, deal=700001, order=700000, price=1.1, lots=1.0)]))
+        app.dispatcher.dispatch([_open_intent(mt5_id, master_position_id=43)], org_id=ORG_A)
+        (second,) = p.parse_response(app.mt5_sync(
+            mt5_id, _sync(seq=4, positions=[_pos(9001, lots=1.0, sl=1.09, tp=1.12)])))[1]
+        # The second copy added to the SAME net position: same ticket, 2.00 lots.
+        app.mt5_sync(mt5_id, _sync(
+            seq=5, positions=[_pos(9001, lots=2.0, sl=1.09, tp=1.12)],
+            deals=[_deal(700003, 9001, order=700002, time_ms=1_757_203_100_500)],
+            acks=[_ack(second.id, pos=9001, deal=700003, order=700002, price=1.1, lots=1.0)]))
+        by_master = self._by_master(repo)
+        assert by_master == {42: ("active", 9001, 100), 43: ("active", 9001, 100)}
+        return first, second
+
+    @staticmethod
+    def _by_master(repo):
+        return {m["master_position_id"]: (m["status"], m["slave_position_id"], m["slave_volume"])
+                for m in repo.mapping_rows(org_id=ORG_A)}
+
+    def test_a_close_is_an_opposite_open_whose_ack_reduces_exactly_that_mapping(self, mt5_world):
+        repo, mt5_id, app = mt5_world
+        self._two_copies(repo, mt5_id, app)
+
+        app.dispatcher.dispatch([ClosePosition(mt5_id, 9001, 100, master_position_id=42)],
+                                org_id=ORG_A)
+        (cmd,) = p.parse_response(app.mt5_sync(
+            mt5_id, _sync(seq=6, positions=[_pos(9001, lots=2.0, sl=1.09, tp=1.12)])))[1]
+        assert cmd.kind == "open" and cmd.client_order_id == f"cm42.{mt5_id}:close"
+        assert cmd.payload == {"symbol": "EURUSD.r", "side": "SELL", "lots": 1.0, "sl": 0.0,
+                               "tp": 0.0, "comment": "close:m42"}
+
+        # The terminal reduced the net position; its OUT deal rides with the ack.
+        app.mt5_sync(mt5_id, _sync(
+            seq=7, positions=[_pos(9001, lots=1.0, sl=1.09, tp=1.12)],
+            deals=[_deal(700005, 9001, entry="OUT", side="SELL", price=1.101, profit=10.0,
+                         time_ms=1_757_203_101_000, order=700004)],
+            acks=[_ack(cmd.id, pos=9001, deal=700005, order=700004, price=1.101, lots=1.0)]))
+
+        assert self._by_master(repo) == {42: ("closed", 9001, 0), 43: ("active", 9001, 100)}
+        assert [(c["kind"], c["status"]) for c in _commands(repo, mt5_id)][-1] == ("open", "done")
+        (event,) = _events(repo.dsn, "position_closed")
+        assert (event["payload"]["client_order_id"], event["payload"]["closed_volume"]) == (
+            f"cm42.{mt5_id}", 100)
+        assert [d["deal_id"] for d in repo.load_deals(mt5_id) if d["close"]] == [700005]
+
+    def test_a_close_that_empties_the_net_position_is_acked_with_ticket_0_and_still_closes_its_mapping(
+            self, mt5_world):
+        """Plan 04's EA acks the net position the terminal shows AFTER the
+        fill -- 0 once the last lot is gone (contract §2). The mapping is
+        named by the ack's coid, never by that ticket."""
+        repo, mt5_id, app = mt5_world
+        self._two_copies(repo, mt5_id, app)
+
+        for seq, master, lots_left, pos_after in ((6, 42, 1.0, 9001), (8, 43, 0.0, 0)):
+            app.dispatcher.dispatch([ClosePosition(mt5_id, 9001, 100, master_position_id=master)],
+                                    org_id=ORG_A)
+            (cmd,) = p.parse_response(app.mt5_sync(mt5_id, _sync(
+                seq=seq, positions=[_pos(9001, lots=lots_left + 1.0, sl=1.09, tp=1.12)])))[1]
+            assert cmd.client_order_id == f"cm{master}.{mt5_id}:close"
+            app.mt5_sync(mt5_id, _sync(
+                seq=seq + 1,
+                positions=[_pos(9001, lots=lots_left, sl=1.09, tp=1.12)] if lots_left else [],
+                deals=[_deal(700000 + seq, 9001, entry="OUT", side="SELL", price=1.101,
+                             profit=10.0, time_ms=1_757_203_101_000 + seq, order=700000 + seq - 1)],
+                acks=[_ack(cmd.id, pos=pos_after, deal=700000 + seq, order=700000 + seq - 1,
+                           price=1.101, lots=1.0)]))
+
+        assert self._by_master(repo) == {42: ("closed", 9001, 0), 43: ("closed", 9001, 0)}
+        assert [(e["payload"]["client_order_id"], e["payload"]["closed_volume"])
+                for e in _events(repo.dsn, "position_closed")] == [
+            (f"cm42.{mt5_id}", 100), (f"cm43.{mt5_id}", 100)]
+        assert [(c["kind"], c["status"]) for c in _commands(repo, mt5_id)][-2:] == [
+            ("open", "done"), ("open", "done")]
+        assert [d["deal_id"] for d in repo.load_deals(mt5_id) if d["close"]] == [700006, 700008]
+
+    def test_an_opposite_side_copy_nets_against_the_older_copy_without_closing_it(self, mt5_world):
+        """Spec "Opposite positions": the master holds BUY 42 and opens SELL
+        45 on the same symbol. On the follower the SELL copy is a plain
+        open whose fill REDUCES the net position -- here it empties it, so
+        plan 04's EA acks pos 0 and the deal names the position. Both
+        masters are open, so both copies stay active with their own
+        volumes: the OUT deal is the SELL copy's own fill, not a close of
+        the BUY copy."""
+        repo, mt5_id, app = mt5_world
+        app.mt5_hello(mt5_id, _hello(hedging=False))
+        app.mt5_sync(mt5_id, _sync(seq=1))
+        app.dispatcher.dispatch([_open_intent(mt5_id, master_position_id=42)], org_id=ORG_A)
+        (first,) = p.parse_response(app.mt5_sync(mt5_id, _sync(seq=2)))[1]
+        app.mt5_sync(mt5_id, _sync(
+            seq=3, positions=[_pos(9001, lots=1.0, sl=1.09, tp=1.12)],
+            deals=[_deal(700001, 9001, order=700000)],
+            acks=[_ack(first.id, pos=9001, deal=700001, order=700000, price=1.1, lots=1.0)]))
+
+        app.dispatcher.dispatch([_open_intent(mt5_id, master_position_id=45, side=Side.SELL)],
+                                org_id=ORG_A)
+        (second,) = p.parse_response(app.mt5_sync(
+            mt5_id, _sync(seq=4, positions=[_pos(9001, lots=1.0, sl=1.09, tp=1.12)])))[1]
+        assert (second.kind, second.payload["side"], second.client_order_id) == (
+            "open", "SELL", f"cm45.{mt5_id}")
+        # The terminal netted the SELL against the BUY: one OUT deal for the
+        # whole lot, no position left, an ack whose pos is 0.
+        app.mt5_sync(mt5_id, _sync(
+            seq=5, positions=[],
+            deals=[_deal(700003, 9001, entry="OUT", side="SELL", price=1.1, order=700002,
+                         time_ms=1_757_203_100_500)],
+            acks=[_ack(second.id, pos=0, deal=700003, order=700002, price=1.1, lots=1.0)]))
+
+        assert self._by_master(repo) == {42: ("active", 9001, 100), 45: ("active", 9001, 100)}
+        assert [(c["kind"], c["status"]) for c in _commands(repo, mt5_id)] == [
+            ("open", "done"), ("open", "done")]
+        assert _events(repo.dsn, "position_closed") == []
+        assert _events(repo.dsn, "mt5_open_ack_without_position") == []
+        (netted,) = _events(repo.dsn, "mt5_netting_opposite_copy")
+        assert (netted["payload"]["client_order_id"], netted["payload"]["position"],
+                netted["payload"]["entry"], netted["payload"]["volume"],
+                netted["payload"]["nets_against"]) == (f"cm45.{mt5_id}", 9001, "OUT", 100, [42])
+
+    def test_a_terminal_side_close_reduces_the_copies_oldest_first(self, mt5_world):
+        repo, mt5_id, app = mt5_world
+        self._two_copies(repo, mt5_id, app)
+
+        # The owner trims 1.50 lots by hand: the older copy goes first, then
+        # a third of the younger one.
+        app.mt5_sync(mt5_id, _sync(
+            seq=6, positions=[_pos(9001, lots=0.5, sl=1.09, tp=1.12)],
+            deals=[_deal(700005, 9001, entry="OUT", side="SELL", lots=1.5, price=1.09,
+                         profit=-150.0, time_ms=1_757_203_101_000)],
+            balance=9850.0))
+        assert self._by_master(repo) == {42: ("closed", 9001, 0), 43: ("active", 9001, 50)}
+        events = _events(repo.dsn, "position_closed")
+        assert [(e["payload"]["client_order_id"], e["payload"]["closed_volume"])
+                for e in events] == [(f"cm42.{mt5_id}", 100), (f"cm43.{mt5_id}", 50)]
+
+        # Then the net stop takes the rest.
+        app.mt5_sync(mt5_id, _sync(
+            seq=7, positions=[],
+            deals=[_deal(700007, 9001, entry="OUT", side="SELL", lots=0.5, price=1.09,
+                         profit=-50.0, time_ms=1_757_203_102_000)],
+            balance=9800.0))
+        assert self._by_master(repo) == {42: ("closed", 9001, 0), 43: ("closed", 9001, 0)}
+        assert _commands(repo, mt5_id)[-1]["kind"] == "open"      # nothing was queued for the terminal's own closes
+
+    def test_the_shared_protection_override_is_recorded(self, mt5_world):
+        repo, mt5_id, app = mt5_world
+        self._two_copies(repo, mt5_id, app)
+        (event,) = _events(repo.dsn, "mt5_netting_protection_override")
+        assert event["account_id"] == mt5_id
+        assert (event["payload"]["position"], event["payload"]["set_by"],
+                event["payload"]["overrides"], event["payload"]["stop_loss"],
+                event["payload"]["take_profit"]) == (9001, f"cm43.{mt5_id}", [42], 1.09, 1.12)
+
+        # An amend for one copy moves the stop every copy on the symbol shares.
+        app.dispatcher.dispatch([AmendPositionSLTP(mt5_id, 9001, 1.095, 1.12)], org_id=ORG_A)
+        (cmd,) = p.parse_response(app.mt5_sync(
+            mt5_id, _sync(seq=6, positions=[_pos(9001, lots=2.0, sl=1.09, tp=1.12)])))[1]
+        assert cmd.kind == "amend" and cmd.payload == {"position": 9001, "sl": 1.095, "tp": 1.12}
+        app.mt5_sync(mt5_id, _sync(
+            seq=7, positions=[_pos(9001, lots=2.0, sl=1.095, tp=1.12)], acks=[_ack(cmd.id, pos=9001)]))
+        events = _events(repo.dsn, "mt5_netting_protection_override")
+        assert len(events) == 2
+        assert (events[1]["payload"]["set_by"], sorted(events[1]["payload"]["overrides"]),
+                events[1]["payload"]["stop_loss"]) == (None, [42, 43], 1.095)
+        assert _account(repo, mt5_id).status == "ok"
+
+    def test_a_refused_close_leaves_the_mapping_open(self, mt5_world):
+        repo, mt5_id, app = mt5_world
+        self._two_copies(repo, mt5_id, app)
+        app.dispatcher.dispatch([ClosePosition(mt5_id, 9001, 100, master_position_id=42)],
+                                org_id=ORG_A)
+        (cmd,) = p.parse_response(app.mt5_sync(
+            mt5_id, _sync(seq=6, positions=[_pos(9001, lots=2.0, sl=1.09, tp=1.12)])))[1]
+        app.mt5_sync(mt5_id, _sync(
+            seq=7, positions=[_pos(9001, lots=2.0, sl=1.09, tp=1.12)],
+            acks=[_ack(cmd.id, ok=False, retcode=10018, msg="Market is closed")]))
+        assert self._by_master(repo) == {42: ("active", 9001, 100), 43: ("active", 9001, 100)}
+        account = _account(repo, mt5_id)
+        assert (account.status, account.last_error) == (
+            "degraded", "terminal rejected close: Market is closed")
+
+
+class TestNettingMaster:
+    """A netting MT5 master: its deals expand into virtual positions the
+    cTrader follower copies one by one."""
+
+    def test_add_add_reduce_and_reverse_fan_out_by_virtual_id(self, netting_master_world):
+        repo, org_b, master_id, build = netting_master_world
+        app = build()
+        app.mt5_hello(master_id, _hello(hedging=False))
+        app.mt5_sync(master_id, _sync(seq=1))
+
+        # add, add
+        app.mt5_sync(master_id, _sync(
+            seq=2, positions=[_pos(5, lots=0.5, sl=1.09)],
+            deals=[_deal(700001, 5, lots=0.5, price=1.1, order=700000, time_ms=1_000)]))
+        app.mt5_sync(master_id, _sync(
+            seq=3, positions=[_pos(5, lots=0.8, sl=1.09)],
+            deals=[_deal(700003, 5, lots=0.3, price=1.101, order=700002, time_ms=2_000)]))
+        by_master = {m["master_position_id"]: m for m in repo.mapping_rows(org_id=org_b)}
+        assert set(by_master) == {700001, 700003}
+        assert by_master[700001]["client_order_id"] == f"cm700001.{SLAVE_B1}"
+        assert [(r["virtual_id"], r["side"], r["volume_left"], r["stop_loss"])
+                for r in repo.load_net_ledger(master_id)] == [
+            (700001, "BUY", 50, 1.09), (700003, "BUY", 30, 1.09)]
+        with psycopg.connect(repo.dsn, autocommit=True) as conn:
+            (master_fill_price,) = conn.execute(
+                "SELECT master_fill_price FROM mappings WHERE client_order_id = %s",
+                (f"cm700003.{SLAVE_B1}",)).fetchone()
+        assert master_fill_price == 1.101
+
+        # partial reduce: 0.6 lots out -> the older virtual position closes,
+        # the younger loses 0.1
+        app.mt5_sync(master_id, _sync(
+            seq=4, positions=[_pos(5, lots=0.2, sl=1.09)],
+            deals=[_deal(700005, 5, entry="OUT", side="SELL", lots=0.6, price=1.105, profit=30.0,
+                         time_ms=3_000)]))
+        assert [(r["virtual_id"], r["volume_left"]) for r in repo.load_net_ledger(master_id)] == [
+            (700003, 20)]
+        closes = [d for d in repo.load_deals(master_id) if d["close"]]
+        assert closes[0]["close"]["entry_price"] == 1.1 and closes[0]["close"]["closed_volume"] == 60
+
+        # the net stop moves: every virtual position is amended
+        app.mt5_sync(master_id, _sync(seq=5, positions=[_pos(5, lots=0.2, sl=1.095)]))
+
+        # reversal: SELL 0.5 against 0.2 BUY -> INOUT: close all, open 0.3 SELL
+        app.mt5_sync(master_id, _sync(
+            seq=6, positions=[_pos(5, side="SELL", lots=0.3)],
+            deals=[_deal(700007, 5, entry="INOUT", side="SELL", lots=0.5, price=1.104, profit=6.0,
+                         time_ms=4_000)]))
+        assert [(r["virtual_id"], r["side"], r["volume_left"])
+                for r in repo.load_net_ledger(master_id)] == [(700007, "SELL", 30)]
+        assert 700007 in {m["master_position_id"] for m in repo.mapping_rows(org_id=org_b)}
+        master_events = [e["payload"]["normalized"] for e in _events(repo.dsn)
+                         if e["category"] == "master_event"]
+        assert master_events == [
+            "MasterPositionOpened", "MasterPositionOpened",
+            "MasterPositionClosed", "MasterPositionClosed",
+            "MasterPositionSLTPAmended",
+            "MasterPositionClosed", "MasterPositionOpened"]
+        with psycopg.connect(repo.dsn, autocommit=True) as conn:
+            rows = conn.execute(
+                "SELECT position_id, volume, status FROM positions WHERE account_id = %s"
+                " ORDER BY position_id", (master_id,)).fetchall()
+        assert [r for r in rows if r[2] == "open"] == [(700007, 30, "open")]
+
+    def test_get_state_and_a_restart_see_the_virtual_positions(self, netting_master_world):
+        repo, org_b, master_id, build = netting_master_world
+        app = build()
+        app.mt5_hello(master_id, _hello(hedging=False))
+        app.mt5_sync(master_id, _sync(
+            seq=1, positions=[_pos(5, lots=0.8, price=1.102, pnl=8.0)],
+            deals=[_deal(700001, 5, lots=0.5, time_ms=1_000),
+                   _deal(700003, 5, lots=0.3, time_ms=2_000)],
+            balance=5000.0, equity=5008.0))
+        reconciler = app.reconcilers[org_b]
+        reconciler.master_positions, reconciler.master_orders = app._mt5_snapshot_provider(master_id)
+        assert [p_.position_id for p_ in reconciler.master_positions] == [700001, 700003]
+
+        state = app.get_state(org_b)
+
+        assert [(pos["position_id"], pos["volume"], pos["pnl_quote"], pos["current_price"])
+                for pos in state["master_positions"]] == [
+            (700001, 50, 5.0, 1.102), (700003, 30, 3.0, 1.102)]
+        assert [(pos["position_id"], pos["pnl_quote"])
+                for pos in state["accounts"][master_id]["positions"]] == [
+            (700001, 5.0), (700003, 3.0)]
+        assert state["accounts"][master_id]["equity"] == 5008.0
+        with psycopg.connect(repo.dsn, autocommit=True) as conn:
+            rows = conn.execute(
+                "SELECT position_id, volume, status FROM positions WHERE account_id = %s"
+                " ORDER BY position_id", (master_id,)).fetchall()
+        assert rows == [(700001, 50, "open"), (700003, 30, "open")]
+
+        # The copier restarts: the ledger comes back from Postgres, the first
+        # report diffs nothing, and the next OUT still consumes oldest-first.
+        fresh = build()
+        fresh.mt5_hello(master_id, _hello(hedging=False))
+        fresh.mt5_sync(master_id, _sync(seq=1, positions=[_pos(5, lots=0.8)]))
+        fresh.mt5_sync(master_id, _sync(
+            seq=2, positions=[_pos(5, lots=0.2)],
+            deals=[_deal(700005, 5, entry="OUT", side="SELL", lots=0.6, price=1.105, profit=30.0,
+                         time_ms=3_000)]))
+        assert [(r["virtual_id"], r["volume_left"]) for r in repo.load_net_ledger(master_id)] == [
+            (700003, 20)]
+        master_events = [e["payload"]["normalized"] for e in _events(repo.dsn)
+                         if e["category"] == "master_event"]
+        assert master_events[-2:] == ["MasterPositionClosed", "MasterPositionClosed"]
+
+
 class TestGetState:
     def test_mt5_accounts_are_served_from_the_registry(self, mt5_world):
         repo, mt5_id, app = mt5_world
@@ -6037,6 +8032,7 @@ class TestCtraderLoopsSkipMt5:
                 assert mt5_id not in client._accounts
         assert _account(repo, mt5_id).status == "ok"
         assert app.reconcilers[ORG_A].snapshot_provider is app._mt5_snapshot_provider
+        assert app.reconcilers[ORG_A].netting_slaves is app._mt5_netting_slaves
 
 
 class TestOperatorActions:
@@ -6213,9 +8209,12 @@ and after `self._clients_by_account = clients_by_account` (line 277) add:
 ```python
         self.mt5_registry = mt5_registry
         self.mt5_outbox = mt5_outbox
-        # Answers an MT5 account's book to the reconcilers; built here so
-        # reload() hands new Reconcilers the same callable.
+        # Answers an MT5 account's book to the reconcilers, and which MT5
+        # followers are netting accounts (their net positions are compared
+        # with the sum of their copies, Task 12b); built here so reload()
+        # hands new Reconcilers the same callables.
         self._mt5_snapshot_provider = _build_mt5_snapshot_provider(routing_provider, mt5_registry)
+        self._mt5_netting_slaves = _build_mt5_netting_slaves(routing_provider, mt5_registry)
         self.mt5_lane = MT5Lane(self)
         # canonical -> broker name per MT5 account; cleared on reload() and
         # after every hello, the two moments aliases can change.
@@ -6223,6 +8222,12 @@ and after `self._clients_by_account = clients_by_account` (line 277) add:
         # account_id -> clock seconds of the last touch_mt5_link write
         # (MT5_LINK_TOUCH_INTERVAL_S throttle).
         self._mt5_last_touch: dict[int, float] = {}
+        # account_id -> deal tickets acked by a command that names a copy
+        # (an open's fill, a ':close') and not yet seen in a report: the
+        # ack did their bookkeeping, so _mt5_slave_deals must not book them
+        # again when the terminal reports them -- in the same sync as the
+        # ack or, past MAX_DEALS_PER_SYNC, the next one.
+        self._mt5_settled_deals: dict[int, set[int]] = {}
 ```
 
 (e) After `state_tracker_for_account` (after line 357) add:
@@ -6533,6 +8538,7 @@ and after `self._clients_by_account = clients_by_account` (line 277) add:
                     clients_by_account=self._clients_by_account, repo=self.repo,
                     dispatcher=self.dispatcher, master_account_id=master_id,
                     org_id=org_id, snapshot_provider=self._mt5_snapshot_provider,
+                    netting_slaves=self._mt5_netting_slaves,
                 )
             elif reconciler.master_account_id != master_id:
                 reconciler.master_account_id = master_id
@@ -6705,8 +8711,16 @@ Still in `copier/src/copier/main.py`:
                    if platform == 'mt5' and routing.org_by_account.get(aid) == org_id}
         # MT5 accounts' balance, equity, open P&L and marked positions come
         # from the terminal's own reports, not from the state tracker.
+        # A netting MASTER is marked by virtual position (the ids its copies
+        # carry), its P&L split by volume share.
+        netting_master = (
+            reconciler.master_account_id
+            if reconciler is not None and reconciler.master_account_id in mt5_ids
+            and self.mt5_registry.margin_mode(reconciler.master_account_id) == "netting"
+            else None)
         for account_id in mt5_ids:
-            block = self.mt5_registry.account_block(account_id)
+            block = self.mt5_registry.account_block(
+                account_id, virtual=(account_id == netting_master))
             if block is not None:
                 accounts_snapshot[account_id] = block
         mappings = self.repo.mapping_rows(org_id=org_id)
@@ -6789,15 +8803,14 @@ Still in `copier/src/copier/main.py`:
                 org_symbols = self.master_symbols_by_org.setdefault(account.org_id, {})
                 org_symbols.clear()
                 org_symbols.update(symbols_by_id(self.mt5_registry.symbols_by_name(account_id)))
-            if hello.hedging:
-                if self.repo.clear_degraded(account_id):
-                    self.repo.log_event(
-                        'slave_action', 'info',
-                        {'action': 'degraded_cleared', 'reason': 'terminal reconnected'},
-                        account_id=account_id, org_id=account.org_id)
-            else:
-                self.repo.set_account_status(
-                    account_id, 'degraded', 'netting account not supported')
+            # Hedging and netting are both accepted (spec "Netting accounts");
+            # the mode is recorded on the link row and reported by mt5_status.
+            # A reconnecting terminal clears an earlier offline/rejection status.
+            if self.repo.clear_degraded(account_id):
+                self.repo.log_event(
+                    'slave_action', 'info',
+                    {'action': 'degraded_cleared', 'reason': 'terminal reconnected'},
+                    account_id=account_id, org_id=account.org_id)
             self.repo.log_event(
                 'connection', 'info',
                 {'action': 'mt5_hello', 'login': hello.login, 'broker': hello.broker,
@@ -6842,11 +8855,12 @@ Still in `copier/src/copier/main.py`:
         Order matters. The report is stored first (so everything below
         sees the terminal's current book); acks settle commands and drive
         mapping bookkeeping; deals are ingested once (watermark) and, for
-        the org's master, turned into MasterEvents; finally the outbox
-        hands over what is due. A netting account is told to STOP. The
-        link row's balance/equity/last_seen_at are written at most once
-        per MT5_LINK_TOUCH_INTERVAL_S per account (the api throttles its
-        own write of those columns the same way).
+        the org's master, turned into MasterEvents -- through the net
+        ledger when the master is a netting account, whose dirty rows and
+        virtual positions are then persisted; finally the outbox hands
+        over what is due. The link row's balance/equity/last_seen_at are
+        written at most once per MT5_LINK_TOUCH_INTERVAL_S per account
+        (the api throttles its own write of those columns the same way).
         """
         now = self._clock_seconds()
         server_ms = int(now * 1000)
@@ -6856,31 +8870,44 @@ Still in `copier/src/copier/main.py`:
         report = mt5_protocol.parse_sync(body)
         org_id = account.org_id
         registry = self.mt5_registry
+        netting = registry.margin_mode(account_id) == "netting"
+        is_master = self.routing_provider().master_by_org.get(org_id) == account_id
 
         was_online = registry.is_online(account_id, now)
         previous = registry.snapshot(account_id, with_labels=False)
-        registry.update_from_sync(account_id, org_id, report, now)
+        previous_report = registry.report(account_id)
+        # A netting master's positions table holds its VIRTUAL positions,
+        # written by _persist_net_ledger once the ledger has absorbed this
+        # report's deals; everyone else persists the terminal's book here.
+        registry.update_from_sync(account_id, org_id, report, now,
+                                  persist=not (netting and is_master))
         if now - self._mt5_last_touch.get(account_id, float("-inf")) >= MT5_LINK_TOUCH_INTERVAL_S:
             self.repo.touch_mt5_link(
                 account_id, balance=report.balance, equity=report.equity,
                 seen_at=datetime.fromtimestamp(now, tz=timezone.utc))
             self._mt5_last_touch[account_id] = now
-        if registry.hedging(account_id) is False:
-            return mt5_protocol.encode_response(
-                "STOP", server_ms, 0, [], reason="netting account not supported")
         if not was_online:
             self._mt5_back_online(account_id, org_id)
 
         outcomes = self.mt5_outbox.apply_acks(account_id, report.acks)
+        # An ack is paired with the deal it produced by the deal ticket
+        # (contract §2): the EA reports the deal in the same sync as the
+        # ack, or the next one past MAX_DEALS_PER_SYNC.
+        deals_by_ticket = {d.ticket: d for d in report.deals}
         for outcome in outcomes:
-            self._apply_mt5_outcome(org_id, account_id, outcome)
+            self._apply_mt5_outcome(org_id, account_id, outcome, netting=netting,
+                                    deals_by_ticket=deals_by_ticket)
 
-        fresh = self._ingest_mt5_deals(account_id, org_id, report, previous)
-        if self.routing_provider().master_by_org.get(org_id) == account_id:
-            self._mt5_master_events(account_id, org_id, dc_replace(report, deals=fresh), previous)
-        elif fresh and account.role == 'slave':
-            acked = {o.position for o in outcomes if o.ok and o.kind == 'open' and o.position}
-            self._mt5_slave_deals(org_id, account_id, fresh, acked)
+        fresh = self._ingest_mt5_deals(account_id, org_id, report, previous_report)
+        if is_master:
+            self._mt5_master_events(account_id, org_id, dc_replace(report, deals=fresh), previous,
+                                    netting=netting)
+            if netting:
+                self._persist_net_ledger(account_id)
+        elif account.role == 'slave' and (fresh or outcomes):
+            # Called on acks too: an acked deal not in this report is
+            # remembered so the next report does not book it again.
+            self._mt5_slave_deals(org_id, account_id, fresh, outcomes, netting=netting)
 
         commands = self.mt5_outbox.deliverable(account_id, now)
         if fresh or outcomes:
@@ -6893,31 +8920,84 @@ Still in `copier/src/copier/main.py`:
             self.repo.log_event('connection', 'info', {'action': 'mt5_online'},
                                 account_id=account_id, org_id=org_id)
 
-    def _apply_mt5_outcome(self, org_id: int, account_id: int, outcome) -> None:
+    def _apply_mt5_outcome(self, org_id: int, account_id: int, outcome,
+                           netting: bool = False, deals_by_ticket: dict | None = None) -> None:
         """One settled command -> the same mapping bookkeeping a cTrader
-        execution event drives, plus the account's degraded status."""
+        execution event drives, plus the account's degraded status.
+
+        `deals_by_ticket` is this report's deals: an ack is paired with the
+        deal it produced (AckOutcome.deal), which on a netting follower
+        says what the fill did to the net position (its entry) and names
+        the position when the ack could not (pos 0: the fill emptied it)."""
+        deal = (deals_by_ticket or {}).get(outcome.deal) if outcome.deal else None
         if not outcome.ok:
             reason = f"terminal rejected {outcome.kind}: {outcome.message}"
-            self.service.handle_slave_rejection(org_id, account_id, outcome.client_order_id, reason)
+            # A refused close or amend leaves the copy open: only a refused
+            # open/place_pending fails its mapping. (A netting follower's
+            # close is reported as kind "close" under the mapping's coid.)
+            coid = outcome.client_order_id if outcome.kind in ('open', 'place_pending') else None
+            self.service.handle_slave_rejection(org_id, account_id, coid, reason)
             self.repo.set_account_status(account_id, 'degraded', reason)
             return
         if outcome.kind == 'open':
-            if outcome.position is None:
+            # The EA acks the position the fill landed in. On a netting
+            # follower that is the net position the terminal shows AFTER
+            # the fill -- 0 when the fill emptied it (plan 04 DoOpen) -- and
+            # the deal still names it (contract §2).
+            ticket = outcome.position or (deal.position if deal is not None else None)
+            if not ticket:
                 self.repo.log_event(
                     'slave_action', 'warning',
-                    {'action': 'mt5_open_ack_without_position', 'command_id': outcome.command_id},
+                    {'action': 'mt5_open_ack_without_position', 'command_id': outcome.command_id,
+                     'deal': outcome.deal},
                     account_id=account_id, org_id=org_id)
             else:
-                pos = self.mt5_registry.position(account_id, outcome.position)
+                pos = self.mt5_registry.position(account_id, ticket)
                 self.service.handle_slave_fill(org_id, SlaveFill(
                     account_id=account_id, client_order_id=outcome.client_order_id,
-                    position_id=outcome.position, filled_volume=outcome.volume or 0,
+                    position_id=ticket, filled_volume=outcome.volume or 0,
                     fill_price=outcome.price, closed_volume=None,
                     # An operator's open carries no client_order_id; every copy does.
                     label=MANUAL_ORDER_LABEL if outcome.client_order_id is None else "",
                     order_id=outcome.order,
                     stop_loss=pos.stop_loss if pos is not None else None,
                     take_profit=pos.take_profit if pos is not None else None))
+                if netting:
+                    # The fill went into the symbol's single net position and
+                    # the deal's entry says what it did to it: IN grew it, OUT
+                    # reduced or emptied it, INOUT flipped it. An opposite-side
+                    # COPY (spec "Opposite positions": the master holds BUY and
+                    # opens SELL) is still a copy -- its mapping is active on
+                    # the net ticket, and the older copies it netted against
+                    # are the master's to close, not this fill's: the deal is
+                    # settled by this ack and never reaches the FIFO reduction
+                    # (_mt5_slave_deals). Recorded so the operator can see why
+                    # the net position shrank without any copy closing.
+                    if (outcome.client_order_id and deal is not None
+                            and deal.entry in CLOSE_ENTRIES):
+                        self.repo.log_event(
+                            'slave_action', 'info',
+                            {'action': 'mt5_netting_opposite_copy',
+                             'client_order_id': outcome.client_order_id, 'position': ticket,
+                             'entry': deal.entry, 'volume': outcome.volume or 0,
+                             'nets_against': self._copies_sharing(
+                                 org_id, account_id, ticket, outcome.client_order_id)},
+                            account_id=account_id, org_id=org_id)
+                    self._record_netting_override(
+                        org_id, account_id, ticket, outcome.client_order_id)
+        elif outcome.kind == 'close' and outcome.client_order_id:
+            # A netting follower's close of ONE copy: the outbox queued it as
+            # an opposite-side open under the mapping's coid + ':close' and
+            # reports its ack as this close. Reduce exactly that mapping --
+            # by its coid alone (Task 4): the ack's ticket is the net
+            # position AFTER the fill, 0 when this close emptied it. The
+            # OUT/INOUT deal it produced is settled by this ack and skipped
+            # by ticket in _mt5_slave_deals (AckOutcome.deal).
+            self.service.handle_slave_fill(org_id, SlaveFill(
+                account_id=account_id, client_order_id=outcome.client_order_id,
+                position_id=outcome.position or (deal.position if deal is not None else 0),
+                filled_volume=outcome.volume or 0,
+                fill_price=outcome.price, closed_volume=outcome.volume or 0, label=""))
         elif outcome.kind == 'place_pending':
             self.service.handle_slave_order_accepted(
                 org_id, account_id, outcome.client_order_id, outcome.order)
@@ -6931,22 +9011,60 @@ Still in `copier/src/copier/main.py`:
                 {'action': f'mt5_{outcome.kind}_done', 'command_id': outcome.command_id,
                  'position': outcome.position, 'order': outcome.order},
                 account_id=account_id, org_id=org_id)
+            if netting and outcome.kind == 'amend' and outcome.position is not None:
+                self._record_netting_override(org_id, account_id, outcome.position, None)
         if self.repo.clear_degraded(account_id):
             self.repo.log_event(
                 'slave_action', 'info',
                 {'action': 'degraded_cleared', 'reason': 'terminal executed a command'},
                 account_id=account_id, org_id=org_id)
 
-    def _ingest_mt5_deals(self, account_id: int, org_id: int, report, previous) -> list:
+    def _record_netting_override(self, org_id: int, account_id: int, position: int,
+                                 set_by: str | None) -> None:
+        """One stop and one target per symbol on a netting account: the
+        latest open or amend sets them for every copy sharing the net
+        position (spec "Netting accounts"). Recorded whenever other active
+        copies share the ticket, so the operator can see whose levels they
+        now carry. `set_by` is the coid of the copy that set them, None for
+        an amend (which names no copy)."""
+        others = self._copies_sharing(org_id, account_id, position, set_by)
+        if not others:
+            return
+        pos = self.mt5_registry.position(account_id, position)
+        self.repo.log_event(
+            'slave_action', 'info',
+            {'action': 'mt5_netting_protection_override', 'position': position,
+             'set_by': set_by, 'overrides': others,
+             'stop_loss': pos.stop_loss if pos is not None else None,
+             'take_profit': pos.take_profit if pos is not None else None,
+             'detail': 'one stop and one target per symbol on a netting account: the latest '
+                       'open or amend sets them for every copy sharing the net position'},
+            account_id=account_id, org_id=org_id)
+
+    def _copies_sharing(self, org_id: int, account_id: int, position: int,
+                        except_coid: str | None) -> list[int]:
+        """Master ids of the OTHER active copies on a net ticket (every copy
+        on a symbol shares it on a netting follower), sorted."""
+        return sorted({
+            m['master_position_id'] for m in self.repo.mapping_rows(org_id=org_id)
+            if m['slave_account_id'] == account_id and m['slave_position_id'] == position
+            and m['status'] == 'active' and m['master_position_id']
+            and m['client_order_id'] != except_coid})
+
+    def _ingest_mt5_deals(self, account_id: int, org_id: int, report, previous_report) -> list:
         """Store the deals past the watermark, estimate balance_after for
-        them, advance the watermark. Returns the fresh deals (time order)."""
+        them, advance the watermark. Returns the fresh deals (time order).
+        Entry prices for the close rows come from the position as it stood
+        in the previous report (a fully closed position is gone from this
+        one) or in this one."""
         last_ticket, _time_ms = self.repo.mt5_watermark(account_id)
         fresh = sorted((d for d in report.deals if d.ticket > last_ticket),
                        key=lambda d: (d.time_ms, d.ticket))
         if not fresh:
             return []
         symbols = self.mt5_registry.symbols_by_name(account_id)
-        entry_prices = {p.position_id: p.price for p in (previous[0] if previous else [])}
+        entry_prices = {p.ticket: p.open_price
+                        for p in (previous_report.positions if previous_report is not None else [])}
         entry_prices.update({p.ticket: p.open_price for p in report.positions})
         rows = deal_rows(fresh, report.balance, symbols, entry_prices.get)
         inserted = self.repo.upsert_mt5_deals(account_id, org_id, rows)
@@ -6961,13 +9079,17 @@ Still in `copier/src/copier/main.py`:
         log.info("mt5 account %s: %d new deal(s) ingested", account_id, inserted)
         return fresh
 
-    def _mt5_master_events(self, account_id: int, org_id: int, report, previous) -> None:
+    def _mt5_master_events(self, account_id: int, org_id: int, report, previous,
+                           netting: bool = False) -> None:
         """The org's MT5 master reported: derive and act on its events, then
-        stamp the master half of the slippage measurement onto the copies."""
+        stamp the master half of the slippage measurement onto the copies.
+        A netting master's deals go through its ledger (virtual positions,
+        ids = deal tickets)."""
         reverse = {broker: canonical
                    for canonical, broker in self._mt5_aliases(account_id).items()}
         symbols = self.mt5_registry.symbols_by_name(account_id)
-        for event in master_events_from_report(report, previous, reverse, symbols):
+        ledger = self.mt5_registry.net_ledger(account_id) if netting else None
+        for event in master_events_from_report(report, previous, reverse, symbols, ledger=ledger):
             try:
                 self.service.act_on_master_event(org_id, account_id, event, source="mt5")
             except Exception as e:
@@ -6979,20 +9101,64 @@ Still in `copier/src/copier/main.py`:
                      'error': f"{type(e).__name__}: {e}", 'error_type': type(e).__name__},
                     org_id=org_id)
         for d in report.deals:
-            if d.entry == "IN" and d.deal_type in TRADE_TYPES:
+            if d.deal_type not in TRADE_TYPES:
+                continue
+            # On a netting master the copies are keyed by the deal ticket
+            # (the virtual id), a reversal's remainder included.
+            if netting and d.entry in ("IN", "INOUT"):
+                self.repo.record_master_fill(org_id, d.ticket, d.price, d.time_ms)
+            elif not netting and d.entry == "IN":
                 self.repo.record_master_fill(org_id, d.position, d.price, d.time_ms)
 
-    def _mt5_slave_deals(self, org_id: int, account_id: int, deals, acked_positions: set) -> None:
+    def _persist_net_ledger(self, account_id: int) -> None:
+        """A netting master's ledger after this report: dirty virtual
+        positions to mt5_net_ledger (a restart rebuilds the ledger from
+        them), then the positions table from the virtual book (what the
+        Positions page and a restart read)."""
+        ledger = self.mt5_registry.net_ledger(account_id)
+        upserts, deleted = ledger.dirty_rows()
+        if upserts:
+            self.repo.upsert_net_ledger(account_id, [v.row() for v in upserts])
+        if deleted:
+            self.repo.delete_net_ledger(account_id, deleted)
+        if upserts or deleted:
+            self.mt5_registry.persist_virtual_positions(account_id)
+
+    def _mt5_slave_deals(self, org_id: int, account_id: int, deals, outcomes,
+                         netting: bool = False) -> None:
         """A follower terminal's own deals: an OUT on a mapped position (a
-        stop hit, the owner closing by hand) reduces the mapping; an IN not
-        already activated by an ack is a pending copy filling, an
-        operator's order, or an unmatched fill."""
+        stop hit, the owner closing by hand) reduces the mapping -- on a
+        netting follower the copies sharing the net position, oldest first
+        (reduce_position_mappings_fifo); an IN not already activated by an
+        ack is a pending copy filling, an operator's order, or an unmatched
+        fill.
+
+        A deal produced by a command that NAMES A COPY is never the
+        terminal's own doing, so it is skipped by its ticket: the ack did
+        the bookkeeping already -- a copy's open activated its mapping
+        whatever the fill did to a net position (grew, reduced, emptied or
+        flipped it: an opposite-side copy is a copy, not a close of the
+        older ones), a ':close' reduced its mapping under its coid. The
+        tickets are kept per account until the terminal reports the deal,
+        in the same sync as the ack or the next one (MAX_DEALS_PER_SYNC).
+        An operator's own open on the net position is NOT in the set: its
+        OUT/INOUT deal really did take volume from the copies, and goes
+        through the FIFO reduction like a close by hand."""
+        settled = self._mt5_settled_deals.setdefault(account_id, set())
+        settled.update(o.deal for o in outcomes
+                       if o.ok and o.deal and o.client_order_id and o.kind in ('open', 'close'))
+        acked_positions = {o.position for o in outcomes if o.ok and o.kind == 'open' and o.position}
         known = {m['slave_position_id'] for m in self.repo.mapping_rows(org_id=org_id)
                  if m['slave_account_id'] == account_id and m['slave_position_id']}
         for d in deals:
             if d.deal_type not in TRADE_TYPES:
                 continue
+            if d.ticket in settled:
+                settled.discard(d.ticket)
+                continue
             if d.entry == "IN":
+                # On a netting follower every copy on a symbol shares the net
+                # ticket, so an add to a mapped ticket is never a fill of its own.
                 if d.position in known or d.position in acked_positions:
                     continue
                 pos = self.mt5_registry.position(account_id, d.position)
@@ -7004,6 +9170,16 @@ Still in `copier/src/copier/main.py`:
                     stop_loss=pos.stop_loss if pos is not None else None,
                     take_profit=pos.take_profit if pos is not None else None)
             elif d.entry in CLOSE_ENTRIES:
+                if netting:
+                    for row in self.repo.reduce_position_mappings_fifo(
+                            account_id, d.position, d.volume):
+                        self.repo.log_event(
+                            'slave_action', 'info',
+                            {'action': 'position_closed', 'slave_position_id': d.position,
+                             'client_order_id': row['client_order_id'],
+                             'closed_volume': row['closed_volume']},
+                            account_id=account_id, org_id=org_id)
+                    continue
                 fill = SlaveFill(
                     account_id=account_id, client_order_id=None, position_id=d.position,
                     filled_volume=d.volume, fill_price=d.price, closed_volume=d.volume,
@@ -7082,13 +9258,36 @@ def _build_mt5_snapshot_provider(routing_provider: Callable[[], OrgRouting], reg
     """The reconciler's snapshot_provider: an MT5 account's book from the
     registry (empty before its first report -- the terminal is the only
     source, and asking a cTrader client would answer for the wrong
-    account), None for a cTrader account."""
+    account), None for a cTrader account. A netting MASTER's book is its
+    ledger's virtual positions: the ids its followers' mappings carry, so
+    drift lines up by virtual id."""
     def provider(account_id: int):
-        if routing_provider().platform_by_account.get(account_id) != 'mt5':
+        routing = routing_provider()
+        if routing.platform_by_account.get(account_id) != 'mt5':
             return None
-        return registry.snapshot(account_id) or ([], [])
+        org_id = routing.org_by_account.get(account_id)
+        virtual = (routing.master_by_org.get(org_id) == account_id
+                   and registry.margin_mode(account_id) == "netting")
+        return registry.snapshot(account_id, virtual=virtual) or ([], [])
 
     return provider
+
+
+def _build_mt5_netting_slaves(routing_provider: Callable[[], OrgRouting], registry: MT5Registry):
+    """The reconcilers' netting_slaves (Task 12b): the MT5 FOLLOWERS whose
+    terminal said hello as a netting account -- the accounts whose net
+    positions compute_drift compares with the signed sum of their copies.
+    A master is not a follower; an account with no hello yet has no mode
+    and is left to the existence checks until it reports."""
+    def netting_slaves() -> set[int]:
+        routing = routing_provider()
+        return {
+            account_id for account_id, platform in routing.platform_by_account.items()
+            if platform == 'mt5'
+            and routing.master_by_org.get(routing.org_by_account.get(account_id)) != account_id
+            and registry.margin_mode(account_id) == "netting"}
+
+    return netting_slaves
 
 
 def _tracker_client_for(clients: dict, accounts, master_account, shards: int):
@@ -7151,8 +9350,11 @@ def build_app(
     )
 
     mt5_registry = MT5Registry(repo, clock=clock)
-    mt5_outbox = MT5Outbox(repo, clock=clock)
+    # The outbox asks the registry for an account's margin mode: a netting
+    # follower's close is an opposite-side open (copier/mt5/outbox.py).
+    mt5_outbox = MT5Outbox(repo, clock=clock, margin_mode=mt5_registry.margin_mode)
     mt5_snapshot_provider = _build_mt5_snapshot_provider(routing_provider, mt5_registry)
+    mt5_netting_slaves = _build_mt5_netting_slaves(routing_provider, mt5_registry)
 
     bucket = TokenBucket(clock=clock)
     dispatcher = Dispatcher(
@@ -7174,7 +9376,7 @@ def build_app(
         reconcilers[org_id] = Reconciler(
             clients_by_account=clients_by_account, repo=repo,
             dispatcher=dispatcher, master_account_id=master_id, org_id=org_id,
-            snapshot_provider=mt5_snapshot_provider,
+            snapshot_provider=mt5_snapshot_provider, netting_slaves=mt5_netting_slaves,
         )
         # The inner dict is created here and mutated in place from then on, so
         # the tracker and the service keep seeing this org's current symbols.
@@ -7245,7 +9447,7 @@ In `copier/tests/unit/test_main.py`, replace lines 449-453 with:
 - [ ] **Step 7: Run the tests to verify they pass**
 
 Run DB `tests/unit/test_main_mt5.py`.
-Expected: `22 passed`.
+Expected: `30 passed`.
 
 Run DB `tests/unit/test_main.py`, DB `tests/unit/test_control.py`, DB `tests/unit/test_control_queries.py`, DB `tests/unit/test_control_actions.py`, DB `tests/unit/test_cutoff_reminders.py`, DB `tests/unit/test_drift_dismissals.py`, DB `tests/unit/test_hot_path_queries.py`.
 Expected: all pass. Then run the whole unit suite (`tests/unit -q`, ~9 minutes) and DB `tests/integration/test_copier_e2e.py`, DB `tests/integration/test_manual_actions.py`.
@@ -7262,22 +9464,29 @@ once with an estimated balance_after, turns an MT5 master's report into
 MasterEvents, and hands the outbox's due commands back. Operator actions
 and the read models branch to the lane; get_state serves MT5 accounts
 from the registry; the cTrader auth, symbol, balance and backfill loops
-skip MT5 accounts; a 5 s timer marks a silent terminal offline.
+skip MT5 accounts; a 5 s timer marks a silent terminal offline. Netting
+accounts are accepted in both roles: an ack is paired with its deal by
+ticket, so a follower's opposite-side copy activates on the net ticket
+without closing the older copies, a close ack reduces the one mapping
+it names (by coid, the ticket being 0 when the close emptied the net
+position) and only the terminal's own closes reduce copies oldest-first
+(the shared stop/target override is recorded); a master's deals run
+through the net ledger, persisted with its virtual positions.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 15: Control endpoints — `POST /mt5/hello`, `POST /mt5/sync`, `GET /mt5/status`
+### Task 16: Control endpoints — `POST /mt5/hello`, `POST /mt5/sync`, `GET /mt5/status`
 
 **Files:**
 - Modify: `copier/src/copier/engine/control.py` — module docstring `:17-44` (route list), helpers after `_write_json` `:58-64`, new resources before `class RootResource` `:542`, `RootResource.__init__` `:545-568`
 - Test: `copier/tests/unit/test_control_mt5.py`
 
 **Interfaces:**
-- Consumes: `CopierApp.mt5_hello/mt5_sync/mt5_status` (Task 14).
-- Produces (contract §2 "engine/control.py", used by the api plan and Task 16): `POST /mt5/hello {"account_id", "org_id", "report"} -> 200 JSON {"last_deal_ticket"}`; `POST /mt5/sync {"account_id", "org_id", "report"} -> 200 text/plain` (the EA response text verbatim); `GET /mt5/status?account_id=N -> 200 JSON`. A bad body or report (and, for hello, an account the copier does not know) is a 400 JSON `{"error": ...}`, which the api passes through to the terminal unchanged: only an unreachable/timed-out copier or a 5xx becomes a `RETRY` line (contract §3; plan 02 Task 5 `_door` steps 5–7), so a rejected report is never resent as-is. An unknown account on `/mt5/sync` is not a 400 — `mt5_sync` answers it with a 200 `STOP` line (Task 14). Resources `Mt5HelloResource`, `Mt5SyncResource`, `Mt5StatusResource`, `Mt5Resource`; helpers `_write_text(request, text, code=None)`, `_mt5_body(body) -> tuple[int, dict]`.
+- Consumes: `CopierApp.mt5_hello/mt5_sync/mt5_status` (Task 15).
+- Produces (contract §2 "engine/control.py", used by the api plan and Task 17): `POST /mt5/hello {"account_id", "org_id", "report"} -> 200 JSON {"last_deal_ticket"}`; `POST /mt5/sync {"account_id", "org_id", "report"} -> 200 text/plain` (the EA response text verbatim); `GET /mt5/status?account_id=N -> 200 JSON`. A bad body or report (and, for hello, an account the copier does not know) is a 400 JSON `{"error": ...}`, which the api passes through to the terminal unchanged: only an unreachable/timed-out copier or a 5xx becomes a `RETRY` line (contract §3; plan 02 Task 6 `_door` steps 5–7), so a rejected report is never resent as-is. An unknown account on `/mt5/sync` is not a 400 — `mt5_sync` answers it with a 200 `STOP` line (Task 15). Resources `Mt5HelloResource`, `Mt5SyncResource`, `Mt5StatusResource`, `Mt5Resource`; helpers `_write_text(request, text, code=None)`, `_mt5_body(body) -> tuple[int, dict]`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -7508,15 +9717,17 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 ---
 
-### Task 16: The fake EA and the end-to-end scenarios
+### Task 17: The fake EA and the end-to-end scenarios
 
 **Files:**
 - Create: `copier/src/copier/testing/fake_ea.py`
 - Test: `copier/tests/integration/test_mt5_bridge.py`
 
 **Interfaces:**
-- Consumes: `copier.mt5.protocol` (Task 2), `CopierApp.mt5_hello/mt5_sync` (Task 14), `FakeCTraderServer`, `build_app`, and the helpers of `tests/integration/test_copier_e2e.py` (`_seed_org`, `_insert_accounts`, `_teardown`, `_wait_until`, `_fire_and_forget`, `_market_order`, `_close_position`, `_amend_sltp`, `_events`, and the constants).
-- Produces (contract §2 "Fake EA"): `FakeEA(base_url=None, key=None, account_id=None, *, hello_fn=None, sync_fn=None, login=12345678, broker="Fake Broker Ltd", server="Fake-Demo", currency="USD", hedging=True, symbols=None, prices=None, balance=10000.0, magic=20260907)` with `tick() -> list[str] | None` (one hello-if-needed + sync, executing every command), the book (`positions`, `orders`, `deals`, `balance`, `executed`), terminal-side actions `market_order(symbol, side, lots, sl=0.0, tp=0.0, comment="") -> ticket`, `close_by_terminal(ticket, lots=0.0)`, `modify_by_terminal(ticket, sl, tp)`, `place_pending_by_terminal(symbol, order_type, lots, price, sl=0.0, tp=0.0, comment="") -> ticket`, `cancel_by_terminal(ticket)`, `fill_pending(ticket) -> position ticket`, `deposit(amount)`, `set_price(symbol, bid, ask)`, and the EA controls `reject_next(retcode, message)`, `disconnect()`, `reconnect()`, `restart()`. With `hello_fn`/`sync_fn` the EA calls the app directly; with `base_url` it POSTs over HTTP (to `/api/mt5/*` with the key header when `key` is given, else to the copier's `/mt5/*` with `{"account_id", "report"}`).
+- Consumes: `copier.mt5.protocol` (Task 2), `CopierApp.mt5_hello/mt5_sync` (Task 15), `FakeCTraderServer`, `build_app`, and the helpers of `tests/integration/test_copier_e2e.py` (`_seed_org`, `_insert_accounts`, `_teardown`, `_wait_until`, `_fire_and_forget`, `_market_order`, `_close_position`, `_amend_sltp`, `_events`, and the constants).
+- Produces (contract §2 "Fake EA"): `FakeEA(base_url=None, key=None, account_id=None, *, hello_fn=None, sync_fn=None, login=12345678, broker="Fake Broker Ltd", server="Fake-Demo", currency="USD", mode="hedging", symbols=None, prices=None, balance=10000.0, magic=20260907)` — `mode` is `"hedging"` or `"netting"` (the hello says `hedging: mode == "hedging"`) — with `tick() -> list[str] | None` (one hello-if-needed + sync, executing every command), the book (`positions`, `orders`, `deals`, `balance`, `executed`), terminal-side actions `market_order(symbol, side, lots, sl=0.0, tp=0.0, comment="") -> ticket` (0 when a netting fill emptied the net position, as the EA's ack says), `close_by_terminal(ticket, lots=0.0)`, `modify_by_terminal(ticket, sl, tp)`, `place_pending_by_terminal(symbol, order_type, lots, price, sl=0.0, tp=0.0, comment="") -> ticket`, `cancel_by_terminal(ticket)`, `fill_pending(ticket) -> position ticket`, `deposit(amount)`, `set_price(symbol, bid, ask)`, and the EA controls `reject_next(retcode, message)`, `disconnect()`, `reconnect()`, `restart()`. With `hello_fn`/`sync_fn` the EA calls the app directly; with `base_url` it POSTs over HTTP (to `/api/mt5/*` with the key header when `key` is given, else to the copier's `/mt5/*` with `{"account_id", "report"}`).
+- Netting book (`mode="netting"`): one position per symbol. An open (a command or `market_order`) on the same side adds to it (`IN` deal, volume-weighted open price); on the opposite side it reduces it (`OUT`), closes it (`OUT`, position gone) or reverses it (`INOUT` for the whole order volume; the position keeps its ticket and turns to the new side with the excess). The ack of an `open` carries, as plan 04's `DoOpen` does, the ticket of the net position the terminal shows AFTER the fill — `pos` 0 when the fill emptied it — and the fill's deal ticket (contract §2 "Acks of an open on a netting follower"). A non-zero SL/TP on the order replaces the position's; zero leaves them. `close`/`close_by_terminal` work on the net ticket in both modes. The ticket survives a reversal in this fake; the copier's ledger keys on the symbol, so a terminal that mints a new one is handled the same way.
+- Scenarios (the spec's Testing list plus the netting ones): twelve in all — the eight hedging scenarios, and (i) a cTrader master's two positions netted into one follower position whose close of one master position reduces it by that copy's volume, and whose close of the other empties it (the ack says `pos` 0; the mapping closes by its coid), (ii) the follower's net position closed by the terminal, its copies reduced oldest-first, (iii) a netting MT5 master's add, add, partial reduce and reversal fanning out to cTrader followers as opens, FIFO closes and a new open the other way, (iv) the master holding BUY and opening SELL on the same symbol: the SELL copy nets against the BUY copy inside the net position (an OUT fill) yet both mappings stay active with their own volumes, and the master's later close of the BUY flips the net position (INOUT) closing only the BUY mapping. The fake cTrader server serves one symbol (EURUSD, id 1) and merges same-side fills into one position (N2), so the two master positions of (i)/(ii) are made by hiding the first from the fake's merge lookup while the second fills (`_two_master_positions`).
 
 - [ ] **Step 1: Write the fake EA**
 
@@ -7526,12 +9737,12 @@ Create `copier/src/copier/testing/fake_ea.py`:
 """A Python stand-in for MirrorFleet.mq5.
 
 Speaks the exact wire format (copier/mt5/protocol.py) against an in-memory
-HEDGING book: every command kind executes, positions/orders/deals are
-reported back, acks carry what the real EA's CTrade results would. Used by
-the integration tests through the copier directly (hello_fn/sync_fn, no
-HTTP) or -- with base_url -- over HTTP: the api's machine door when `key`
-is given (header X-MirrorFleet-Key), else the copier control port (JSON
-bodies carrying account_id).
+book in HEDGING or NETTING mode: every command kind executes, positions/
+orders/deals are reported back, acks carry what the real EA's CTrade
+results would. Used by the integration tests through the copier directly
+(hello_fn/sync_fn, no HTTP) or -- with base_url -- over HTTP: the api's
+machine door when `key` is given (header X-MirrorFleet-Key), else the
+copier control port (JSON bodies carrying account_id).
 
 What it models of the real EA's discipline:
 - executed command ids live in memory AND in an ack "file"
@@ -7544,6 +9755,19 @@ What it models of the real EA's discipline:
 - an amend that changes nothing acks ok (TRADE_RETCODE_NO_CHANGES is not
   a failure for the EA either), and every price is used as given -- the
   real EA normalises to the symbol's digits before calling CTrade.
+
+The netting book (mode="netting", ACCOUNT_MARGIN_MODE_RETAIL_NETTING):
+one position per symbol. An open on the same side adds to it (an IN deal,
+volume-weighted open price); on the opposite side it reduces it (OUT),
+closes it (OUT, the position is gone) or reverses it (one INOUT deal for
+the order's whole volume; the position keeps its ticket and turns to the
+new side with the excess). The ack of an open reports, as the real EA's
+DoOpen does, the ticket of the net position the terminal shows AFTER the
+fill -- pos 0 when the fill emptied it -- and the fill's deal ticket; the
+copier pairs the two by the deal ticket and reads the deal's entry. A
+non-zero SL/TP on the order replaces the position's, as
+CTrade.PositionOpen does on a netting account; zero leaves them. The
+hello says hedging:false.
 """
 
 import itertools
@@ -7562,19 +9786,23 @@ ACK_FILE_LIMIT = 500
 RETCODE_DONE = 10009
 RETCODE_INVALID = 10013
 RETCODE_POSITION_CLOSED = 10036
+MODES = ("hedging", "netting")
 
 
 class FakeEA:
     def __init__(self, base_url=None, key=None, account_id=None, *, hello_fn=None, sync_fn=None,
                  login=12345678, broker="Fake Broker Ltd", server="Fake-Demo", currency="USD",
-                 hedging=True, symbols=None, prices=None, balance=10000.0, magic=20260907):
+                 mode="hedging", symbols=None, prices=None, balance=10000.0, magic=20260907):
+        if mode not in MODES:
+            raise ValueError(f"mode must be one of {MODES}, not {mode!r}")
         self.base_url = base_url
         self.key = key
         self.account_id = account_id
         self._hello_fn = hello_fn
         self._sync_fn = sync_fn
         self.login, self.broker, self.server, self.currency = login, broker, server, currency
-        self.hedging = hedging
+        self.mode = mode
+        self.hedging = mode == "hedging"
         self.symbols = [dict(s) for s in (symbols if symbols is not None else DEFAULT_SYMBOLS)]
         self.prices = dict(prices or DEFAULT_PRICES)
         self.balance = float(balance)
@@ -7627,28 +9855,76 @@ class FakeEA:
             "commission": 0.0, "time": int(time.time() * 1000), "comment": comment,
             "magic": self.magic})
 
-    def _open(self, symbol, side, lots, sl, tp, comment):
-        bid, ask = self.prices[symbol]
-        price = ask if side == "BUY" else bid
-        ticket, order, deal = next(self._tickets), next(self._tickets), next(self._tickets)
+    def _new_position(self, ticket, symbol, side, lots, price, sl, tp, comment) -> dict:
         self.positions[ticket] = {
             "t": ticket, "s": symbol, "side": side, "lots": float(lots), "open": price,
             "sl": float(sl or 0), "tp": float(tp or 0), "price": price, "pnl": 0.0, "swap": 0.0,
             "comment": comment, "magic": self.magic, "time": int(time.time())}
-        self._deal(deal, ticket, order, symbol, side, "IN", lots, price, comment=comment)
+        return self.positions[ticket]
+
+    def _profit(self, pos: dict, lots: float, price: float) -> float:
+        cs = self._contract_size(pos["s"])
+        if pos["side"] == "BUY":
+            return round((price - pos["open"]) * lots * cs, 2)
+        return round((pos["open"] - price) * lots * cs, 2)
+
+    def _net_position(self, symbol: str) -> dict | None:
+        return next((pos for pos in self.positions.values() if pos["s"] == symbol), None)
+
+    def _open(self, symbol, side, lots, sl, tp, comment):
+        """A market order. Hedging: a new position every time. Netting: the
+        symbol's single position absorbs it -- see the module docstring."""
+        bid, ask = self.prices[symbol]
+        price = ask if side == "BUY" else bid
+        lots = float(lots)
+        order, deal = next(self._tickets), next(self._tickets)
+        pos = self._net_position(symbol) if self.mode == "netting" else None
+        if pos is None:
+            ticket = next(self._tickets)
+            self._new_position(ticket, symbol, side, lots, price, sl, tp, comment)
+            self._deal(deal, ticket, order, symbol, side, "IN", lots, price, comment=comment)
+            return ticket, order, deal, price
+        ticket = pos["t"]
+        if sl:
+            pos["sl"] = float(sl)
+        if tp:
+            pos["tp"] = float(tp)
+        if pos["side"] == side:
+            total = round(pos["lots"] + lots, 2)
+            pos["open"] = round((pos["open"] * pos["lots"] + price * lots) / total, 5)
+            pos["lots"] = total
+            self._deal(deal, ticket, order, symbol, side, "IN", lots, price, comment=comment)
+            return ticket, order, deal, price
+        closing = min(lots, pos["lots"])
+        profit = self._profit(pos, closing, price)
+        self.balance = round(self.balance + profit, 2)
+        remainder = round(lots - pos["lots"], 2)
+        if remainder > 0:
+            # A reversal: the whole old volume closes and the excess opens the
+            # other way -- one INOUT deal for the order's whole volume.
+            self._deal(deal, ticket, order, symbol, side, "INOUT", lots, price, profit,
+                       comment=comment)
+            pos.update({"side": side, "lots": remainder, "open": price, "comment": comment,
+                        "time": int(time.time())})
+        else:
+            self._deal(deal, ticket, order, symbol, side, "OUT", closing, price, profit,
+                       comment=comment)
+            pos["lots"] = round(pos["lots"] - closing, 2)
+            if pos["lots"] <= 0:
+                del self.positions[ticket]
+                # The real EA acks the ticket the terminal shows AFTER the
+                # fill (plan 04 DoOpen: PositionSelect(symbol)) -- 0 when the
+                # fill emptied the net position. The deal still names it.
+                ticket = 0
         return ticket, order, deal, price
 
     def _close(self, ticket, lots):
+        """PositionClose / PositionClosePartial on a ticket, in both modes."""
         pos = self.positions[ticket]
         close_lots = pos["lots"] if not lots or float(lots) >= pos["lots"] else float(lots)
         bid, ask = self.prices[pos["s"]]
         price = bid if pos["side"] == "BUY" else ask
-        cs = self._contract_size(pos["s"])
-        if pos["side"] == "BUY":
-            profit = (price - pos["open"]) * close_lots * cs
-        else:
-            profit = (pos["open"] - price) * close_lots * cs
-        profit = round(profit, 2)
+        profit = self._profit(pos, close_lots, price)
         self.balance = round(self.balance + profit, 2)
         deal, order = next(self._tickets), next(self._tickets)
         self._deal(deal, ticket, order, pos["s"], "SELL" if pos["side"] == "BUY" else "BUY",
@@ -7661,6 +9937,8 @@ class FakeEA:
     # Terminal-side actions: the owner trading by hand, a stop being hit.
 
     def market_order(self, symbol, side, lots, sl=0.0, tp=0.0, comment="") -> int:
+        """The owner trades by hand. Returns the position ticket -- 0 when a
+        netting fill emptied the net position, as the EA's ack would say."""
         ticket, _order, _deal, _price = self._open(symbol, side, lots, sl, tp, comment)
         return ticket
 
@@ -7684,14 +9962,13 @@ class FakeEA:
 
     def fill_pending(self, ticket) -> int:
         """The market reached a pending order: it becomes a position whose
-        opening deal names the order, as MT5 does."""
+        opening deal names the order, as MT5 does. (Hedging book only: the
+        netting scenarios drive pendings through the copier's commands.)"""
         o = self.orders.pop(ticket)
         side = o["type"].split("_", 1)[0]
         position, deal = next(self._tickets), next(self._tickets)
-        self.positions[position] = {
-            "t": position, "s": o["s"], "side": side, "lots": o["lots"], "open": o["price"],
-            "sl": o["sl"], "tp": o["tp"], "price": o["price"], "pnl": 0.0, "swap": 0.0,
-            "comment": o["comment"], "magic": self.magic, "time": int(time.time())}
+        self._new_position(position, o["s"], side, o["lots"], o["price"], o["sl"], o["tp"],
+                           o["comment"])
         self._deal(deal, position, ticket, o["s"], side, "IN", o["lots"], o["price"],
                    comment=o["comment"])
         return position
@@ -7858,8 +10135,8 @@ a FakeCTraderServer on one side and the FakeEA on the other.
 The fake EA talks to the app the way the api would proxy it (hello_fn /
 sync_fn call app.mt5_hello / app.mt5_sync directly -- the control route
 and the api door are unit-tested elsewhere), executes every command in
-the response against its in-memory hedging book, and reports back on the
-next tick. Outcomes are asserted from real Postgres state, the recorded
+the response against its in-memory hedging or netting book, and reports
+back on the next tick. Outcomes are asserted from real Postgres state, the recorded
 cTrader wire traffic and the EA's book -- never from internal mocks.
 """
 
@@ -7918,11 +10195,12 @@ def _insert_mt5_account(dsn, org_id, role):
     return account_id
 
 
-def _setup_bridge(dsn, *, mt5_role="slave", ea_symbols=None):
+def _setup_bridge(dsn, *, mt5_role="slave", ea_symbols=None, ea_mode="hedging"):
     """FakeCTraderServer + real CopierApp + FakeEA.
 
     mt5_role='slave': cTrader master 100 with slaves 101/102 and the MT5
     slave. mt5_role='master': the MT5 master with cTrader slaves 101/102.
+    ea_mode: the fake terminal's book, 'hedging' or 'netting'.
     Returns (server, repo, app, ea, mt5_id); the caller yields
     app.startup(), then ea.tick() once for the hello (the hello auto-matches
     against symbol caches startup fills), and eventually calls _teardown.
@@ -7949,7 +10227,7 @@ def _setup_bridge(dsn, *, mt5_role="slave", ea_symbols=None):
     ea = FakeEA(account_id=mt5_id,
                 hello_fn=lambda body: app.mt5_hello(mt5_id, body),
                 sync_fn=lambda body: app.mt5_sync(mt5_id, body),
-                symbols=ea_symbols)
+                symbols=ea_symbols, mode=ea_mode)
     return server, repo, app, ea, mt5_id
 
 
@@ -8270,17 +10548,290 @@ def test_an_unmatched_symbol_alerts_and_queues_nothing(db):
         if ticker:
             ticker.stop()
         _teardown(app, server)
+
+
+# ---------- netting accounts ----------
+
+def _oldest_first(rows):
+    return sorted(rows, key=lambda r: (r["created_at"], r["id"]))
+
+
+def _active_mappings(repo):
+    return [r for r in repo.mapping_rows() if r["status"] == "active"]
+
+
+@pytest_twisted.inlineCallbacks
+def _two_master_positions(server, app, repo, ea, mt5_id):
+    """Two SEPARATE same-side master positions (1.00 and 0.50 lots), each
+    copied to the MT5 follower. cTrader merges a second same-side market
+    fill into the existing position (N2) and the fake server does too, so
+    the first position is hidden from the fake's merge lookup while the
+    second fills and put back afterwards -- the copier sees two distinct
+    master fills, as it would for positions opened through different
+    routes. Returns (first_master_id, second_master_id), oldest first."""
+    client = app.clients[False][0]
+    _fire_and_forget(client, _market_order(MASTER_ID, ProtoOATradeSide.BUY, ONE_LOT))
+    yield _wait_until(lambda: len(_mt5_rows(repo, mt5_id, "active")) == 1)
+    hidden = server.open_positions[MASTER_ID].pop()
+    _fire_and_forget(client, _market_order(MASTER_ID, ProtoOATradeSide.BUY, ONE_LOT // 2))
+    yield _wait_until(lambda: len(_mt5_rows(repo, mt5_id, "active")) == 2)
+    server.open_positions[MASTER_ID].append(hidden)
+    rows = _oldest_first(_mt5_rows(repo, mt5_id, "active"))
+    return rows[0]["master_position_id"], rows[1]["master_position_id"]
+
+
+@pytest.mark.timeout(60)
+@pytest_twisted.inlineCallbacks
+def test_netting_follower_nets_two_copies_and_a_master_close_reduces_its_share(db):
+    server, repo, app, ea, mt5_id = _setup_bridge(db, ea_mode="netting")
+    ticker = None
+    try:
+        yield app.startup()
+        ea.tick()
+        assert ea.hello_body()["hedging"] is False
+        assert app.mt5_registry.margin_mode(mt5_id) == "netting"
+        assert repo.load_mt5_link(mt5_id)["hedging"] is False
+        ticker = _Ticker(ea)
+
+        first_master, second_master = yield _two_master_positions(server, app, repo, ea, mt5_id)
+
+        (net,) = ea.positions.values()                        # ONE net position...
+        net_ticket = net["t"]
+        assert (net["s"], net["side"], net["lots"]) == ("EURUSD.r", "BUY", 1.5)   # ...its volume the sum
+        rows = {r["master_position_id"]: r for r in _mt5_rows(repo, mt5_id, "active")}
+        assert rows[first_master]["slave_position_id"] == net_ticket
+        assert rows[second_master]["slave_position_id"] == net_ticket
+        assert (rows[first_master]["slave_volume"], rows[second_master]["slave_volume"]) == (100, 50)
+        assert [c.kind for c in ea.executed] == ["open", "open"]
+
+        # The master closes its FIRST position: the follower's copy of it is
+        # closed with an opposite-side open for exactly that copy's volume.
+        _fire_and_forget(app.clients[False][0], _close_position(MASTER_ID, first_master, ONE_LOT))
+        yield _wait_until(lambda: ea.positions.get(net_ticket, {}).get("lots") == 0.5)
+        yield _wait_until(lambda: {r["master_position_id"] for r in _mt5_rows(repo, mt5_id, "active")}
+                          == {second_master})
+
+        (close,) = [c for c in ea.executed if c.payload.get("comment", "").startswith("close:")]
+        assert (close.kind, close.payload["side"], close.payload["lots"], close.client_order_id) == (
+            "open", "SELL", 1.0, f"cm{first_master}.{mt5_id}:close")
+        assert [d["entry"] for d in ea.deals if d["s"] == "EURUSD.r"] == ["IN", "IN", "OUT"]
+        (closed,) = _mt5_rows(repo, mt5_id, "closed")
+        assert (closed["master_position_id"], closed["slave_volume"]) == (first_master, 0)
+        (active,) = _mt5_rows(repo, mt5_id, "active")
+        assert (active["master_position_id"], active["slave_volume"]) == (second_master, 50)
+        closes = [e for e in _events(db, "slave_action")
+                  if e["payload"].get("action") == "position_closed" and e["account_id"] == mt5_id]
+        assert [(e["payload"]["client_order_id"], e["payload"]["closed_volume"]) for e in closes] == [
+            (f"cm{first_master}.{mt5_id}", 100)]
+
+        # The master closes its SECOND position too: the follower's last
+        # 0.50 goes and the net position is gone, so the EA acks pos 0 (the
+        # ticket the terminal shows after the fill: none). The mapping is
+        # named by the ack's coid, so it closes all the same.
+        _fire_and_forget(app.clients[False][0],
+                         _close_position(MASTER_ID, second_master, ONE_LOT // 2))
+        yield _wait_until(lambda: ea.positions == {})
+        yield _wait_until(lambda: {r["status"] for r in _mt5_rows(repo, mt5_id)} == {"closed"})
+        (last_close,) = [c for c in ea.executed
+                         if c.client_order_id == f"cm{second_master}.{mt5_id}:close"]
+        assert ea._file_acks[last_close.id]["pos"] == 0           # what the EA acked
+        assert [d["entry"] for d in ea.deals if d["s"] == "EURUSD.r"] == ["IN", "IN", "OUT", "OUT"]
+        closes = [e for e in _events(db, "slave_action")
+                  if e["payload"].get("action") == "position_closed" and e["account_id"] == mt5_id]
+        assert [(e["payload"]["client_order_id"], e["payload"]["closed_volume"]) for e in closes] == [
+            (f"cm{first_master}.{mt5_id}", 100), (f"cm{second_master}.{mt5_id}", 50)]
+        assert _mt5_rows(repo, mt5_id, "active") == []
+        assert ticker.errors == []
+    finally:
+        if ticker:
+            ticker.stop()
+        _teardown(app, server)
+
+
+@pytest.mark.timeout(60)
+@pytest_twisted.inlineCallbacks
+def test_netting_follower_copies_an_opposite_side_master_position_without_closing_the_older_copy(db):
+    """Spec "Opposite positions": the master holds BUY and opens SELL on
+    the same symbol. On a netting follower the SELL copy nets against the
+    BUY copy inside the one net position -- its fill is an OUT deal on it
+    -- yet it is a COPY: its mapping activates on the net ticket and the
+    BUY copy, whose master is still open, is untouched. When the master
+    then closes the BUY, its ':close' SELL flips the net position (INOUT)
+    and only the BUY mapping closes."""
+    server, repo, app, ea, mt5_id = _setup_bridge(db, ea_mode="netting")
+    ticker = None
+    try:
+        yield app.startup()
+        ea.tick()
+        ticker = _Ticker(ea)
+        client = app.clients[False][0]
+
+        buy_master, net_ticket = yield _open_one_copy(app, repo, ea, mt5_id)
+        _fire_and_forget(client, _market_order(MASTER_ID, ProtoOATradeSide.SELL, ONE_LOT // 2))
+        yield _wait_until(lambda: len(_mt5_rows(repo, mt5_id, "active")) == 2)
+
+        (net,) = ea.positions.values()
+        assert (net["t"], net["side"], net["lots"]) == (net_ticket, "BUY", 0.5)   # 1.00 BUY - 0.50 SELL
+        rows = {r["master_position_id"]: r for r in _mt5_rows(repo, mt5_id, "active")}
+        sell_master = next(m for m in rows if m != buy_master)
+        assert (rows[buy_master]["slave_position_id"], rows[buy_master]["slave_volume"]) == (
+            net_ticket, 100)
+        assert (rows[sell_master]["slave_position_id"], rows[sell_master]["slave_volume"]) == (
+            net_ticket, 50)
+        assert [(c.kind, c.payload["side"], c.payload["comment"]) for c in ea.executed] == [
+            ("open", "BUY", f"copy:m{buy_master}"), ("open", "SELL", f"copy:m{sell_master}")]
+        assert [d["entry"] for d in ea.deals if d["s"] == "EURUSD.r"] == ["IN", "OUT"]
+        assert [(c["kind"], c["status"]) for c in _all_commands(repo, mt5_id)] == [
+            ("open", "done"), ("open", "done")]
+        assert [e for e in _events(db, "slave_action")
+                if e["payload"].get("action") == "position_closed" and e["account_id"] == mt5_id] == []
+        (netted,) = [e for e in _events(db, "slave_action")
+                     if e["payload"].get("action") == "mt5_netting_opposite_copy"]
+        assert (netted["payload"]["client_order_id"], netted["payload"]["entry"],
+                netted["payload"]["nets_against"]) == (f"cm{sell_master}.{mt5_id}", "OUT", [buy_master])
+
+        # The master closes the BUY: a ':close' SELL 1.00 against BUY 0.50
+        # flips the net position to SELL 0.50 -- the SELL copy's own volume.
+        _fire_and_forget(client, _close_position(MASTER_ID, buy_master, ONE_LOT))
+        yield _wait_until(lambda: {r["master_position_id"] for r in _mt5_rows(repo, mt5_id, "active")}
+                          == {sell_master})
+        (net,) = ea.positions.values()
+        assert (net["side"], net["lots"]) == ("SELL", 0.5)
+        assert [d["entry"] for d in ea.deals if d["s"] == "EURUSD.r"] == ["IN", "OUT", "INOUT"]
+        (active,) = _mt5_rows(repo, mt5_id, "active")
+        assert (active["master_position_id"], active["slave_position_id"],
+                active["slave_volume"]) == (sell_master, net_ticket, 50)
+        closes = [e for e in _events(db, "slave_action")
+                  if e["payload"].get("action") == "position_closed" and e["account_id"] == mt5_id]
+        assert [(e["payload"]["client_order_id"], e["payload"]["closed_volume"]) for e in closes] == [
+            (f"cm{buy_master}.{mt5_id}", 100)]
+        assert ticker.errors == []
+    finally:
+        if ticker:
+            ticker.stop()
+        _teardown(app, server)
+
+
+@pytest.mark.timeout(60)
+@pytest_twisted.inlineCallbacks
+def test_netting_follower_terminal_close_reduces_the_copies_oldest_first(db):
+    server, repo, app, ea, mt5_id = _setup_bridge(db, ea_mode="netting")
+    ticker = None
+    try:
+        yield app.startup()
+        ea.tick()
+        ticker = _Ticker(ea)
+        first_master, second_master = yield _two_master_positions(server, app, repo, ea, mt5_id)
+        (net,) = ea.positions.values()
+        net_ticket = net["t"]
+
+        # The owner's terminal trims 1.00 lot of the 1.50 (a stop on part of
+        # it, a manual reduce): the OLDER copy is what goes.
+        ea.close_by_terminal(net_ticket, lots=1.0)
+        yield _wait_until(lambda: [r["status"] for r in _oldest_first(_mt5_rows(repo, mt5_id))]
+                          == ["closed", "active"])
+        rows = _oldest_first(_mt5_rows(repo, mt5_id))
+        assert (rows[0]["master_position_id"], rows[0]["slave_volume"]) == (first_master, 0)
+        assert (rows[1]["master_position_id"], rows[1]["slave_volume"]) == (second_master, 50)
+
+        # Then the net stop takes the rest.
+        ea.close_by_terminal(net_ticket)
+        yield _wait_until(lambda: {r["status"] for r in _mt5_rows(repo, mt5_id)} == {"closed"})
+        assert ea.positions == {}
+        closes = [e for e in _events(db, "slave_action")
+                  if e["payload"].get("action") == "position_closed" and e["account_id"] == mt5_id]
+        assert [(e["payload"]["client_order_id"], e["payload"]["closed_volume"]) for e in closes] == [
+            (f"cm{first_master}.{mt5_id}", 100), (f"cm{second_master}.{mt5_id}", 50)]
+        assert [c.kind for c in ea.executed] == ["open", "open"]   # nothing queued for the terminal's own closes
+        assert ticker.errors == []
+    finally:
+        if ticker:
+            ticker.stop()
+        _teardown(app, server)
+
+
+@pytest.mark.timeout(60)
+@pytest_twisted.inlineCallbacks
+def test_netting_mt5_master_add_reduce_and_reverse_fan_out_to_ctrader_followers(db):
+    server, repo, app, ea, mt5_id = _setup_bridge(db, mt5_role="master", ea_mode="netting")
+    ticker = None
+    try:
+        yield app.startup()
+        ea.tick()
+        assert app.mt5_registry.margin_mode(mt5_id) == "netting"
+        ticker = _Ticker(ea)
+
+        # add, add: one net position on the terminal, TWO virtual master
+        # positions in the ledger, two opens per follower
+        ea.market_order("EURUSD.r", "BUY", 0.5)
+        yield _wait_until(lambda: len(_active_mappings(repo)) == 2)
+        # cTrader merges a follower's second same-side fill into its first
+        # position (N2) and the fake server does too, which would leave both
+        # mappings on ONE slave position (and a close of one would reduce
+        # both). Hide the first copies from the fake's merge lookup while the
+        # second fills, as _two_master_positions does for the master, so each
+        # copy is a position of its own.
+        hidden = {a: server.open_positions[a].pop() for a in (SLAVE1_ID, SLAVE2_ID)}
+        ea.market_order("EURUSD.r", "BUY", 0.3)
+        yield _wait_until(lambda: len(_active_mappings(repo)) == 4)
+        for account_id, entry in hidden.items():
+            server.open_positions[account_id].append(entry)
+        (net,) = ea.positions.values()
+        assert (net["side"], net["lots"]) == ("BUY", 0.8)
+        ledger = repo.load_net_ledger(mt5_id)
+        first_id, second_id = [r["virtual_id"] for r in ledger]
+        assert [(r["side"], r["volume_left"]) for r in ledger] == [("BUY", 50), ("BUY", 30)]
+        opens = _reqs(server, ProtoOANewOrderReq, SLAVE1_ID)
+        assert [o.clientOrderId for o in opens] == [f"cm{first_id}.{SLAVE1_ID}", f"cm{second_id}.{SLAVE1_ID}"]
+        assert [o.volume for o in opens] == [ONE_LOT // 2, ONE_LOT * 3 // 10]
+        assert [o.volume for o in _reqs(server, ProtoOANewOrderReq, SLAVE2_ID)] == [
+            ONE_LOT // 4, ONE_LOT * 3 // 20]                    # the 0.5x follower
+
+        # partial reduce: 0.6 lots out of 0.8 -> the older virtual position
+        # closes, the younger loses 0.1: two closes per follower, oldest first
+        ea.market_order("EURUSD.r", "SELL", 0.6)
+        yield _wait_until(lambda: len(_reqs(server, ProtoOAClosePositionReq, SLAVE1_ID)) == 2)
+        closes = _reqs(server, ProtoOAClosePositionReq, SLAVE1_ID)
+        assert [c.volume for c in closes] == [ONE_LOT // 2, ONE_LOT // 10]
+        assert [(r["virtual_id"], r["volume_left"]) for r in repo.load_net_ledger(mt5_id)] == [
+            (second_id, 20)]
+
+        # reversal: SELL 0.5 against 0.2 BUY -> the last virtual position
+        # closes and a NEW one opens the other way
+        ea.market_order("EURUSD.r", "SELL", 0.5)
+        yield _wait_until(lambda: len(_reqs(server, ProtoOAClosePositionReq, SLAVE1_ID)) == 3
+                          and len(_reqs(server, ProtoOANewOrderReq, SLAVE1_ID)) == 3)
+        assert _reqs(server, ProtoOAClosePositionReq, SLAVE1_ID)[2].volume == ONE_LOT // 5
+        (row,) = repo.load_net_ledger(mt5_id)
+        assert (row["side"], row["volume_left"]) == ("SELL", 30)
+        reopened = _reqs(server, ProtoOANewOrderReq, SLAVE1_ID)[2]
+        assert (reopened.tradeSide, reopened.volume, reopened.clientOrderId) == (
+            ProtoOATradeSide.SELL, ONE_LOT * 3 // 10, f"cm{row['virtual_id']}.{SLAVE1_ID}")
+        (net,) = ea.positions.values()
+        assert (net["side"], net["lots"]) == ("SELL", 0.3)
+        assert [d["entry"] for d in ea.deals] == ["IN", "IN", "OUT", "INOUT"]
+        master_events = [e["payload"]["normalized"] for e in _events(db, "master_event")
+                         if e["payload"].get("source") == "mt5"]
+        assert master_events == [
+            "MasterPositionOpened", "MasterPositionOpened",
+            "MasterPositionClosed", "MasterPositionClosed",
+            "MasterPositionClosed", "MasterPositionOpened"]
+        assert ticker.errors == []
+    finally:
+        if ticker:
+            ticker.stop()
+        _teardown(app, server)
 ```
 
 - [ ] **Step 3: Run the tests to verify they fail**
 
 Run DB `tests/integration/test_mt5_bridge.py`.
-Expected: FAIL at collection with `ModuleNotFoundError: No module named 'copier.testing.fake_ea'` — until Step 1's file exists; with it in place, all eight scenarios run and pass. (Write the EA first, then the tests, then run: the EA has no test of its own — the scenarios are its test.)
+Expected: FAIL at collection with `ModuleNotFoundError: No module named 'copier.testing.fake_ea'` — until Step 1's file exists; with it in place, all twelve scenarios run and pass. (Write the EA first, then the tests, then run: the EA has no test of its own — the scenarios are its test.)
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run DB `tests/integration/test_mt5_bridge.py`.
-Expected: `8 passed`.
+Expected: `12 passed`.
 
 Then run DB `tests/integration/test_copier_e2e.py` and DB `tests/integration/test_manual_actions.py`.
 Expected: all pass.
@@ -8288,15 +10839,20 @@ Expected: all pass.
 - [ ] **Step 5: Commit**
 
 ```bash
-cd "/c/Users/Sherwyn joel/OneDrive/Desktop/Forex-Automated-Copy-Trading-System" && git add copier/src/copier/testing/fake_ea.py copier/tests/integration/test_mt5_bridge.py && git commit -m "test(mt5): a fake EA and eight end-to-end scenarios across both platforms
+cd "/c/Users/Sherwyn joel/OneDrive/Desktop/Forex-Automated-Copy-Trading-System" && git add copier/src/copier/testing/fake_ea.py copier/tests/integration/test_mt5_bridge.py && git commit -m "test(mt5): a fake EA and twelve end-to-end scenarios across both platforms
 
-The fake EA speaks the exact wire format against an in-memory hedging
-book, keeps an ack file across restarts and re-acks re-delivered ids.
-Scenarios: cTrader master -> MT5 copy with protection; partial close and
-amend; MT5 master -> cTrader followers; a Trade-page order; Close all
-across both platforms with verified counts; a terminal offline (the open
-expires, the close survives); duplicate delivery after a restart; an
-unmatched symbol.
+The fake EA speaks the exact wire format against an in-memory hedging or
+netting book (acking, like the real EA, the net position left after a
+fill: 0 when it emptied), keeps an ack file across restarts and re-acks
+re-delivered ids. Scenarios: cTrader master -> MT5 copy with protection;
+partial close and amend; MT5 master -> cTrader followers; a Trade-page
+order; Close all across both platforms with verified counts; a terminal
+offline (the open expires, the close survives); duplicate delivery after
+a restart; an unmatched symbol; a netting follower netting two copies and
+closing them one by one by their masters' closes (the last one emptying
+the net position), then by the terminal's own close oldest-first; an
+opposite-side copy netting against an older copy without closing it; a
+netting master's add, add, reduce and reversal fanning out by virtual id.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
@@ -8305,6 +10861,6 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 ## Notes for the executor
 
-- **Order is load-bearing.** Tasks 1–13 each leave the suite green on their own; Task 14 is the only task that changes `build_app`'s composition, and Tasks 15–16 sit on top of it. Do not reorder.
-- **Two scoped decisions, made on purpose (not TODOs):** (1) an org whose master is MT5 subscribes cTrader quotes on a follower's connection (`_tracker_client_for`), so its cTrader followers' live P&L works; an org with no cTrader account at all has no tracker and its `/state` comes wholly from the registry. (2) The EA normalises prices to the symbol's digits and treats `TRADE_RETCODE_NO_CHANGES` as success; the copier passes master prices through and the lane rounds operator prices (the fake EA models both).
-- **Spec coverage check** (spec → task): migration 014 → 1; wire protocol → 2; symbols/auto-match → 3; repo additions → 4; registry → 5; outbox with TTL/redelivery → 6; Dispatcher seam → 7; ingress → 8; `CopierService` split + `SlaveFill` → 9; `build_routing` canonical keys → 10; `Reconciler._fetch_snapshot` → 11; balance_after estimation → 12; `MT5Lane` incl. flatten and queries → 13; `CopierApp` (hello/sync/status, `_query_context`, actions, `get_state`, auth loops skip, offline timer, netting, deals ingest + watermark) → 14; control endpoints → 15; fake EA + the seven integration scenarios of the spec's Testing section (eight here: the unmatched-symbol Alert is the eighth) → 16. The api, dashboard and `.mq5` files are the other three plans.
+- **Order is load-bearing.** Tasks 1–14 each leave the suite green on their own; Task 15 is the only task that changes `build_app`'s composition, and Tasks 16–17 sit on top of it. Do not reorder. Two placements follow from that rule: the `mt5_net_ledger` accessors ship with their table in Task 5 (not with the other repo additions in Task 4), and the registry's ledger views ship with `NetLedger` in Task 9 (not with the registry in Task 6).
+- **Five scoped decisions, made on purpose (not TODOs):** (1) an org whose master is MT5 subscribes cTrader quotes on a follower's connection (`_tracker_client_for`), so its cTrader followers' live P&L works; an org with no cTrader account at all has no tracker and its `/state` comes wholly from the registry. (2) The EA normalises prices to the symbol's digits and treats `TRADE_RETCODE_NO_CHANGES` as success; the copier passes master prices through and the lane rounds operator prices (the fake EA models both). (3) `compute_drift` compares volumes ONLY for netting MT5 followers (Task 12b, the spec's "Reconcile compares the sum of active mapping volumes per net position with the terminal's net volume"): per net ticket, the side-signed sum of the active copies against the terminal's net volume — a shortfall is `missing_slave_copy`, an excess `orphan_slave_position`, one item per ticket carrying the delta in `DriftItem.volume`, and `close_orphan` closes exactly that much. Signed, because opposite copies net against each other there and a flat terminal is right when they cancel; so for those tickets check 2's per-copy "vanished" is replaced by the comparison. cTrader and hedging accounts keep today's existence-only checks: volumes are not compared there. (4) A netting follower's `:close` open carries SL/TP `0`, which leaves the net position's levels alone; a netting master's virtual positions are priced at the net position's open price (the ledger stores no entry price; the deal's price reaches followers in `MasterPositionOpened.entry_price` and `master_fill_price`). (5) An ack is paired with the deal it produced by the deal ticket (contract §2 "Acks of an open on a netting follower"; plan 04's `DoOpen` acks the net position left after the fill, 0 when it emptied, and the deal's entry says what the fill did): a copy's own deal — an open's fill whatever its entry, a `:close`'s OUT/INOUT — is never booked as a terminal-side close, an opposite-side copy activates on the net ticket without reducing the older copies, a `:close` reduces its mapping by coid alone, and the tickets of acked deals not yet reported are carried to the next sync (`_mt5_settled_deals`). An operator's own open on the net position names no copy, so its OUT/INOUT deal still reduces the copies oldest-first.
+- **Spec coverage check** (spec → task): migration 014 → 1; wire protocol → 2; symbols/auto-match → 3; repo additions incl. `mapping_side` / `reduce_position_mappings_fifo` → 4; migration 015 (`mt5_net_ledger`) + its accessors → 5; registry incl. `margin_mode` → 6; outbox with TTL/redelivery, the netting close as an opposite-side open, `ClosePosition.master_position_id` → 7; Dispatcher seam → 8; ingress incl. `VirtualPosition`/`NetLedger` and the registry's ledger views → 9; `CopierService` split + `SlaveFill` (a close by coid) → 10; `build_routing` canonical keys → 11; `Reconciler._fetch_snapshot` → 12; the netting follower's net position compared with the sum of its copies (`missing_slave_copy` / `orphan_slave_position` with the delta) → 12b; balance_after estimation → 13; `MT5Lane` incl. flatten and queries → 14; `CopierApp` (hello/sync/status, `_query_context`, actions, `get_state`, auth loops skip, offline timer, deals ingest + watermark, netting in both roles: acks paired with their deals, opposite-side copies, the `:close` acked with ticket 0, FIFO closes, the protection override event, the ledger persisted and served) → 15; control endpoints → 16; fake EA (hedging and netting books, the pos-0 ack) + the seven integration scenarios of the spec's Testing section plus the unmatched-symbol Alert and the four netting scenarios (twelve) → 17. The api, dashboard and `.mq5` files are the other three plans.
