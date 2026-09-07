@@ -4,6 +4,7 @@ import { MemoryRouter, Routes, Route } from 'react-router-dom'
 import { expect, test, vi, afterEach } from 'vitest'
 import Layout from './Layout'
 import type { Role } from '../lib/roles'
+import { mt5Account } from '../test/mt5Fixtures'
 
 const { useOrgMock, navigateMock } = vi.hoisted(() => ({
   useOrgMock: vi.fn(),
@@ -463,4 +464,25 @@ test('the desk strip shows each open contract with its live price', async () => 
 
   expect(await screen.findByText('77801.5')).toBeInTheDocument()
   expect(screen.getByText('9,999.90')).toBeInTheDocument()
+})
+
+test('the sidebar caption names the platforms the org has connected', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  mockRoutes({ accounts: [...accounts, mt5Account] })
+  renderLayout()
+
+  expect(await screen.findByText('cTrader · MT5')).toBeInTheDocument()
+  expect(screen.queryByText('FP Markets · cTrader')).not.toBeInTheDocument()
+})
+
+test('a single-platform org gets a single-platform caption', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  mockRoutes()
+  const view = renderLayout()
+  expect(await screen.findByText('cTrader')).toBeInTheDocument()
+  view.unmount()
+
+  mockRoutes({ accounts: [mt5Account] })
+  renderLayout()
+  expect(await screen.findByText('MT5')).toBeInTheDocument()
 })

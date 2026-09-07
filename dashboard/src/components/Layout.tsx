@@ -10,6 +10,7 @@ import type { Account, ApiState, CloseAllResult, EventResponse, Settings, Webhoo
 import ConfirmDialog from './ConfirmDialog'
 import Logo from './Logo'
 import { money, signed, errorText } from '../lib/format'
+import { platformCaption } from '../lib/platform'
 
 const navItems = (orgId: number, role: Role) => [
   { path: `/org/${orgId}`, label: 'Overview' },
@@ -58,7 +59,9 @@ function contractPrices(
   return [...out.entries()].map(([symbol, price]) => ({ symbol, price }))
 }
 
-function DeskStrip() {
+/** `onAccounts` hands the fleet the strip already polls to whoever needs
+ *  it -- the sidebar caption -- so the platform list costs no extra fetch. */
+function DeskStrip({ onAccounts }: { onAccounts?: (accounts: Account[]) => void }) {
   const { orgId, role } = useOrg()
   const [settings, setSettings] = useState<Settings | null>(null)
   // The Automation switch, mirrored on every page next to the copying
@@ -85,6 +88,7 @@ function DeskStrip() {
         orgApi<ApiState>(orgId, 'state'),
       ])
       setSettings(sett)
+      onAccounts?.(accounts)
       const master = accounts.find((a) => a.role === 'master')
       masterIdRef.current = master?.ctid_trader_account_id ?? null
       const masterSnap = master
@@ -132,7 +136,7 @@ function DeskStrip() {
     } catch {
       // Older api without the reminder category: no banner.
     }
-  }, [orgId, role])
+  }, [orgId, role, onAccounts])
 
   useEffect(() => {
     refresh()
@@ -379,6 +383,11 @@ export default function Layout() {
   const navigate = useNavigate()
   const { orgId, role, me } = useOrg()
   const [menuOpen, setMenuOpen] = useState(false)
+  // "cTrader", "MT5" or "cTrader · MT5" -- null until the first fetch, so
+  // the sidebar never claims a platform list it has not seen.
+  const [caption, setCaption] = useState<string | null>(null)
+  const handleAccounts = useCallback(
+    (list: Account[]) => setCaption(platformCaption(list)), [])
 
   const handleLogout = async () => {
     try {
@@ -420,7 +429,7 @@ export default function Layout() {
             <option key={o.id} value={o.id}>{o.name}</option>
           ))}
         </select>
-        <p className="desk-label mt-1">FP Markets · cTrader</p>
+        {caption && <p className="desk-label mt-1">{caption}</p>}
       </div>
 
       <nav className="mt-4 flex-1 overflow-y-auto">
@@ -509,7 +518,7 @@ export default function Layout() {
           </button>
           <Logo size={22} textClass="text-base" />
         </div>
-        <DeskStrip />
+        <DeskStrip onAccounts={handleAccounts} />
         <main className="flex-1 overflow-y-auto p-4 md:p-6">
           <Outlet />
         </main>
