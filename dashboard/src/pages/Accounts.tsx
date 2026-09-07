@@ -2,13 +2,25 @@ import { useEffect, useState } from 'react'
 import { orgApi } from '../lib/api'
 import { useOrg } from '../lib/org'
 import { can } from '../lib/roles'
-import type { Account, AccountDetails, ApiState, CloseAllResult, StateSnapshot } from '../lib/types'
+import type {
+  Account, AccountDetails, ApiState, CloseAllResult, Mt5AccountCreated, StateSnapshot,
+} from '../lib/types'
 import ConfirmDialog from '../components/ConfirmDialog'
 import { money, formatWhen } from '../lib/format'
 import { isMt5 } from '../lib/platform'
 
 // How long the green "Flattened ✓" confirmation stays on a row button.
 const FLATTEN_DONE_MS = 5000
+
+/** A key is shown exactly once. This is held only while its dialog is open
+ *  and dropped the moment the dialog closes -- never stored anywhere else. */
+interface KeyReveal {
+  title: string
+  key: string
+  /** Present on creation; a rotation only replaces the key. */
+  download_url: string | null
+  install: string[]
+}
 
 function formatDate(iso: string | undefined): string {
   if (!iso) return '—'
@@ -52,6 +64,11 @@ export default function Accounts() {
   const [details, setDetails] = useState<AccountDetails | null>(null)
   const [detailsError, setDetailsError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  // Add MT5 account: nickname dialog → POST → one-time key dialog.
+  const [addingMt5, setAddingMt5] = useState(false)
+  const [mt5Nickname, setMt5Nickname] = useState('')
+  const [keyReveal, setKeyReveal] = useState<KeyReveal | null>(null)
+  const [copied, setCopied] = useState(false)
 
   // Live equity per account, keyed by account id. Held separately from the
   // accounts rows because it comes from the engine, not the database: the
@@ -210,6 +227,46 @@ export default function Accounts() {
     }
   }
 
+  const handleAddMt5 = async () => {
+    try {
+      setBusy(true)
+      const result = await orgApi<Mt5AccountCreated>(orgId, 'mt5/accounts', {
+        method: 'POST',
+        body: JSON.stringify({ nickname: mt5Nickname.trim() }),
+      })
+      setAddingMt5(false)
+      setMt5Nickname('')
+      setKeyReveal({
+        title: 'MT5 account added — install the EA',
+        key: result.key,
+        download_url: result.download_url,
+        install: result.install,
+      })
+      await fetchAccounts()
+    } catch (err) {
+      setAddingMt5(false)
+      setError(`Could not add the MT5 account (${err instanceof Error ? err.message : 'unknown'})`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const copyKey = async (key: string) => {
+    try {
+      await navigator.clipboard.writeText(key)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 2000)
+    } catch {
+      setError('Could not copy — select the key and copy it by hand')
+    }
+  }
+
+  const closeKeyReveal = () => {
+    // The key leaves memory here; it is never shown again.
+    setKeyReveal(null)
+    setCopied(false)
+  }
+
   const handleFlatten = async () => {
     if (!flattening) return
     const account = flattening
@@ -286,12 +343,20 @@ export default function Accounts() {
           </p>
         </div>
         {can(role, 'control') && (
-          <button
-            onClick={handleConnectOAuth}
-            className="w-full md:w-auto shrink-0 px-4 py-2.5 bg-brand text-on-accent text-sm font-semibold rounded hover:bg-brand-deep transition-colors"
-          >
-            Connect cTrader ID
-          </button>
+          <div className="flex flex-col gap-2 md:flex-row md:items-center shrink-0">
+            <button
+              onClick={() => setAddingMt5(true)}
+              className="w-full md:w-auto px-4 py-2.5 text-sm font-semibold rounded border border-line-strong text-ink hover:border-ink transition-colors"
+            >
+              Add MT5 account
+            </button>
+            <button
+              onClick={handleConnectOAuth}
+              className="w-full md:w-auto px-4 py-2.5 bg-brand text-on-accent text-sm font-semibold rounded hover:bg-brand-deep transition-colors"
+            >
+              Connect cTrader ID
+            </button>
+          </div>
         )}
       </header>
 
@@ -597,6 +662,83 @@ export default function Accounts() {
           working order cancelled. Other accounts are untouched
           {flattening?.is_live ? ' — and this is a live account' : ''}.
         </p>
+      </ConfirmDialog>
+
+      {/* Add MT5 account: the nickname is the only identifier the row has
+          until its terminal connects, so it is required. */}
+      <ConfirmDialog
+        open={addingMt5}
+        title="Add an MT5 account"
+        confirmLabel="Create account"
+        busy={busy}
+        disabled={mt5Nickname.trim() === ''}
+        onConfirm={handleAddMt5}
+        onCancel={() => { setAddingMt5(false); setMt5Nickname('') }}
+      >
+        <p>
+          The account starts as a disabled slave. You get a one-time key to
+          paste into the MirrorFleet EA running in the account's own MT5
+          terminal; the login, broker and symbols arrive when the EA first
+          connects.
+        </p>
+        <div>
+          <label className="desk-label block mb-1" htmlFor="mt5-nickname">Nickname</label>
+          <input
+            id="mt5-nickname"
+            type="text"
+            value={mt5Nickname}
+            onChange={(e) => setMt5Nickname(e.target.value)}
+            autoComplete="off"
+            placeholder="e.g. VPS desk"
+            className="w-full rounded border border-line-strong px-3 py-2 text-sm text-ink bg-card"
+          />
+        </div>
+      </ConfirmDialog>
+
+      {/* One-time key reveal. Confirm and cancel both just close it. */}
+      <ConfirmDialog
+        open={keyReveal != null}
+        title={keyReveal?.title ?? ''}
+        confirmLabel="I have copied it — close"
+        onConfirm={closeKeyReveal}
+        onCancel={closeKeyReveal}
+      >
+        <p>
+          This key is shown <strong>once</strong>. Paste it into the EA's{' '}
+          <span className="num">InpKey</span> input. If it is lost, rotate the
+          key from the account's row — the old one stops working at once.
+        </p>
+        <div className="flex items-center gap-2">
+          <code
+            aria-label="MT5 key"
+            className="num flex-1 break-all rounded border border-line-strong bg-paper px-3 py-2 text-xs text-ink"
+          >
+            {keyReveal?.key}
+          </code>
+          <button
+            type="button"
+            onClick={() => { if (keyReveal) copyKey(keyReveal.key) }}
+            className="shrink-0 px-2.5 py-1 text-xs font-medium rounded border border-line-strong text-ink-soft hover:text-ink hover:border-ink transition-colors"
+          >
+            {copied ? 'Copied' : 'Copy'}
+          </button>
+        </div>
+        {keyReveal?.download_url && (
+          <a
+            href={keyReveal.download_url}
+            download
+            className="inline-block text-sm font-medium text-brand hover:underline"
+          >
+            Download MirrorFleet.mq5
+          </a>
+        )}
+        {keyReveal && keyReveal.install.length > 0 && (
+          <ol className="list-decimal pl-5 space-y-1">
+            {keyReveal.install.map((step, i) => (
+              <li key={i}>{step}</li>
+            ))}
+          </ol>
+        )}
       </ConfirmDialog>
 
       {/* Details drawer */}

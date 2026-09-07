@@ -755,3 +755,91 @@ test('an MT5 row has no Re-grant access or Disconnect: there is no OAuth grant b
   // cTrader rows keep both.
   expect(screen.getAllByRole('button', { name: /re-grant access/i })).toHaveLength(2)
 })
+
+// ---------- Add MT5 account ----------
+
+const created = {
+  account_id: 1000000000001,
+  key: 'mt5_test_key_abc',
+  download_url: '/downloads/MirrorFleet.mq5',
+  install: [
+    'Download MirrorFleet.mq5',
+    'Copy it to MQL5/Experts and compile it in MetaEditor',
+    'Allow https://mirrorfleet.com in Tools → Options → Expert Advisors',
+    'Attach it to any chart and paste the key into InpKey',
+    'Confirm the row here says Connected',
+  ],
+}
+
+test('Add MT5 account asks for a nickname, POSTs it, then shows the key once with the install steps', async () => {
+  setRole('admin')
+  const fetchMock = mockMt5Routes({
+    'POST /api/orgs/1/mt5/accounts': () => jsonResponse(created, 201),
+  })
+  renderAccounts()
+
+  await userEvent.click(await screen.findByRole('button', { name: /add mt5 account/i }))
+  const dialog = await screen.findByRole('dialog')
+  // A nameless MT5 row would be unidentifiable until its terminal connects.
+  expect(within(dialog).getByRole('button', { name: /create account/i })).toBeDisabled()
+  await userEvent.type(within(dialog).getByLabelText(/nickname/i), 'VPS desk')
+  await userEvent.click(within(dialog).getByRole('button', { name: /create account/i }))
+
+  await waitFor(() => {
+    const call = fetchMock.mock.calls.find(([u, init]) =>
+      String(u) === '/api/orgs/1/mt5/accounts' && (init as RequestInit)?.method === 'POST')
+    expect(call).toBeTruthy()
+    expect(JSON.parse(String((call![1] as RequestInit).body))).toEqual({ nickname: 'VPS desk' })
+  })
+
+  const reveal = await screen.findByRole('dialog', { name: /mt5 account added/i })
+  expect(within(reveal).getByText('mt5_test_key_abc')).toBeInTheDocument()
+  expect(within(reveal).getByRole('link', { name: /download mirrorfleet\.mq5/i }))
+    .toHaveAttribute('href', '/downloads/MirrorFleet.mq5')
+  expect(within(reveal).getAllByRole('listitem')).toHaveLength(5)
+
+  // Closing the dialog is the last time the key is on screen.
+  await userEvent.click(within(reveal).getByRole('button', { name: /i have copied it/i }))
+  expect(screen.queryByText('mt5_test_key_abc')).not.toBeInTheDocument()
+})
+
+test('the key dialog copies the key to the clipboard', async () => {
+  setRole('admin')
+  mockMt5Routes({
+    'POST /api/orgs/1/mt5/accounts': () => jsonResponse({ ...created, install: [] }, 201),
+  })
+  renderAccounts()
+
+  await userEvent.click(await screen.findByRole('button', { name: /add mt5 account/i }))
+  const dialog = await screen.findByRole('dialog')
+  await userEvent.type(within(dialog).getByLabelText(/nickname/i), 'VPS desk')
+  await userEvent.click(within(dialog).getByRole('button', { name: /create account/i }))
+  const reveal = await screen.findByRole('dialog', { name: /mt5 account added/i })
+
+  // Installed AFTER every userEvent call: user-event swaps in its own
+  // clipboard stub on first use, and this one must be the one the page hits.
+  const writeText = vi.fn().mockResolvedValue(undefined)
+  Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+  fireEvent.click(within(reveal).getByRole('button', { name: /^copy$/i }))
+
+  await waitFor(() => expect(writeText).toHaveBeenCalledWith('mt5_test_key_abc'))
+  expect(await within(reveal).findByRole('button', { name: /^copied$/i })).toBeInTheDocument()
+})
+
+test('viewer sees no Add MT5 account button', async () => {
+  setRole('viewer')
+  mockRoutes()
+  renderAccounts()
+
+  await screen.findByText('12345')
+  expect(screen.queryByRole('button', { name: /add mt5 account/i })).not.toBeInTheDocument()
+})
+
+test('trader sees no Add MT5 account button', async () => {
+  setRole('trader')
+  mockRoutes()
+  renderAccounts()
+
+  await screen.findByText('12345')
+  expect(screen.queryByRole('button', { name: /add mt5 account/i })).not.toBeInTheDocument()
+})
