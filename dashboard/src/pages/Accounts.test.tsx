@@ -882,3 +882,113 @@ test('below control, an MT5 row shows no Rotate key', async () => {
   await screen.findByText('MT5 · login 555 · XYZ Ltd')
   expect(screen.queryByRole('button', { name: /rotate key/i })).not.toBeInTheDocument()
 })
+
+// ---------- MT5 details drawer ----------
+
+const mt5Details = {
+  account_id: 1000000000001, trader_login: 555, balance: 9784.04, deposit_currency: 'USD',
+  leverage: 500, max_leverage: null, broker_name: 'XYZ Ltd',
+  registration_timestamp: null, account_type: 'HEDGED', access_rights: null, swap_free: null,
+  is_limited_risk: false, open_positions: [], pending_orders: [],
+  nickname: 'VPS desk', role: 'slave', enabled: false, multiplier: 1, status: 'ok',
+  last_error: null, is_live: true,
+}
+
+const mt5Aliases = {
+  aliases: [
+    { canonical: 'XAUUSD', broker_name: 'XAUUSD.r', source: 'auto' },
+    { canonical: 'EURUSD', broker_name: 'EURUSD.r', source: 'manual' },
+  ],
+  broker_symbols: ['XAUUSD.r', 'EURUSD.r', 'GBPUSD.r'],
+}
+
+async function openMt5Details() {
+  const rows = await screen.findAllByRole('row')
+  const mt5Row = rows.find((r) => r.textContent?.includes('XYZ Ltd'))!
+  await userEvent.click(within(mt5Row).getByRole('button', { name: /details/i }))
+}
+
+test("an MT5 account's details show a Terminal section instead of the OAuth grant, and the symbol mapping", async () => {
+  setRole('admin')
+  mockMt5Routes({
+    '/accounts/1000000000001/symbol-aliases': () => jsonResponse(mt5Aliases),
+    '/accounts/1000000000001/details': () => jsonResponse(mt5Details),
+  })
+  renderAccounts()
+  await openMt5Details()
+
+  const terminal = (await screen.findByRole('heading', { name: 'Terminal' })).closest('section')!
+  expect(within(terminal).getByText('XYZ-Live3')).toBeInTheDocument()
+  expect(within(terminal).getByText('real')).toBeInTheDocument()
+  expect(within(terminal).getByText('1.0.0')).toBeInTheDocument()
+  expect(screen.queryByText('OAuth grant')).not.toBeInTheDocument()
+
+  const mapping = screen.getByRole('heading', { name: 'Symbol mapping' }).closest('section')!
+  const input = await within(mapping).findByLabelText('Broker symbol for XAUUSD')
+  expect((input as HTMLInputElement).value).toBe('XAUUSD.r')
+  expect(within(mapping).getByText('XAUUSD')).toBeInTheDocument()
+  expect(within(mapping).getByText('auto')).toBeInTheDocument()
+  expect(within(mapping).getByText('manual')).toBeInTheDocument()
+
+  // The spec puts Rotate key in the Terminal section: it opens the same
+  // confirm dialog as the row button, stacked above the drawer.
+  await userEvent.click(within(terminal).getByRole('button', { name: /rotate key/i }))
+  expect(await screen.findByRole('dialog', { name: /rotate the key for vps desk/i })).toBeInTheDocument()
+})
+
+test('editing a broker symbol PUTs that one alias on blur and reloads the mapping', async () => {
+  setRole('admin')
+  const fetchMock = mockMt5Routes({
+    'PUT /accounts/1000000000001/symbol-aliases': () => jsonResponse({ status: 'ok' }),
+    '/accounts/1000000000001/symbol-aliases': () => jsonResponse(mt5Aliases),
+    '/accounts/1000000000001/details': () => jsonResponse(mt5Details),
+  })
+  renderAccounts()
+  await openMt5Details()
+
+  const input = await screen.findByLabelText('Broker symbol for XAUUSD')
+  await userEvent.clear(input)
+  await userEvent.type(input, 'GOLD.r')
+  await userEvent.tab()
+
+  await waitFor(() => {
+    const call = fetchMock.mock.calls.find(([u, init]) =>
+      String(u) === '/api/orgs/1/accounts/1000000000001/symbol-aliases' &&
+      (init as RequestInit)?.method === 'PUT')
+    expect(call).toBeTruthy()
+    expect(JSON.parse(String((call![1] as RequestInit).body))).toEqual({ aliases: { XAUUSD: 'GOLD.r' } })
+  })
+  // Re-read after the save so the auto/manual tag is the server's truth.
+  await waitFor(() => {
+    const reads = fetchMock.mock.calls.filter(([u, init]) =>
+      String(u).endsWith('/symbol-aliases') && ((init as RequestInit)?.method ?? 'GET') === 'GET')
+    expect(reads.length).toBeGreaterThanOrEqual(2)
+  })
+})
+
+test('a new canonical → broker mapping can be added from the drawer', async () => {
+  setRole('admin')
+  const fetchMock = mockMt5Routes({
+    'PUT /accounts/1000000000001/symbol-aliases': () => jsonResponse({ status: 'ok' }),
+    '/accounts/1000000000001/symbol-aliases': () => jsonResponse(mt5Aliases),
+    '/accounts/1000000000001/details': () => jsonResponse(mt5Details),
+  })
+  renderAccounts()
+  await openMt5Details()
+
+  await screen.findByLabelText('Broker symbol for XAUUSD')
+  const addButton = screen.getByRole('button', { name: /add mapping/i })
+  expect(addButton).toBeDisabled()
+  await userEvent.type(screen.getByLabelText('New canonical symbol'), 'us500')
+  await userEvent.type(screen.getByLabelText('New broker symbol'), 'US500.cash')
+  await userEvent.click(addButton)
+
+  await waitFor(() => {
+    const call = fetchMock.mock.calls.find(([u, init]) =>
+      String(u) === '/api/orgs/1/accounts/1000000000001/symbol-aliases' &&
+      (init as RequestInit)?.method === 'PUT')
+    expect(call).toBeTruthy()
+    // Canonical names are upper-case, as master events carry them.
+    expect(JSON.parse(String((call![1] as RequestInit).body))).toEqual({ aliases: { US500: 'US500.cash' } })
+  })
+})

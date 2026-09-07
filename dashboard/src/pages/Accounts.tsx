@@ -4,6 +4,7 @@ import { useOrg } from '../lib/org'
 import { can } from '../lib/roles'
 import type {
   Account, AccountDetails, ApiState, CloseAllResult, Mt5AccountCreated, StateSnapshot,
+  SymbolAliases,
 } from '../lib/types'
 import ConfirmDialog from '../components/ConfirmDialog'
 import { money, formatWhen } from '../lib/format'
@@ -70,6 +71,11 @@ export default function Accounts() {
   const [keyReveal, setKeyReveal] = useState<KeyReveal | null>(null)
   const [copied, setCopied] = useState(false)
   const [rotating, setRotating] = useState<Account | null>(null)
+  // Symbol mapping for the MT5 account whose drawer is open.
+  const [aliases, setAliases] = useState<SymbolAliases | null>(null)
+  const [aliasesError, setAliasesError] = useState<string | null>(null)
+  const [aliasDrafts, setAliasDrafts] = useState<Record<string, string>>({})
+  const [newAlias, setNewAlias] = useState({ canonical: '', broker_name: '' })
 
   // Live equity per account, keyed by account id. Held separately from the
   // accounts rows because it comes from the engine, not the database: the
@@ -336,17 +342,73 @@ export default function Accounts() {
     }
   }
 
+  const loadAliases = async (accountId: number) => {
+    try {
+      setAliases(await orgApi<SymbolAliases>(orgId, `accounts/${accountId}/symbol-aliases`))
+      setAliasesError(null)
+    } catch (err) {
+      setAliasesError(
+        `Could not load the symbol mapping (${err instanceof Error ? err.message : 'unknown'})`)
+    }
+  }
+
+  // One PUT per change, then a re-read: the server decides the auto/manual
+  // tag, and an empty broker name removes the row.
+  const saveAlias = async (accountId: number, canonical: string, brokerName: string) => {
+    try {
+      await orgApi(orgId, `accounts/${accountId}/symbol-aliases`, {
+        method: 'PUT',
+        body: JSON.stringify({ aliases: { [canonical]: brokerName } }),
+      })
+      await loadAliases(accountId)
+    } catch (err) {
+      setAliasesError(
+        `Could not save the mapping for ${canonical} (${err instanceof Error ? err.message : 'unknown'})`)
+    }
+  }
+
+  const handleAliasBlur = async (row: SymbolAliases['aliases'][number]) => {
+    if (!detailsFor) return
+    const draft = aliasDrafts[row.canonical]
+    if (draft === undefined || draft.trim() === row.broker_name) return
+    await saveAlias(detailsFor.ctid_trader_account_id, row.canonical, draft.trim())
+    setAliasDrafts((prev) => {
+      const next = { ...prev }
+      delete next[row.canonical]
+      return next
+    })
+  }
+
+  const handleAddAlias = () => {
+    if (!detailsFor) return
+    // Canonical names are what master events carry: upper-case.
+    const canonical = newAlias.canonical.trim().toUpperCase()
+    const brokerName = newAlias.broker_name.trim()
+    if (!canonical || !brokerName) return
+    setNewAlias({ canonical: '', broker_name: '' })
+    saveAlias(detailsFor.ctid_trader_account_id, canonical, brokerName)
+  }
+
   const openDetails = async (account: Account) => {
     setDetailsFor(account)
     setDetails(null)
     setDetailsError(null)
+    setAliases(null)
+    setAliasesError(null)
+    setAliasDrafts({})
+    setNewAlias({ canonical: '', broker_name: '' })
+    // The mapping lives in the api's database, so it loads even when the
+    // copier is down; reading it needs the trader role.
+    if (isMt5(account) && can(role, 'trade')) loadAliases(account.ctid_trader_account_id)
     try {
       setDetails(await orgApi<AccountDetails>(
         orgId, `accounts/${account.ctid_trader_account_id}/details`))
     } catch (err) {
       setDetailsError(
         `Could not fetch details: ${err instanceof Error ? err.message : 'unknown error'}. ` +
-        'The copier may be offline or the account not yet authorized.')
+        (isMt5(account)
+          ? 'The copier may be offline or the terminal has not connected yet.'
+          : 'The copier may be offline or the account not yet authorized.'))
     }
   }
 
@@ -806,7 +868,9 @@ export default function Accounts() {
                   {detailsFor.nickname || `Account ${detailsFor.trader_login}`}
                 </h2>
                 <p className="num text-sm text-ink-soft mt-0.5">
-                  {detailsFor.trader_login} · cTID {detailsFor.ctid_trader_account_id}
+                  {isMt5(detailsFor)
+                    ? mt5Subtitle(detailsFor.mt5)
+                    : `${detailsFor.trader_login} · cTID ${detailsFor.ctid_trader_account_id}`}
                 </p>
               </div>
               <button
@@ -858,8 +922,9 @@ export default function Accounts() {
                     />
                   </dl>
                   <p className="mt-3 text-xs text-ink-faint">
-                    The account holder's name and email are not exposed by the
-                    cTrader Open API — set a nickname instead.
+                    {isMt5(detailsFor)
+                      ? 'The terminal reports only what MT5 exposes to an Expert Advisor — set a nickname for anything more.'
+                      : 'The account holder\'s name and email are not exposed by the cTrader Open API — set a nickname instead.'}
                   </p>
                 </section>
 
@@ -875,15 +940,136 @@ export default function Accounts() {
                   </dl>
                 </section>
 
-                <section>
-                  <h3 className="desk-label mb-2">OAuth grant</h3>
-                  <dl className="space-y-1.5 text-sm">
-                    <DetailRow label="Granted" value={formatDate(details.connection?.granted_at)} />
-                    <DetailRow label="Token expires" value={formatDate(details.connection?.expires_at)} />
-                    <DetailRow label="Grant status" value={details.connection?.status ?? '—'} />
-                    <DetailRow label="Scope" value={details.connection?.scope ?? '—'} />
-                  </dl>
-                </section>
+                {isMt5(detailsFor) ? (
+                  <section>
+                    <h3 className="desk-label mb-2">Terminal</h3>
+                    <dl className="space-y-1.5 text-sm">
+                      <DetailRow label="Broker" value={detailsFor.mt5?.broker ?? '—'} />
+                      <DetailRow label="Server" value={detailsFor.mt5?.server ?? '—'} />
+                      <DetailRow label="Currency" value={detailsFor.mt5?.currency ?? '—'} />
+                      <DetailRow
+                        label="Hedging"
+                        value={detailsFor.mt5?.hedging == null
+                          ? '—'
+                          : detailsFor.mt5?.hedging ? 'Yes' : 'No — netting accounts are not supported'}
+                      />
+                      <DetailRow label="Trade mode" value={detailsFor.mt5?.trade_mode ?? '—'} />
+                      <DetailRow label="EA version" value={detailsFor.mt5?.ea_version ?? '—'} mono />
+                      <DetailRow label="Last seen" value={formatWhen(detailsFor.mt5?.last_seen_at)} mono />
+                    </dl>
+                    {/* The spec puts Rotate key here, beside the terminal it
+                        cuts off; the row button opens the same dialog. */}
+                    {can(role, 'control') && (
+                      <button
+                        type="button"
+                        onClick={() => setRotating(detailsFor)}
+                        className="mt-3 px-2.5 py-1 text-xs font-medium rounded border border-line-strong text-ink-soft hover:text-ink hover:border-ink transition-colors"
+                      >
+                        Rotate key
+                      </button>
+                    )}
+                  </section>
+                ) : (
+                  <section>
+                    <h3 className="desk-label mb-2">OAuth grant</h3>
+                    <dl className="space-y-1.5 text-sm">
+                      <DetailRow label="Granted" value={formatDate(details.connection?.granted_at)} />
+                      <DetailRow label="Token expires" value={formatDate(details.connection?.expires_at)} />
+                      <DetailRow label="Grant status" value={details.connection?.status ?? '—'} />
+                      <DetailRow label="Scope" value={details.connection?.scope ?? '—'} />
+                    </dl>
+                  </section>
+                )}
+
+                {isMt5(detailsFor) && (
+                  <section>
+                    <h3 className="desk-label mb-2">Symbol mapping</h3>
+                    {!can(role, 'trade') ? (
+                      <p className="text-sm text-ink-faint">Traders and admins can see the mapping.</p>
+                    ) : aliasesError ? (
+                      <p className="text-sm text-loss-deep">{aliasesError}</p>
+                    ) : !aliases ? (
+                      <p className="text-sm text-ink-faint">Loading the mapping…</p>
+                    ) : (
+                      <>
+                        {aliases.aliases.length === 0 ? (
+                          <p className="text-sm text-ink-faint">
+                            Nothing mapped yet — the terminal sends its symbol list when
+                            the EA first connects.
+                          </p>
+                        ) : (
+                          <ul className="space-y-1.5 text-sm">
+                            {aliases.aliases.map((row) => (
+                              <li key={row.canonical} className="flex items-center justify-between gap-3">
+                                <span className="num text-ink">{row.canonical}</span>
+                                <span className="flex items-center gap-2">
+                                  {can(role, 'control') ? (
+                                    <input
+                                      type="text"
+                                      aria-label={`Broker symbol for ${row.canonical}`}
+                                      list="mt5-broker-symbols"
+                                      value={aliasDrafts[row.canonical] ?? row.broker_name}
+                                      onChange={(e) =>
+                                        setAliasDrafts((prev) => ({ ...prev, [row.canonical]: e.target.value }))}
+                                      onBlur={() => handleAliasBlur(row)}
+                                      className="num w-28 rounded border border-transparent hover:border-line-strong focus:border-line-strong px-2 py-1 text-sm bg-transparent text-right"
+                                    />
+                                  ) : (
+                                    <span className="num text-ink">{row.broker_name}</span>
+                                  )}
+                                  <span className={`text-xs px-1.5 py-0.5 rounded ${
+                                    row.source === 'manual' ? 'bg-brand-wash text-ink' : 'bg-line text-ink-soft'
+                                  }`}>
+                                    {row.source}
+                                  </span>
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                        {can(role, 'control') && (
+                          <div className="mt-3 flex items-center gap-2">
+                            <input
+                              type="text"
+                              aria-label="New canonical symbol"
+                              placeholder="XAUUSD"
+                              value={newAlias.canonical}
+                              onChange={(e) => setNewAlias((prev) => ({ ...prev, canonical: e.target.value }))}
+                              className="num w-24 rounded border border-line-strong px-2 py-1 text-sm bg-card"
+                            />
+                            <span className="text-ink-faint">→</span>
+                            <input
+                              type="text"
+                              aria-label="New broker symbol"
+                              placeholder="GOLD.r"
+                              list="mt5-broker-symbols"
+                              value={newAlias.broker_name}
+                              onChange={(e) => setNewAlias((prev) => ({ ...prev, broker_name: e.target.value }))}
+                              className="num w-28 rounded border border-line-strong px-2 py-1 text-sm bg-card"
+                            />
+                            <button
+                              type="button"
+                              onClick={handleAddAlias}
+                              disabled={!newAlias.canonical.trim() || !newAlias.broker_name.trim()}
+                              className="px-2.5 py-1 text-xs font-medium rounded border border-line-strong text-ink-soft hover:text-ink hover:border-ink transition-colors disabled:opacity-50"
+                            >
+                              Add mapping
+                            </button>
+                          </div>
+                        )}
+                        <datalist id="mt5-broker-symbols">
+                          {aliases.broker_symbols.map((name) => (
+                            <option key={name} value={name} />
+                          ))}
+                        </datalist>
+                        <p className="mt-2 text-xs text-ink-faint">
+                          Clearing a broker name removes the mapping; a manual entry is
+                          never overwritten by the auto-matcher.
+                        </p>
+                      </>
+                    )}
+                  </section>
+                )}
 
                 <section>
                   <h3 className="desk-label mb-2">
