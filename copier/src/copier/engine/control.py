@@ -42,6 +42,11 @@ Routes:
 - POST /close-all: kill switch for one org, body {"org_id": int, "account_id": int?}
   (no account_id = every enabled account in that org; copying is paused only
   while the flatten runs and restored before the response)
+- POST /mt5/hello, POST /mt5/sync: an MT5 terminal's reports, proxied by
+  the api with the account it resolved from the key, body
+  {"account_id": int, "org_id": int, "report": {...}}; hello answers JSON
+  {"last_deal_ticket"}, sync answers the EA's text/plain command lines
+- GET /mt5/status?account_id: online flag, last report time, queue depth
 """
 
 import json
@@ -66,6 +71,32 @@ def _write_json(request, payload: dict, code: int | None = None) -> None:
 def _read_json_body(request) -> dict:
     body = request.content.read()
     return json.loads(body) if body else {}
+
+
+def _write_text(request, text: str, code: int | None = None) -> None:
+    if code is not None:
+        request.setResponseCode(code)
+    request.setHeader(b"Content-Type", b"text/plain; charset=utf-8")
+    request.write(text.encode())
+    request.finish()
+
+
+def _mt5_body(body: dict) -> tuple[int, dict]:
+    """(account_id, report) from an /mt5/* body. The api resolved
+    account_id from the terminal's key and stamps org_id for its own log;
+    the copier re-derives the org from the accounts table, so org_id is
+    accepted and not trusted."""
+    account_id = body.get("account_id")
+    if account_id is None:
+        raise ValueError("account_id required")
+    try:
+        account_id = int(account_id)
+    except (TypeError, ValueError):
+        raise ValueError("account_id must be an integer")
+    report = body.get("report")
+    if not isinstance(report, dict):
+        raise ValueError("report must be an object")
+    return account_id, report
 
 
 def _int_arg(request, name: bytes, default: int | None = None) -> int:
@@ -539,6 +570,49 @@ class DriftResource(resource.Resource):
         self.putChild(b"dismiss", DriftDismissResource(app))
 
 
+class Mt5HelloResource(_JsonResource):
+    """POST /mt5/hello: a terminal's hello (in chunks), answered with the
+    deal watermark it should resume from."""
+
+    def _handle(self, request, body):
+        account_id, report = _mt5_body(body)
+        return self.app.mt5_hello(account_id, report)
+
+
+class Mt5SyncResource(_JsonResource):
+    """POST /mt5/sync: one sync report in, the EA's text response out --
+    text/plain, the command lines the terminal executes. A ValueError
+    (bad body or report) is still a JSON 400 through
+    _JsonResource.render_POST, and the api passes that 400 through to the
+    terminal as is -- only an unreachable copier or a 5xx becomes a RETRY
+    line (contract section 3) -- so a rejected report is not resent
+    unchanged. An unknown account is a 200 STOP line, not a 400."""
+
+    def _render(self, request):
+        body = _read_json_body(request)
+        account_id, report = _mt5_body(body)
+        _write_text(request, self.app.mt5_sync(account_id, report))
+        return server.NOT_DONE_YET
+
+
+class Mt5StatusResource(_JsonResource):
+    """GET /mt5/status?account_id=N: online flag, last report, queue depth."""
+
+    def _handle(self, request, body):
+        return self.app.mt5_status(_int_arg(request, b"account_id"))
+
+
+class Mt5Resource(resource.Resource):
+    """Parent resource for /mt5/{hello,sync,status}."""
+
+    def __init__(self, app):
+        super().__init__()
+        self.app = app
+        self.putChild(b"hello", Mt5HelloResource(app))
+        self.putChild(b"sync", Mt5SyncResource(app))
+        self.putChild(b"status", Mt5StatusResource(app))
+
+
 class RootResource(resource.Resource):
     """Root resource that dispatches to sub-resources."""
 
@@ -566,6 +640,7 @@ class RootResource(resource.Resource):
         self.putChild(b"positions", PositionsResource(app))
         self.putChild(b"orders", OrdersResource(app))
         self.putChild(b"close-all", CloseAllResource(app))
+        self.putChild(b"mt5", Mt5Resource(app))
 
 
 def make_control_site(app: Any) -> server.Site:
