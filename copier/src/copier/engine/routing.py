@@ -2,7 +2,7 @@
 each org's slave fleet. Pure data derived from the accounts table; rebuilt by
 CopierApp on boot and on every reload()."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Mapping
 
 from copier.db.repo import AccountRow
@@ -14,32 +14,62 @@ class OrgRouting:
     org_by_account: Mapping[int, int]
     master_by_org: Mapping[int, int]
     slaves_by_org: Mapping[int, list[SlaveConfig]]
+    # account -> 'ctrader' | 'mt5'. Defaulted so the unit-test fixture that
+    # builds routings by hand stays valid.
+    platform_by_account: Mapping[int, str] = field(default_factory=dict)
+
+
+def mt5_symbols_by_canonical(
+    symbols: Mapping[str, SymbolInfo], aliases: Mapping[str, str],
+) -> dict[str, SymbolInfo]:
+    """An MT5 account's symbol cache re-keyed for the engine.
+
+    The cache is keyed by BROKER name ("XAUUSD.r"); master events carry
+    CANONICAL names ("XAUUSD"). Every alias adds a canonical key pointing
+    at the broker symbol's SymbolInfo -- whose .name stays the broker name,
+    which is what the outbox sends -- and every broker name keeps its own
+    key, so an unaliased symbol still resolves for a master that happens
+    to use the same name.
+    """
+    out = dict(symbols)
+    for canonical, broker_name in aliases.items():
+        info = symbols.get(broker_name)
+        if info is not None:
+            out[canonical] = info
+    return out
 
 
 def build_routing(
     accounts: list[AccountRow],
     symbol_loader: Callable[[int], Mapping[str, SymbolInfo]],
+    alias_loader: Callable[[int], Mapping[str, str]] | None = None,
 ) -> OrgRouting:
     org_by_account: dict[int, int] = {}
     master_by_org: dict[int, int] = {}
     slaves_by_org: dict[int, list[SlaveConfig]] = {}
+    platform_by_account: dict[int, str] = {}
     for a in accounts:
         org_by_account[a.account_id] = a.org_id
+        platform_by_account[a.account_id] = a.platform
         if a.role == "master":
             master_by_org[a.org_id] = a.account_id
         elif a.role == "slave":
+            symbols = symbol_loader(a.account_id)
+            if a.platform == "mt5" and alias_loader is not None:
+                symbols = mt5_symbols_by_canonical(symbols, alias_loader(a.account_id))
             slaves_by_org.setdefault(a.org_id, []).append(
                 SlaveConfig(
                     account_id=a.account_id,
                     enabled=a.enabled and a.status != "paused",
                     multiplier=a.multiplier,
-                    symbols=symbol_loader(a.account_id),
+                    symbols=symbols,
                 )
             )
     return OrgRouting(
         org_by_account=org_by_account,
         master_by_org=master_by_org,
         slaves_by_org=slaves_by_org,
+        platform_by_account=platform_by_account,
     )
 
 
