@@ -15,6 +15,7 @@ from starlette.testclient import TestClient
 
 from conftest import default_mock_callback
 from api.routes import webhooks as wh
+from api import netaddr
 
 SECRET = "tvw_test-secret-value-0123456789"
 MASTER = 999
@@ -136,27 +137,10 @@ def test_an_outsider_never_reaches_the_database(org_client, db, monkeypatch):
 # appends. The first live alert was refused as "non-TradingView source
 # 172.18.0.1" because this route only believed that header from loopback.
 
-PROD_PROC_NET_ROUTE = (
-    "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n"
-    "eth0\t00000000\t010012AC\t0003\t0\t0\t0\t00000000\t0\t0\t0\n"
-    "eth0\t000012AC\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0\n"
-)
-
-
-def test_gateway_is_read_from_proc_net_route():
-    """Exactly what the production container reports; 010012AC is
-    172.18.0.1 in little-endian hex."""
-    assert wh._gateway_from_proc_route(PROD_PROC_NET_ROUTE) == "172.18.0.1"
-    no_default = ("Iface\tDestination\tGateway\n"
-                  "eth0\t000012AC\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0\n")
-    assert wh._gateway_from_proc_route(no_default) is None
-    assert wh._gateway_from_proc_route("") is None
-
-
 def _behind_proxy(monkeypatch, gateway="172.18.0.1"):
     monkeypatch.setattr(wh, "TRADINGVIEW_SOURCE_IPS", frozenset({"52.89.214.238"}))
     monkeypatch.setenv("TRUST_PROXY", "true")
-    monkeypatch.setattr(wh, "_container_gateway", lambda: gateway)
+    monkeypatch.setattr(netaddr, "_container_gateway", lambda: gateway)
 
 
 def _post_as(app, peer, body, forwarded):
@@ -227,7 +211,7 @@ def test_without_trust_proxy_the_gateway_is_just_another_stranger(org_client, db
     seed(MASTER, role="master"); _arm(db, org_id)
     monkeypatch.setattr(wh, "TRADINGVIEW_SOURCE_IPS", frozenset({"52.89.214.238"}))
     monkeypatch.setenv("TRUST_PROXY", "false")
-    monkeypatch.setattr(wh, "_container_gateway", lambda: "172.18.0.1")
+    monkeypatch.setattr(netaddr, "_container_gateway", lambda: "172.18.0.1")
 
     r = _post_as(client.app, "172.18.0.1", _alert(), "52.89.214.238")
 
