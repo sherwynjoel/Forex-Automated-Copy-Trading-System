@@ -214,6 +214,9 @@ def _is_proxy_address(ip: str) -> bool:
     return ip in ("127.0.0.1", "::1", "localhost", "unknown")
 
 
+CSRF_EXEMPT_PREFIXES = ("/api/webhooks/", "/api/mt5/")
+
+
 class CSRFMiddleware(BaseHTTPMiddleware):
     """Middleware for CSRF protection on mutating requests."""
 
@@ -222,12 +225,15 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         # Only check mutations (POST, PUT, DELETE, PATCH)
         if request.method in ["POST", "PUT", "DELETE", "PATCH"]:
             # Skip CSRF check for the public endpoints: login, register,
-            # and inbound webhooks. A webhook has no session and no CSRF
-            # cookie by definition -- it authenticates with a per-org
-            # secret in its body (routes/webhooks.py), and the prefix is
-            # its own namespace so nothing else is ever exempted with it.
+            # and the sessionless machine doors. A webhook or an MT5
+            # terminal has no session and no CSRF cookie by definition --
+            # each authenticates with its own secret (routes/webhooks.py:
+            # per-org secret in the body; routes/mt5.py: per-account key in
+            # a header), and each prefix is its own namespace so nothing
+            # else is ever exempted with it. The trailing slash is
+            # load-bearing: /api/mt5x/ is not exempt.
             path = request.url.path
-            if path not in ("/api/login", "/api/register") and not path.startswith("/api/webhooks/"):
+            if path not in ("/api/login", "/api/register") and not path.startswith(CSRF_EXEMPT_PREFIXES):
                 # Get CSRF token from cookie
                 csrf_cookie = request.cookies.get("csrf")
                 if not csrf_cookie:
