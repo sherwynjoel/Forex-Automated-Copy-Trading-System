@@ -775,6 +775,10 @@ export default function Overview() {
               const isPaused = !slave.enabled
               const isDegraded = slave.status === 'degraded'
               const isRefreshFailed = slave.connection_status === 'refresh_failed'
+              // An MT5 terminal that has stopped reporting: copies queue and
+              // market opens expire after 30 s, so it is the same class of
+              // problem as a failed token refresh.
+              const isOffline = slave.connection_status === 'offline'
 
               let statusTone: 'ok' | 'paused' | 'degraded' = 'ok'
               let statusLabel = 'OK'
@@ -791,7 +795,7 @@ export default function Overview() {
                   key={slave.ctid_trader_account_id}
                   data-testid="slave-tile"
                   className={`bg-card p-5 rounded-lg border transition-colors hover:border-line-strong ${
-                    isRefreshFailed ? 'border-warn' : 'border-line'
+                    isRefreshFailed || isOffline ? 'border-warn' : 'border-line'
                   }`}
                 >
                   {/* Header with status */}
@@ -821,13 +825,21 @@ export default function Overview() {
                     </p>
                   )}
 
-                  {/* Refresh-failed marker - distinct from the degraded badge above */}
+                  {/* Connection markers - distinct from the degraded badge above */}
                   {isRefreshFailed && (
                     <div
                       data-testid="slave-refresh-failed-marker"
                       className="mb-4 px-3 py-2 bg-warn-wash border border-warn/40 text-warn-deep text-xs font-semibold rounded flex items-center gap-1.5"
                     >
                       <StatusDot tone="warn" /> Token refresh failed — reconnect required
+                    </div>
+                  )}
+                  {isOffline && (
+                    <div
+                      data-testid="slave-offline-marker"
+                      className="mb-4 px-3 py-2 bg-warn-wash border border-warn/40 text-warn-deep text-xs font-semibold rounded flex items-center gap-1.5"
+                    >
+                      <StatusDot tone="warn" /> Terminal offline — copies wait until the EA reports again
                     </div>
                   )}
 

@@ -6,6 +6,7 @@ import Overview from './Overview'
 import type { Account, ApiState, Settings, StateSnapshot } from '../lib/types'
 import type { Role } from '../lib/roles'
 import { mockUseOrg } from '../test/orgMock'
+import { mt5Account } from '../test/mt5Fixtures'
 
 const { useOrgMock } = vi.hoisted(() => ({ useOrgMock: vi.fn() }))
 vi.mock('../lib/org', () => ({ useOrg: useOrgMock }))
@@ -1392,4 +1393,30 @@ test('the live contracts table shows the protection on each position itself', as
     (c) => !c.textContent?.includes('4600.5'))!
   expect(unprotected.textContent).toContain('—')
   expect(unprotected.textContent).not.toContain('4600.5')
+})
+
+test('an MT5 slave whose terminal is offline gets the warn marker, like a failed token refresh', async () => {
+  setRole('owner')
+  const accounts: Account[] = [
+    mockAccounts[0],
+    { ...mt5Account, connection_status: 'offline', mt5: { ...mt5Account.mt5!, connected: false } },
+  ]
+  stubApi({
+    '/api/orgs/1/accounts': accounts,
+    '/api/orgs/1/settings': mockSettings,
+    '/api/orgs/1/state': mockState,
+  })
+
+  render(
+    <MemoryRouter>
+      <Overview />
+    </MemoryRouter>
+  )
+
+  const marker = await screen.findByTestId('slave-offline-marker')
+  expect(marker).toHaveTextContent(/terminal offline/i)
+  // It is a connection problem, not a send failure: no Degraded, and the
+  // cTrader token banner stays down.
+  expect(screen.queryByText('Degraded')).not.toBeInTheDocument()
+  expect(screen.queryByTestId('refresh-failed-banner')).not.toBeInTheDocument()
 })
