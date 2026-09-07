@@ -843,3 +843,42 @@ test('trader sees no Add MT5 account button', async () => {
   await screen.findByText('12345')
   expect(screen.queryByRole('button', { name: /add mt5 account/i })).not.toBeInTheDocument()
 })
+
+// ---------- Rotate key ----------
+
+test('Rotate key confirms, POSTs the rotation, and shows the new key once', async () => {
+  setRole('admin')
+  const fetchMock = mockMt5Routes({
+    'POST /api/orgs/1/mt5/accounts/1000000000001/key': () => jsonResponse({ key: 'mt5_rotated_key' }),
+  })
+  renderAccounts()
+
+  await userEvent.click(await screen.findByRole('button', { name: /rotate key/i }))
+  const dialog = await screen.findByRole('dialog')
+  expect(dialog).toHaveTextContent(/stops working/i)
+  // Nothing sent until confirmed: the running EA goes dark the moment it is.
+  expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith('/key'))).toBe(false)
+
+  await userEvent.click(within(dialog).getByRole('button', { name: /^rotate key$/i }))
+
+  await waitFor(() => {
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/orgs/1/mt5/accounts/1000000000001/key',
+      expect.objectContaining({ method: 'POST' })
+    )
+  })
+  const reveal = await screen.findByRole('dialog', { name: /new key for vps desk/i })
+  expect(within(reveal).getByText('mt5_rotated_key')).toBeInTheDocument()
+  // A rotation replaces only the key: no download link, no install steps.
+  expect(within(reveal).queryByRole('link')).not.toBeInTheDocument()
+  expect(within(reveal).queryByRole('listitem')).not.toBeInTheDocument()
+})
+
+test('below control, an MT5 row shows no Rotate key', async () => {
+  setRole('trader')
+  mockMt5Routes()
+  renderAccounts()
+
+  await screen.findByText('MT5 · login 555 · XYZ Ltd')
+  expect(screen.queryByRole('button', { name: /rotate key/i })).not.toBeInTheDocument()
+})

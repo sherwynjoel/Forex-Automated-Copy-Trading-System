@@ -7,7 +7,7 @@ import type {
 } from '../lib/types'
 import ConfirmDialog from '../components/ConfirmDialog'
 import { money, formatWhen } from '../lib/format'
-import { isMt5 } from '../lib/platform'
+import { isMt5, accountName } from '../lib/platform'
 
 // How long the green "Flattened ✓" confirmation stays on a row button.
 const FLATTEN_DONE_MS = 5000
@@ -69,6 +69,7 @@ export default function Accounts() {
   const [mt5Nickname, setMt5Nickname] = useState('')
   const [keyReveal, setKeyReveal] = useState<KeyReveal | null>(null)
   const [copied, setCopied] = useState(false)
+  const [rotating, setRotating] = useState<Account | null>(null)
 
   // Live equity per account, keyed by account id. Held separately from the
   // accounts rows because it comes from the engine, not the database: the
@@ -265,6 +266,28 @@ export default function Accounts() {
     // The key leaves memory here; it is never shown again.
     setKeyReveal(null)
     setCopied(false)
+  }
+
+  const handleRotateKey = async () => {
+    if (!rotating) return
+    const account = rotating
+    try {
+      setBusy(true)
+      const result = await orgApi<{ key: string }>(
+        orgId, `mt5/accounts/${account.ctid_trader_account_id}/key`, { method: 'POST' })
+      setRotating(null)
+      setKeyReveal({
+        title: `New key for ${accountName(account)}`,
+        key: result.key,
+        download_url: null,
+        install: [],
+      })
+    } catch (err) {
+      setRotating(null)
+      setError(`Could not rotate the key (${err instanceof Error ? err.message : 'unknown'})`)
+    } finally {
+      setBusy(false)
+    }
   }
 
   const handleFlatten = async () => {
@@ -591,6 +614,15 @@ export default function Accounts() {
                             {flattenStatus[id] === 'error' ? 'Failed — retry' : 'Flatten'}
                           </button>
                         ))}
+                        {can(role, 'control') && onMt5 && (
+                          <button
+                            onClick={() => setRotating(account)}
+                            disabled={isPending}
+                            className="px-2.5 py-1 text-xs font-medium rounded border border-line-strong text-ink-soft hover:text-ink hover:border-ink transition-colors disabled:opacity-50"
+                          >
+                            Rotate key
+                          </button>
+                        )}
                         {can(role, 'control') && !onMt5 && (
                           <button
                             onClick={() => setDisconnecting(account)}
@@ -739,6 +771,24 @@ export default function Accounts() {
             ))}
           </ol>
         )}
+      </ConfirmDialog>
+
+      {/* Rotate key: the old key dies the moment the new one exists. */}
+      <ConfirmDialog
+        open={rotating != null}
+        title={`Rotate the key for ${rotating ? accountName(rotating) : ''}`}
+        confirmLabel="Rotate key"
+        danger
+        busy={busy}
+        onConfirm={handleRotateKey}
+        onCancel={() => setRotating(null)}
+      >
+        <p>
+          The current key stops working the moment the new one exists, so the
+          running EA disconnects until you paste the new key into its{' '}
+          <span className="num">InpKey</span> input and restart it. Positions,
+          symbol mapping and history are untouched.
+        </p>
       </ConfirmDialog>
 
       {/* Details drawer */}
