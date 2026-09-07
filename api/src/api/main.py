@@ -174,6 +174,11 @@ def create_app(http_transport: Optional[httpx.BaseTransport] = None) -> FastAPI:
     app.include_router(create_webhooks_router(rate_limiter))
     app.include_router(create_webhook_settings_router())
 
+    # MT5 terminals report to the copier through the api; the door shares
+    # the login rate limiter for its per-source bad-key bucket.
+    from .routes.mt5 import create_mt5_router
+    app.include_router(create_mt5_router(rate_limiter))
+
     # Include insights router (margin, candles, analytics, overview stats)
     insights_router = create_insights_router()
     app.include_router(insights_router)

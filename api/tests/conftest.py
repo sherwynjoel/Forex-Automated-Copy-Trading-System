@@ -431,3 +431,23 @@ def org_client(app_client, make_user, make_org, login_as, db):
         return account_id
 
     return app_client, org_id, seed
+
+
+def seed_mt5(db: str, org_id: int, key: str, nickname: str = "VPS") -> int:
+    """Insert an MT5 account the way POST /api/orgs/{org}/mt5/accounts does
+    (synthetic id, no cTrader grant, disabled slave) plus its key link, and
+    return the account id. Shared by test_mt5.py and test_accounts.py."""
+    import hashlib
+
+    with psycopg.connect(db, autocommit=True) as conn:
+        (account_id,) = conn.execute(
+            """INSERT INTO accounts (ctid_trader_account_id, ctid_connection_id, org_id,
+                   platform, trader_login, is_live, role, enabled, nickname)
+               VALUES (nextval('mt5_account_id_seq'), NULL, %s, 'mt5', 0, false,
+                       'slave', false, %s)
+               RETURNING ctid_trader_account_id""",
+            (org_id, nickname)).fetchone()
+        conn.execute(
+            "INSERT INTO mt5_links (account_id, key_hash) VALUES (%s, %s)",
+            (account_id, hashlib.sha256(key.encode()).hexdigest()))
+    return int(account_id)
