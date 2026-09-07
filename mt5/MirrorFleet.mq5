@@ -441,3 +441,314 @@ bool SendHello()
    ShowStatus("connected");
    return true;
 }
+
+//+------------------------------------------------------------------+
+//| Sync: the report                                                  |
+//+------------------------------------------------------------------+
+// MT5 keeps every datetime in the broker's clock. The wire carries UTC, so
+// the offset is estimated once per sync (brokers sit on whole or half
+// hours; rounding hides the request latency and a clock a few seconds out).
+void UpdateServerOffset()
+{
+   long diff = (long)TimeTradeServer() - (long)TimeGMT();
+   g_server_offset_s = (long)MathRound((double)diff / 1800.0) * 1800;
+}
+
+// The four pending kinds the copier knows; "" for anything else (stop-limit
+// orders and market orders in flight are not reported).
+string PendingTypeName(const long type)
+{
+   if(type == ORDER_TYPE_BUY_LIMIT)  return "BUY_LIMIT";
+   if(type == ORDER_TYPE_SELL_LIMIT) return "SELL_LIMIT";
+   if(type == ORDER_TYPE_BUY_STOP)   return "BUY_STOP";
+   if(type == ORDER_TYPE_SELL_STOP)  return "SELL_STOP";
+   return "";
+}
+
+string PositionsJson()
+{
+   string out = "";
+   int total = PositionsTotal();
+   for(int i = 0; i < total; i++)
+   {
+      ulong ticket = PositionGetTicket(i);          // selects the position as well
+      if(ticket == 0) continue;
+      string s = PositionGetString(POSITION_SYMBOL);
+      int digits = (int)SymbolInfoInteger(s, SYMBOL_DIGITS);
+      bool buy = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+      if(out != "") out += ",";
+      out += "{" + JField("t", (string)ticket) + "," +
+             JField("s", JStr(s)) + "," +
+             JField("side", JStr(buy ? "BUY" : "SELL")) + "," +
+             JField("lots", JLots(PositionGetDouble(POSITION_VOLUME))) + "," +
+             JField("open", JNum(PositionGetDouble(POSITION_PRICE_OPEN), digits)) + "," +
+             JField("sl", JNum(PositionGetDouble(POSITION_SL), digits)) + "," +
+             JField("tp", JNum(PositionGetDouble(POSITION_TP), digits)) + "," +
+             JField("price", JNum(PositionGetDouble(POSITION_PRICE_CURRENT), digits)) + "," +
+             JField("pnl", JNum(PositionGetDouble(POSITION_PROFIT), 2)) + "," +
+             JField("swap", JNum(PositionGetDouble(POSITION_SWAP), 2)) + "," +
+             JField("comment", JStr(PositionGetString(POSITION_COMMENT))) + "," +
+             JField("magic", IntegerToString(PositionGetInteger(POSITION_MAGIC))) + "," +
+             JField("time", IntegerToString(PositionGetInteger(POSITION_TIME) - g_server_offset_s)) + "}";
+   }
+   return "[" + out + "]";
+}
+
+string OrdersJson()
+{
+   string out = "";
+   int total = OrdersTotal();
+   for(int i = 0; i < total; i++)
+   {
+      ulong ticket = OrderGetTicket(i);             // selects the order as well
+      if(ticket == 0) continue;
+      string type_name = PendingTypeName(OrderGetInteger(ORDER_TYPE));
+      if(type_name == "") continue;
+      string s = OrderGetString(ORDER_SYMBOL);
+      int digits = (int)SymbolInfoInteger(s, SYMBOL_DIGITS);
+      if(out != "") out += ",";
+      out += "{" + JField("t", (string)ticket) + "," +
+             JField("s", JStr(s)) + "," +
+             JField("type", JStr(type_name)) + "," +
+             JField("lots", JLots(OrderGetDouble(ORDER_VOLUME_CURRENT))) + "," +
+             JField("price", JNum(OrderGetDouble(ORDER_PRICE_OPEN), digits)) + "," +
+             JField("sl", JNum(OrderGetDouble(ORDER_SL), digits)) + "," +
+             JField("tp", JNum(OrderGetDouble(ORDER_TP), digits)) + "," +
+             JField("comment", JStr(OrderGetString(ORDER_COMMENT))) + "," +
+             JField("magic", IntegerToString(OrderGetInteger(ORDER_MAGIC))) + "}";
+   }
+   return "[" + out + "]";
+}
+
+// One deal, already selected with HistoryDealSelect.
+string DealJson(const ulong t)
+{
+   string s = HistoryDealGetString(t, DEAL_SYMBOL);
+   int digits = (s == "") ? 2 : (int)SymbolInfoInteger(s, SYMBOL_DIGITS);
+   long type = HistoryDealGetInteger(t, DEAL_TYPE);
+   string type_name = "OTHER";
+   if(type == DEAL_TYPE_BUY)          type_name = "BUY";
+   else if(type == DEAL_TYPE_SELL)    type_name = "SELL";
+   else if(type == DEAL_TYPE_BALANCE) type_name = "BALANCE";
+   else if(type == DEAL_TYPE_CREDIT)  type_name = "CREDIT";
+   string entry_name = "";
+   if(type == DEAL_TYPE_BUY || type == DEAL_TYPE_SELL)
+   {
+      long entry = HistoryDealGetInteger(t, DEAL_ENTRY);
+      if(entry == DEAL_ENTRY_IN)          entry_name = "IN";
+      else if(entry == DEAL_ENTRY_OUT)    entry_name = "OUT";
+      else if(entry == DEAL_ENTRY_INOUT)  entry_name = "INOUT";
+      else if(entry == DEAL_ENTRY_OUT_BY) entry_name = "OUT_BY";
+   }
+   return "{" + JField("t", (string)t) + "," +
+          JField("pos", IntegerToString(HistoryDealGetInteger(t, DEAL_POSITION_ID))) + "," +
+          JField("order", IntegerToString(HistoryDealGetInteger(t, DEAL_ORDER))) + "," +
+          JField("s", JStr(s)) + "," +
+          JField("type", JStr(type_name)) + "," +
+          JField("entry", JStr(entry_name)) + "," +
+          JField("lots", JLots(HistoryDealGetDouble(t, DEAL_VOLUME))) + "," +
+          JField("price", JNum(HistoryDealGetDouble(t, DEAL_PRICE), digits)) + "," +
+          JField("profit", JNum(HistoryDealGetDouble(t, DEAL_PROFIT), 2)) + "," +
+          JField("swap", JNum(HistoryDealGetDouble(t, DEAL_SWAP), 2)) + "," +
+          JField("commission", JNum(HistoryDealGetDouble(t, DEAL_COMMISSION), 2)) + "," +
+          JField("time", IntegerToString(HistoryDealGetInteger(t, DEAL_TIME_MSC) - g_server_offset_s * 1000)) + "," +
+          JField("comment", JStr(HistoryDealGetString(t, DEAL_COMMENT))) + "," +
+          JField("magic", IntegerToString(HistoryDealGetInteger(t, DEAL_MAGIC))) + "}";
+}
+
+// Every deal past the watermark, ascending by ticket, at most
+// MAX_DEALS_PER_SYNC and never past the body cap; the rest follow on the
+// next polls. Reports the last ticket and its server time so Sync can
+// advance the watermark once the server says OK.
+string DealsJson(const int body_so_far, ulong &max_ticket, datetime &max_time)
+{
+   max_ticket = 0;
+   max_time = 0;
+   datetime from = (g_watermark_time == 0) ? 0 : g_watermark_time - DEAL_LOOKBACK_S;
+   if(!HistorySelect(from, TimeCurrent() + 86400)) return "[]";
+   ulong fresh[];
+   int total = HistoryDealsTotal();
+   for(int i = 0; i < total; i++)
+   {
+      ulong t = HistoryDealGetTicket(i);
+      if(t == 0) continue;
+      if(t == g_watermark && g_watermark_time == 0)
+         g_watermark_time = (datetime)HistoryDealGetInteger(t, DEAL_TIME);
+      if(t <= g_watermark) continue;
+      int n = ArraySize(fresh);
+      ArrayResize(fresh, n + 1, 256);
+      fresh[n] = t;
+   }
+   int count = ArraySize(fresh);
+   if(count == 0)
+   {
+      // Nothing newer than the watermark anywhere: later syncs need only
+      // the one-hour window.
+      if(g_watermark_time == 0) g_watermark_time = TimeCurrent();
+      return "[]";
+   }
+   ArraySort(fresh);
+   string out = "";
+   int size = body_so_far;
+   for(int i = 0; i < count && i < MAX_DEALS_PER_SYNC; i++)
+   {
+      ulong t = fresh[i];
+      if(!HistoryDealSelect(t)) continue;
+      string item = DealJson(t);
+      if(size + StringLen(item) > MAX_SYNC_BODY_BYTES) break;
+      if(out != "") out += ",";
+      out += item;
+      size += StringLen(item) + 1;
+      max_ticket = t;
+      max_time = (datetime)HistoryDealGetInteger(t, DEAL_TIME);
+   }
+   return "[" + out + "]";
+}
+
+string AcksJson()
+{
+   string out = "";
+   int n = ArraySize(g_pending_acks);
+   for(int i = 0; i < n; i++)
+   {
+      if(out != "") out += ",";
+      out += g_pending_acks[i];
+   }
+   return "[" + out + "]";
+}
+
+void PushAck(const string ack)
+{
+   int n = ArraySize(g_pending_acks);
+   ArrayResize(g_pending_acks, n + 1);
+   g_pending_acks[n] = ack;
+}
+
+// The first `count` acks were delivered: drop them, keep the ones the
+// commands of this tick appended after the POST.
+void DropSentAcks(const int count)
+{
+   int n = ArraySize(g_pending_acks);
+   if(count <= 0) return;
+   if(count >= n)
+   {
+      ArrayResize(g_pending_acks, 0);
+      return;
+   }
+   for(int i = count; i < n; i++) g_pending_acks[i - count] = g_pending_acks[i];
+   ArrayResize(g_pending_acks, n - count);
+}
+
+// The sync body (the spec's example, key for key). Deals go last so the
+// size guard sees everything else first.
+string SyncBody(ulong &max_ticket, datetime &max_time)
+{
+   g_seq++;
+   string body = "{" + JField("v", IntegerToString(PROTOCOL_VERSION)) + "," +
+                 JField("seq", IntegerToString(g_seq)) + "," +
+                 JField("ts", IntegerToString((long)TimeGMT() * 1000)) + "," +
+                 JField("balance", JNum(AccountInfoDouble(ACCOUNT_BALANCE), 2)) + "," +
+                 JField("equity", JNum(AccountInfoDouble(ACCOUNT_EQUITY), 2)) + "," +
+                 JField("margin", JNum(AccountInfoDouble(ACCOUNT_MARGIN), 2)) + "," +
+                 JField("margin_free", JNum(AccountInfoDouble(ACCOUNT_MARGIN_FREE), 2)) + "," +
+                 JField("positions", PositionsJson()) + "," +
+                 JField("orders", OrdersJson()) + "," +
+                 JField("acks", AcksJson()) + ",";
+   body += JField("deals", DealsJson(StringLen(body), max_ticket, max_time)) + "}";
+   return body;
+}
+
+//+------------------------------------------------------------------+
+//| Sync: the reply                                                   |
+//+------------------------------------------------------------------+
+// The server's next_poll_ms is a floor it may raise, never a way past the
+// owner's InpPollMs; an unreadable value falls back.
+int PollFrom(const string text, const int fallback)
+{
+   int ms = (int)StringToInteger(text);
+   if(ms <= 0) ms = fallback;
+   int floor_ms = PollFloor();
+   return (ms < floor_ms) ? floor_ms : ms;
+}
+
+// One poll: the report out, the status line and the commands in.
+void Sync()
+{
+   UpdateServerOffset();
+   ulong sent_max_ticket = 0;
+   datetime sent_max_time = 0;
+   int sent_acks = ArraySize(g_pending_acks);
+   string body = SyncBody(sent_max_ticket, sent_max_time);
+   string reply = "";
+   int code = Post(SYNC_PATH, body, reply);
+   if(code == 401)
+   {
+      Stop(JsonString(reply, "reason", "unknown key"));
+      return;
+   }
+   if(code != 200)
+   {
+      if(code != -1)
+         g_last_error = "sync answered HTTP " + IntegerToString(code) + " " +
+                        JsonString(reply, "reason", "");
+      Retrying(g_last_error);
+      return;
+   }
+
+   // Lines: a status line, then one CMD line per command (contract section 2).
+   StringReplace(reply, "\r", "");
+   string lines[];
+   int count = StringSplit(reply, '\n', lines);
+   if(count < 1 || lines[0] == "")
+   {
+      Retrying("empty reply from the server");
+      return;
+   }
+   string fields[];
+   int nf = StringSplit(lines[0], '\t', fields);
+   string status = (nf > 0) ? fields[0] : "";
+
+   if(status == "STOP")
+   {
+      // STOP <server_ms> <reason>: three fields, the reason is the third.
+      string reason = "stopped by the server";
+      if(nf >= 3)
+      {
+         reason = fields[2];
+         for(int i = 3; i < nf; i++) reason += " " + fields[i];
+      }
+      Stop(reason);
+      return;
+   }
+   if(status == "RETRY")
+   {
+      // RETRY <server_ms> <next_poll_ms>: nothing was applied. The acks
+      // and the deals stay for the next poll.
+      g_last_error = "the copier is unavailable";
+      g_poll_ms = (nf >= 3) ? PollFrom(fields[2], RETRY_POLL_MS) : RETRY_POLL_MS;
+      ShowStatus("retrying - " + g_last_error);
+      return;
+   }
+   if(status != "OK")
+   {
+      Retrying("unexpected status line '" + lines[0] + "'");
+      return;
+   }
+
+   // OK <server_ms> <next_poll_ms>: the report was applied.
+   g_poll_ms = (nf >= 3) ? PollFrom(fields[2], PollFloor()) : PollFloor();
+   DropSentAcks(sent_acks);
+   if(sent_max_ticket > g_watermark)
+   {
+      g_watermark = sent_max_ticket;
+      g_watermark_time = sent_max_time;
+   }
+   g_last_error = "";
+   g_last_sync = TimeLocal();
+   ShowStatus("connected - last sync " + TimeToString(g_last_sync, TIME_SECONDS) + " - v" + EA_VERSION);
+   for(int i = 1; i < count; i++)
+   {
+      if(lines[i] == "") continue;
+      ExecuteLine(lines[i]);
+   }
+}
