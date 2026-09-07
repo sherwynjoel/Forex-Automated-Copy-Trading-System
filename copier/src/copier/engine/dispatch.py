@@ -1,7 +1,7 @@
 """Intent dispatcher: converts SlaveIntents to cTrader protobuf requests."""
 
 import logging
-from typing import Callable, Sequence
+from typing import Callable, Mapping, Sequence
 
 from twisted.internet import defer
 from google.protobuf import message
@@ -224,6 +224,8 @@ class Dispatcher:
         repo: Repo,
         bucket: TokenBucket,
         clock=None,
+        mt5_targets: Callable[[int], Mapping[int, str] | None] | None = None,
+        mt5_outbox=None,
     ):
         """Initialize dispatcher.
 
@@ -234,6 +236,11 @@ class Dispatcher:
             repo: Repository for mappings and events.
             bucket: TokenBucket for rate limiting.
             clock: Optional Twisted Clock for testing.
+            mt5_targets: account_id -> {symbol_id: broker symbol name} when the
+                account is an MT5 terminal, None when it is cTrader (or when
+                the process has no MT5 lane at all). Intents for MT5 accounts
+                are queued on `mt5_outbox` instead of built into protobuf.
+            mt5_outbox: copier.mt5.outbox.MT5Outbox, or None.
         """
         self._send_for_account = send_for_account
         self._repo = repo
@@ -241,6 +248,8 @@ class Dispatcher:
         if clock is None:
             from twisted.internet import reactor as clock
         self._clock = clock
+        self._mt5_targets = mt5_targets
+        self._mt5_outbox = mt5_outbox
 
     def dispatch(self, intents: Sequence[SlaveIntent], org_id: int) -> None:
         """Dispatch a sequence of intents on behalf of exactly one org.
@@ -409,7 +418,10 @@ class Dispatcher:
         )
 
     def _handle_live_send(self, intent: SlaveIntent, org_id: int) -> None:
-        """Send request with retry logic."""
+        """Send request with retry logic -- or, for an MT5 slave, queue it."""
+        if self._enqueue_for_mt5(intent, org_id):
+            return
+
         account_id, req = build_request(intent)
 
         # Create mapping if needed
@@ -421,6 +433,43 @@ class Dispatcher:
 
         # Send with retries
         self._send_with_retries(account_id, req, attempt=0)
+
+    def _enqueue_for_mt5(self, intent: SlaveIntent, org_id: int) -> bool:
+        """Route an MT5 slave's intent to the command outbox.
+
+        Decided BEFORE build_request: an MT5 terminal speaks no protobuf,
+        and its symbol ids are the bridge's crc32 values. Mapping creation
+        is exactly the live path's (same client_order_id scheme), so the
+        ack that comes back through the sync report activates the same row
+        a cTrader execution event would. Returns True when the intent was
+        handled here.
+        """
+        if self._mt5_targets is None or self._mt5_outbox is None:
+            return False
+        account_id = intent.slave_account_id
+        targets = self._mt5_targets(account_id)
+        if targets is None:
+            return False
+        broker_symbol = ""
+        if isinstance(intent, (OpenMarket, PlacePending)):
+            broker_symbol = targets.get(intent.symbol_id)
+            if broker_symbol is None:
+                self._repo.log_event(
+                    'slave_action', 'warning',
+                    {'action': 'mt5_symbol_unmatched', 'symbol': intent.symbol_name,
+                     'message': f"cannot copy to MT5 account {account_id}: no broker symbol "
+                                f"is mapped to {intent.symbol_name!r}; set the mapping in the "
+                                f"account's Details panel"},
+                    account_id=account_id, org_id=org_id)
+                return True
+        self._create_mapping(intent, account_id, org_id)
+        command_id = self._mt5_outbox.enqueue_intent(intent, org_id, broker_symbol)
+        self._repo.log_event(
+            'slave_action', 'info',
+            {'action': 'mt5_command_queued', 'command_id': command_id,
+             'intent_type': type(intent).__name__},
+            account_id=account_id, org_id=org_id)
+        return True
 
     def send_direct(self, account_id: int, req: message.Message,
                     bucket=None) -> None:
