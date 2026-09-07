@@ -344,3 +344,126 @@ def test_the_forwarded_address_is_recorded_from_the_container_gateway(
 
     assert r.status_code == 200, r.text
     assert _link(db, account_id)[1] == "203.0.113.9"
+
+
+# ================================================ operator: add + rotate
+
+
+def _create(client, org_id, nickname="VPS demo"):
+    return client.post(f"/api/orgs/{org_id}/mt5/accounts", json={"nickname": nickname},
+                       headers=_csrf(client))
+
+
+def test_an_admin_adds_an_mt5_account_and_sees_the_key_exactly_once(org_client, db):
+    client, org_id, seed = org_client
+    calls = _copier(client)
+
+    r = _create(client, org_id)
+
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert set(body) == {"account_id", "key", "download_url", "install"}
+    assert body["key"].startswith("mt5_") and len(body["key"]) > 40
+    assert body["account_id"] >= 1_000_000_000_000
+    assert body["download_url"] == "/downloads/MirrorFleet.mq5"
+    assert len(body["install"]) == 5 and all(isinstance(s, str) and s for s in body["install"])
+    assert any("https://mirrorfleet.com" in s for s in body["install"])
+    assert body["key"] not in json.dumps(body["install"])
+
+    with psycopg.connect(db, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT platform, ctid_connection_id, trader_login, is_live, role, enabled, "
+            "nickname, org_id FROM accounts WHERE ctid_trader_account_id = %s",
+            (body["account_id"],)).fetchone()
+        assert row == ("mt5", None, 0, False, "slave", False, "VPS demo", org_id)
+        (stored,) = conn.execute("SELECT key_hash FROM mt5_links WHERE account_id = %s",
+                                 (body["account_id"],)).fetchone()
+    assert stored == hashlib.sha256(body["key"].encode()).hexdigest()
+
+    (account_id, payload, actor), = _events(db, org_id, "mt5_account_added")
+    assert account_id == body["account_id"] and actor == "admin@example.com"
+    assert payload["nickname"] == "VPS demo"
+    assert any("/reload" in url for url, _ in calls)
+
+    # the key is shown once: nothing else the api serves carries it
+    listed = client.get(f"/api/orgs/{org_id}/accounts").json()
+    assert body["key"] not in json.dumps(listed)
+    with psycopg.connect(db, autocommit=True) as conn:
+        blob = json.dumps(conn.execute("SELECT payload FROM events").fetchall(), default=str)
+    assert body["key"] not in blob
+
+
+def test_the_new_key_opens_the_door(org_client, db):
+    client, org_id, seed = org_client
+    key = _create(client, org_id).json()["key"]
+    calls = _copier(client)
+    assert _sync(client, key=key).status_code == 200
+    assert calls[-1][1]["org_id"] == org_id
+
+
+def test_a_nickname_is_required(org_client):
+    client, org_id, seed = org_client
+    r = _create(client, org_id, nickname="   ")
+    assert r.status_code == 400
+    assert "nickname" in r.json()["detail"]
+
+
+def test_the_install_steps_name_the_public_origin_when_there_is_one(org_client, monkeypatch):
+    client, org_id, seed = org_client
+    monkeypatch.setenv("PUBLIC_ORIGIN", "https://mirrorfleet.test")
+    steps = _create(client, org_id).json()["install"]
+    assert any("https://mirrorfleet.test" in s for s in steps)
+    assert not any("https://mirrorfleet.com" in s for s in steps)
+
+
+def test_rotating_the_key_kills_the_old_one_immediately(org_client, db):
+    client, org_id, seed = org_client
+    created = _create(client, org_id).json()
+    account_id, old = created["account_id"], created["key"]
+    _copier(client)
+    assert _sync(client, key=old).status_code == 200
+
+    r = client.post(f"/api/orgs/{org_id}/mt5/accounts/{account_id}/key", headers=_csrf(client))
+
+    assert r.status_code == 200, r.text
+    new = r.json()["key"]
+    assert set(r.json()) == {"key"}
+    assert new.startswith("mt5_") and new != old
+    assert _sync(client, key=old).status_code == 401
+    assert _sync(client, key=new).status_code == 200
+    (audited_id, _, actor), = _events(db, org_id, "mt5_key_rotated")
+    assert audited_id == account_id and actor == "admin@example.com"
+
+
+def test_rotation_on_a_ctrader_account_is_400(org_client):
+    client, org_id, seed = org_client
+    seed(12345)
+    r = client.post(f"/api/orgs/{org_id}/mt5/accounts/12345/key", headers=_csrf(client))
+    assert r.status_code == 400
+    assert r.json()["detail"] == "not an MT5 account"
+
+
+def test_another_orgs_mt5_account_is_404_here(org_client, make_user, make_org, db):
+    client, org_id, seed = org_client
+    other_owner = make_user(email="other@example.com")
+    other_org = make_org(name="Other", members=[(other_owner, "owner")])
+    theirs = seed_mt5(db, other_org, WRONG)
+
+    assert client.post(f"/api/orgs/{org_id}/mt5/accounts/{theirs}/key",
+                       headers=_csrf(client)).status_code == 404
+    assert client.post(f"/api/orgs/{org_id}/mt5/accounts/424242/key",
+                       headers=_csrf(client)).status_code == 404
+
+
+def test_a_trader_can_neither_add_nor_rotate(org_client, make_user, login_as, db):
+    client, org_id, seed = org_client
+    mine = seed_mt5(db, org_id, KEY)
+    trader = make_user(email="trader@example.com")
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute("INSERT INTO org_memberships (org_id, user_id, role) VALUES (%s, %s, 'trader')",
+                     (org_id, trader["id"]))
+    login_as(client, trader)
+
+    assert _create(client, org_id).status_code == 403
+    assert client.post(f"/api/orgs/{org_id}/mt5/accounts/{mine}/key",
+                       headers=_csrf(client)).status_code == 403

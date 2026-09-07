@@ -54,21 +54,26 @@ from __future__ import annotations
 
 import json
 import logging
+import secrets
 import time
 from typing import Any, Dict, Optional
 
 import httpx
 import psycopg
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import PlainTextResponse, Response
+from pydantic import BaseModel
 
 from ..auth import LoginRateLimiter
 from ..config import ApiConfig
+from ..db import get_conn
 from ..netaddr import client_ip
+from ..rbac import OrgContext, require_account_in_org, require_org_role
 # Shared with the webhook door on purpose: one JSON helper, one sha256, one
 # exception describer, one redaction. They are private to that module by
 # convention only; this module is the second door they were written for.
 from .webhooks import _describe, _hash, _json, scrub_secrets
+from .settings_control import audit
 
 logger = logging.getLogger(__name__)
 
@@ -206,5 +211,107 @@ def create_mt5_router(rate_limiter: LoginRateLimiter) -> APIRouter:
             # ---- 7. pass the copier's 200 through: body and content-type as is ----
             return Response(content=upstream.content, status_code=upstream.status_code,
                             media_type=upstream.headers.get("content-type", "text/plain"))
+
+    return router
+
+
+# ------------------------------------------------------ operator endpoints
+
+
+class Mt5AccountCreate(BaseModel):
+    nickname: str
+
+
+def _new_key() -> str:
+    return MT5_KEY_PREFIX + secrets.token_urlsafe(32)
+
+
+def _server_url(cfg: ApiConfig) -> str:
+    """Where the terminal must be allowed to call: the site's public origin
+    when it is configured, else the EA's own InpServer default."""
+    origin = (cfg.public_origin.split(",")[0] if cfg.public_origin else "").strip().rstrip("/")
+    return origin or EA_DEFAULT_SERVER
+
+
+def _install_steps(server: str) -> list[str]:
+    """The five steps the one-time key dialog shows, in the operator's
+    terms. They name the exact MT5 dialogs because the commonest failure is
+    WebRequest error 4014: the URL was never allowed. The key itself is not
+    repeated here -- the dialog shows it once, beside these."""
+    return [
+        "Download MirrorFleet.mq5 and copy it into your terminal's MQL5/Experts folder "
+        "(File > Open Data Folder), then open it in MetaEditor and press F7 to compile it once.",
+        f"In MT5 open Tools > Options > Expert Advisors, tick 'Allow WebRequest for listed URL' "
+        f"and add {server} to the list -- without this the EA reports error 4014.",
+        "In the same dialog tick 'Allow algorithmic trading', then make sure the AutoTrading "
+        "button in the toolbar is on (green).",
+        f"Drag MirrorFleet from the Navigator onto any chart. In the Inputs tab paste the key "
+        f"shown above into InpKey and leave InpServer as {server}.",
+        "Watch the chart comment: within a few seconds it reads 'MirrorFleet - connected' and "
+        "this account shows as connected in the Accounts list. The key is shown only this "
+        "once; use 'Rotate key' in the account's details if you lose it.",
+    ]
+
+
+async def _reload_copier(request: Request, cfg: ApiConfig) -> bool:
+    """Best-effort, like every account edit in routes/accounts.py: the
+    copier's routing snapshot bakes in the account list and the aliases,
+    and this is what makes a change apply on the next event instead of
+    whenever the cache expires."""
+    try:
+        response = await request.app.state.http.post(f"{cfg.copier_control_url}/reload")
+        return response.status_code == 200
+    except Exception:
+        return False
+
+
+def create_mt5_operator_router() -> APIRouter:
+    router = APIRouter(prefix="/api/orgs/{org_id}", tags=["mt5"])
+
+    @router.post("/mt5/accounts", status_code=201, response_model=Dict[str, Any])
+    async def create_mt5_account(body: Mt5AccountCreate, request: Request,
+                                 ctx: OrgContext = Depends(require_org_role("admin")),
+                                 conn: psycopg.Connection = Depends(get_conn),
+                                 cfg: ApiConfig = Depends(ApiConfig.from_env)):
+        """Create the account (synthetic id, no cTrader grant, a disabled
+        slave until the operator says otherwise) and its key link in one
+        transaction. The key is in this response and nowhere else."""
+        nickname = body.nickname.strip()
+        if not nickname:
+            raise HTTPException(status_code=400, detail="nickname is required")
+        key = _new_key()
+        with conn.transaction():
+            (account_id,) = conn.execute(
+                "INSERT INTO accounts (ctid_trader_account_id, ctid_connection_id, org_id, "
+                "platform, trader_login, is_live, role, enabled, nickname) "
+                "VALUES (nextval('mt5_account_id_seq'), NULL, %s, 'mt5', 0, false, "
+                "'slave', false, %s) RETURNING ctid_trader_account_id",
+                (ctx.org_id, nickname)).fetchone()
+            conn.execute("INSERT INTO mt5_links (account_id, key_hash) VALUES (%s, %s)",
+                         (account_id, _hash(key)))
+        account_id = int(account_id)
+        audit(conn, ctx.org_id, ctx.user_email, "mt5_account_added",
+              {"nickname": nickname, "platform": "mt5"}, account_id=account_id)
+        await _reload_copier(request, cfg)
+        return {"account_id": account_id, "key": key, "download_url": DOWNLOAD_PATH,
+                "install": _install_steps(_server_url(cfg))}
+
+    @router.post("/mt5/accounts/{account_id}/key", response_model=Dict[str, Any])
+    async def rotate_mt5_key(account_id: int,
+                             ctx: OrgContext = Depends(require_org_role("admin")),
+                             conn: psycopg.Connection = Depends(get_conn)):
+        """Replace the key. Shown exactly once; only its sha256 is stored.
+        The old key stops at the door immediately -- the lookup is per
+        request and nothing caches it."""
+        require_account_in_org(conn, ctx.org_id, account_id)
+        key = _new_key()
+        row = conn.execute(
+            "UPDATE mt5_links SET key_hash = %s, key_created_at = now() "
+            "WHERE account_id = %s RETURNING account_id",
+            (_hash(key), account_id)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=400, detail="not an MT5 account")
+        audit(conn, ctx.org_id, ctx.user_email, "mt5_key_rotated", {}, account_id=account_id)
+        return {"key": key}
 
     return router
