@@ -4,6 +4,7 @@ import { unitsFor, priceForAmount, quoteCurrencyOf, feeFor } from '../lib/protec
 import { actionBurst } from '../lib/refresh'
 import { useOrg } from '../lib/org'
 import { can } from '../lib/roles'
+import { accountWho } from '../lib/platform'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
 import type { TicksPayload } from '../lib/ticks'
 import type {
@@ -56,9 +57,8 @@ function readDefaultSymbol(orgId: number, accountId: number): string | null {
 }
 
 function accountLabel(account: Account): string {
-  const name = account.nickname || `Account ${account.trader_login}`
   const env = account.is_live ? 'Live' : 'Demo'
-  return `${name} · ${account.trader_login} · ${env} (${account.role})`
+  return `${accountWho(account)} · ${env} (${account.role})`
 }
 
 export default function Trade() {

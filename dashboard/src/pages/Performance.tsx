@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { orgApi } from '../lib/api'
 import { useOrg } from '../lib/org'
 import type { Account, Analytics } from '../lib/types'
+import { accountWho } from '../lib/platform'
 import {
   EquityCurve, MirrorScore, PerfBars, PerfLine, PnlBars,
 } from '../components/charts'
@@ -10,8 +11,7 @@ import { money, signed } from '../lib/format'
 import { cumulativeSeries, drawdownSeries, dailyPnl } from '../lib/perf'
 
 function accountLabel(account: Account): string {
-  const name = account.nickname || `Account ${account.trader_login}`
-  return `${name} · ${account.trader_login} · ${account.is_live ? 'Live' : 'Demo'}`
+  return `${accountWho(account)} · ${account.is_live ? 'Live' : 'Demo'}`
 }
 
 

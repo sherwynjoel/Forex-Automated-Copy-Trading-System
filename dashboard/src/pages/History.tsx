@@ -3,6 +3,7 @@ import { orgApi } from '../lib/api'
 import { useOrg } from '../lib/org'
 import type { Account, CashFlowEntry, Deal, HistoricalOrder, TradeSymbol } from '../lib/types'
 import { money, signed, formatWhen, errorText } from '../lib/format'
+import { accountWho } from '../lib/platform'
 import Banner from '../components/Banner'
 
 const DAY_MS = 24 * 3600 * 1000
@@ -28,10 +29,7 @@ export const historyPacing = {
 }
 
 function accountLabel(account: Account): string {
-  const env = account.is_live ? 'Live' : 'Demo'
-  return account.nickname
-    ? `${account.nickname} · ${account.trader_login} · ${env}`
-    : `Account ${account.trader_login} · ${env}`
+  return `${accountWho(account)} · ${account.is_live ? 'Live' : 'Demo'}`
 }
 
 function price(value: number | null | undefined, digits = 5): string {

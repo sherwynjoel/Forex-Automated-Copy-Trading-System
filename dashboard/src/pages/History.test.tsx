@@ -4,6 +4,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi, afterEach } from 'vitest'
 import History, { historyPacing } from './History'
 import { mockUseOrg } from '../test/orgMock'
+import { mt5Account } from '../test/mt5Fixtures'
 
 const { useOrgMock } = vi.hoisted(() => ({ useOrgMock: vi.fn() }))
 vi.mock('../lib/org', () => ({ useOrg: useOrgMock }))
@@ -674,4 +675,19 @@ test('a copy shows how far its EXIT sat from the master, not just its entry', as
   // Master 1.10000 -> 1.12000; copy 1.10050 -> 1.11950.
   expect(within(panel).getByText('+0.00050')).toBeInTheDocument()   // entry
   expect(within(panel).getByText('-0.00050')).toBeInTheDocument()   // exit
+})
+
+test('an MT5 account is labelled by its MT5 login, never a cTID', async () => {
+  const base = mockRoutes()
+  const json = (payload: unknown) =>
+    new Response(JSON.stringify(payload), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) =>
+    String(input) === '/api/orgs/1/accounts' ? json([...accounts, mt5Account]) : base(input)))
+  renderHistory()
+  await screen.findByText('21')
+
+  expect(screen.getByRole('option', { name: 'VPS desk · MT5 · login 555 · Live' })).toBeInTheDocument()
+  expect(screen.queryByRole('option', { name: /1000000000001/ })).not.toBeInTheDocument()
 })

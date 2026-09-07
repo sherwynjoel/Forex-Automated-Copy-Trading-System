@@ -6,6 +6,7 @@ import { act } from 'react'
 import Trade from './Trade'
 import type { Role } from '../lib/roles'
 import { mockUseOrg } from '../test/orgMock'
+import { mt5Account } from '../test/mt5Fixtures'
 
 const { useOrgMock } = vi.hoisted(() => ({ useOrgMock: vi.fn() }))
 vi.mock('../lib/org', () => ({ useOrg: useOrgMock }))
@@ -696,4 +697,20 @@ test('price mode is untouched: what you type is what is sent', async () => {
     const body = JSON.parse((call![1] as RequestInit).body as string)
     expect(body.take_profit).toBe(1.09)
   })
+})
+
+test('an MT5 account is labelled by its MT5 login in the account picker', async () => {
+  setRole('trader')
+  const base = mockRoutes()
+  const json = (payload: unknown) =>
+    new Response(JSON.stringify(payload), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) =>
+    String(input) === '/api/orgs/1/accounts' ? json([...accounts, mt5Account]) : base(input)))
+  renderTrade()
+
+  const select = await screen.findByLabelText(/account/i)
+  expect(within(select).getByRole('option', { name: 'VPS desk · MT5 · login 555 · Live (slave)' }))
+    .toBeInTheDocument()
 })

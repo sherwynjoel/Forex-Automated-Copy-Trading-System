@@ -4,6 +4,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi, afterEach } from 'vitest'
 import Performance from './Performance'
 import { mockUseOrg } from '../test/orgMock'
+import { mt5Account } from '../test/mt5Fixtures'
 
 const { useOrgMock } = vi.hoisted(() => ({ useOrgMock: vi.fn() }))
 vi.mock('../lib/org', () => ({ useOrg: useOrgMock }))
@@ -212,4 +213,18 @@ test('activity windows appear as tiles without repeating Net P&L', async () => {
   expect(screen.getByText(/this week/i)).toBeInTheDocument()
   // Net P&L already had a tile here; the move must not duplicate it.
   expect(screen.getAllByText(/^Net P&L$/i)).toHaveLength(1)
+})
+
+test('an MT5 account is labelled by its MT5 login in the account picker', async () => {
+  const base = mockRoutes()
+  const json = (payload: unknown) =>
+    new Response(JSON.stringify(payload), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) =>
+    String(input) === '/api/orgs/1/accounts' ? json([...accounts, mt5Account]) : base(input)))
+  renderPage()
+
+  await screen.findByText('+116.70')
+  expect(screen.getByRole('option', { name: 'VPS desk · MT5 · login 555 · Live' })).toBeInTheDocument()
 })
