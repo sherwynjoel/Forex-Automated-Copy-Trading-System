@@ -2,6 +2,17 @@
 import psycopg
 import pytest
 
+from conftest import seed_mt5
+
+MT5_KEY = "mt5_accounts-test-key-0123456789abcdefghijk"
+
+
+def _mt5_link(db, account_id, **cols):
+    with psycopg.connect(db, autocommit=True) as conn:
+        for k, v in cols.items():
+            conn.execute(f"UPDATE mt5_links SET {k} = %s WHERE account_id = %s",
+                         (v, account_id))
+
 
 def _csrf(client):
     return {"X-CSRF-Token": client.cookies.get("csrf")}
@@ -412,6 +423,91 @@ def test_account_details_merges_copier_and_db(org_client):
     assert "granted_at" in data["connection"]
     assert "expires_at" in data["connection"]
     assert data["connection"]["status"] == "active"
+    assert data["platform"] == "ctrader"
+    assert data["mt5"] is None
+
+
+def test_list_shows_the_platform_and_the_mt5_block(org_client, db):
+    """A cTrader row is unchanged apart from platform; an MT5 row carries
+    what the Accounts page shows in place of the grant."""
+    client, org_id, seed = org_client
+    seed(12345, role="master", is_live=True)
+    mt5_id = seed_mt5(db, org_id, MT5_KEY, nickname="VPS")
+    _mt5_link(db, mt5_id, login=12345678, broker="XYZ Ltd", server="XYZ-Live3",
+              currency="USD", hedging=True, trade_mode="demo", ea_version="1.0.0")
+
+    rows = {a["ctid_trader_account_id"]: a for a in client.get(f"/api/orgs/{org_id}/accounts").json()}
+
+    ct = rows[12345]
+    assert ct["platform"] == "ctrader" and ct["mt5"] is None
+    assert ct["connection_status"] == "active"
+
+    mt = rows[mt5_id]
+    assert mt["platform"] == "mt5"
+    assert mt["trader_login"] == 0 and mt["nickname"] == "VPS"
+    assert mt["role"] == "slave" and mt["enabled"] is False and mt["is_live"] is False
+    assert mt["mt5"] == {"login": 12345678, "broker": "XYZ Ltd", "server": "XYZ-Live3",
+                         "currency": "USD", "hedging": True, "trade_mode": "demo",
+                         "ea_version": "1.0.0", "last_seen_at": None, "connected": False}
+    assert mt["connection_status"] == "never"
+    assert "key_hash" not in mt and MT5_KEY not in str(mt)
+
+
+def test_mt5_connection_status_follows_last_seen(org_client, db):
+    client, org_id, seed = org_client
+    mt5_id = seed_mt5(db, org_id, MT5_KEY)
+
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute("UPDATE mt5_links SET last_seen_at = now() WHERE account_id = %s", (mt5_id,))
+    (row,) = client.get(f"/api/orgs/{org_id}/accounts").json()
+    assert row["connection_status"] == "connected" and row["mt5"]["connected"] is True
+    assert row["mt5"]["last_seen_at"] is not None
+
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute("UPDATE mt5_links SET last_seen_at = now() - interval '1 minute' "
+                     "WHERE account_id = %s", (mt5_id,))
+    (row,) = client.get(f"/api/orgs/{org_id}/accounts").json()
+    assert row["connection_status"] == "offline" and row["mt5"]["connected"] is False
+
+
+def test_mt5_details_merge_the_link_instead_of_the_grant(org_client, db):
+    client, org_id, seed = org_client
+    mt5_id = seed_mt5(db, org_id, MT5_KEY, nickname="VPS")
+    _mt5_link(db, mt5_id, login=12345678, broker="XYZ Ltd", server="XYZ-Live3",
+              currency="USD", hedging=True, trade_mode="demo", leverage=500,
+              ea_version="1.0.0", ea_build=4400, last_ip="203.0.113.9",
+              balance=9784.04, equity=9790.10)
+
+    import httpx
+    from conftest import default_mock_callback
+
+    def callback(request):
+        url = str(request.url)
+        if "copier.test" in url and "/details" in url:
+            assert f"account_id={mt5_id}" in url
+            return httpx.Response(200, json={
+                "account_id": mt5_id, "balance": 9784.04, "platform": "mt5",
+                "open_positions": [], "pending_orders": []})
+        return default_mock_callback(request)
+
+    client.app.state.mock_transport.set_callback(callback)
+
+    r = client.get(f"/api/orgs/{org_id}/accounts/{mt5_id}/details")
+
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["platform"] == "mt5" and data["connection"] is None
+    assert data["nickname"] == "VPS" and data["role"] == "slave" and data["trader_login"] == 0
+    assert data["balance"] == 9784.04
+    mt5 = data["mt5"]
+    assert mt5["login"] == 12345678 and mt5["broker"] == "XYZ Ltd"
+    assert mt5["server"] == "XYZ-Live3" and mt5["currency"] == "USD"
+    assert mt5["hedging"] is True and mt5["trade_mode"] == "demo" and mt5["leverage"] == 500
+    assert mt5["ea_version"] == "1.0.0" and mt5["ea_build"] == 4400
+    assert mt5["last_ip"] == "203.0.113.9" and mt5["equity"] == 9790.10
+    assert mt5["last_seen_at"] is None and mt5["connected"] is False
+    assert mt5["key_created_at"] is not None
+    assert "key_hash" not in mt5 and MT5_KEY not in r.text
 
 
 def test_account_details_unknown_account_404(org_client):

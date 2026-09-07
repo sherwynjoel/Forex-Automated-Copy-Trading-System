@@ -1,6 +1,6 @@
 """Accounts management endpoints."""
 import logging
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Optional, List, Any
 
@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from ..config import ApiConfig
 from ..db import get_conn
 from ..rbac import OrgContext, require_org_role, require_account_in_org
+from .mt5 import MT5_OFFLINE_AFTER_S
 from .settings_control import _proxy_to_copier
 
 
@@ -27,6 +28,20 @@ class PatchAccountRequest(BaseModel):
     cutoff_date: Optional[str] = None
 
 
+class Mt5Summary(BaseModel):
+    """What the Accounts page shows for an MT5 row in place of the grant."""
+    login: Optional[int] = None
+    broker: Optional[str] = None
+    server: Optional[str] = None
+    currency: Optional[str] = None
+    hedging: Optional[bool] = None
+    trade_mode: Optional[str] = None
+    ea_version: Optional[str] = None
+    last_seen_at: Optional[datetime] = None
+    # A report arrived within MT5_OFFLINE_AFTER_S.
+    connected: bool = False
+
+
 class AccountResponse(BaseModel):
     """Response for an account."""
     ctid_trader_account_id: int
@@ -37,9 +52,18 @@ class AccountResponse(BaseModel):
     multiplier: Decimal
     status: str
     last_error: Optional[str] = None
+    # cTrader: the grant's status. MT5: connected | offline | never.
     connection_status: str = "active"
     nickname: Optional[str] = None
     cutoff_date: Optional[date] = None
+    platform: str = "ctrader"
+    mt5: Optional[Mt5Summary] = None
+
+
+def _mt5_connection_status(last_seen_at: Optional[datetime], connected: bool) -> str:
+    if connected:
+        return "connected"
+    return "offline" if last_seen_at is not None else "never"
 
 
 # Upper bound on an account's copy multiplier. Scaling beyond this is
@@ -62,16 +86,31 @@ def create_accounts_router() -> APIRouter:
         rows = conn.execute(
             """SELECT a.ctid_trader_account_id, a.trader_login, a.is_live, a.role, a.enabled,
                       a.multiplier, a.status, a.last_error, c.status as conn_status, a.nickname,
-                      a.cutoff_date
+                      a.cutoff_date, a.platform,
+                      l.login, l.broker, l.server, l.currency, l.hedging, l.trade_mode,
+                      l.ea_version, l.last_seen_at,
+                      COALESCE(l.last_seen_at > now() - make_interval(secs => %s), false)
                FROM accounts a
-               JOIN ctid_connections c ON a.ctid_connection_id = c.id
+               LEFT JOIN ctid_connections c ON a.ctid_connection_id = c.id
+               LEFT JOIN mt5_links l ON l.account_id = a.ctid_trader_account_id
                WHERE a.org_id = %s
                ORDER BY a.ctid_trader_account_id""",
-            (ctx.org_id,),
+            (MT5_OFFLINE_AFTER_S, ctx.org_id),
         ).fetchall()
 
-        return [
-            AccountResponse(
+        result = []
+        for row in rows:
+            platform = row[11]
+            mt5 = None
+            if platform == "mt5":
+                mt5 = Mt5Summary(
+                    login=row[12], broker=row[13], server=row[14], currency=row[15],
+                    hedging=row[16], trade_mode=row[17], ea_version=row[18],
+                    last_seen_at=row[19], connected=bool(row[20]))
+                connection_status = _mt5_connection_status(row[19], bool(row[20]))
+            else:
+                connection_status = row[8]
+            result.append(AccountResponse(
                 ctid_trader_account_id=row[0],
                 trader_login=row[1],
                 is_live=row[2],
@@ -80,12 +119,13 @@ def create_accounts_router() -> APIRouter:
                 multiplier=row[5],
                 status=row[6],
                 last_error=row[7],
-                connection_status=row[8],
+                connection_status=connection_status,
                 nickname=row[9],
                 cutoff_date=row[10],
-            )
-            for row in rows
-        ]
+                platform=platform,
+                mt5=mt5,
+            ))
+        return result
 
     @router.patch("/accounts/{account_id}", response_model=dict)
     async def patch_account(
@@ -291,11 +331,17 @@ def create_accounts_router() -> APIRouter:
         row = conn.execute(
             """SELECT a.nickname, a.role, a.enabled, a.multiplier, a.status,
                       a.last_error, a.is_live, a.trader_login,
-                      c.granted_at, c.expires_at, c.status, c.scope
+                      c.granted_at, c.expires_at, c.status, c.scope,
+                      a.platform,
+                      l.login, l.broker, l.server, l.currency, l.hedging, l.trade_mode,
+                      l.leverage, l.ea_version, l.ea_build, l.last_seen_at, l.last_ip,
+                      l.balance, l.equity, l.key_created_at,
+                      COALESCE(l.last_seen_at > now() - make_interval(secs => %s), false)
                FROM accounts a
-               JOIN ctid_connections c ON a.ctid_connection_id = c.id
+               LEFT JOIN ctid_connections c ON a.ctid_connection_id = c.id
+               LEFT JOIN mt5_links l ON l.account_id = a.ctid_trader_account_id
                WHERE a.ctid_trader_account_id = %s AND a.org_id = %s""",
-            (account_id, ctx.org_id),
+            (MT5_OFFLINE_AFTER_S, account_id, ctx.org_id),
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Account not found")
@@ -315,13 +361,29 @@ def create_accounts_router() -> APIRouter:
             "status": row[4],
             "last_error": row[5],
             "is_live": row[6],
-            "connection": {
+            "platform": row[12],
+        })
+        if row[12] == "mt5":
+            # The terminal link stands where the OAuth grant would: what
+            # the Details drawer's Terminal section shows.
+            details["connection"] = None
+            details["mt5"] = {
+                "login": row[13], "broker": row[14], "server": row[15],
+                "currency": row[16], "hedging": row[17], "trade_mode": row[18],
+                "leverage": row[19], "ea_version": row[20], "ea_build": row[21],
+                "last_seen_at": row[22].isoformat() if row[22] else None,
+                "last_ip": row[23], "balance": row[24], "equity": row[25],
+                "key_created_at": row[26].isoformat() if row[26] else None,
+                "connected": bool(row[27]),
+            }
+        else:
+            details["connection"] = {
                 "granted_at": row[8].isoformat(),
                 "expires_at": row[9].isoformat(),
                 "status": row[10],
                 "scope": row[11],
-            },
-        })
+            }
+            details["mt5"] = None
         if not details.get("trader_login"):
             details["trader_login"] = row[7]
         return details
