@@ -6,6 +6,7 @@ import { act } from 'react'
 import Accounts from './Accounts'
 import type { Role } from '../lib/roles'
 import { mockUseOrg } from '../test/orgMock'
+import { mt5Account } from '../test/mt5Fixtures'
 
 const { useOrgMock } = vi.hoisted(() => ({ useOrgMock: vi.fn() }))
 vi.mock('../lib/org', () => ({ useOrg: useOrgMock }))
@@ -143,6 +144,16 @@ function renderAccounts() {
       <Accounts />
     </MemoryRouter>
   )
+}
+
+/** The fleet plus one connected MT5 account. `extra` is spread FIRST: the
+ *  override loop matches by substring in insertion order, and
+ *  '/api/orgs/1/accounts' would otherwise swallow '/accounts/…/details'. */
+function mockMt5Routes(extra: Record<string, (init?: RequestInit) => Response> = {}) {
+  return mockRoutes({
+    ...extra,
+    '/api/orgs/1/accounts': () => jsonResponse([...mockAccounts, mt5Account]),
+  })
 }
 
 test('loads and displays accounts with nicknames on mount', async () => {
@@ -687,4 +698,60 @@ test('equity failure does not break the accounts list', async () => {
 
   expect(await screen.findByText('12345')).toBeInTheDocument()
   expect(screen.getByText('12346')).toBeInTheDocument()
+})
+
+// ---------- MT5 rows ----------
+
+test('rows carry a platform badge; an MT5 row shows login and broker instead of a cTID', async () => {
+  setRole('admin')
+  mockMt5Routes()
+  renderAccounts()
+
+  const rows = await screen.findAllByRole('row')
+  const mt5Row = rows.find((r) => r.textContent?.includes('XYZ Ltd'))!
+  expect(mt5Row).toBeTruthy()
+  expect(within(mt5Row).getByText('MT5')).toBeInTheDocument()
+  expect(within(mt5Row).getByText('MT5 · login 555 · XYZ Ltd')).toBeInTheDocument()
+  expect(within(mt5Row).queryByText(/cTID/)).not.toBeInTheDocument()
+
+  const ctraderRow = rows.find((r) => r.textContent?.includes('12345'))!
+  expect(within(ctraderRow).getByText('cTrader')).toBeInTheDocument()
+  expect(within(ctraderRow).getByText('cTID 1')).toBeInTheDocument()
+})
+
+test('an MT5 row shows connected, offline with last seen, or waiting for the terminal', async () => {
+  setRole('admin')
+  const offline = {
+    ...mt5Account, ctid_trader_account_id: 1000000000002, nickname: 'Offline desk',
+    connection_status: 'offline',
+    mt5: { ...mt5Account.mt5!, connected: false, last_seen_at: '2026-09-07T09:00:00+00:00' },
+  }
+  const fresh = {
+    ...mt5Account, ctid_trader_account_id: 1000000000003, nickname: 'New desk',
+    trader_login: 0, connection_status: 'never',
+    mt5: { ...mt5Account.mt5!, login: null, broker: null, connected: false, last_seen_at: null },
+  }
+  mockRoutes({ '/api/orgs/1/accounts': () => jsonResponse([mt5Account, offline, fresh]) })
+  renderAccounts()
+
+  expect(await screen.findByText('Connected')).toBeInTheDocument()
+  expect(screen.getByText(/^Offline · last seen /)).toBeInTheDocument()
+  expect(screen.getByText('Waiting for the terminal')).toBeInTheDocument()
+  // No login yet: the subtitle says so instead of printing "login 0".
+  expect(screen.getByText('MT5 · no login yet')).toBeInTheDocument()
+})
+
+test('an MT5 row has no Re-grant access or Disconnect: there is no OAuth grant behind it', async () => {
+  setRole('admin')
+  mockMt5Routes()
+  renderAccounts()
+
+  const rows = await screen.findAllByRole('row')
+  const mt5Row = rows.find((r) => r.textContent?.includes('XYZ Ltd'))!
+  expect(within(mt5Row).queryByRole('button', { name: /re-grant access/i })).not.toBeInTheDocument()
+  expect(within(mt5Row).queryByRole('button', { name: /disconnect/i })).not.toBeInTheDocument()
+  // The per-account kill switch still applies: Close all covers MT5 too.
+  expect(within(mt5Row).getByRole('button', { name: /^flatten$/i })).toBeInTheDocument()
+  // cTrader rows keep both.
+  expect(screen.getAllByRole('button', { name: /re-grant access/i })).toHaveLength(2)
 })

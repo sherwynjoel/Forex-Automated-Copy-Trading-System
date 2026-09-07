@@ -4,7 +4,8 @@ import { useOrg } from '../lib/org'
 import { can } from '../lib/roles'
 import type { Account, AccountDetails, ApiState, CloseAllResult, StateSnapshot } from '../lib/types'
 import ConfirmDialog from '../components/ConfirmDialog'
-import { money } from '../lib/format'
+import { money, formatWhen } from '../lib/format'
+import { isMt5 } from '../lib/platform'
 
 // How long the green "Flattened ✓" confirmation stays on a row button.
 const FLATTEN_DONE_MS = 5000
@@ -21,6 +22,15 @@ function formatTimestamp(ms: number | null | undefined): string {
   return new Date(ms).toLocaleDateString('en-GB', {
     day: '2-digit', month: 'short', year: 'numeric',
   })
+}
+
+/** "MT5 · login 555 · XYZ Ltd" -- what an MT5 row prints under the login in
+ *  place of the cTrader id. Before the first hello there is no login and no
+ *  broker to print, and "login 0" would look like one. */
+function mt5Subtitle(link: Account['mt5']): string {
+  const parts = ['MT5', link?.login ? `login ${link.login}` : 'no login yet']
+  if (link?.broker) parts.push(link.broker)
+  return parts.join(' · ')
 }
 
 export default function Accounts() {
@@ -270,7 +280,8 @@ export default function Accounts() {
         <div>
           <h1 className="page-title">Accounts</h1>
           <p className="text-sm text-ink-soft mt-1">
-            One cTrader ID grant covers every account under it. Roles,
+            One cTrader ID grant covers every account under it; an MT5 account
+            connects through the MirrorFleet EA in its own terminal. Roles,
             nicknames, and cutoff dates apply per account.
           </p>
         </div>
@@ -310,7 +321,8 @@ export default function Accounts() {
         <div className="bg-card border border-line rounded-lg px-6 py-12 text-center">
           <p className="text-ink-soft">No accounts connected yet.</p>
           <p className="text-sm text-ink-faint mt-1">
-            Connect a cTrader ID to discover its trading accounts.
+            Connect a cTrader ID to discover its trading accounts, or add an
+            MT5 account and install the EA in its terminal.
           </p>
         </div>
       ) : (
@@ -325,7 +337,7 @@ export default function Accounts() {
                 <th className="desk-label px-3 py-2.5 font-semibold">Role</th>
                 <th className="desk-label px-3 py-2.5 font-semibold">Enabled</th>
                 <th className="desk-label px-3 py-2.5 font-semibold">Cutoff</th>
-                <th className="desk-label px-3 py-2.5 font-semibold">Grant</th>
+                <th className="desk-label px-3 py-2.5 font-semibold">Connection</th>
                 <th className="desk-label px-5 py-2.5 font-semibold text-right">Actions</th>
               </tr>
             </thead>
@@ -333,11 +345,21 @@ export default function Accounts() {
               {accounts.map((account) => {
                 const id = account.ctid_trader_account_id
                 const isPending = pendingRows.has(id)
+                const onMt5 = isMt5(account)
                 return (
                   <tr key={id} className={`border-b border-line last:border-0 align-top ${isPending ? 'opacity-60' : ''}`}>
                     <td data-label="Account" className="px-5 py-3">
-                      <div className="num text-ink">{account.trader_login}</div>
-                      <div className="text-xs text-ink-faint">cTID {id}</div>
+                      <div className="num text-ink">
+                        {onMt5 ? (account.mt5?.login ?? '—') : account.trader_login}
+                      </div>
+                      <div className="text-xs text-ink-faint">
+                        {onMt5 ? mt5Subtitle(account.mt5) : `cTID ${id}`}
+                      </div>
+                      <span className={`mt-1 inline-block text-xs font-semibold px-2 py-0.5 rounded ${
+                        onMt5 ? 'bg-brand-wash text-ink' : 'bg-line text-ink-soft'
+                      }`}>
+                        {onMt5 ? 'MT5' : 'cTrader'}
+                      </span>
                       {account.status === 'degraded' && (
                         <div
                           className="mt-1 text-xs text-loss-deep bg-loss-wash rounded px-1.5 py-0.5 max-w-44 truncate"
@@ -441,14 +463,18 @@ export default function Accounts() {
                         <span className="num text-ink">{account.cutoff_date || '—'}</span>
                       )}
                     </td>
-                    <td data-label="Grant" className="px-3 py-3">
-                      <span className={`text-xs font-medium px-2 py-0.5 rounded ${
-                        account.connection_status === 'active'
-                          ? 'bg-profit-wash text-profit-deep'
-                          : 'bg-warn-wash text-warn-deep'
-                      }`}>
-                        {account.connection_status === 'active' ? 'Active' : account.connection_status}
-                      </span>
+                    <td data-label="Connection" className="px-3 py-3">
+                      {onMt5 ? (
+                        <Mt5ConnectionBadge account={account} />
+                      ) : (
+                        <span className={`text-xs font-medium px-2 py-0.5 rounded ${
+                          account.connection_status === 'active'
+                            ? 'bg-profit-wash text-profit-deep'
+                            : 'bg-warn-wash text-warn-deep'
+                        }`}>
+                          {account.connection_status === 'active' ? 'Active' : account.connection_status}
+                        </span>
+                      )}
                     </td>
                     <td className="px-5 py-3">
                       <div className="flex justify-end gap-2 flex-wrap">
@@ -459,7 +485,7 @@ export default function Accounts() {
                         >
                           Details
                         </button>
-                        {can(role, 'control') && (
+                        {can(role, 'control') && !onMt5 && (
                           <button
                             onClick={handleConnectOAuth}
                             disabled={isPending}
@@ -500,7 +526,7 @@ export default function Accounts() {
                             {flattenStatus[id] === 'error' ? 'Failed — retry' : 'Flatten'}
                           </button>
                         ))}
-                        {can(role, 'control') && (
+                        {can(role, 'control') && !onMt5 && (
                           <button
                             onClick={() => setDisconnecting(account)}
                             disabled={isPending}
@@ -702,4 +728,30 @@ function DetailRow({ label, value, mono }: { label: string; value: string; mono?
       <dd className={`text-ink text-right ${mono ? 'num' : ''}`}>{value}</dd>
     </div>
   )
+}
+
+/** The copier's view of the terminal, as the accounts row reports it:
+ *  connected (a report within 15 s), offline (with when it was last heard
+ *  from), or never reported -- the EA has not been installed yet. */
+function Mt5ConnectionBadge({ account }: { account: Account }) {
+  switch (account.connection_status) {
+    case 'connected':
+      return (
+        <span className="text-xs font-medium px-2 py-0.5 rounded bg-profit-wash text-profit-deep">
+          Connected
+        </span>
+      )
+    case 'offline':
+      return (
+        <span className="text-xs font-medium px-2 py-0.5 rounded bg-warn-wash text-warn-deep">
+          Offline · last seen {formatWhen(account.mt5?.last_seen_at)}
+        </span>
+      )
+    default:
+      return (
+        <span className="text-xs font-medium px-2 py-0.5 rounded bg-line text-ink-soft">
+          Waiting for the terminal
+        </span>
+      )
+  }
 }
