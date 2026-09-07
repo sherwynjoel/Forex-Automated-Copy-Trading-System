@@ -176,10 +176,12 @@ def create_app(http_transport: Optional[httpx.BaseTransport] = None) -> FastAPI:
 
     # MT5 terminals report to the copier through the api (the door shares
     # the login rate limiter for its per-source bad-key bucket); operators
-    # add MT5 accounts, rotate keys and map symbols.
-    from .routes.mt5 import create_mt5_operator_router, create_mt5_router
+    # add MT5 accounts, rotate keys and map symbols; the EA file is public.
+    from .routes.mt5 import (create_downloads_router, create_mt5_operator_router,
+                             create_mt5_router)
     app.include_router(create_mt5_router(rate_limiter))
     app.include_router(create_mt5_operator_router())
+    app.include_router(create_downloads_router())
 
     # Include insights router (margin, candles, analytics, overview stats)
     insights_router = create_insights_router()

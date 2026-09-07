@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import secrets
 import time
 from typing import Any, Dict, Optional
@@ -61,7 +62,7 @@ from typing import Any, Dict, Optional
 import httpx
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import PlainTextResponse, Response
+from fastapi.responses import FileResponse, PlainTextResponse, Response
 from pydantic import BaseModel
 
 from ..auth import LoginRateLimiter
@@ -95,6 +96,7 @@ BAD_KEY_PER_MINUTE = 10
 # page (the copier uses the same 15 s to mark the account degraded).
 MT5_OFFLINE_AFTER_S = 15
 DOWNLOAD_PATH = "/downloads/MirrorFleet.mq5"
+EA_FILENAME = "MirrorFleet.mq5"
 # The EA's own InpServer default; the install steps name it when no public
 # origin is configured.
 EA_DEFAULT_SERVER = "https://mirrorfleet.com"
@@ -373,5 +375,28 @@ def create_mt5_operator_router() -> APIRouter:
                   {"aliases": changes}, account_id=account_id)
             await _reload_copier(request, cfg)
         return _aliases_payload(conn, account_id)
+
+    return router
+
+
+# ------------------------------------------------------ the EA download
+
+
+def create_downloads_router() -> APIRouter:
+    """The EA file, public. It contains no secrets -- the key is an input
+    the operator types into the terminal. Served from STATIC_DIR/downloads,
+    where api/Dockerfile copies mt5/MirrorFleet.mq5 at image build; the
+    directory is read per request so a test can point STATIC_DIR at a temp
+    dir. Registered ahead of the SPA catch-all so the browser gets an
+    attachment, not a page."""
+    router = APIRouter(tags=["mt5"])
+
+    @router.get(DOWNLOAD_PATH, include_in_schema=False)
+    async def download_ea():
+        static_dir = os.environ.get("STATIC_DIR")
+        path = os.path.join(static_dir, "downloads", EA_FILENAME) if static_dir else ""
+        if not path or not os.path.isfile(path):
+            raise HTTPException(status_code=404, detail="Not found")
+        return FileResponse(path, media_type="application/octet-stream", filename=EA_FILENAME)
 
     return router

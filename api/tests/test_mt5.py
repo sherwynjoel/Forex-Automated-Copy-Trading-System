@@ -584,3 +584,34 @@ def test_a_trader_reads_aliases_but_only_an_admin_writes_them(org_client, make_u
     assert client.get(path).status_code == 200
     assert client.put(path, json={"aliases": {"XAUUSD": "GOLD.r"}},
                       headers=_csrf(client)).status_code == 403
+
+
+# ================================================ the EA download
+
+
+def test_the_ea_file_is_served_as_an_attachment_from_static_dir(app_client, tmp_path, monkeypatch):
+    """Public, no session: the file contains no secrets (the key is an
+    input the operator types into the terminal). Served as an attachment
+    so the browser saves it instead of rendering MQL5 as text."""
+    downloads = tmp_path / "downloads"
+    downloads.mkdir()
+    (downloads / "MirrorFleet.mq5").write_text('#property version "1.00"\n')
+    monkeypatch.setenv("STATIC_DIR", str(tmp_path))
+    app_client.cookies.clear()
+
+    r = app_client.get("/downloads/MirrorFleet.mq5")
+
+    assert r.status_code == 200
+    assert r.text == '#property version "1.00"\n'
+    assert r.headers["content-disposition"] == 'attachment; filename="MirrorFleet.mq5"'
+    assert r.headers["content-type"].startswith("application/octet-stream")
+
+
+def test_a_missing_ea_file_is_404(app_client, tmp_path, monkeypatch):
+    monkeypatch.setenv("STATIC_DIR", str(tmp_path))
+    assert app_client.get("/downloads/MirrorFleet.mq5").status_code == 404
+
+
+def test_without_a_static_dir_the_download_is_404(app_client, monkeypatch):
+    monkeypatch.delenv("STATIC_DIR", raising=False)
+    assert app_client.get("/downloads/MirrorFleet.mq5").status_code == 404
