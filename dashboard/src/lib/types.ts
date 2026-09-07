@@ -41,7 +41,22 @@ export interface Account {
   // Admin-set one-time cutoff date (ISO YYYY-MM-DD); a reminder event fires
   // two days before it.
   cutoff_date?: string | null
+  /** Absent on an api that predates MT5: the account is cTrader. */
+  platform?: 'ctrader' | 'mt5'
+  /** The MT5 terminal link; null/absent for cTrader accounts. `connected`
+   *  means a report arrived within the last 15 s. */
+  mt5?: {
+    login: number | null; broker: string | null; server: string | null; currency: string | null
+    hedging: boolean | null; trade_mode: string | null; ea_version: string | null
+    last_seen_at: string | null; connected: boolean
+  } | null
 }
+
+/** Returned exactly once by POST .../mt5/accounts. Hold it only while the
+ *  key dialog is open. */
+export interface Mt5AccountCreated { account_id: number; key: string; download_url: string; install: string[] }
+
+export interface SymbolAliases { aliases: { canonical: string; broker_name: string; source: 'auto' | 'manual' }[]; broker_symbols: string[] }
 
 export interface OpenPosition {
   position_id: number
