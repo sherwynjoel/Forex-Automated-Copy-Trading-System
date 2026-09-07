@@ -13,7 +13,9 @@ THAT org. An account whose org cannot be resolved is logged and dropped.
 """
 
 import logging
+import math
 import time
+from dataclasses import dataclass
 from typing import Callable, Mapping
 
 from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOAExecutionEvent
@@ -23,7 +25,7 @@ from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
 from copier.ctrader.symbols import by_id as symbols_by_id
 from copier.db.repo import Repo, MappingNotFound
 from copier.domain.models import (
-    MANUAL_ORDER_LABEL, SymbolInfo, MasterPendingFilled, AmendPositionSLTP,
+    MANUAL_ORDER_LABEL, SymbolInfo, MasterEvent, MasterPendingFilled, AmendPositionSLTP,
     MasterPositionOpened, MasterPositionClosed, MasterPositionSLTPAmended)
 from copier.domain.decision import decide
 from copier.engine.capture import execution_row
@@ -50,6 +52,39 @@ def master_position_of(client_order_id: str | None) -> int | None:
         return int(client_order_id[2:].split(".", 1)[0])
     except ValueError:
         return None
+
+
+@dataclass(frozen=True)
+class SlaveFill:
+    """A slave's fill in platform-neutral terms.
+
+    Built from a ProtoOAExecutionEvent for cTrader slaves and from an MT5
+    terminal's ack or deal for MT5 slaves, then handled identically by
+    handle_slave_fill. `closed_volume` set means this fill CLOSED (part of)
+    a position. `order_id` is the slave's own order ticket, which is how a
+    filled pending copy finds its order mapping. `stop_loss`/`take_profit`
+    are the protection the copy already carries when the platform reports
+    it (MT5 does; cTrader fills leave them None, so the master's level is
+    re-stated as before).
+    """
+    account_id: int
+    client_order_id: str | None
+    position_id: int
+    filled_volume: int
+    fill_price: float | None
+    closed_volume: int | None
+    label: str
+    order_id: int | None = None
+    stop_loss: float | None = None
+    take_profit: float | None = None
+
+
+def _same_level(a: float | None, b: float | None) -> bool:
+    """Two protection levels are the same when both are unset or differ by
+    less than any broker's price precision."""
+    if a is None or b is None:
+        return a is b
+    return math.isclose(a, b, rel_tol=0.0, abs_tol=1e-7)
 
 
 class CopierService:
@@ -154,7 +189,8 @@ class CopierService:
         self._master_protection[normalized.position_id] = levels
 
     def _protect_new_copy(self, account_id: int, client_order_id: str,
-                          slave_position_id: int, org_id: int) -> None:
+                          slave_position_id: int, org_id: int,
+                          current: tuple[float | None, float | None] = (None, None)) -> None:
         """Give a just-filled copy the protection its master already has.
 
         This is the first instant the copy can be amended -- before the
@@ -162,6 +198,11 @@ class CopierService:
         SL/TP event could not reach it. Sent even when the copy may already
         carry the level: re-stating the same stop is a no-op at the broker,
         and the alternative is guessing about a naked position.
+
+        `current` is what the copy is KNOWN to carry (an MT5 open travels
+        with its SL/TP, and the terminal reports them back): when it
+        already matches the master's level, nothing is sent. cTrader fills
+        pass (None, None) -- unknown -- so the level is re-stated as before.
 
         Never raises. A copy that opened is real money at the broker; a
         failure to protect it must be logged and must not take down the
@@ -174,6 +215,8 @@ class CopierService:
         if levels is None:
             return
         stop_loss, take_profit = levels
+        if _same_level(stop_loss, current[0]) and _same_level(take_profit, current[1]):
+            return
         try:
             self._dispatcher.dispatch(
                 [AmendPositionSLTP(account_id, slave_position_id,
@@ -320,7 +363,7 @@ class CopierService:
         start_time: int,
         routing: OrgRouting,
     ) -> None:
-        """Handle master account event: normalize -> decide -> dispatch.
+        """Handle a cTrader master account event: normalize -> act.
 
         Everything here is scoped to `org_id`: the symbol map is that org's
         master's, the slave fleet is that org's, and the dispatch carries
@@ -335,10 +378,6 @@ class CopierService:
             routing: The routing snapshot this event is being processed against.
         """
         normalized = normalize(evt, self._master_symbols_by_org.get(org_id, {}))
-        # Before decide(), so a copy that fills during this very event's
-        # dispatch already finds the level recorded.
-        self._remember_master_protection(normalized)
-
         payload = {
             'execution_type': ProtoOAExecutionType.Name(evt.executionType),
             'normalized': type(normalized).__name__ if normalized else None,
@@ -350,41 +389,13 @@ class CopierService:
             # {"normalized": null} for exactly this lack of detail.
             payload['order_type'] = ProtoOAOrderType.Name(evt.order.orderType)
             payload['symbol_id'] = evt.order.tradeData.symbolId
+            self._audit_master_event(org_id, master_account_id, payload, start_time)
+            self._submit_execution(org_id, master_account_id, evt,
+                                   is_master=True, routing=routing)
+            return
 
-        # Decide and dispatch FIRST; the audit row is written in the
-        # finally, so it can never sit as a blocking database write in
-        # front of the copy handoff, and it is still written even when
-        # decide/dispatch raise (the outer handler then logs the failure
-        # as well). latency_ms therefore measures the whole internal
-        # path: normalize -> decide -> dispatch handoff.
-        try:
-            if normalized is not None:
-                # Decide: get intents for THIS ORG's enabled slaves only
-                slaves = routing.slaves_by_org.get(org_id, [])
-                intents = decide(normalized, self._repo, slaves)
-
-                # Dispatch intents against this org's gates
-                if intents:
-                    self._dispatcher.dispatch(intents, org_id=org_id)
-        finally:
-            # Best-effort: the orders are already at the broker by now, so
-            # a failed audit write must not replace the real exception, and
-            # must not skip the post-dispatch bookkeeping below. A lost
-            # audit row is a diagnostics gap; a skipped pending-fill check
-            # is a real one.
-            latency_ms = (time.time_ns() // 1_000_000) - start_time
-            try:
-                self._repo.log_event(
-                    'master_event',
-                    'info',
-                    payload,
-                    account_id=master_account_id,
-                    latency_ms=latency_ms,
-                    org_id=org_id,
-                )
-            except Exception:
-                log.exception(
-                    "master_event audit write failed (copy already dispatched)")
+        self._decide_dispatch_audit(org_id, master_account_id, normalized, routing,
+                                    payload, start_time)
 
         # The master trade's OWN economics -- price, volume, side, symbol,
         # broker clock and the quote that was live at the time. The
@@ -392,10 +403,6 @@ class CopierService:
         # record. Queued, not written, so it costs the reactor nothing.
         self._submit_execution(org_id, master_account_id, evt,
                                is_master=True, routing=routing)
-
-        # If normalization yielded no event, we're done
-        if normalized is None:
-            return
 
         # Stamp the master half of the slippage measurement onto the copies.
         # STRICTLY after the dispatch above: it is one indexed UPDATE, and
@@ -409,6 +416,68 @@ class CopierService:
                 evt.deal.executionTimestamp or None,
             )
 
+        self._after_master_event(org_id, normalized)
+
+    def act_on_master_event(self, org_id: int, master_account_id: int,
+                            normalized: MasterEvent, *, source: str) -> None:
+        """A platform-neutral master event: decide -> dispatch -> audit ->
+        bookkeeping. The MT5 lane calls this with what ingress.py derived
+        from a terminal's report; the cTrader path goes through
+        _handle_master_event, which normalizes first and captures the
+        execution row. `source` names where the event came from in the
+        audit payload."""
+        routing = self._routing_provider()
+        start_time = time.time_ns() // 1_000_000
+        payload = {'source': source, 'normalized': type(normalized).__name__}
+        self._decide_dispatch_audit(org_id, master_account_id, normalized, routing,
+                                    payload, start_time)
+        self._after_master_event(org_id, normalized)
+
+    def _decide_dispatch_audit(self, org_id: int, master_account_id: int,
+                               normalized: MasterEvent, routing: OrgRouting,
+                               payload: dict, start_time: int) -> None:
+        # Before decide(), so a copy that fills during this very event's
+        # dispatch already finds the level recorded.
+        self._remember_master_protection(normalized)
+
+        # Decide and dispatch FIRST; the audit row is written in the
+        # finally, so it can never sit as a blocking database write in
+        # front of the copy handoff, and it is still written even when
+        # decide/dispatch raise (the outer handler then logs the failure
+        # as well). latency_ms therefore measures the whole internal
+        # path: normalize -> decide -> dispatch handoff.
+        try:
+            # Decide: get intents for THIS ORG's enabled slaves only
+            slaves = routing.slaves_by_org.get(org_id, [])
+            intents = decide(normalized, self._repo, slaves)
+
+            # Dispatch intents against this org's gates
+            if intents:
+                self._dispatcher.dispatch(intents, org_id=org_id)
+        finally:
+            self._audit_master_event(org_id, master_account_id, payload, start_time)
+
+    def _audit_master_event(self, org_id: int, master_account_id: int, payload: dict,
+                            start_time: int) -> None:
+        """Best-effort: the orders are already at the broker by now, so a
+        failed audit write must not replace the real exception, and must
+        not skip the post-dispatch bookkeeping. A lost audit row is a
+        diagnostics gap; a skipped pending-fill check is a real one."""
+        latency_ms = (time.time_ns() // 1_000_000) - start_time
+        try:
+            self._repo.log_event(
+                'master_event',
+                'info',
+                payload,
+                account_id=master_account_id,
+                latency_ms=latency_ms,
+                org_id=org_id,
+            )
+        except Exception:
+            log.exception(
+                "master_event audit write failed (copy already dispatched)")
+
+    def _after_master_event(self, org_id: int, normalized: MasterEvent) -> None:
         # Schedule pending fill alert if this is a pending fill
         if isinstance(normalized, MasterPendingFilled):
             self._schedule_pending_fill_check(org_id, normalized)
@@ -562,53 +631,58 @@ class CopierService:
     def _handle_slave_fill(
         self, org_id: int, account_id: int, evt: ProtoOAExecutionEvent
     ) -> None:
-        """Handle slave ORDER_FILLED or ORDER_PARTIAL_FILL.
+        """A cTrader slave's ORDER_FILLED / ORDER_PARTIAL_FILL, as a SlaveFill."""
+        deal = evt.deal
+        self.handle_slave_fill(org_id, SlaveFill(
+            account_id=account_id,
+            client_order_id=self._extract_client_order_id(evt),
+            position_id=deal.positionId,
+            filled_volume=deal.filledVolume,
+            # T9c: the execution price is what the Positions screen's
+            # per-copy "Fill Price" column is built from (see
+            # repo.mappings.fill_price / db/migrations/003_mapping_fill_price.sql).
+            fill_price=deal.executionPrice if deal.HasField('executionPrice') else None,
+            closed_volume=(deal.closePositionDetail.closedVolume
+                           if deal.HasField('closePositionDetail') else None),
+            label=evt.order.tradeData.label,
+            order_id=evt.order.orderId,
+        ))
 
-        Updates:
-        - clientOrderId starting "cm" → activate_position_mapping
-        - closePositionDetail → reduce_position_mapping
-        - slave_order_id matching order mapping → activate_pending_fill
+    def handle_slave_fill(self, org_id: int, fill: SlaveFill) -> None:
+        """A slave's fill, from whichever platform reported it.
 
-        Args:
-            org_id: Org that owns this slave.
-            account_id: Slave account ID.
-            evt: ProtoOAExecutionEvent.
+        - closed_volume set -> reduce_position_mapping; pinned to the one mapping
+          when the fill names a "cm" client_order_id (a netting MT5 follower's
+          copies share one net ticket, and the outbox's ':close' ack names the
+          copy it closed), else every active mapping on that position as before
+        - client_order_id "cm..." -> activate_position_mapping (+ the master's protection)
+        - else a pending copy filling: activate_pending_fill by the slave's order ticket
+        - else an operator's manual order (expected) or an unmatched fill (warning)
         """
-        client_order_id = self._extract_client_order_id(evt)
-        deal_position_id = evt.deal.positionId
-        filled_volume = evt.deal.filledVolume
-        slave_order_id = evt.order.orderId
+        account_id = fill.account_id
 
-        # Check for close (has closePositionDetail)
-        if evt.deal.HasField('closePositionDetail'):
-            closed_volume = evt.deal.closePositionDetail.closedVolume
-            self._repo.reduce_position_mapping(account_id, deal_position_id, closed_volume)
-            self._repo.log_event(
-                'slave_action',
-                'info',
-                {
-                    'action': 'position_closed',
-                    'slave_position_id': deal_position_id,
-                    'closed_volume': closed_volume,
-                },
-                account_id=account_id,
-                org_id=org_id,
-            )
+        if fill.closed_volume is not None:
+            coid = fill.client_order_id
+            coid = coid if coid and coid.startswith("cm") else None
+            self._repo.reduce_position_mapping(
+                account_id, fill.position_id, fill.closed_volume, client_order_id=coid)
+            payload = {
+                'action': 'position_closed',
+                'slave_position_id': fill.position_id,
+                'closed_volume': fill.closed_volume,
+            }
+            if coid:
+                payload['client_order_id'] = coid
+            self._repo.log_event('slave_action', 'info', payload,
+                                 account_id=account_id, org_id=org_id)
             return
 
-        # T9c: the execution price is what the Positions screen's per-copy
-        # "Fill Price" column is built from. It was already
-        # being read here for the event log; it is now also handed to the
-        # mapping row so GET /state can report it (see repo.mappings.fill_price
-        # / db/migrations/003_mapping_fill_price.sql).
-        fill_price = evt.deal.executionPrice if evt.deal.HasField('executionPrice') else None
-
-        # Check for position fill (clientOrderId starting "cm")
+        client_order_id = fill.client_order_id
         if client_order_id and client_order_id.startswith("cm"):
             try:
                 self._repo.activate_position_mapping(
-                    account_id, client_order_id, deal_position_id, filled_volume,
-                    fill_price=fill_price,
+                    account_id, client_order_id, fill.position_id, fill.filled_volume,
+                    fill_price=fill.fill_price,
                 )
                 self._repo.log_event(
                     'slave_action',
@@ -616,9 +690,9 @@ class CopierService:
                     {
                         'action': 'position_filled',
                         'client_order_id': client_order_id,
-                        'slave_position_id': deal_position_id,
-                        'filled_volume': filled_volume,
-                        'fill_price': fill_price,
+                        'slave_position_id': fill.position_id,
+                        'filled_volume': fill.filled_volume,
+                        'fill_price': fill.fill_price,
                     },
                     account_id=account_id,
                     org_id=org_id,
@@ -627,7 +701,8 @@ class CopierService:
                 # finally reach it -- it could not when the master's own
                 # SL/TP event fired, a quarter of a second ago.
                 self._protect_new_copy(
-                    account_id, client_order_id, deal_position_id, org_id)
+                    account_id, client_order_id, fill.position_id, org_id,
+                    current=(fill.stop_loss, fill.take_profit))
             except MappingNotFound:
                 # Unknown clientOrderId - log as drift warning
                 self._repo.log_event(
@@ -643,11 +718,11 @@ class CopierService:
                 )
             return
 
-        # Check for pending order fill: match by slave_order_id
+        # Check for pending order fill: match by the slave's own order ticket
         try:
             self._repo.activate_pending_fill(
-                account_id, slave_order_id, deal_position_id, filled_volume,
-                fill_price=fill_price,
+                account_id, fill.order_id, fill.position_id, fill.filled_volume,
+                fill_price=fill.fill_price,
             )
             self._repo.log_event(
                 'slave_action',
@@ -655,32 +730,32 @@ class CopierService:
                 {
                     'action': 'pending_fill',
                     'client_order_id': client_order_id,
-                    'slave_order_id': slave_order_id,
-                    'slave_position_id': deal_position_id,
-                    'filled_volume': filled_volume,
-                    'fill_price': fill_price,
+                    'slave_order_id': fill.order_id,
+                    'slave_position_id': fill.position_id,
+                    'filled_volume': fill.filled_volume,
+                    'fill_price': fill.fill_price,
                 },
                 account_id=account_id,
                 org_id=org_id,
             )
             return
         except MappingNotFound:
-            # slave_order_id didn't match; no order mapping found
+            # order ticket didn't match; no order mapping found
             pass
 
         # An operator-placed manual order's fill matches no mapping BY
         # DESIGN -- it is expected, so it must not raise the unexplained-
         # fill warning below.
-        if evt.order.tradeData.label == MANUAL_ORDER_LABEL:
+        if fill.label == MANUAL_ORDER_LABEL:
             self._repo.log_event(
                 'slave_action',
                 'info',
                 {
                     'action': 'manual_fill',
-                    'slave_order_id': slave_order_id,
-                    'slave_position_id': deal_position_id,
-                    'filled_volume': filled_volume,
-                    'fill_price': fill_price,
+                    'slave_order_id': fill.order_id,
+                    'slave_position_id': fill.position_id,
+                    'filled_volume': fill.filled_volume,
+                    'fill_price': fill.fill_price,
                 },
                 account_id=account_id,
                 org_id=org_id,
@@ -693,8 +768,8 @@ class CopierService:
             'warning',
             {
                 'action': 'unmatched_slave_fill',
-                'slave_order_id': slave_order_id,
-                'slave_position_id': deal_position_id,
+                'slave_order_id': fill.order_id,
+                'slave_position_id': fill.position_id,
                 'client_order_id': client_order_id,
                 'reason': 'No matching position or order mapping',
             },
@@ -705,21 +780,19 @@ class CopierService:
     def _handle_slave_order_accepted(
         self, org_id: int, account_id: int, evt: ProtoOAExecutionEvent
     ) -> None:
-        """Handle slave ORDER_ACCEPTED with clientOrderId starting 'co'.
+        """A cTrader slave's ORDER_ACCEPTED."""
+        self.handle_slave_order_accepted(
+            org_id, account_id, self._extract_client_order_id(evt), evt.order.orderId)
 
-        Updates: activate_order_mapping
-
-        Args:
-            org_id: Org that owns this slave.
-            account_id: Slave account ID.
-            evt: ProtoOAExecutionEvent.
-        """
-        client_order_id = self._extract_client_order_id(evt)
-
+    def handle_slave_order_accepted(
+        self, org_id: int, account_id: int, client_order_id: str | None, slave_order_id: int
+    ) -> None:
+        """A pending copy the slave's platform accepted: clientOrderId 'co...'
+        -> activate_order_mapping. Anything else (an operator's own order)
+        has nothing to link."""
         if not client_order_id or not client_order_id.startswith("co"):
             return
 
-        slave_order_id = evt.order.orderId
         try:
             self._repo.activate_order_mapping(account_id, client_order_id, slave_order_id)
             self._repo.log_event(
@@ -748,17 +821,13 @@ class CopierService:
     def _handle_slave_order_cancelled(
         self, org_id: int, account_id: int, evt: ProtoOAExecutionEvent
     ) -> None:
-        """Handle slave ORDER_CANCELLED on mapped order.
+        """A cTrader slave's ORDER_CANCELLED."""
+        self.handle_slave_order_cancelled(org_id, account_id, evt.order.orderId)
 
-        Updates: close_order_mapping
-
-        Args:
-            org_id: Org that owns this slave.
-            account_id: Slave account ID.
-            evt: ProtoOAExecutionEvent.
-        """
-        slave_order_id = evt.order.orderId
-
+    def handle_slave_order_cancelled(
+        self, org_id: int, account_id: int, slave_order_id: int
+    ) -> None:
+        """A mapped pending copy is gone: close_order_mapping."""
         try:
             self._repo.close_order_mapping(account_id, slave_order_id)
             self._repo.log_event(
@@ -788,27 +857,23 @@ class CopierService:
     def _handle_slave_order_rejected(
         self, org_id: int, account_id: int, evt: ProtoOAExecutionEvent
     ) -> None:
-        """Handle slave ORDER_REJECTED.
-
-        Updates: fail_mapping with error code
-        Logs: error event
-
-        Spec: broker rejections (min-volume, margin) are NOT account status degradations.
-        Only alerts as error event.
-
-        Args:
-            org_id: Org that owns this slave.
-            account_id: Slave account ID.
-            evt: ProtoOAExecutionEvent.
-        """
-        client_order_id = self._extract_client_order_id(evt)
+        """A cTrader slave's ORDER_REJECTED."""
         error_code = evt.errorCode if evt.errorCode else "UNKNOWN"
-        error_msg = f"Order rejected: {error_code}"
+        self.handle_slave_rejection(
+            org_id, account_id, self._extract_client_order_id(evt),
+            f"Order rejected: {error_code}", error_code=error_code)
 
-        # Try to mark mapping as failed if clientOrderId exists
+    def handle_slave_rejection(
+        self, org_id: int, account_id: int, client_order_id: str | None, reason: str,
+        error_code: str | None = None,
+    ) -> None:
+        """The slave's platform refused a copy: fail its mapping (if any) and
+        log an error event. Spec: broker rejections (min-volume, margin) are
+        NOT account status degradations here -- the MT5 lane sets its own
+        degraded status with the terminal's reason (main.py)."""
         if client_order_id:
             try:
-                self._repo.fail_mapping(account_id, client_order_id, error_msg)
+                self._repo.fail_mapping(account_id, client_order_id, reason)
             except MappingNotFound:
                 pass  # Mapping doesn't exist - no-op
 
@@ -820,7 +885,7 @@ class CopierService:
                 'action': 'order_rejected',
                 'client_order_id': client_order_id,
                 'error_code': error_code,
-                'error': error_msg,
+                'error': reason,
             },
             account_id=account_id,
             org_id=org_id,
