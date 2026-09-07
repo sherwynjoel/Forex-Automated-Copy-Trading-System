@@ -85,6 +85,10 @@ class OrderSnapshot:
     side/order_type/price come straight off the same payload; they were
     simply being discarded, which left the Positions screen unable to say
     anything about a working order beyond its symbol and size.
+
+    stop_loss/take_profit are filled by the MT5 registry (a pending
+    order's own protection travels in its report) so the ingress diff can
+    see a changed level; the cTrader snapshot leaves them None.
     """
     order_id: int
     symbol_id: int
@@ -95,6 +99,8 @@ class OrderSnapshot:
     order_type: str | None = None
     # The order's trigger price: limitPrice for LIMIT, stopPrice for STOP.
     price: float | None = None
+    stop_loss: float | None = None
+    take_profit: float | None = None
 
 
 @dataclass(frozen=True)
