@@ -111,6 +111,12 @@ COPIER_CALL_TIMEOUT_S = 1.0
 DEDUP_WINDOW_S = 20
 
 SECRET_PREFIX = "tvw_"
+# Every secret this api hands out, by prefix. Redaction is by VALUE on these
+# (see _redact and scrub_secrets), so a key pasted into the wrong field is
+# still scrubbed. "mt5_" is the MT5 terminal key (routes/mt5.py); it is
+# listed here because this module owns the redaction helpers, not because
+# TradingView ever carries one.
+SECRET_PREFIXES = (SECRET_PREFIX, "mt5_")
 
 # Phrases in a copier 400 that mean "not now" rather than "never".
 _TRANSIENT_400 = (
@@ -162,7 +168,7 @@ def _redact(value: Any) -> Any:
     clear on every retry.
     """
     if isinstance(value, str):
-        return "***" if value.startswith(SECRET_PREFIX) else value
+        return "***" if value.startswith(SECRET_PREFIXES) else value
     if isinstance(value, dict):
         return {k: _redact(v) for k, v in value.items()}
     if isinstance(value, list):
@@ -171,13 +177,20 @@ def _redact(value: Any) -> Any:
 
 
 _CURLY_QUOTES = "“”‘’"
-_SECRET_SHAPED = re.compile(re.escape(SECRET_PREFIX) + "[A-Za-z0-9_-]*")
+_SECRET_SHAPED = re.compile(
+    "(?:" + "|".join(re.escape(p) for p in SECRET_PREFIXES) + ")[A-Za-z0-9_-]*")
+
+
+def scrub_secrets(text: str) -> str:
+    """Every secret-shaped token in free text becomes ***. Public because
+    the MT5 door routes its log lines through it."""
+    return _SECRET_SHAPED.sub("***", text)
 
 
 def _safe_preview(text: str, limit: int = 30) -> str:
     # A secret that ended up inside non-JSON text is still a secret. Redact
     # BEFORE cutting to length, or the cut hides the prefix from the regex.
-    clean = _SECRET_SHAPED.sub("***", text)
+    clean = scrub_secrets(text)
     return "".join(ch if ch.isprintable() else " " for ch in clean[:limit])
 
 

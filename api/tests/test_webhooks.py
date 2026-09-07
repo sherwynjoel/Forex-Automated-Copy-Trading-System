@@ -677,3 +677,19 @@ def test_recent_receipts_are_listed_for_the_operator(org_client, db):
     _post(client, _alert()); _post(client, _alert(secret="tvw_bad"))
     recent = client.get(f"/api/orgs/{org_id}/webhook").json()["recent"]
     assert [r["outcome"] for r in recent] == ["rejected", "accepted"]
+
+
+# ================================================ shared redaction
+
+
+def test_redaction_scrubs_mt5_keys_by_value_exactly_like_tvw():
+    """The MT5 terminal key is the second secret this api hands out. A key
+    pasted into the wrong field, or inside an exception's text, must be
+    scrubbed wherever a tvw_ secret would be."""
+    key = "mt5_" + "k" * 43
+    assert wh._redact({"note": key, "nested": [key, "fine"], "n": 1}) == {
+        "note": "***", "nested": ["***", "fine"], "n": 1}
+    assert wh._redact("tvw_abc") == "***"
+    assert wh.scrub_secrets(f"refused by {key} and tvw_abc.") == "refused by *** and ***."
+    assert wh._safe_preview(key + " buy") == "*** buy"
+    assert wh.SECRET_PREFIXES == ("tvw_", "mt5_")
