@@ -752,3 +752,361 @@ void Sync()
       ExecuteLine(lines[i]);
    }
 }
+
+//+------------------------------------------------------------------+
+//| Commands: normalisation and acks                                  |
+//+------------------------------------------------------------------+
+// The lots the terminal accepts: on the step, inside [min, max]; 0 when
+// the request rounds to nothing (acked as failed, never traded).
+double NormalizeLots(const string symbol, const double lots)
+{
+   double vmin = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
+   double vmax = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
+   double step = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
+   if(step <= 0) step = (vmin > 0) ? vmin : 0.01;
+   double v = MathRound(lots / step) * step;
+   if(v < step / 2) return 0.0;
+   if(v < vmin) v = vmin;
+   if(vmax > 0 && v > vmax) v = vmax;
+   return NormalizeDouble(v, 8);
+}
+
+// A price field: "0" is none; anything else is rounded to the symbol's digits.
+double PriceField(const string text, const string symbol)
+{
+   double v = StringToDouble(text);
+   if(v <= 0) return 0.0;
+   return NormalizeDouble(v, (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS));
+}
+
+bool Succeeded(const uint retcode)
+{
+   return retcode == TRADE_RETCODE_DONE || retcode == TRADE_RETCODE_DONE_PARTIAL ||
+          retcode == TRADE_RETCODE_PLACED || retcode == TRADE_RETCODE_NO_CHANGES;
+}
+
+bool PendingTypeFor(const string name, ENUM_ORDER_TYPE &type)
+{
+   if(name == "BUY_LIMIT")  { type = ORDER_TYPE_BUY_LIMIT;  return true; }
+   if(name == "SELL_LIMIT") { type = ORDER_TYPE_SELL_LIMIT; return true; }
+   if(name == "BUY_STOP")   { type = ORDER_TYPE_BUY_STOP;   return true; }
+   if(name == "SELL_STOP")  { type = ORDER_TYPE_SELL_STOP;  return true; }
+   return false;
+}
+
+// The ack object (the spec's example, key for key); 0 tickets, prices and
+// lots go out as null.
+string AckJson(const ulong id, const bool ok, const uint retcode, const string msg,
+               const ulong pos, const ulong deal, const ulong order,
+               const double price, const int digits, const double lots)
+{
+   return "{" + JField("id", (string)id) + "," +
+          JField("ok", JBool(ok)) + "," +
+          JField("retcode", IntegerToString(retcode)) + "," +
+          JField("msg", JStr(msg)) + "," +
+          JField("pos", JTicket(pos)) + "," +
+          JField("deal", JTicket(deal)) + "," +
+          JField("order", JTicket(order)) + "," +
+          JField("price", (price > 0) ? JNum(price, digits) : "null") + "," +
+          JField("lots", (lots > 0) ? JLots(lots) : "null") + "}";
+}
+
+string Fail(const ulong id, const uint retcode, const string msg)
+{
+   Log(StringFormat("command %I64u failed: %s (retcode %u)", id, msg, retcode));
+   return AckJson(id, false, retcode, msg, 0, 0, 0, 0.0, 0, 0.0);
+}
+
+string Malformed(const ulong id, const string kind)
+{
+   return Fail(id, 0, "malformed " + kind + " command");
+}
+
+//+------------------------------------------------------------------+
+//| Commands: one function per kind                                   |
+//+------------------------------------------------------------------+
+string DoOpen(const ulong id, const string &f[])
+{
+   string symbol = f[3];
+   string side = f[4];
+   string comment = (ArraySize(f) > 8) ? f[8] : "";
+   if(side != "BUY" && side != "SELL") return Fail(id, 0, "bad side " + side);
+   if(!SymbolSelect(symbol, true)) return Fail(id, 0, "unknown symbol " + symbol);
+   int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+   double lots = NormalizeLots(symbol, StringToDouble(f[5]));
+   if(lots <= 0) return Fail(id, 0, "volume rounds to zero");
+   double sl = PriceField(f[6], symbol);
+   double tp = PriceField(f[7], symbol);
+   g_trade.SetTypeFillingBySymbol(symbol);
+   // Buy/Sell fill the current ask/bid into PositionOpen; a market order
+   // with price 0 is refused by instant-execution brokers.
+   if(side == "BUY") g_trade.Buy(lots, symbol, 0.0, sl, tp, comment);
+   else              g_trade.Sell(lots, symbol, 0.0, sl, tp, comment);
+   uint retcode = g_trade.ResultRetcode();
+   if(!Succeeded(retcode)) return Fail(id, retcode, g_trade.ResultRetcodeDescription());
+   ulong deal = g_trade.ResultDeal();
+   ulong order = g_trade.ResultOrder();
+   ulong pos = 0;
+   double price = g_trade.ResultPrice();
+   double filled = g_trade.ResultVolume();
+   if(deal != 0 && HistoryDealSelect(deal))
+   {
+      pos = (ulong)HistoryDealGetInteger(deal, DEAL_POSITION_ID);
+      price = HistoryDealGetDouble(deal, DEAL_PRICE);
+      filled = HistoryDealGetDouble(deal, DEAL_VOLUME);
+   }
+   if(g_hedging)
+   {
+      // A hedging position carries the ticket of the order that opened it.
+      if(pos == 0 && order != 0 && PositionSelectByTicket(order)) pos = order;
+   }
+   else
+   {
+      // Netting: the fill went into the symbol's single net position and
+      // may have grown, reduced, closed or flipped it (a flip keeps the
+      // position identifier but renews the ticket). Report the ticket the
+      // terminal shows now -- the one the next report lists -- or 0 when
+      // nothing is left. The deal's entry (IN/OUT/INOUT) tells the server
+      // which it was; it travels in the deals array like every other deal.
+      // A close that takes the last of the net volume is acked 0 on
+      // purpose: the server matches it to its mapping by client_order_id.
+      if(PositionSelect(symbol)) pos = (ulong)PositionGetInteger(POSITION_TICKET);
+      else                       pos = 0;
+   }
+   return AckJson(id, true, retcode, "done", pos, deal, order, price, digits, filled);
+}
+
+string DoClose(const ulong id, const string &f[])
+{
+   ulong ticket = (ulong)StringToInteger(f[3]);
+   if(!PositionSelectByTicket(ticket))
+      return AckJson(id, true, RC_POSITION_CLOSED, "already closed", ticket, 0, 0, 0.0, 0, 0.0);
+   string symbol = PositionGetString(POSITION_SYMBOL);
+   int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+   double have = PositionGetDouble(POSITION_VOLUME);
+   double step = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
+   double want = StringToDouble(f[4]);
+   bool full = (want <= 0 || want >= have - step / 2);
+   double lots = have;
+   g_trade.SetTypeFillingBySymbol(symbol);
+   if(full)
+      g_trade.PositionClose(ticket);
+   else
+   {
+      lots = NormalizeLots(symbol, want);
+      if(lots <= 0) return Fail(id, 0, "volume rounds to zero");
+      if(lots >= have) g_trade.PositionClose(ticket);
+      else             g_trade.PositionClosePartial(ticket, lots);
+   }
+   uint retcode = g_trade.ResultRetcode();
+   if(!Succeeded(retcode)) return Fail(id, retcode, g_trade.ResultRetcodeDescription());
+   return AckJson(id, true, retcode, "done", ticket, g_trade.ResultDeal(), g_trade.ResultOrder(),
+                  g_trade.ResultPrice(), digits, lots);
+}
+
+string DoAmend(const ulong id, const string &f[])
+{
+   ulong ticket = (ulong)StringToInteger(f[3]);
+   if(!PositionSelectByTicket(ticket))
+      return Fail(id, RC_POSITION_CLOSED, "no such position " + (string)ticket);
+   string symbol = PositionGetString(POSITION_SYMBOL);
+   int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+   g_trade.PositionModify(ticket, PriceField(f[4], symbol), PriceField(f[5], symbol));
+   uint retcode = g_trade.ResultRetcode();
+   if(!Succeeded(retcode)) return Fail(id, retcode, g_trade.ResultRetcodeDescription());
+   return AckJson(id, true, retcode, "done", ticket, 0, 0, 0.0, digits, 0.0);
+}
+
+string DoPlacePending(const ulong id, const string &f[])
+{
+   string symbol = f[3];
+   string comment = (ArraySize(f) > 10) ? f[10] : "";
+   ENUM_ORDER_TYPE type = ORDER_TYPE_BUY_LIMIT;
+   if(!PendingTypeFor(f[4], type)) return Fail(id, 0, "bad pending type " + f[4]);
+   if(!SymbolSelect(symbol, true)) return Fail(id, 0, "unknown symbol " + symbol);
+   int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+   double lots = NormalizeLots(symbol, StringToDouble(f[5]));
+   if(lots <= 0) return Fail(id, 0, "volume rounds to zero");
+   double price = PriceField(f[6], symbol);
+   if(price <= 0) return Fail(id, 0, "a pending order needs a price");
+   double sl = PriceField(f[7], symbol);
+   double tp = PriceField(f[8], symbol);
+   long expiry_ms = StringToInteger(f[9]);
+   ENUM_ORDER_TYPE_TIME type_time = ORDER_TIME_GTC;
+   datetime expiry = 0;
+   if(expiry_ms > 0)
+   {
+      type_time = ORDER_TIME_SPECIFIED;
+      expiry = (datetime)(expiry_ms / 1000 + g_server_offset_s);   // UTC on the wire, broker time here
+   }
+   g_trade.SetTypeFillingBySymbol(symbol);
+   g_trade.OrderOpen(symbol, type, lots, 0.0, price, sl, tp, type_time, expiry, comment);
+   uint retcode = g_trade.ResultRetcode();
+   if(!Succeeded(retcode)) return Fail(id, retcode, g_trade.ResultRetcodeDescription());
+   return AckJson(id, true, retcode, "done", 0, 0, g_trade.ResultOrder(), price, digits, lots);
+}
+
+string DoAmendPending(const ulong id, const string &f[])
+{
+   ulong ticket = (ulong)StringToInteger(f[3]);
+   if(!OrderSelect(ticket)) return Fail(id, RC_INVALID, "no such order " + (string)ticket);
+   string symbol = OrderGetString(ORDER_SYMBOL);
+   int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+   double price = PriceField(f[5], symbol);
+   if(price <= 0) price = OrderGetDouble(ORDER_PRICE_OPEN);
+   double sl = PriceField(f[6], symbol);
+   double tp = PriceField(f[7], symbol);
+   ENUM_ORDER_TYPE_TIME type_time = (ENUM_ORDER_TYPE_TIME)OrderGetInteger(ORDER_TYPE_TIME);
+   datetime expiry = (datetime)OrderGetInteger(ORDER_TIME_EXPIRATION);
+   double have = OrderGetDouble(ORDER_VOLUME_CURRENT);
+   double want = NormalizeLots(symbol, StringToDouble(f[4]));
+   string note = "done";
+   if(want > 0 && MathAbs(want - have) > SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP) / 2)
+      note = "done; volume kept at " + JLots(have) + " (MT5 cannot resize a pending order)";
+   g_trade.OrderModify(ticket, price, sl, tp, type_time, expiry, OrderGetDouble(ORDER_PRICE_STOPLIMIT));
+   uint retcode = g_trade.ResultRetcode();
+   if(!Succeeded(retcode)) return Fail(id, retcode, g_trade.ResultRetcodeDescription());
+   return AckJson(id, true, retcode, note, 0, 0, ticket, price, digits, have);
+}
+
+string DoCancelPending(const ulong id, const string &f[])
+{
+   ulong ticket = (ulong)StringToInteger(f[3]);
+   if(!OrderSelect(ticket))
+      return AckJson(id, true, RC_INVALID, "already gone", 0, 0, ticket, 0.0, 0, 0.0);
+   g_trade.OrderDelete(ticket);
+   uint retcode = g_trade.ResultRetcode();
+   if(!Succeeded(retcode)) return Fail(id, retcode, g_trade.ResultRetcodeDescription());
+   return AckJson(id, true, retcode, "done", 0, 0, ticket, 0.0, 0, 0.0);
+}
+
+// Field counts include CMD, id and kind. open and place_pending end in two
+// text fields that may be empty, so they are accepted with the numeric
+// fields alone and read the trailing two only when present.
+string Execute(const ulong id, const string kind, const string &f[], const int n)
+{
+   if(kind == "open")           return (n >= 8)  ? DoOpen(id, f)          : Malformed(id, kind);
+   if(kind == "close")          return (n >= 5)  ? DoClose(id, f)         : Malformed(id, kind);
+   if(kind == "amend")          return (n >= 6)  ? DoAmend(id, f)         : Malformed(id, kind);
+   if(kind == "place_pending")  return (n >= 10) ? DoPlacePending(id, f)  : Malformed(id, kind);
+   if(kind == "amend_pending")  return (n >= 8)  ? DoAmendPending(id, f)  : Malformed(id, kind);
+   if(kind == "cancel_pending") return (n >= 4)  ? DoCancelPending(id, f) : Malformed(id, kind);
+   return Fail(id, 0, "unknown command kind " + kind);
+}
+
+// One CMD line: a re-delivered id is re-acked from memory, never re-run;
+// a new one runs, is remembered (memory and file) and then acked.
+void ExecuteLine(const string line)
+{
+   string f[];
+   int n = StringSplit(line, '\t', f);
+   if(n < 3 || f[0] != "CMD")
+   {
+      Log("ignored an unreadable line: " + line);
+      return;
+   }
+   ulong id = (ulong)StringToInteger(f[1]);
+   string kind = f[2];
+   string ack = "";
+   if(FindDone(id, ack))
+   {
+      PushAck(ack);
+      return;
+   }
+   ack = Execute(id, kind, f, n);
+   RememberDone(id, ack);
+   PushAck(ack);
+}
+
+//+------------------------------------------------------------------+
+//| Executed ids: memory plus MQL5/Files/MirrorFleet/<login>.acks     |
+//+------------------------------------------------------------------+
+string AckFileName() { return ACK_DIR + "\\" + IntegerToString(g_login) + ACK_EXT; }
+
+bool FindDone(const ulong id, string &ack)
+{
+   for(int i = ArraySize(g_done_ids) - 1; i >= 0; i--)
+   {
+      if(g_done_ids[i] == id)
+      {
+         ack = g_done_acks[i];
+         return true;
+      }
+   }
+   return false;
+}
+
+// Keep the last ACK_FILE_LIMIT ids, oldest first, and write the file
+// before the ack is queued: a terminal that dies here still re-acks the
+// same result when the server re-delivers the id.
+void RememberDone(const ulong id, const string ack)
+{
+   int n = ArraySize(g_done_ids);
+   if(n >= ACK_FILE_LIMIT)
+   {
+      for(int i = 1; i < n; i++)
+      {
+         g_done_ids[i - 1] = g_done_ids[i];
+         g_done_acks[i - 1] = g_done_acks[i];
+      }
+      n--;
+   }
+   ArrayResize(g_done_ids, n + 1);
+   ArrayResize(g_done_acks, n + 1);
+   g_done_ids[n] = id;
+   g_done_acks[n] = ack;
+   SaveAcks();
+}
+
+void SaveAcks()
+{
+   FolderCreate(ACK_DIR);
+   int h = FileOpen(AckFileName(), FILE_WRITE | FILE_TXT | FILE_ANSI);
+   if(h == INVALID_HANDLE)
+   {
+      Log("cannot write " + AckFileName() + ", error " + IntegerToString(GetLastError()));
+      return;
+   }
+   int n = ArraySize(g_done_ids);
+   for(int i = 0; i < n; i++)
+      FileWrite(h, (string)g_done_ids[i] + "\t" + g_done_acks[i]);
+   FileClose(h);
+}
+
+// Read on start; a missing file is a fresh install. Lines are
+// <id><tab><ack object>; anything else is skipped.
+void LoadAcks()
+{
+   ArrayResize(g_done_ids, 0);
+   ArrayResize(g_done_acks, 0);
+   int h = FileOpen(AckFileName(), FILE_READ | FILE_TXT | FILE_ANSI);
+   if(h == INVALID_HANDLE) return;
+   while(!FileIsEnding(h))
+   {
+      string line = FileReadString(h);
+      int tab = StringFind(line, "\t");
+      if(tab <= 0) continue;
+      ulong id = (ulong)StringToInteger(StringSubstr(line, 0, tab));
+      if(id == 0) continue;
+      int n = ArraySize(g_done_ids);
+      ArrayResize(g_done_ids, n + 1);
+      ArrayResize(g_done_acks, n + 1);
+      g_done_ids[n] = id;
+      g_done_acks[n] = StringSubstr(line, tab + 1);
+   }
+   FileClose(h);
+   int n = ArraySize(g_done_ids);
+   if(n > ACK_FILE_LIMIT)
+   {
+      int drop = n - ACK_FILE_LIMIT;
+      for(int i = drop; i < n; i++)
+      {
+         g_done_ids[i - drop] = g_done_ids[i];
+         g_done_acks[i - drop] = g_done_acks[i];
+      }
+      ArrayResize(g_done_ids, ACK_FILE_LIMIT);
+      ArrayResize(g_done_acks, ACK_FILE_LIMIT);
+   }
+   Log(StringFormat("%d executed command id(s) remembered from %s", ArraySize(g_done_ids), AckFileName()));
+}
+//+------------------------------------------------------------------+
