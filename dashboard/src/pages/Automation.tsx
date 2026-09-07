@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { orgApi } from '../lib/api'
 import { can } from '../lib/roles'
 import { useOrg } from '../lib/org'
+import { useLiveRefresh } from '../hooks/useLiveRefresh'
 import Banner from '../components/Banner'
 import ConfirmDialog from '../components/ConfirmDialog'
 import type { WebhookReceipt, WebhookSettings, WebhookSecret } from '../lib/types'
@@ -49,6 +50,13 @@ export default function Automation() {
     const id = window.setInterval(refresh, POLL_MS)
     return () => window.clearInterval(id)
   }, [refresh])
+
+  // Every alert outcome is written as a 'control' event, and those stream
+  // to the browser the moment they are committed -- so the recent list
+  // refetches within a quarter second of an alert landing. The poll above
+  // is the fallback for a dropped socket and for duplicates, which write
+  // a receipt but no event.
+  useLiveRefresh(refresh, orgId)
 
   const control = can(role, 'control')
 
@@ -294,7 +302,7 @@ export default function Automation() {
       <section className="space-y-3">
         <div className="flex items-baseline justify-between">
           <h2 className="desk-label">Recent alerts</h2>
-          <span className="text-xs text-ink-faint">refreshes every {POLL_MS / 1000}s</span>
+          <span className="text-xs text-ink-faint">live · updates the moment an alert lands</span>
         </div>
         {settings.recent.length === 0 ? (
           <p className="text-sm text-ink-soft">No alerts received yet.</p>
