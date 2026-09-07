@@ -335,3 +335,109 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
          break;
    }
 }
+
+//+------------------------------------------------------------------+
+//| Hello: who this terminal is and what it can trade                 |
+//+------------------------------------------------------------------+
+// Every symbol the terminal can trade, fixed for one hello round so the
+// chunks agree on `chunks`.
+void CollectSymbols()
+{
+   ArrayResize(g_hello_symbols, 0);
+   int total = SymbolsTotal(false);
+   for(int i = 0; i < total; i++)
+   {
+      string name = SymbolName(i, false);
+      if(SymbolInfoInteger(name, SYMBOL_TRADE_MODE) == SYMBOL_TRADE_MODE_DISABLED) continue;
+      int n = ArraySize(g_hello_symbols);
+      ArrayResize(g_hello_symbols, n + 1, 256);
+      g_hello_symbols[n] = name;
+   }
+   int count = ArraySize(g_hello_symbols);
+   g_hello_chunks = (count + SYMBOLS_PER_HELLO - 1) / SYMBOLS_PER_HELLO;
+   if(g_hello_chunks < 1) g_hello_chunks = 1;     // an empty list is still one hello
+}
+
+// The hello body for one chunk (the spec's example, key for key).
+string HelloBody(const int chunk)
+{
+   string trade_mode = "real";
+   long mode = AccountInfoInteger(ACCOUNT_TRADE_MODE);
+   if(mode == ACCOUNT_TRADE_MODE_DEMO)         trade_mode = "demo";
+   else if(mode == ACCOUNT_TRADE_MODE_CONTEST) trade_mode = "contest";
+
+   string symbols = "";
+   int first = (chunk - 1) * SYMBOLS_PER_HELLO;
+   int last = first + SYMBOLS_PER_HELLO;
+   if(last > ArraySize(g_hello_symbols)) last = ArraySize(g_hello_symbols);
+   for(int i = first; i < last; i++)
+   {
+      string s = g_hello_symbols[i];
+      if(symbols != "") symbols += ",";
+      symbols += "{" + JField("n", JStr(s)) + "," +
+                 JField("d", IntegerToString(SymbolInfoInteger(s, SYMBOL_DIGITS))) + "," +
+                 JField("cs", JTrim(SymbolInfoDouble(s, SYMBOL_TRADE_CONTRACT_SIZE), 4)) + "," +
+                 JField("vmin", JLots(SymbolInfoDouble(s, SYMBOL_VOLUME_MIN))) + "," +
+                 JField("vstep", JLots(SymbolInfoDouble(s, SYMBOL_VOLUME_STEP))) + "," +
+                 JField("vmax", JLots(SymbolInfoDouble(s, SYMBOL_VOLUME_MAX))) + "," +
+                 JField("tm", IntegerToString(SymbolInfoInteger(s, SYMBOL_TRADE_MODE))) + "}";
+   }
+   return "{" + JField("v", IntegerToString(PROTOCOL_VERSION)) + "," +
+          JField("ea", JStr(EA_VERSION)) + "," +
+          JField("build", IntegerToString(TerminalInfoInteger(TERMINAL_BUILD))) + "," +
+          JField("login", IntegerToString(g_login)) + "," +
+          JField("broker", JStr(AccountInfoString(ACCOUNT_COMPANY))) + "," +
+          JField("server", JStr(AccountInfoString(ACCOUNT_SERVER))) + "," +
+          JField("currency", JStr(AccountInfoString(ACCOUNT_CURRENCY))) + "," +
+          JField("hedging", JBool(g_hedging)) + "," +
+          JField("trade_mode", JStr(trade_mode)) + "," +
+          JField("leverage", IntegerToString(AccountInfoInteger(ACCOUNT_LEVERAGE))) + "," +
+          JField("symbols", "[" + symbols + "]") + "," +
+          JField("chunk", IntegerToString(chunk)) + "," +
+          JField("chunks", IntegerToString(g_hello_chunks)) + "}";
+}
+
+// One chunk of the hello. The reply to the last chunk is JSON,
+// {"last_deal_ticket": N} (contract section 2: mt5_hello returns a dict and
+// the api passes it through) -- NOT an OK line -- and N is where this
+// terminal's deal reporting resumes, so a restarted EA neither repeats nor
+// skips a deal.
+bool SendHello()
+{
+   if(g_hello_chunk <= 1) CollectSymbols();
+   string reply = "";
+   int code = Post(HELLO_PATH, HelloBody(g_hello_chunk), reply);
+   if(code == 401)
+   {
+      Stop(JsonString(reply, "reason", "unknown key"));
+      return true;
+   }
+   if(code != 200)
+   {
+      // -1 left its explanation in g_last_error; 503 is the copier being
+      // away (its body carries a reason); anything else is shown as is.
+      if(code != -1)
+         g_last_error = "hello answered HTTP " + IntegerToString(code) + " " +
+                        JsonString(reply, "reason", "");
+      Retrying(g_last_error);
+      g_hello_chunk = 1;                    // a round restarts from the chunk that resets the list
+      return false;
+   }
+   if(g_hello_chunk < g_hello_chunks)
+   {
+      ShowStatus(StringFormat("connecting (hello %d/%d)", g_hello_chunk, g_hello_chunks));
+      g_hello_chunk++;
+      return true;
+   }
+   g_watermark = (ulong)JsonLong(reply, "last_deal_ticket", 0);
+   g_watermark_time = 0;                    // unknown until the first sync finds the ticket
+   g_hello_chunk = 1;
+   // The hello carried the margin mode; hedging and netting both run.
+   g_state = ST_RUNNING;
+   g_seq = 0;
+   g_poll_ms = PollFloor();
+   Log(StringFormat("connected as login %I64d with %d symbols; deals resume after ticket %I64u",
+                    g_login, ArraySize(g_hello_symbols), g_watermark));
+   ShowStatus("connected");
+   return true;
+}
