@@ -9,3 +9,7 @@ node_modules/
 dashboard/dist/
 docker-compose.override.yml
 .impeccable/
+
+# Private keys never belong in the repository (AWS key pairs, TLS keys)
+*.pem
+*.ppk
