@@ -1237,3 +1237,145 @@ class TestSnapshotProvider:
         yield reconciler.run()
 
         assert sorted(client.asked) == [self.MASTER, self.SLAVE]
+
+
+class TestNettingVolumeDrift:
+    """A netting MT5 follower (account 2001 here): copies of master
+    positions share net ticket 9001. The net position the terminal shows
+    is compared, as a whole, with the signed sum of its copies."""
+
+    MASTER = [PositionSnapshot(1, 1, Side.BUY, 100, 1.1, ""),
+              PositionSnapshot(2, 1, Side.BUY, 50, 1.1, "")]
+    SIDES = {"cm1.2001": "BUY", "cm2.2001": "BUY", "cm3.2001": "SELL"}
+
+    @staticmethod
+    def _copies(*rows):
+        return [{'id': i, 'master_position_id': master, 'slave_account_id': 2001,
+                 'slave_position_id': 9001, 'slave_volume': volume, 'status': 'active',
+                 'client_order_id': f"cm{master}.2001"}
+                for i, (master, volume) in enumerate(rows, start=1)]
+
+    def _drift(self, net, mappings, master=None, netting=frozenset({2001}), sides=SIDES):
+        return compute_drift(
+            self.MASTER if master is None else master, [], {2001: net}, {2001: []},
+            mappings, {2001}, netting_slave_ids=netting, mapping_sides=sides)
+
+    def test_a_net_position_equal_to_the_sum_of_its_copies_is_not_drift(self):
+        net = [PositionSnapshot(9001, 1, Side.BUY, 150, 1.1, "copy:m2")]
+        assert self._drift(net, self._copies((1, 100), (2, 50))) == []
+
+    def test_a_shortfall_is_a_missing_copy_for_the_delta(self):
+        net = [PositionSnapshot(9001, 1, Side.BUY, 120, 1.1, "copy:m2")]
+        (item,) = self._drift(net, self._copies((1, 100), (2, 50)))
+        assert (item.kind, item.account_id, item.position_id, item.volume) == (
+            'missing_slave_copy', 2001, 9001, 30)
+        assert "BUY 120" in item.detail and "BUY 150" in item.detail and "short 30" in item.detail
+
+    def test_an_excess_is_an_orphan_for_the_delta(self):
+        net = [PositionSnapshot(9001, 1, Side.BUY, 200, 1.1, "copy:m2")]
+        (item,) = self._drift(net, self._copies((1, 100), (2, 50)))
+        assert (item.kind, item.position_id, item.volume) == ('orphan_slave_position', 9001, 50)
+
+    def test_opposite_copies_net_against_each_other(self):
+        master = [PositionSnapshot(1, 1, Side.BUY, 100, 1.1, ""),
+                  PositionSnapshot(3, 1, Side.SELL, 100, 1.1, "")]
+        # BUY 100 and SELL 100 copies: the terminal shows nothing, and that
+        # is right -- no item, and no per-copy "vanished" from check 2.
+        copies = self._copies((1, 100), (3, 100))
+        assert self._drift([], copies, master=master) == []
+        # A residue on either side is an orphan for what it holds.
+        net = [PositionSnapshot(9001, 1, Side.SELL, 20, 1.1, "copy:m3")]
+        (item,) = self._drift(net, copies, master=master)
+        assert (item.kind, item.volume) == ('orphan_slave_position', 20)
+        # BUY 100 against SELL 50: the terminal should show BUY 50 ...
+        copies = self._copies((1, 100), (3, 50))
+        net = [PositionSnapshot(9001, 1, Side.BUY, 50, 1.1, "copy:m3")]
+        assert self._drift(net, copies, master=master) == []
+        # ... and a terminal on the WRONG side is short by both volumes.
+        net = [PositionSnapshot(9001, 1, Side.SELL, 50, 1.1, "copy:m3")]
+        (item,) = self._drift(net, copies, master=master)
+        assert (item.kind, item.volume) == ('missing_slave_copy', 100)
+
+    def test_a_vanished_net_position_with_copies_that_do_not_cancel_is_one_shortfall(self):
+        (item,) = self._drift([], self._copies((1, 100), (2, 50)))
+        assert (item.kind, item.position_id, item.volume) == ('missing_slave_copy', 9001, 150)
+
+    def test_hedging_and_ctrader_accounts_are_not_compared(self):
+        net = [PositionSnapshot(9001, 1, Side.BUY, 120, 1.1, "copy:m2")]
+        assert self._drift(net, self._copies((1, 100), (2, 50)), netting=frozenset()) == []
+        assert self._drift(net, self._copies((1, 100), (2, 50)), sides=None) == []
+
+    def test_a_copy_of_unknown_side_leaves_the_ticket_to_checks_one_and_two(self):
+        net = [PositionSnapshot(9001, 1, Side.BUY, 120, 1.1, "copy:m2")]
+        copies = self._copies((1, 100), (2, 50))
+        assert self._drift(net, copies, sides={"cm1.2001": "BUY"}) == []
+        items = self._drift([], copies, sides={"cm1.2001": "BUY"})
+        assert [(i.kind, i.volume) for i in items] == [
+            ('missing_slave_copy', None), ('missing_slave_copy', None)]
+
+    def test_the_net_volume_item_is_stable_and_distinct_from_check_ones_orphan(self):
+        net = [PositionSnapshot(9001, 1, Side.BUY, 200, 1.1, "copy:m2")]
+        first = self._drift(net, self._copies((1, 100), (2, 50)))
+        again = self._drift(net, self._copies((1, 100), (2, 50)))
+        assert [i.id for i in first] == [i.id for i in again]
+        # The same ticket with NO mapping at all is check 1's orphan: a
+        # different item, closing the whole position.
+        (orphan,) = self._drift(net, [], master=[])
+        assert orphan.id != first[0].id and orphan.volume is None
+
+    @pytest_twisted.inlineCallbacks
+    def test_run_reads_the_sides_from_the_open_commands(self, repo, db):
+        """End to end through run(): the netting follower is an MT5 account
+        (no client; its book comes from the snapshot_provider), the copies'
+        sides come from their open commands (Repo.mapping_side)."""
+        with psycopg.connect(db, autocommit=True) as conn:
+            conn.execute(
+                """
+                INSERT INTO accounts (ctid_trader_account_id, org_id, ctid_connection_id,
+                                      trader_login, is_live, role, enabled, multiplier, platform)
+                VALUES (3001, %s, NULL, 0, false, 'slave', true, 1.0, 'mt5')
+                """, (ORG_ID,))
+            conn.execute(
+                """
+                INSERT INTO mappings (master_position_id, slave_account_id, slave_position_id,
+                                      slave_volume, client_order_id, org_id, status)
+                VALUES (1, 3001, 9001, 100, 'cm1.3001', %(org)s, 'active'),
+                       (3, 3001, 9001, 50, 'cm3.3001', %(org)s, 'active')
+                """, {"org": ORG_ID})
+        for master, side in ((1, "BUY"), (3, "SELL")):
+            repo.enqueue_mt5_command(
+                3001, ORG_ID, "open",
+                {"symbol": "EURUSD.r", "side": side, "lots": 1.0, "sl": 0, "tp": 0,
+                 "comment": f"copy:m{master}"}, f"cm{master}.3001")
+        books = {
+            MASTER_ID: ([PositionSnapshot(1, 1, Side.BUY, 100, 1.1, ""),
+                         PositionSnapshot(3, 1, Side.SELL, 50, 1.1, "")], []),
+            # BUY 100 and SELL 50 copies should net to BUY 50; the terminal shows BUY 80.
+            3001: ([PositionSnapshot(9001, 1, Side.BUY, 80, 1.1, "copy:m3")], []),
+        }
+        reconciler = Reconciler(
+            clients_by_account=lambda _account_id: _EmptyBookClient(), repo=repo,
+            dispatcher=Mock(), master_account_id=MASTER_ID, org_id=ORG_ID,
+            snapshot_provider=books.get, netting_slaves=lambda: {3001})
+
+        items = yield reconciler.run()
+
+        (item,) = [i for i in items if i.account_id == 3001]
+        assert (item.kind, item.position_id, item.volume) == ('orphan_slave_position', 9001, 30)
+
+    @pytest_twisted.inlineCallbacks
+    def test_close_orphan_closes_only_the_excess_of_a_net_position(self, repo):
+        """The copies live INSIDE the net position: the remedy closes the
+        excess, never the whole ticket."""
+        dispatcher = Mock()
+        reconciler = Reconciler(
+            clients_by_account=Mock(), repo=repo, dispatcher=dispatcher,
+            master_account_id=MASTER_ID, org_id=ORG_ID)
+        reconciler.current = [DriftItem(
+            id="net-9001", kind='orphan_slave_position', account_id=3001, position_id=9001,
+            order_id=None, detail="excess", volume=30)]
+
+        yield reconciler.close_orphan("net-9001")
+
+        dispatcher.dispatch.assert_called_once_with(
+            [ClosePosition(slave_account_id=3001, position_id=9001, volume=30)], org_id=ORG_ID)

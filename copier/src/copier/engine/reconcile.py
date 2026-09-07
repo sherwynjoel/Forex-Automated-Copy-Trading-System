@@ -114,6 +114,18 @@ class DriftItem:
     position_id: int | None
     order_id: int | None
     detail: str
+    # The centilots the item is about, when it is about a volume rather than
+    # a whole position: a netting follower's net position holding less or
+    # more than the sum of its copies (check 6). close_orphan closes exactly
+    # this much then. None everywhere else.
+    volume: int | None = None
+
+
+def _signed_volume(volume: int) -> str:
+    """'BUY 150' / 'SELL 20' / 'flat' for a side-signed centilot volume."""
+    if volume == 0:
+        return "flat"
+    return f"{'BUY' if volume > 0 else 'SELL'} {abs(volume)}"
 
 
 def _extract_master_id_from_label(label: str) -> int | None:
@@ -142,16 +154,21 @@ def compute_drift(
     now: datetime | None = None,
     stale_pending_after_s: float = STALE_PENDING_AFTER_S,
     dry_run: bool = False,
+    netting_slave_ids: frozenset[int] | set[int] = frozenset(),
+    mapping_sides: dict[str, str] | None = None,
 ) -> list[DriftItem]:
     """Compute drift between broker reality and mappings (pure, no side effects).
 
-    Detects five drift categories:
+    Detects six drift categories:
     1. orphan_slave_position: slave position labeled copy:* with no active mapping,
        or mapping whose master position is gone
     2. missing_slave_copy: active mapping exists but slave position vanished
     3. unmapped_master_position: master position with zero mapping rows (missed while down)
     4. unfilled_slave_order: order mapping linked to master fill but slave position never materialized
     5. stale_pending_copy: a mapping that never left 'pending' (N8)
+    6. net volume drift (netting MT5 followers only): a net position holding
+       less (missing_slave_copy) or more (orphan_slave_position) than the
+       signed sum of its active copies
 
     Args:
         master_positions: List of PositionSnapshot from master account
@@ -171,6 +188,13 @@ def compute_drift(
             one of them would otherwise be reported as drift for as long as
             Stage 1 runs. Those rows do become genuine leftovers once
             dry-run is switched off, and are reported from that point on.
+        netting_slave_ids: Accounts that are NETTING MT5 followers -- every
+            copy on a symbol lives inside the symbol's single net position
+            there, so check 6 compares volumes for them. Empty (the
+            default) for a fleet without netting followers: nothing changes.
+        mapping_sides: client_order_id -> "BUY"|"SELL" for those accounts'
+            active copies (Repo.mapping_side); a copy with no entry leaves
+            its ticket to checks 1 and 2.
 
     Returns:
         list[DriftItem] sorted by id for stable output
@@ -194,6 +218,20 @@ def compute_drift(
     slave_pos_by_account = {}
     for account_id, positions in slave_positions.items():
         slave_pos_by_account[account_id] = {p.position_id: p for p in positions}
+
+    # 6 is prepared here and reported after 5: a netting MT5 follower's net
+    # tickets, each compared AS A WHOLE with the signed sum of its copies.
+    # Those tickets are skipped by check 2, which would otherwise report
+    # every copy of a correctly flat net position (opposite copies that
+    # cancel) as vanished.
+    sides = mapping_sides or {}
+    net_groups: dict[tuple[int, int], list[dict]] = {}
+    for m in mappings:
+        if (m.get('status') == 'active' and m.get('slave_position_id')
+                and m.get('slave_account_id') in netting_slave_ids):
+            net_groups.setdefault((m['slave_account_id'], m['slave_position_id']), []).append(m)
+    compared = {key for key, rows in net_groups.items()
+                if all(sides.get(m.get('client_order_id')) in ('BUY', 'SELL') for m in rows)}
 
     # 1. Check for orphan slave positions (labeled copy:* without active mapping, or mapping whose master is gone)
     for account_id, positions in slave_positions.items():
@@ -248,6 +286,9 @@ def compute_drift(
 
         if account_id not in enabled_slave_ids:
             continue
+
+        if (account_id, slave_pos_id) in compared:
+            continue        # a netting follower's net ticket: check 6 compares it as a whole
 
         # Only flag as missing if the master position this mapping tracks is
         # still open. If the master closed too, there is nothing to reconcile.
@@ -377,6 +418,40 @@ def compute_drift(
                 ),
             ))
 
+    # 6. A netting MT5 follower's net position against its copies (spec
+    #    "Netting accounts / As a follower"). Every copy on a symbol lives
+    #    inside the symbol's single net position, so whether the position
+    #    EXISTS (checks 1 and 2) says nothing about whether it still holds
+    #    what the copies say. Signed by side: opposite copies net against
+    #    each other there, and a flat terminal is right when they cancel.
+    #    Measured along the copies' side (the terminal's when the copies
+    #    cancel): less than the copies hold is a shortfall, more an excess.
+    for account_id, ticket in sorted(compared):
+        if account_id not in enabled_slave_ids:
+            continue
+        rows = net_groups[(account_id, ticket)]
+        expected = sum(int(m.get('slave_volume') or 0)
+                       * (1 if sides[m['client_order_id']] == 'BUY' else -1) for m in rows)
+        pos = slave_pos_by_account.get(account_id, {}).get(ticket)
+        actual = 0 if pos is None else int(pos.volume) * (1 if pos.side == Side.BUY else -1)
+        if actual == expected:
+            continue
+        direction = 1 if (expected or actual) > 0 else -1
+        held, want = actual * direction, abs(expected)
+        short = want - held
+        drift_items.append(DriftItem(
+            id=_stable_id('net_volume', account_id, ticket),
+            kind='missing_slave_copy' if short > 0 else 'orphan_slave_position',
+            account_id=account_id,
+            position_id=ticket,
+            order_id=None,
+            detail=(f"Netting position {ticket} holds {_signed_volume(actual)} but its "
+                    f"{len(rows)} active cop{'y' if len(rows) == 1 else 'ies'} sum to "
+                    f"{_signed_volume(expected)} ({'short' if short > 0 else 'excess'} "
+                    f"{abs(short)} centilots)"),
+            volume=abs(short),
+        ))
+
     # Sort for stable output
     drift_items.sort(key=lambda item: item.id)
     return drift_items
@@ -405,6 +480,7 @@ class Reconciler:
         master_account_id: int,
         org_id: int,
         snapshot_provider: Callable[[int], tuple[list, list] | None] | None = None,
+        netting_slaves: Callable[[], set[int]] | None = None,
     ):
         """Initialize Reconciler.
 
@@ -420,6 +496,10 @@ class Reconciler:
                 somewhere other than a cTrader client -- the MT5 registry --
                 or None for "not mine, ask the client". Optional: a process
                 with no MT5 lane passes nothing and behaves exactly as before.
+            netting_slaves: Answers the account ids of the netting MT5
+                followers (compute_drift compares their net positions with
+                the sum of their copies, check 6). Optional: a process with
+                no MT5 lane passes nothing and compares no volumes.
         """
         self.clients_by_account = clients_by_account
         self.repo = repo
@@ -427,6 +507,7 @@ class Reconciler:
         self.master_account_id = master_account_id
         self.org_id = org_id
         self.snapshot_provider = snapshot_provider
+        self.netting_slaves = netting_slaves
         self.current: list[DriftItem] = []
         # Snapshot of the most recent slave positions per account, captured by
         # run(). Used by close_orphan()/adopt() to determine the real live
@@ -570,9 +651,20 @@ class Reconciler:
             log.exception("reconcile: could not read org settings; assuming dry_run=False")
             dry_run = False
 
+        # A netting follower's copies are compared by side (check 6); the
+        # side of a copy is on its open command (Repo.mapping_side).
+        netting_ids = (set(self.netting_slaves()) & enabled_slave_ids
+                       if self.netting_slaves is not None else set())
+        mapping_sides = {
+            m['client_order_id']: self.repo.mapping_side(m['client_order_id'])
+            for m in mappings
+            if m.get('status') == 'active' and m.get('client_order_id')
+            and m.get('slave_account_id') in netting_ids}
+
         items = compute_drift(
             master_positions, master_orders, slave_positions, slave_orders,
             mappings, enabled_slave_ids, dry_run=dry_run,
+            netting_slave_ids=netting_ids, mapping_sides=mapping_sides,
         )
 
         items = self._apply_dismissals(items)
@@ -629,7 +721,9 @@ class Reconciler:
         """Close an orphan slave position (user-initiated action).
 
         Finds the DriftItem by id, extracts slave_position_id and account_id,
-        dispatches a full-volume ClosePosition intent.
+        dispatches a ClosePosition intent for the position's full volume, or
+        for `item.volume` when the item names one (a netting follower's
+        excess over its copies).
 
         This is the ONLY drift action that actually trades, and only on explicit user click.
 
@@ -655,7 +749,10 @@ class Reconciler:
             d.errback(ValueError(f"Item {item_id} missing account_id or position_id"))
             return d
 
-        volume = self._lookup_slave_volume(item.account_id, item.position_id)
+        # A net-volume item (a netting follower's net position holding MORE
+        # than its copies) names the excess: the copies live inside that
+        # position, so closing the whole ticket would close them too.
+        volume = item.volume or self._lookup_slave_volume(item.account_id, item.position_id)
 
         if not volume:
             d.errback(ValueError(f"Could not determine volume for position {item.position_id}"))
