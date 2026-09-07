@@ -8,6 +8,8 @@ from decimal import Decimal
 from unittest.mock import Mock, MagicMock, AsyncMock
 
 from ctrader_open_api import Client, TcpProtocol
+from ctrader_open_api.messages.OpenApiCommonMessages_pb2 import ProtoMessage
+from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOAReconcileRes
 from ctrader_open_api.messages.OpenApiModelMessages_pb2 import ProtoOATradeSide
 from twisted.internet import defer, reactor
 
@@ -1184,3 +1186,54 @@ class TestReconcileErrorResponse:
         assert len(positions) == 1
         assert positions[0].position_id == 999
         assert positions[0].price == 1.2345
+
+
+class _EmptyBookClient:
+    """A cTrader client whose reconcile always answers an empty book, and
+    remembers who it was asked about."""
+
+    def __init__(self):
+        self.asked = []
+
+    def send(self, req):
+        self.asked.append(req.ctidTraderAccountId)
+        res = ProtoOAReconcileRes()
+        res.ctidTraderAccountId = req.ctidTraderAccountId
+        return defer.succeed(ProtoMessage(payloadType=res.payloadType,
+                                          payload=res.SerializeToString()))
+
+
+class TestSnapshotProvider:
+    """An MT5 account has no cTrader client to reconcile against: its book
+    comes from the registry, through the snapshot_provider injected next
+    to clients_by_account. None from the provider means 'not mine' and the
+    account's client is asked as before."""
+
+    MASTER, SLAVE, ORG = 1001, 2001, 1
+
+    @pytest_twisted.inlineCallbacks
+    def test_the_provider_answers_for_its_accounts_and_the_client_for_the_rest(self, repo):
+        client = _EmptyBookClient()
+        mt5_book = ([PositionSnapshot(position_id=7001, symbol_id=1, side=Side.BUY,
+                                      volume=100, price=1.1, label="copy:m1")], [])
+        reconciler = Reconciler(
+            clients_by_account=lambda _account_id: client, repo=repo, dispatcher=Mock(),
+            master_account_id=self.MASTER, org_id=self.ORG,
+            snapshot_provider=lambda account_id: mt5_book if account_id == self.SLAVE else None)
+
+        items = yield reconciler.run()
+
+        assert client.asked == [self.MASTER]                    # the slave's book came from the provider
+        assert reconciler.slave_positions[self.SLAVE] == mt5_book[0]
+        assert [i.kind for i in items] == ["orphan_slave_position"]   # copy:* with no mapping row
+
+    @pytest_twisted.inlineCallbacks
+    def test_without_a_provider_every_account_uses_its_client(self, repo):
+        client = _EmptyBookClient()
+        reconciler = Reconciler(
+            clients_by_account=lambda _account_id: client, repo=repo, dispatcher=Mock(),
+            master_account_id=self.MASTER, org_id=self.ORG)
+
+        yield reconciler.run()
+
+        assert sorted(client.asked) == [self.MASTER, self.SLAVE]

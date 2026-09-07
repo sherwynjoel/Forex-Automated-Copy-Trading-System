@@ -392,6 +392,11 @@ class Reconciler:
     - dismiss() provides data for manual dismissal; manual action calls repo
     """
 
+    # Class-level default so a test double built with Reconciler.__new__()
+    # (skipping __init__ because it needs no database) still finds an
+    # attribute here instead of raising AttributeError.
+    snapshot_provider: Callable[[int], tuple[list, list] | None] | None = None
+
     def __init__(
         self,
         clients_by_account: Callable[[int], CTraderClient],
@@ -399,6 +404,7 @@ class Reconciler:
         dispatcher: Dispatcher,
         master_account_id: int,
         org_id: int,
+        snapshot_provider: Callable[[int], tuple[list, list] | None] | None = None,
     ):
         """Initialize Reconciler.
 
@@ -410,12 +416,17 @@ class Reconciler:
             org_id: The org this Reconciler serves -- exactly one org per
                 instance. Every repo read/write it performs is scoped or
                 stamped with this id.
+            snapshot_provider: Answers an account's (positions, orders) from
+                somewhere other than a cTrader client -- the MT5 registry --
+                or None for "not mine, ask the client". Optional: a process
+                with no MT5 lane passes nothing and behaves exactly as before.
         """
         self.clients_by_account = clients_by_account
         self.repo = repo
         self.dispatcher = dispatcher
         self.master_account_id = master_account_id
         self.org_id = org_id
+        self.snapshot_provider = snapshot_provider
         self.current: list[DriftItem] = []
         # Snapshot of the most recent slave positions per account, captured by
         # run(). Used by close_orphan()/adopt() to determine the real live
@@ -442,10 +453,17 @@ class Reconciler:
         self._dismissed: set[str] = repo.load_drift_dismissals(org_id)
 
     def _fetch_snapshot(self, account_id: int):
-        """Send ProtoOAReconcileReq for one account and extract snapshots.
+        """The account's (positions, orders): from the snapshot_provider when
+        it claims the account (an MT5 terminal's last report), else by
+        sending ProtoOAReconcileReq to the account's client.
 
         Returns a Deferred[(list[PositionSnapshot], list[OrderSnapshot])].
         """
+        if self.snapshot_provider is not None:
+            provided = self.snapshot_provider(account_id)
+            if provided is not None:
+                positions, orders = provided
+                return defer.succeed((list(positions), list(orders)))
         client = self.clients_by_account(account_id)
         req = ProtoOAReconcileReq()
         req.ctidTraderAccountId = account_id
