@@ -50,3 +50,31 @@ def _release_repo_connections(monkeypatch):
             conn.close()
         except Exception:
             pass
+
+
+@pytest.fixture
+def seed_mt5_account(db):
+    """seed_mt5_account(org_id, role='slave', multiplier='1.0', enabled=True)
+    -> the synthetic account id of a fresh MT5 account in that org, with the
+    mt5_links row the api would have created (a dummy key hash; the copier
+    never reads it)."""
+    import psycopg
+
+    def _seed(org_id, role="slave", multiplier="1.0", enabled=True):
+        with psycopg.connect(db, autocommit=True) as conn:
+            (account_id,) = conn.execute(
+                """
+                INSERT INTO accounts (ctid_trader_account_id, ctid_connection_id, org_id,
+                                      trader_login, is_live, role, enabled, multiplier, platform)
+                VALUES (nextval('mt5_account_id_seq'), NULL, %s, 0, false, %s, %s, %s, 'mt5')
+                RETURNING ctid_trader_account_id
+                """,
+                (org_id, role, enabled, multiplier),
+            ).fetchone()
+            conn.execute(
+                "INSERT INTO mt5_links (account_id, key_hash) VALUES (%s, %s)",
+                (account_id, f"hash-{account_id}"),
+            )
+        return account_id
+
+    return _seed

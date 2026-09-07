@@ -41,7 +41,7 @@ class AccountRow:
     """Account row representation."""
     account_id: int
     org_id: int
-    connection_id: int
+    connection_id: int | None      # NULL for MT5 accounts (migration 014)
     trader_login: int
     is_live: bool
     role: str
@@ -49,6 +49,44 @@ class AccountRow:
     multiplier: Decimal
     status: str
     last_error: str | None
+    # 'ctrader' | 'mt5'. Defaulted so every existing keyword construction
+    # (tests, routing) stays valid.
+    platform: str = "ctrader"
+
+
+def _deal_row(account_id: int, org_id: int | None, d: dict) -> dict:
+    """One `deals` row from a queries._map_deal-shaped dict.
+
+    Two top-level fallbacks exist for MT5 deals, which have no
+    closePositionDetail: `balance_after` (the estimate main.py computes for
+    every deal, close or not) and `gross_profit` (a BALANCE/CREDIT
+    operation's amount). A cTrader dict never carries them, so those rows
+    are unchanged.
+    """
+    close = d.get('close') or {}
+    return {
+        'account_id': account_id,
+        'deal_id': d['deal_id'],
+        'org_id': org_id,
+        'order_id': d.get('order_id'),
+        'position_id': d.get('position_id'),
+        'symbol_id': d.get('symbol_id'),
+        'symbol': d.get('symbol'),
+        'side': d.get('side'),
+        'volume': d.get('volume'),
+        'filled_volume': d.get('filled_volume'),
+        'execution_price': d.get('execution_price'),
+        'status': d.get('status'),
+        'commission': d.get('commission'),
+        'create_timestamp': d.get('create_timestamp'),
+        'execution_timestamp': d['execution_timestamp'],
+        'is_close': bool(d.get('close')),
+        'entry_price': close.get('entry_price'),
+        'gross_profit': close.get('gross_profit', d.get('gross_profit')),
+        'swap': close.get('swap'),
+        'balance_after': close.get('balance', d.get('balance_after')),
+        'closed_volume': close.get('closed_volume'),
+    }
 
 
 class Repo:
@@ -355,7 +393,7 @@ class Repo:
             rows = conn.execute(
                 """
                 SELECT ctid_trader_account_id, org_id, ctid_connection_id, trader_login, is_live,
-                       role, enabled, multiplier, status, last_error
+                       role, enabled, multiplier, status, last_error, platform
                 FROM accounts
                 """
             ).fetchall()
@@ -372,6 +410,7 @@ class Repo:
                 multiplier=row[7],  # Already a Decimal from psycopg
                 status=row[8],
                 last_error=row[9],
+                platform=row[10],
             )
             for row in rows
         ]
@@ -799,30 +838,7 @@ class Repo:
         the async writer when one is attached, else written inline.
         """
         for d in deals:
-            close = d.get('close') or {}
-            row = {
-                'account_id': account_id,
-                'deal_id': d['deal_id'],
-                'org_id': org_id,
-                'order_id': d.get('order_id'),
-                'position_id': d.get('position_id'),
-                'symbol_id': d.get('symbol_id'),
-                'symbol': d.get('symbol'),
-                'side': d.get('side'),
-                'volume': d.get('volume'),
-                'filled_volume': d.get('filled_volume'),
-                'execution_price': d.get('execution_price'),
-                'status': d.get('status'),
-                'commission': d.get('commission'),
-                'create_timestamp': d.get('create_timestamp'),
-                'execution_timestamp': d['execution_timestamp'],
-                'is_close': bool(d.get('close')),
-                'entry_price': close.get('entry_price'),
-                'gross_profit': close.get('gross_profit'),
-                'swap': close.get('swap'),
-                'balance_after': close.get('balance'),
-                'closed_volume': close.get('closed_volume'),
-            }
+            row = _deal_row(account_id, org_id, d)
             if self.writer is not None:
                 self.writer.submit(
                     'deals', row, upsert_key=('account_id', 'deal_id'))
@@ -846,7 +862,8 @@ class Repo:
 
     def load_deals(
         self, account_id: int, since_ms: int | None = None,
-        limit: int = 50_000,
+        limit: int = 50_000, until_ms: int | None = None,
+        position_id: int | None = None,
     ) -> list[dict]:
         """Deals for one account, reconstructed into the nested shape
         queries._map_deal produces -- including the `close` sub-dict -- so
@@ -882,6 +899,12 @@ class Repo:
         if since_ms is not None:
             sql += " AND execution_timestamp >= %s"
             params.append(since_ms)
+        if until_ms is not None:
+            sql += " AND execution_timestamp <= %s"
+            params.append(until_ms)
+        if position_id is not None:
+            sql += " AND position_id = %s"
+            params.append(position_id)
         sql += " ORDER BY execution_timestamp LIMIT %s"
         params.append(limit)
         with self._connect() as conn:
@@ -1131,11 +1154,24 @@ class Repo:
         slave_account_id: int,
         slave_position_id: int,
         closed_volume: int,
+        client_order_id: str | None = None,
     ) -> None:
         """Reduce a position mapping by the closed volume.
 
         Sets status to 'closed' when slave_volume reaches 0.
         Atomic: uses single UPDATE with GREATEST to avoid TOCTOU race on concurrent reduces.
+
+        `client_order_id`, when given, pins the reduction to ONE mapping. On
+        a hedging account a slave position has exactly one mapping, so the
+        (account, position) pair is enough; on a netting MT5 follower every
+        copy on a symbol shares the symbol's single net position, and a close
+        the copier itself queued names its mapping (the outbox's ':close'
+        suffix, Task 7) -- reducing every row on that ticket would close
+        copies the master still holds. When it is given it is the ONLY
+        predicate besides the account -- the ticket is not consulted: the
+        EA acks the net position the terminal shows AFTER the fill, which
+        is 0 when that close emptied it (plan 04 DoOpen), and a
+        client_order_id is unique on its own.
         """
         with self._connect() as conn:
             # Atomic single-statement update: decrement slave_volume safely,
@@ -1146,10 +1182,13 @@ class Repo:
                 SET slave_volume = GREATEST(slave_volume - %s, 0),
                     status = CASE WHEN slave_volume - %s <= 0 THEN 'closed' ELSE 'active' END,
                     updated_at = now()
-                WHERE slave_account_id = %s AND slave_position_id = %s AND status = 'active'
+                WHERE slave_account_id = %s AND status = 'active'
+                  AND CASE WHEN %s::text IS NULL THEN slave_position_id = %s
+                           ELSE client_order_id = %s END
                 RETURNING slave_volume, status
                 """,
-                (closed_volume, closed_volume, slave_account_id, slave_position_id),
+                (closed_volume, closed_volume, slave_account_id,
+                 client_order_id, slave_position_id, client_order_id),
             ).fetchone()
 
     def fail_mapping(self, slave_account_id: int, client_order_id: str, error: str) -> None:
@@ -1411,6 +1450,355 @@ class Repo:
             OrderMappingEntry(slave_account_id=row[0], slave_order_id=row[1])
             for row in rows
         ]
+
+    # ---------- MT5 bridge ----------
+
+    _MT5_LINK_COLUMNS = (
+        "account_id", "login", "broker", "server", "currency", "hedging", "trade_mode",
+        "leverage", "ea_version", "ea_build", "last_seen_at", "last_ip", "balance", "equity",
+        "key_created_at", "created_at",
+    )
+
+    def load_mt5_link(self, account_id: int) -> dict | None:
+        """The terminal-side facts of one MT5 account, or None when it has no
+        link row. The key hash is deliberately never read here."""
+        with self._connect() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                return cur.execute(
+                    f"SELECT {', '.join(self._MT5_LINK_COLUMNS)} FROM mt5_links "
+                    "WHERE account_id = %s",
+                    (account_id,),
+                ).fetchone()
+
+    def upsert_mt5_link_hello(
+        self, account_id: int, *, login, broker, server, currency, hedging, trade_mode,
+        leverage, ea_version, ea_build,
+    ) -> None:
+        """Record what the terminal said about itself in its hello.
+
+        The link row is created by the api together with its key hash (the
+        copier never sees a key), so this only ever UPDATEs it. The login is
+        also copied onto accounts.trader_login, which every 'cTID {id}'
+        label in the dashboard falls back to.
+        """
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE mt5_links
+                   SET login = %s, broker = %s, server = %s, currency = %s, hedging = %s,
+                       trade_mode = %s, leverage = %s, ea_version = %s, ea_build = %s
+                 WHERE account_id = %s
+                """,
+                (login, broker, server, currency, hedging, trade_mode, leverage,
+                 ea_version, ea_build, account_id),
+            )
+            conn.execute(
+                "UPDATE accounts SET trader_login = %s WHERE ctid_trader_account_id = %s",
+                (login, account_id),
+            )
+
+    def touch_mt5_link(self, account_id: int, *, balance, equity, seen_at) -> None:
+        """Stamp a sync report's balance/equity and its arrival time."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE mt5_links SET balance = %s, equity = %s, last_seen_at = %s "
+                "WHERE account_id = %s",
+                (balance, equity, seen_at, account_id),
+            )
+
+    def enqueue_mt5_command(
+        self, account_id: int, org_id: int, kind: str, payload: dict,
+        client_order_id: str | None,
+    ) -> int:
+        with self._connect() as conn:
+            (command_id,) = conn.execute(
+                """
+                INSERT INTO mt5_commands (account_id, org_id, kind, payload, client_order_id)
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (account_id, org_id, kind, Jsonb(payload), client_order_id),
+            ).fetchone()
+        return command_id
+
+    def mt5_commands_open(self, account_id: int) -> list[dict]:
+        """Every queued or sent command of one account, in id order."""
+        with self._connect() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                return cur.execute(
+                    """
+                    SELECT id, account_id, org_id, kind, payload, client_order_id, status,
+                           attempts, created_at, sent_at
+                      FROM mt5_commands
+                     WHERE account_id = %s AND status IN ('queued', 'sent')
+                     ORDER BY id
+                    """,
+                    (account_id,),
+                ).fetchall()
+
+    def mark_mt5_commands_sent(self, ids: list[int], sent_at) -> None:
+        """Handed to the terminal (again): status 'sent', attempts + 1."""
+        if not ids:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE mt5_commands SET status = 'sent', sent_at = %s, attempts = attempts + 1 "
+                "WHERE id = ANY(%s)",
+                (sent_at, [int(i) for i in ids]),
+            )
+
+    def complete_mt5_command(
+        self, command_id: int, ok: bool, result: dict, done_at, account_id: int | None = None,
+    ) -> dict | None:
+        """Settle one command on its ack.
+
+        Returns the row (id, account_id, org_id, kind, client_order_id,
+        payload) or None when the id is unknown, already settled, or -- with
+        `account_id` given -- belongs to another account. A duplicate or
+        foreign ack therefore changes nothing, which is what makes the
+        terminal's re-acks safe.
+        """
+        with self._connect() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                return cur.execute(
+                    """
+                    UPDATE mt5_commands
+                       SET status = %s, result = %s, done_at = %s
+                     WHERE id = %s AND status IN ('queued', 'sent')
+                       AND (%s::bigint IS NULL OR account_id = %s)
+                    RETURNING id, account_id, org_id, kind, client_order_id, payload
+                    """,
+                    ('done' if ok else 'failed', Jsonb(result), done_at, command_id,
+                     account_id, account_id),
+                ).fetchone()
+
+    def fail_stale_mt5_opens(self, account_id: int, older_than) -> list[int]:
+        """Expire market copies the terminal never picked up.
+
+        A market copy delivered minutes late is a different trade, so an
+        open/place_pending created before `older_than` and still not done
+        is failed ("terminal offline"), and the pending mapping rows those
+        commands were created for are failed with it -- otherwise the
+        Positions screen would show a copy pending forever. Closes, amends
+        and cancels never expire -- nor does a netting follower's close,
+        which is an `open` whose client_order_id ends in ':close' (Task 7).
+        Returns the expired command ids.
+        """
+        result = Jsonb({"ok": False, "retcode": 0, "message": "terminal offline",
+                        "position": None, "deal": None, "order": None, "price": None,
+                        "lots": None})
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                UPDATE mt5_commands
+                   SET status = 'failed', result = %s, done_at = now()
+                 WHERE account_id = %s AND kind IN ('open', 'place_pending')
+                   AND status IN ('queued', 'sent') AND created_at < %s
+                   AND (client_order_id IS NULL OR client_order_id NOT LIKE '%%:close')
+                RETURNING id, client_order_id
+                """,
+                (result, account_id, older_than),
+            ).fetchall()
+            coids = [r[1] for r in rows if r[1]]
+            if coids:
+                conn.execute(
+                    """
+                    UPDATE mappings
+                       SET status = 'failed', error = 'terminal offline', updated_at = now()
+                     WHERE slave_account_id = %s AND client_order_id = ANY(%s)
+                       AND status = 'pending'
+                    """,
+                    (account_id, coids),
+                )
+        return [r[0] for r in rows]
+
+    def load_symbol_aliases(self, account_id: int) -> dict[str, str]:
+        """canonical -> broker_name for one MT5 account."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT canonical, broker_name FROM symbol_aliases WHERE account_id = %s",
+                (account_id,),
+            ).fetchall()
+        return {r[0]: r[1] for r in rows}
+
+    def save_symbol_aliases(self, account_id: int, aliases: dict[str, str], source: str) -> None:
+        """Upsert canonical -> broker_name. An 'auto' write never overwrites
+        a 'manual' row; an empty broker_name removes the alias."""
+        with self._connect() as conn:
+            with conn.transaction():
+                for canonical, broker_name in aliases.items():
+                    if not broker_name:
+                        conn.execute(
+                            "DELETE FROM symbol_aliases WHERE account_id = %s AND canonical = %s",
+                            (account_id, canonical),
+                        )
+                        continue
+                    conn.execute(
+                        """
+                        INSERT INTO symbol_aliases (account_id, canonical, broker_name, source)
+                        VALUES (%s, %s, %s, %s)
+                        ON CONFLICT (account_id, canonical) DO UPDATE
+                            SET broker_name = EXCLUDED.broker_name, source = EXCLUDED.source
+                          WHERE NOT (symbol_aliases.source = 'manual' AND EXCLUDED.source = 'auto')
+                        """,
+                        (account_id, canonical, broker_name, source),
+                    )
+
+    def mt5_watermark(self, account_id: int) -> tuple[int, int]:
+        """(last_deal_ticket, last_deal_time_ms); (0, 0) before any deal."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT last_deal_ticket, last_deal_time_ms FROM mt5_deal_watermark "
+                "WHERE account_id = %s",
+                (account_id,),
+            ).fetchone()
+        return (row[0], row[1]) if row else (0, 0)
+
+    def set_mt5_watermark(self, account_id: int, ticket: int, time_ms: int) -> None:
+        """Advance the watermark; it never moves backwards."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO mt5_deal_watermark (account_id, last_deal_ticket, last_deal_time_ms)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (account_id) DO UPDATE SET
+                    last_deal_ticket = GREATEST(mt5_deal_watermark.last_deal_ticket,
+                                                EXCLUDED.last_deal_ticket),
+                    last_deal_time_ms = GREATEST(mt5_deal_watermark.last_deal_time_ms,
+                                                 EXCLUDED.last_deal_time_ms),
+                    updated_at = now()
+                """,
+                (account_id, ticket, time_ms),
+            )
+
+    def upsert_mt5_deals(self, account_id: int, org_id: int | None, rows: list[dict]) -> int:
+        """Store MT5 deals (queries._map_deal's shape, `balance_after`
+        estimated by the caller) and return how many were NEW.
+
+        Inline and ON CONFLICT DO NOTHING rather than the writer: the count
+        is what makes a re-sent batch harmless, and the caller advances the
+        watermark only once the rows are down.
+        """
+        inserted = 0
+        with self._connect() as conn:
+            for d in rows:
+                row = _deal_row(account_id, org_id, d)
+                columns = tuple(sorted(row.keys()))
+                cursor = conn.execute(
+                    f"INSERT INTO deals ({', '.join(columns)}) "
+                    f"VALUES ({', '.join(['%s'] * len(columns))}) "
+                    "ON CONFLICT (account_id, deal_id) DO NOTHING",
+                    [row[c] for c in columns],
+                )
+                inserted += cursor.rowcount
+        return inserted
+
+    def load_mt5_cash_flow(self, account_id: int, from_ms: int, to_ms: int) -> list[dict]:
+        """BALANCE/CREDIT deals of one MT5 account in [from_ms, to_ms]: the
+        cash-flow history the History page shows for cTrader accounts."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT deal_id, side, gross_profit, balance_after, execution_timestamp
+                  FROM deals
+                 WHERE account_id = %s AND side IN ('BALANCE', 'CREDIT')
+                   AND execution_timestamp BETWEEN %s AND %s
+                 ORDER BY execution_timestamp, deal_id
+                """,
+                (account_id, from_ms, to_ms),
+            ).fetchall()
+        return [
+            {"deal_id": r[0], "side": r[1],
+             "amount": float(r[2]) if r[2] is not None else 0.0,
+             "balance_after": float(r[3]) if r[3] is not None else None,
+             "timestamp": r[4]}
+            for r in rows
+        ]
+
+    # ---------- netting followers ----------
+
+    def mt5_open_payload(self, client_order_id: str) -> dict | None:
+        """The payload of the 'open' command queued under that coid (symbol,
+        side, lots, ...), or None. A position increase queues a second open
+        with the same coid and the same symbol and side, so the first is as
+        good as any; the ':close' commands carry a different coid and never
+        answer here."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT payload FROM mt5_commands
+                 WHERE client_order_id = %s AND kind = 'open'
+                 ORDER BY id LIMIT 1
+                """,
+                (client_order_id,),
+            ).fetchone()
+        return row[0] if row else None
+
+    def mapping_side(self, client_order_id: str) -> str | None:
+        """The side a copy was opened on ("BUY" | "SELL"), read from its open
+        command: the mapping row has no side, and a netting terminal's net
+        position may not even show the copy's side."""
+        payload = self.mt5_open_payload(client_order_id) or {}
+        side = payload.get("side")
+        return side if side in ("BUY", "SELL") else None
+
+    def reduce_position_mappings_fifo(
+        self, slave_account_id: int, slave_position_id: int, closed_volume: int,
+    ) -> list[dict]:
+        """A close the terminal reported on a netting follower's net position
+        (a stop, a target, the owner closing by hand): the copies sharing
+        that ticket are reduced OLDEST FIRST until the closed volume is used
+        up; a row that reaches 0 is closed. Returns the rows touched (oldest
+        first) with the volume taken from each as `closed_volume`, so the
+        caller can log one event per copy.
+
+        One transaction with the rows locked, so a concurrent ack on the
+        same ticket cannot interleave with the walk.
+        """
+        touched: list[dict] = []
+        remaining = int(closed_volume)
+        if remaining <= 0:
+            return touched
+        with self._connect() as conn:
+            with conn.transaction():
+                with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                    rows = cur.execute(
+                        """
+                        SELECT id, client_order_id, master_position_id, slave_volume
+                          FROM mappings
+                         WHERE slave_account_id = %s AND slave_position_id = %s
+                           AND status = 'active'
+                         ORDER BY created_at, id
+                         FOR UPDATE
+                        """,
+                        (slave_account_id, slave_position_id),
+                    ).fetchall()
+                    for row in rows:
+                        if remaining <= 0:
+                            break
+                        held = int(row["slave_volume"] or 0)
+                        if held <= 0:
+                            continue
+                        take = min(held, remaining)
+                        remaining -= take
+                        left = held - take
+                        cur.execute(
+                            """
+                            UPDATE mappings
+                               SET slave_volume = %s,
+                                   status = CASE WHEN %s <= 0 THEN 'closed' ELSE 'active' END,
+                                   updated_at = now()
+                             WHERE id = %s
+                            """,
+                            (left, left, row["id"]),
+                        )
+                        touched.append({
+                            "id": row["id"], "client_order_id": row["client_order_id"],
+                            "master_position_id": row["master_position_id"],
+                            "closed_volume": take, "slave_volume": left,
+                            "status": "closed" if left <= 0 else "active",
+                        })
+        return touched
 
     # ---------- partitions ----------
 
