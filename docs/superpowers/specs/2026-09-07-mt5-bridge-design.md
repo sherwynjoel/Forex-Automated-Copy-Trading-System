@@ -224,7 +224,8 @@ data shapes changes.
 - `sync`: POST JSON `{seq, ts, balance, equity, margin, margin_free,
   positions[], orders[], deals[], acks[]}`; deals are every history deal with
   ticket > watermark (HistorySelect from the last watermark time − 1 h, then
-  filter by ticket); acks carry `{id, ok, retcode, message, position, deal,
+  filter by ticket; at most 200 deals per sync, the rest follow on the next
+  syncs so a long-offline backlog never exceeds the body cap); acks carry `{id, ok, retcode, message, position, deal,
   order, price, volume}` for commands executed since the last sync. Parse the
   response lines; execute each command; remember executed ids in memory and in
   `MQL5/Files/MirrorFleet/<login>.acks` (last 500) so a re-delivered id is
@@ -276,7 +277,9 @@ CMD	92	amend_pending	5551	0.01	4451.00	0	0
 CMD	93	cancel_pending	5551
 ```
 
-Status line: `OK <server_ms> <next_poll_ms>` or `RETRY <server_ms> <next_poll_ms>`
+Status line: `OK <server_ms> <next_poll_ms>` (the hello response adds a fourth
+field, `<last_deal_ticket>`, so a restarted EA resumes its deal watermark from
+the server's) or `RETRY <server_ms> <next_poll_ms>`
 (copier unreachable; nothing was applied) or `STOP <reason>` (key revoked,
 account removed, netting refused — the EA stops polling and shows the reason).
 Command fields are positional and never contain tabs; the copier escapes none
