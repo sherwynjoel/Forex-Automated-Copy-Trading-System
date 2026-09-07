@@ -1800,6 +1800,57 @@ class Repo:
                         })
         return touched
 
+    # ---------- netting masters: the virtual-position ledger ----------
+
+    _NET_LEDGER_COLUMNS = ("virtual_id", "symbol", "side", "volume_open", "volume_left",
+                           "stop_loss", "take_profit", "opened_at_ms")
+
+    def load_net_ledger(self, account_id: int) -> list[dict]:
+        """Every virtual master position of a netting account, oldest first
+        -- the order the ledger consumes them in (copier/mt5/ingress.py)."""
+        with self._connect() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                return cur.execute(
+                    f"SELECT {', '.join(self._NET_LEDGER_COLUMNS)} FROM mt5_net_ledger "
+                    "WHERE account_id = %s ORDER BY opened_at_ms, virtual_id",
+                    (account_id,),
+                ).fetchall()
+
+    def upsert_net_ledger(self, account_id: int, rows: list[dict]) -> None:
+        """Insert new virtual positions; refresh what changes on an existing
+        one (what is left of it and its protection). One transaction, so a
+        report's worth of ledger changes lands whole or not at all."""
+        if not rows:
+            return
+        with self._connect() as conn:
+            with conn.transaction():
+                for row in rows:
+                    conn.execute(
+                        """
+                        INSERT INTO mt5_net_ledger (account_id, virtual_id, symbol, side,
+                                                    volume_open, volume_left, stop_loss,
+                                                    take_profit, opened_at_ms)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (account_id, virtual_id) DO UPDATE SET
+                            volume_left = EXCLUDED.volume_left,
+                            stop_loss = EXCLUDED.stop_loss,
+                            take_profit = EXCLUDED.take_profit
+                        """,
+                        (account_id, row["virtual_id"], row["symbol"], row["side"],
+                         row["volume_open"], row["volume_left"], row.get("stop_loss"),
+                         row.get("take_profit"), row["opened_at_ms"]),
+                    )
+
+    def delete_net_ledger(self, account_id: int, virtual_ids: list[int]) -> None:
+        """Virtual positions that were consumed to zero."""
+        if not virtual_ids:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM mt5_net_ledger WHERE account_id = %s AND virtual_id = ANY(%s)",
+                (account_id, [int(v) for v in virtual_ids]),
+            )
+
     # ---------- partitions ----------
 
     PARTITIONED_TABLES = ("executions", "balance_samples")

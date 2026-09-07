@@ -345,3 +345,39 @@ class TestNetting:
         assert self._by_coid(repo, org_id) == {
             f"cm42.{mt5_id}": ("active", 70), f"cm43.{mt5_id}": ("closed", 0),
             f"cm44.{mt5_id}": ("closed", 0)}
+
+
+class TestNetLedger:
+    """The netting master's virtual positions, persisted so a restart keeps them."""
+
+    def _row(self, virtual_id, **extra):
+        row = {"virtual_id": virtual_id, "symbol": "XAUUSD.r", "side": "BUY", "volume_open": 50,
+               "volume_left": 50, "stop_loss": None, "take_profit": None,
+               "opened_at_ms": 1_757_203_100_000 + virtual_id}
+        row.update(extra)
+        return row
+
+    def test_roundtrip_in_open_order(self, world):
+        repo, _org_id, mt5_id = world
+        assert repo.load_net_ledger(mt5_id) == []
+        repo.upsert_net_ledger(mt5_id, [self._row(700003), self._row(700001, stop_loss=2390.0)])
+        assert repo.load_net_ledger(mt5_id) == [
+            self._row(700001, stop_loss=2390.0), self._row(700003)]
+
+    def test_upsert_updates_volume_and_protection_in_place(self, world):
+        repo, _org_id, mt5_id = world
+        repo.upsert_net_ledger(mt5_id, [self._row(700001)])
+        repo.upsert_net_ledger(mt5_id, [self._row(700001, volume_left=20, take_profit=2420.0)])
+        repo.upsert_net_ledger(mt5_id, [])                        # nothing to do, no error
+        (row,) = repo.load_net_ledger(mt5_id)
+        assert (row["volume_open"], row["volume_left"], row["take_profit"]) == (50, 20, 2420.0)
+
+    def test_delete_removes_only_the_named_rows_of_that_account(self, world, seed_mt5_account):
+        repo, org_id, mt5_id = world
+        other = seed_mt5_account(org_id)
+        repo.upsert_net_ledger(mt5_id, [self._row(700001), self._row(700002)])
+        repo.upsert_net_ledger(other, [self._row(700001)])
+        repo.delete_net_ledger(mt5_id, [700001, 424242])
+        repo.delete_net_ledger(mt5_id, [])
+        assert [r["virtual_id"] for r in repo.load_net_ledger(mt5_id)] == [700002]
+        assert [r["virtual_id"] for r in repo.load_net_ledger(other)] == [700001]
