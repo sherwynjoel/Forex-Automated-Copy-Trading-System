@@ -104,6 +104,20 @@ class TestOperatorActions:
                              None, None, None)
         assert _commands(repo, mt5_id) == []
 
+    def test_a_webhook_alert_s_canonical_symbol_resolves_through_the_account_s_alias(self, world):
+        repo, org_id, mt5_id, app, lane = world
+        repo.save_symbol_aliases(mt5_id, {"XAUUSD": "XAUUSD.r"}, "auto")
+        lane.place_order(mt5_id, org_id, "XAUUSD", "BUY", "MARKET", 0.5, None, None,
+                         None, None, None)
+        (row,) = _commands(repo, mt5_id)
+        assert row["payload"]["symbol"] == "XAUUSD.r"
+
+    def test_an_unaliased_canonical_symbol_still_fails_as_unknown(self, world):
+        repo, org_id, mt5_id, app, lane = world
+        with pytest.raises(ValueError, match="unknown symbol"):
+            lane.place_order(mt5_id, org_id, "GBPJPY", "BUY", "MARKET", 1.0, None, None,
+                             None, None, None)
+
     def test_close_full_partial_and_clamped(self, world):
         repo, org_id, mt5_id, app, lane = world
         full = lane.close_position(mt5_id, 7001, None, None)

@@ -88,6 +88,16 @@ class MT5Lane:
                     limit_price, stop_price, stop_loss, take_profit, actor) -> dict:
         info = self._registry.symbol_by_name(account_id, symbol)
         if info is None:
+            # The dashboard ticket already sends the broker's own name (it
+            # lists symbol_cache directly), but a webhook alert sends
+            # MirrorFleet's CANONICAL name -- translate it through this
+            # account's aliases the same way the copy pipeline does.
+            broker_name = self._repo.load_symbol_aliases(account_id).get(symbol)
+            if broker_name is not None:
+                info = self._registry.symbol_by_name(account_id, broker_name)
+                if info is not None:
+                    symbol = broker_name
+        if info is None:
             raise ValueError(f"unknown symbol {symbol!r} for account {account_id}")
         volume = int(round(float(volume_lots) * CENTILOTS))
         if info.step_volume:
