@@ -679,7 +679,7 @@ test('amount mode shows the price it will exit at, rather than converting silent
   expect(screen.getByText('1.08581')).toBeInTheDocument()
 })
 
-test('price mode is untouched: what you type is what is sent', async () => {
+test('price mode: what you type is what is sent', async () => {
   setRole('trader')
   const fetchMock = mockRoutes()
   renderTrade()
@@ -688,6 +688,9 @@ test('price mode is untouched: what you type is what is sent', async () => {
     expect((screen.getByLabelText(/symbol/i) as HTMLInputElement).value).toBe('EURUSD')
   })
 
+  // Amount is the default; switch to Price explicitly rather than lean on
+  // whichever mode happens to load first.
+  await userEvent.click(screen.getByRole('button', { name: /^price$/i }))
   await userEvent.type(screen.getByLabelText(/take profit/i), '1.09')
   await userEvent.click(screen.getByRole('button', { name: /place order/i }))
 

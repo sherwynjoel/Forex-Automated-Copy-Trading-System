@@ -40,9 +40,10 @@ interface TicketState {
 const EMPTY_TICKET: TicketState = {
   symbol: '', side: 'BUY', orderType: 'MARKET', volumeLots: '0.01',
   limitPrice: '', stopPrice: '', stopLoss: '', takeProfit: '',
-  // Price by default: it is what the broker stores, so an operator who
-  // never touches the toggle keeps exactly the old behaviour.
-  protectionMode: 'price',
+  // Amount by default: an operator thinks in "$1.50 after commission",
+  // not in the raw price the broker stores -- Price is one click away
+  // for anyone who wants the literal number instead.
+  protectionMode: 'amount',
 }
 
 const defaultSymbolKey = (orgId: number, accountId: number) =>
