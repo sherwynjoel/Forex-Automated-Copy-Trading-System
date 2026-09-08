@@ -546,3 +546,25 @@ test('the amend dialog reopens in price mode so prefilled prices are not misread
 
   expect(screen.getByRole('button', { name: /^price/i })).toHaveAttribute('aria-pressed', 'true')
 })
+
+test('a position with no protection yet opens the dialog in amount mode', async () => {
+  // Nothing pre-fills, so there is nothing to misread -- default to how an
+  // operator actually thinks about it, same as the order ticket.
+  setRole('trader')
+  const unprotected: ApiState = {
+    ...mockApiState,
+    master_positions: mockApiState.master_positions.map((p) => ({
+      ...p, account_id: 1001, stop_loss: null, take_profit: null,
+    })),
+  }
+  vi.spyOn(apiModule, 'orgApi')
+    .mockImplementation(async (_org, path) =>
+      (path === 'state' ? unprotected : {}) as never)
+
+  render(<MemoryRouter><Positions /></MemoryRouter>)
+
+  const row = (await screen.findByText('EURUSD')).closest('tr')!
+  await userEvent.click(within(row).getByRole('button', { name: /sl \/ tp/i }))
+
+  expect(screen.getByRole('button', { name: /^amount/i })).toHaveAttribute('aria-pressed', 'true')
+})

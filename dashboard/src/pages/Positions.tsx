@@ -80,10 +80,10 @@ export default function Positions() {
   const [slDraft, setSlDraft] = useState('')
   const [tpDraft, setTpDraft] = useState('')
   const [amendBusy, setAmendBusy] = useState(false)
-  // Price or money. Price stays the default: it is what the broker stores
-  // and what the row already shows, so an operator who ignores the toggle
-  // sees no change at all.
-  const [amendMode, setAmendMode] = useState<'price' | 'amount'>('price')
+  // Price or money. The real default is decided per-position in the effect
+  // below; this initial value only matters for the instant before that
+  // effect first runs.
+  const [amendMode, setAmendMode] = useState<'price' | 'amount'>('amount')
   // Broker refusals stream in as control events. Kept apart from `error`
   // (the page-load failure) so a background refresh cannot wipe it: only
   // the reader dismisses it.
@@ -94,9 +94,11 @@ export default function Positions() {
   useEffect(() => {
     setSlDraft(editing?.stop_loss != null ? String(editing.stop_loss) : '')
     setTpDraft(editing?.take_profit != null ? String(editing.take_profit) : '')
-    // Reopen in price mode: the values just pre-filled are prices, and
-    // showing them under an "amount" heading would misread them wildly.
-    setAmendMode('price')
+    // A position with nothing set yet opens in Amount, matching the order
+    // ticket -- an operator thinks in dollars first. But the moment either
+    // field pre-fills a REAL price, force Price mode: showing that price
+    // under an "amount" heading would misread it by orders of magnitude.
+    setAmendMode(editing?.stop_loss == null && editing?.take_profit == null ? 'amount' : 'price')
   }, [editing])
 
   // An open position states its own size, so turning money into a price
