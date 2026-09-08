@@ -13,6 +13,17 @@ indicator("MirrorFleet FVG Multi-Timeframe", overlay = true, max_lines_count = 5
 secret = input.string("tvw_PASTE_SECRET_HERE", "MirrorFleet secret", group = "MirrorFleet")
 lots   = input.float(0.01, "Lots", step = 0.01, minval = 0.01, group = "MirrorFleet")
 
+// ============================================================ Risk
+// The FVG boundary is often only a few ticks from price on a short entry
+// timeframe -- too close for a broker's minimum stop distance, which
+// rejects the order outright ("invalid stops") rather than filling it.
+// Widens the FINAL order's stop/target outward (never inward) to at
+// least this many ATRs from the entry close; the signal-validity check
+// above still runs on the raw FVG levels, so this never creates a trade
+// that would not have fired anyway.
+atrLen      = input.int(14, "ATR length (entry timeframe)", minval = 1, group = "Risk")
+minStopMult = input.float(1.0, "Minimum stop/target distance, in ATRs", minval = 0, step = 0.1, group = "Risk")
+
 // ============================================================ Timeframes
 entryTF        = input.timeframe("", "Entry timeframe (blank = chart timeframe)", group = "Timeframes")
 autoNext       = input.bool(true, "Target = next timeframe up, automatically", group = "Timeframes")
@@ -42,10 +53,11 @@ barcolor(colorBull ? color.new(color.lime, 70) : colorBear ? color.new(color.red
 // C = the bar that just closed on the entry timeframe (offset 1 -- offset 0
 // is still forming and can still change). B = offset 2, the impulse candle.
 // A = offset 3, the candle the gap opens away from -- and this entry's stop.
-[cHigh, cLow, cTime, aHigh, aLow] = request.security(
+[cHigh, cLow, cTime, aHigh, aLow, entryATR] = request.security(
      syminfo.tickerid, effectiveEntryTF,
-     [high[1], low[1], time[1], high[3], low[3]],
+     [high[1], low[1], time[1], high[3], low[3], ta.atr(atrLen)[1]],
      lookahead = barmerge.lookahead_off)
+minDist = minStopMult * entryATR
 
 [tgtHigh, tgtLow] = request.security(
      syminfo.tickerid, targetTF, [high[1], low[1]],
@@ -78,18 +90,22 @@ if isNewEntryBar and not tfTooSmall
         sl = aHigh
         tp = tgtHigh
         if sl < close and tp > close                 // the "avoid trading" guard: a level already behind price is not a trade
-            alert(msg("buy", sl, tp), alert.freq_once_per_bar_close)
+            slOrder = math.min(sl, close - minDist)  // padded OUTWARD, never past the raw FVG level, and never the reason a trade fires
+            tpOrder = math.max(tp, close + minDist)
+            alert(msg("buy", slOrder, tpOrder), alert.freq_once_per_bar_close)
             showBuy := true
-            line.new(bar_index, sl, bar_index + 5, sl, color = color.red,  style = line.style_dashed)
-            line.new(bar_index, tp, bar_index + 5, tp, color = color.lime, style = line.style_dashed)
+            line.new(bar_index, slOrder, bar_index + 5, slOrder, color = color.red,  style = line.style_dashed)
+            line.new(bar_index, tpOrder, bar_index + 5, tpOrder, color = color.lime, style = line.style_dashed)
     else if bearSignal and not na(tgtLow)
         sl = aLow
         tp = tgtLow
         if sl > close and tp < close
-            alert(msg("sell", sl, tp), alert.freq_once_per_bar_close)
+            slOrder = math.max(sl, close + minDist)
+            tpOrder = math.min(tp, close - minDist)
+            alert(msg("sell", slOrder, tpOrder), alert.freq_once_per_bar_close)
             showSell := true
-            line.new(bar_index, sl, bar_index + 5, sl, color = color.red,  style = line.style_dashed)
-            line.new(bar_index, tp, bar_index + 5, tp, color = color.lime, style = line.style_dashed)
+            line.new(bar_index, slOrder, bar_index + 5, slOrder, color = color.red,  style = line.style_dashed)
+            line.new(bar_index, tpOrder, bar_index + 5, tpOrder, color = color.lime, style = line.style_dashed)
     lastSignalledTime := cTime
 
 plotshape(showBuy,  "Buy",  shape.triangleup,   location.belowbar, color.lime, size = size.small)
