@@ -66,13 +66,20 @@ msg(action, sl, tp) =>
      ', "take_profit": ' + str.tostring(tp, format.mintick) +
      ', "id": "' + str.tostring(cTime) + '"}'
 
+// plotshape() cannot be called conditionally inside an if -- it must sit
+// at the top level, with the condition passed IN as its own first
+// argument. These reset to false at the start of every bar and are set
+// true only on the bar a signal actually fires.
+bool showBuy  = false
+bool showSell = false
+
 if isNewEntryBar and not tfTooSmall
     if bullSignal and not na(tgtHigh)
         sl = aHigh
         tp = tgtHigh
         if sl < close and tp > close                 // the "avoid trading" guard: a level already behind price is not a trade
             alert(msg("buy", sl, tp), alert.freq_once_per_bar_close)
-            plotshape(true, "Buy", shape.triangleup, location.belowbar, color.lime, size = size.small)
+            showBuy := true
             line.new(bar_index, sl, bar_index + 5, sl, color = color.red,  style = line.style_dashed)
             line.new(bar_index, tp, bar_index + 5, tp, color = color.lime, style = line.style_dashed)
     else if bearSignal and not na(tgtLow)
@@ -80,7 +87,10 @@ if isNewEntryBar and not tfTooSmall
         tp = tgtLow
         if sl > close and tp < close
             alert(msg("sell", sl, tp), alert.freq_once_per_bar_close)
-            plotshape(true, "Sell", shape.triangledown, location.abovebar, color.red, size = size.small)
+            showSell := true
             line.new(bar_index, sl, bar_index + 5, sl, color = color.red,  style = line.style_dashed)
             line.new(bar_index, tp, bar_index + 5, tp, color = color.lime, style = line.style_dashed)
     lastSignalledTime := cTime
+
+plotshape(showBuy,  "Buy",  shape.triangleup,   location.belowbar, color.lime, size = size.small)
+plotshape(showSell, "Sell", shape.triangledown, location.abovebar, color.red,  size = size.small)
