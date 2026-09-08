@@ -231,6 +231,22 @@ class TestQueries:
             "update_timestamp": 1000, "stop_loss": None, "take_profit": None}
         assert [o["order_id"] for o in orders["orders"]] == [10, 11]
 
+    def test_order_history_carries_the_copy_label_the_fleet_view_groups_by(self, world):
+        repo, org_id, mt5_id, app, lane = world
+        repo.upsert_mt5_deals(mt5_id, org_id, [
+            {"deal_id": 1, "order_id": 10, "position_id": 7001, "symbol_id": 77,
+             "symbol": "EURUSD.r", "side": "BUY", "volume": 100, "filled_volume": 100,
+             "execution_price": 1.1, "status": "FILLED", "commission": -0.03,
+             "create_timestamp": 1000, "execution_timestamp": 1000, "close": None,
+             "label": "copy:m670345546", "balance_after": 9994.97},
+        ])
+        (order,) = lane.order_history(mt5_id, 0, 5000)["orders"]
+        assert order["label"] == "copy:m670345546"
+        # deal_history stays exactly _map_deal-shaped -- a cTrader deal
+        # never carries a label, only its order does.
+        (deal,) = lane.deal_history(mt5_id, 0, 5000)["deals"]
+        assert "label" not in deal
+
     def test_cash_flow(self, world):
         repo, org_id, mt5_id, app, lane = world
         self._seed_deals(repo, org_id, mt5_id)

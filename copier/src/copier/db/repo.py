@@ -80,6 +80,7 @@ def _deal_row(account_id: int, org_id: int | None, d: dict) -> dict:
         'commission': d.get('commission'),
         'create_timestamp': d.get('create_timestamp'),
         'execution_timestamp': d['execution_timestamp'],
+        'label': d.get('label'),
         'is_close': bool(d.get('close')),
         'entry_price': close.get('entry_price'),
         'gross_profit': close.get('gross_profit', d.get('gross_profit')),
@@ -892,7 +893,7 @@ class Repo:
             "SELECT deal_id, order_id, position_id, symbol_id, symbol, side, "
             "volume, filled_volume, execution_price, status, commission, "
             "create_timestamp, execution_timestamp, is_close, entry_price, "
-            "gross_profit, swap, balance_after, closed_volume "
+            "gross_profit, swap, balance_after, closed_volume, label "
             "FROM deals WHERE account_id = %s"
         )
         params: list = [account_id]
@@ -915,7 +916,7 @@ class Repo:
             (deal_id, order_id, position_id, symbol_id, symbol, side, volume,
              filled_volume, execution_price, status, commission,
              create_ts, exec_ts, is_close, entry_price, gross_profit, swap,
-             balance_after, closed_volume) = r
+             balance_after, closed_volume, label) = r
             out.append({
                 "deal_id": deal_id,
                 "order_id": order_id,
@@ -930,6 +931,7 @@ class Repo:
                 "commission": float(commission) if commission is not None else None,
                 "create_timestamp": create_ts,
                 "execution_timestamp": exec_ts,
+                "label": label,
                 "close": {
                     "entry_price": entry_price,
                     "gross_profit": float(gross_profit) if gross_profit is not None else 0.0,

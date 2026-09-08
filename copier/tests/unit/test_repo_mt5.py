@@ -239,6 +239,18 @@ class TestMt5Deals:
                 " WHERE account_id = %s AND deal_id = 1", (mt5_id,)).fetchone()
         assert (float(row[0]), row[1], row[2]) == (9990.0, False, None)
 
+    def test_the_copy_label_survives_the_round_trip(self, world):
+        """The History page's fleet view groups a trade by this label
+        ("copy:m<master_position_id>"); without it round-tripping through
+        `deals`, an MT5 copy could never be matched back to its master."""
+        repo, org_id, mt5_id = world
+        repo.upsert_mt5_deals(mt5_id, org_id, [
+            _deal(1, 1000, label="copy:m670345546"),
+            _deal(2, 2000),   # no label -- a manual fill, not a copy
+        ])
+        by_id = {d["deal_id"]: d["label"] for d in repo.load_deals(mt5_id)}
+        assert by_id == {1: "copy:m670345546", 2: None}
+
     def test_load_deals_filters_by_until_and_position(self, world):
         repo, org_id, mt5_id = world
         repo.upsert_mt5_deals(

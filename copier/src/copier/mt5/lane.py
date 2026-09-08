@@ -258,6 +258,11 @@ class MT5Lane:
 
     def _deal(self, row: dict) -> dict:
         deal = dict(row)
+        # "label" exists on the row for order_history() to read directly --
+        # cTrader's own _map_deal never carries it (a cTrader deal has no
+        # label; only its order does), so it is dropped here to keep this
+        # shape identical for both platforms.
+        deal.pop("label", None)
         deal["volume_lots"] = _lots(deal.get("filled_volume"), CENTILOTS)
         if deal.get("close"):
             deal["close"] = {**deal["close"],
@@ -284,7 +289,7 @@ class MT5Lane:
                 "volume_lots": _lots(r["volume"], CENTILOTS), "order_type": "MARKET",
                 "status": "FILLED", "limit_price": None, "stop_price": None,
                 "execution_price": r["execution_price"], "executed_volume": r["filled_volume"],
-                "position_id": r["position_id"], "label": "",
+                "position_id": r["position_id"], "label": r.get("label") or "",
                 "open_timestamp": r["execution_timestamp"],
                 "update_timestamp": r["execution_timestamp"],
                 "stop_loss": None, "take_profit": None,

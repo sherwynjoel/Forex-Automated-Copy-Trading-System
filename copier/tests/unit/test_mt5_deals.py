@@ -39,12 +39,31 @@ def test_deal_rows_have_map_deals_shape():
         "deal_id": 1, "order_id": 10, "position_id": 7001, "symbol_id": 77, "symbol": "EURUSD.r",
         "side": "BUY", "volume": 100, "filled_volume": 100, "volume_lots": "1.00",
         "execution_price": 1.1, "status": "FILLED", "commission": -0.03,
-        "create_timestamp": 1000, "execution_timestamp": 1000, "close": None,
+        "create_timestamp": 1000, "execution_timestamp": 1000, "label": None, "close": None,
         "balance_after": 9998.01, "gross_profit": None}
     assert rows[1]["close"] == {
         "entry_price": 1.1, "gross_profit": 2.0, "swap": 0.0, "commission": -0.01,
         "balance": 10000.0, "closed_volume": 40, "closed_volume_lots": "0.40"}
     assert rows[1]["side"] == "SELL" and rows[1]["balance_after"] == 10000.0
+
+
+def test_a_copy_carries_its_master_position_as_the_label():
+    """The History page's fleet view groups a trade by its order's label,
+    read as "copy:m<master_position_id>" -- set on an MT5 copy by the
+    outbox's open payload comment (contract section 1) and reported back on
+    every deal for that position. Without this the label was always
+    dropped, and no MT5 copy could ever be matched to its master trade.
+    """
+    rows = deal_rows(
+        [deal(1, position=9001, entry="IN", comment="copy:m670345546", time_ms=1000)],
+        10000.0, SYMBOLS, entry_price_for=lambda _: None)
+    assert rows[0]["label"] == "copy:m670345546"
+
+
+def test_a_deal_with_no_comment_has_no_label():
+    rows = deal_rows([deal(1, position=9001, entry="IN", comment="", time_ms=1000)],
+                     10000.0, SYMBOLS, entry_price_for=lambda _: None)
+    assert rows[0]["label"] is None
 
 
 def test_balance_operations_carry_their_amount_and_no_symbol():

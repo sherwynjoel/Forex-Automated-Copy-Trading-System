@@ -75,6 +75,7 @@ def deal_rows(
             "commission": d.commission if is_trade else None,
             "create_timestamp": d.time_ms,
             "execution_timestamp": d.time_ms,
+            "label": d.comment or None,
             "close": close,
             "balance_after": estimates[d.ticket],
             "gross_profit": None if is_trade else d.profit,
