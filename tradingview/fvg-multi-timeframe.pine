@@ -1,0 +1,86 @@
+//@version=6
+indicator("MirrorFleet FVG Multi-Timeframe", overlay = true, max_lines_count = 50)
+
+// Built on the owner's own FVG-coloring script, extended to trade it:
+// entries and their stop come from a chosen (possibly higher-than-chart)
+// entry timeframe, using only bars that have fully closed, so it cannot
+// repaint; the target is read from the next timeframe up. Sends the same
+// {"secret","action","symbol","lots","stop_loss","take_profit","id"}
+// message MirrorFleet's webhook door expects -- see
+// docs/superpowers/specs and api/src/api/tradingview_alerts.py.
+
+// ============================================================ MirrorFleet
+secret = input.string("tvw_PASTE_SECRET_HERE", "MirrorFleet secret", group = "MirrorFleet")
+lots   = input.float(0.01, "Lots", step = 0.01, minval = 0.01, group = "MirrorFleet")
+
+// ============================================================ Timeframes
+entryTF        = input.timeframe("", "Entry timeframe (blank = chart timeframe)", group = "Timeframes")
+autoNext       = input.bool(true, "Target = next timeframe up, automatically", group = "Timeframes")
+targetTFManual = input.timeframe("60", "Target timeframe (used only if auto is off)", group = "Timeframes")
+
+// The ladder auto-target walks: 1m -> 5m -> 15m -> 1h -> 4h -> 1D -> 1W -> 1M.
+nextRung(tf) =>
+    s = timeframe.in_seconds(tf)
+    s <= 60 ? "5" : s <= 300 ? "15" : s <= 900 ? "60" : s <= 3600 ? "240" :
+     s <= 14400 ? "D" : s <= 86400 ? "W" : "M"
+
+effectiveEntryTF = entryTF == "" ? timeframe.period : entryTF
+targetTF         = autoNext ? nextRung(effectiveEntryTF) : targetTFManual
+// request.security cannot pull a timeframe SMALLER than the chart's own --
+// if that's what got picked, there is nothing valid to trade on.
+tfTooSmall = timeframe.in_seconds(effectiveEntryTF) < timeframe.in_seconds(timeframe.period)
+
+// ============================================================ Original FVG coloring (owner's script, unchanged)
+// A = i-2, B = i-1, C = i -- purely visual, on the chart's own bars.
+isBullFVG = low > high[2]
+isBearFVG = high < low[2]
+colorBull = isBullFVG[0]
+colorBear = isBearFVG[0]
+barcolor(colorBull ? color.new(color.lime, 70) : colorBear ? color.new(color.red, 70) : na, offset = -1)
+
+// ============================================================ Entry-timeframe FVG, confirmed bars only
+// C = the bar that just closed on the entry timeframe (offset 1 -- offset 0
+// is still forming and can still change). B = offset 2, the impulse candle.
+// A = offset 3, the candle the gap opens away from -- and this entry's stop.
+[cHigh, cLow, cTime, aHigh, aLow] = request.security(
+     syminfo.tickerid, effectiveEntryTF,
+     [high[1], low[1], time[1], high[3], low[3]],
+     lookahead = barmerge.lookahead_off)
+
+[tgtHigh, tgtLow] = request.security(
+     syminfo.tickerid, targetTF, [high[1], low[1]],
+     lookahead = barmerge.lookahead_off)
+
+bullSignal = not na(cTime) and not na(aHigh) and cLow > aHigh
+bearSignal = not na(cTime) and not na(aLow)  and cHigh < aLow
+
+// Fire once per newly CLOSED entry-timeframe bar, never once per chart tick.
+var float lastSignalledTime = na
+isNewEntryBar = na(lastSignalledTime) or cTime != lastSignalledTime
+
+// ============================================================ The MirrorFleet alert
+msg(action, sl, tp) =>
+    '{"secret": "' + secret + '", "action": "' + action + '", "symbol": "' + syminfo.ticker +
+     '", "lots": ' + str.tostring(lots) +
+     ', "stop_loss": ' + str.tostring(sl, format.mintick) +
+     ', "take_profit": ' + str.tostring(tp, format.mintick) +
+     ', "id": "' + str.tostring(cTime) + '"}'
+
+if isNewEntryBar and not tfTooSmall
+    if bullSignal and not na(tgtHigh)
+        sl = aHigh
+        tp = tgtHigh
+        if sl < close and tp > close                 // the "avoid trading" guard: a level already behind price is not a trade
+            alert(msg("buy", sl, tp), alert.freq_once_per_bar_close)
+            plotshape(true, "Buy", shape.triangleup, location.belowbar, color.lime, size = size.small)
+            line.new(bar_index, sl, bar_index + 5, sl, color = color.red,  style = line.style_dashed)
+            line.new(bar_index, tp, bar_index + 5, tp, color = color.lime, style = line.style_dashed)
+    else if bearSignal and not na(tgtLow)
+        sl = aLow
+        tp = tgtLow
+        if sl > close and tp < close
+            alert(msg("sell", sl, tp), alert.freq_once_per_bar_close)
+            plotshape(true, "Sell", shape.triangledown, location.abovebar, color.red, size = size.small)
+            line.new(bar_index, sl, bar_index + 5, sl, color = color.red,  style = line.style_dashed)
+            line.new(bar_index, tp, bar_index + 5, tp, color = color.lime, style = line.style_dashed)
+    lastSignalledTime := cTime
