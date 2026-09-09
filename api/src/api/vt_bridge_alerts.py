@@ -15,10 +15,11 @@ levels without price having reached them yet). When it does trigger, it is
 checked against the org's most recent HTF snapshot for that symbol:
 
   0. its own `tf` is on the workspace's allowed-timeframes list
-  1. a snapshot exists at all
-  2. the snapshot is not stale (older than STALE_MULTIPLIER times its own tf)
-  3. its bias matches the snapshot's bias
-  4. its entry falls inside the snapshot's stop-target band, padded by
+  1. its own `valid` is true (stop/target are on the correct side of entry)
+  2. a snapshot exists at all
+  3. the snapshot is not stale (older than STALE_MULTIPLIER times its own tf)
+  4. its bias matches the snapshot's bias
+  5. its entry falls inside the snapshot's stop-target band, padded by
      TOL_PCT of the band's own width (never a fixed price number -- a gold
      band and a EURUSD band differ by orders of magnitude)
 
@@ -172,6 +173,9 @@ def check_gate(htf: VTSnapshot | None, ltf: VTAlert, allowed_timeframes: set[str
     checking whether a snapshot exists."""
     if ltf.tf not in allowed_timeframes:
         return GateResult(False, f"entry timeframe {ltf.tf} is not enabled for this workspace")
+
+    if not ltf.valid:
+        return GateResult(False, "LTF setup is not valid (stop/target on the wrong side of entry)")
 
     if htf is None:
         return GateResult(False, f"no HTF snapshot for {ltf.symbol} yet")

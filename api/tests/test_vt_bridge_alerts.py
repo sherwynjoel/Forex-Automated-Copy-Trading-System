@@ -121,6 +121,10 @@ class TestCheckGate:
         result = check_gate(None, self._ltf(), set(), NOW)
         assert not result.passed and "not enabled" in result.reason
 
+    def test_an_invalid_ltf_setup_is_rejected_even_when_everything_else_passes(self):
+        result = check_gate(self._htf(), self._ltf(valid=False), {"1"}, NOW)
+        assert not result.passed and "not valid" in result.reason
+
     def test_missing_snapshot_is_rejected(self):
         result = check_gate(None, self._ltf(), {"1"}, NOW)
         assert not result.passed and "no HTF snapshot" in result.reason

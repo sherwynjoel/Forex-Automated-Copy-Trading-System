@@ -73,13 +73,14 @@ if isHTF and haveLevels and valid
     alert(htfMsg(), alert.freq_once_per_bar_close)
 
 // LTF: only on the bar price actually reaches the held entry level.
-// Note: if price keeps straddling `entry` for several bars in a row, this
-// fires again on each one (a different bar, a different bar_ms, so
-// MirrorFleet's dedup does not catch it) -- MirrorFleet's own
-// max-open-positions cap is what bounds that, by design (risk is handled
-// there, not in this script).
-triggered = isLTF and haveLevels and valid and low <= entry and high >= entry
+// Fire once per distinct entry level: price straddling the same held level
+// for several bars would otherwise stack identical resting orders (each
+// bar a new bar_ms, so MirrorFleet's dedup cannot catch it).
+var float alertedEntry = na
+isNewLevel = na(alertedEntry) or entry != alertedEntry
+triggered = isLTF and haveLevels and valid and isNewLevel and low <= entry and high >= entry
 if triggered
+    alertedEntry := entry
     alert(ltfMsg(), alert.freq_once_per_bar_close)
 
 plotshape(isHTF and haveLevels and valid, "HTF reading", shape.circle,

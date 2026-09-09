@@ -629,7 +629,9 @@ def create_webhooks_router(rate_limiter: LoginRateLimiter) -> APIRouter:
             state = await _copier(client, "GET", f"{base}/state?org_id={org_id}", None, remaining())
             held = find_master_positions(state, vt.symbol)
             opposite = "SELL" if vt.bias == "long" else "BUY"
-            if any(str(p.get("side", "")).upper() == opposite for p in held):
+            resting = [o for o in (state.get("pending_orders") or [])
+                       if str(o.get("symbol", "")).upper() == vt.symbol]
+            if any(str(p.get("side", "")).upper() == opposite for p in held + resting):
                 raise WebhookRejected(
                     422, f"master holds an opposite position on {vt.symbol}; "
                          f"reverse-on-signal is not supported -- send close first")

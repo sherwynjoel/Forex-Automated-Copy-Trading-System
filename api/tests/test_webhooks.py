@@ -971,12 +971,41 @@ def test_a_short_ltf_places_a_sell_limit(org_client, db):
     assert sent["side"] == "SELL" and sent["order_type"] == "LIMIT"
 
 
+def test_ltf_invalid_setup_is_rejected_even_past_the_gate(org_client, db):
+    """valid=False must be caught server-side too -- a compromised or buggy
+    relay script is not the only way an invalid setup reaches this route."""
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+    _pass_the_gate(db, org_id, client)
+    calls = _copier(client)
+
+    r = _post(client, _vt_ltf(valid=False))
+
+    assert r.status_code == 422 and "not valid" in r.json()["reason"]
+    assert not any("/order" in u for u, _ in calls)
+
+
 def test_ltf_still_respects_the_opposite_position_guard(org_client, db):
     client, org_id, seed = org_client
     seed(MASTER, role="master"); _arm(db, org_id)
     _pass_the_gate(db, org_id, client)
     calls = _copier(client, state={"master_positions": [
         {"position_id": 1, "symbol": "XAUUSD", "side": "SELL", "volume": 100}]})
+
+    r = _post(client, _vt_ltf(bias="long", entry=4350.00))
+
+    assert r.status_code == 422 and "opposite position" in r.json()["reason"]
+    assert not any("/order" in u for u, _ in calls)
+
+
+def test_ltf_opposite_guard_also_sees_resting_pending_orders(org_client, db):
+    """A resting LIMIT order is not a position yet, but it becomes one on
+    fill -- the opposite-position guard must be blind to neither."""
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+    _pass_the_gate(db, org_id, client)
+    calls = _copier(client, state={"master_positions": [], "pending_orders": [
+        {"order_id": 5, "symbol": "XAUUSD", "side": "SELL", "volume": 100}]})
 
     r = _post(client, _vt_ltf(bias="long", entry=4350.00))
 
@@ -1022,6 +1051,23 @@ def test_a_placed_ltf_order_is_audited_as_tradingview(org_client, db):
     severity, payload, actor = _events(db, org_id)[-1]
     assert actor == "tradingview" and payload["outcome"] == "accepted"
     assert payload["alert"]["role"] == "ltf"
+
+
+def test_two_allowed_timeframes_both_trigger_independently(org_client, db):
+    """The allowlist is a set, not a single choice -- an org that enables
+    both "1" and "5" must get an order from either one triggering."""
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+    _allow_timeframes(db, org_id, "1", "5")
+    _post(client, _vt_htf(bias="long", stop=4340.00, target=4400.00))  # band [4340, 4400]
+    calls = _copier(client)
+
+    first = _post(client, _vt_ltf(tf="1", bias="long", entry=4350.00, bar_ms=1))
+    second = _post(client, _vt_ltf(tf="5", bias="long", entry=4350.00, bar_ms=2))
+
+    assert first.status_code == 200 and first.json()["status"] == "accepted"
+    assert second.status_code == 200 and second.json()["status"] == "accepted"
+    assert len([u for u, _ in calls if "/order" in u]) == 2
 
 
 # ================================== VT bridge: caps and aliasing (fix round 1)
