@@ -25,6 +25,7 @@ const webhook = {
   configured: true, hook_id: 'hookabc', url: 'https://mirrorfleet.test/api/webhooks/tradingview/hookabc',
   url_hint: null, has_secret: true, secret_created_at: '2026-09-06T12:35:11Z', enabled: true,
   max_lots: 0.1, max_per_minute: 10, max_open_positions: 3, symbol_aliases: {},
+  vt_ltf_timeframes: ['5'],
   master_account_id: 999, dry_run: false, copying_enabled: true, template: '{}',
   recent: [{ id: 1, received_at: '2026-09-06T17:57:15Z', outcome: 'accepted', reason: null,
              action: 'buy', symbol: 'BTCUSD', lots: 0.01, source_ip: '52.89.214.238', latency_ms: 14 }],
@@ -80,3 +81,29 @@ test('the recent list says it is live, not on a timer', async () => {
 
   expect(await screen.findByText(/updates the moment an alert lands/i)).toBeInTheDocument()
 })
+
+test('entry timeframes shows what is currently allowed and lets an admin change it', async () => {
+  const fetchMock = mockWebhookRoute()
+  render(<MemoryRouter><Automation /></MemoryRouter>)
+
+  await waitFor(() => expect(screen.getByRole('heading', { name: /Entry timeframes/i })).toBeTruthy())
+  const five = await screen.findByRole('checkbox', { name: '5m' })
+  const one = screen.getByRole('checkbox', { name: '1m' })
+  expect((five as HTMLInputElement).checked).toBe(true)
+  expect((one as HTMLInputElement).checked).toBe(false)
+
+  fetchMock.mockClear()
+  await act(async () => {
+    one.click()
+  })
+  await act(async () => {
+    screen.getByRole('button', { name: /Save entry timeframes/i }).click()
+  })
+
+  await waitFor(() => expect(webhookCalls(fetchMock)).toBeGreaterThan(0))
+  const putCall = fetchMock.mock.calls.find(([, init]) => (init as RequestInit)?.method === 'PUT')
+  const body = JSON.parse((putCall![1] as RequestInit).body as string)
+  expect(sorted(body.vt_ltf_timeframes)).toEqual(['1', '5'])
+})
+
+function sorted(a: string[]) { return [...a].sort() }

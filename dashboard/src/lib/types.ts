@@ -235,6 +235,7 @@ export interface WebhookSettings {
   max_per_minute: number
   max_open_positions: number
   symbol_aliases: Record<string, string>
+  vt_ltf_timeframes: string[]
   master_account_id: number | null
   dry_run: boolean
   copying_enabled: boolean

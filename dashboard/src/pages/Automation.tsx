@@ -9,6 +9,11 @@ import type { WebhookReceipt, WebhookSettings, WebhookSecret } from '../lib/type
 
 const POLL_MS = 5000
 
+const TF_CHOICES = ['1', '3', '5', '15', '30', '45', '60']
+const TF_LABEL: Record<string, string> = {
+  '1': '1m', '3': '3m', '5': '5m', '15': '15m', '30': '30m', '45': '45m', '60': '1h',
+}
+
 /**
  * TradingView alerts placing the master's orders.
  *
@@ -28,6 +33,7 @@ export default function Automation() {
   const [copied, setCopied] = useState<'url' | 'template' | null>(null)
   const [confirmRotate, setConfirmRotate] = useState(false)
   const [draft, setDraft] = useState({ max_lots: '', max_per_minute: '', max_open_positions: '' })
+  const [tfDraft, setTfDraft] = useState<string[] | null>(null)
 
   const refresh = useCallback(async () => {
     try {
@@ -38,6 +44,7 @@ export default function Automation() {
         max_per_minute: d.max_per_minute === '' ? String(s.max_per_minute) : d.max_per_minute,
         max_open_positions: d.max_open_positions === '' ? String(s.max_open_positions) : d.max_open_positions,
       }))
+      setTfDraft((current) => current ?? s.vt_ltf_timeframes)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load automation settings')
     }
@@ -107,6 +114,10 @@ export default function Automation() {
     if (!(open >= 1)) { setError('Max open positions must be at least 1'); return }
     body.max_lots = lots; body.max_per_minute = perMin; body.max_open_positions = open
     await put(body, 'Limits saved.')
+  }
+
+  const saveTimeframes = async () => {
+    await put({ vt_ltf_timeframes: tfDraft ?? [] }, 'Entry timeframes saved.')
   }
 
   const copy = async (text: string, what: 'url' | 'template') => {
@@ -277,6 +288,44 @@ export default function Automation() {
           <button onClick={saveLimits} disabled={busy}
                   className="px-4 py-2 text-sm font-semibold rounded bg-brand text-on-accent hover:bg-brand-deep disabled:opacity-50">
             Save limits
+          </button>
+        )}
+      </section>
+
+      {/* ---------- entry timeframes ---------- */}
+      <section className="rounded-lg border border-line bg-card p-5 space-y-4">
+        <div>
+          <h2 className="desk-label">Entry timeframes</h2>
+          <p className="text-sm text-ink-soft mt-1 max-w-2xl">
+            Which lower-timeframe VT Screener triggers are allowed to place a trade.
+            An LTF alert on a timeframe not checked here is refused before anything else
+            is even looked at. Starts empty — nothing trades until you turn one on.
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-4">
+          {TF_CHOICES.map((tf) => (
+            <label key={tf} className="flex items-center gap-2 text-sm text-ink">
+              <input
+                type="checkbox"
+                role="checkbox"
+                aria-label={TF_LABEL[tf]}
+                checked={(tfDraft ?? []).includes(tf)}
+                disabled={!control}
+                onChange={(e) => {
+                  const next = new Set(tfDraft ?? [])
+                  if (e.target.checked) next.add(tf); else next.delete(tf)
+                  setTfDraft([...next])
+                }}
+                className="h-4 w-4"
+              />
+              {TF_LABEL[tf]}
+            </label>
+          ))}
+        </div>
+        {control && (
+          <button onClick={saveTimeframes} disabled={busy}
+                  className="px-4 py-2 text-sm font-semibold rounded bg-brand text-on-accent hover:bg-brand-deep disabled:opacity-50">
+            Save entry timeframes
           </button>
         )}
       </section>
