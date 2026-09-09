@@ -65,6 +65,14 @@ def _events(db, org_id):
             (org_id,)).fetchall()
 
 
+def _events_by_action(db, org_id, action):
+    with psycopg.connect(db, autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT payload FROM events WHERE org_id = %s AND payload->>'action' = %s "
+            "ORDER BY id", (org_id, action)).fetchall()
+    return [r[0] for r in rows]
+
+
 def _copier(client, *, state=None, order=None, close=None, raise_on=None):
     """Route copier calls through a recorder.
 
@@ -707,6 +715,55 @@ def test_recent_receipts_are_listed_for_the_operator(org_client, db):
     _post(client, _alert()); _post(client, _alert(secret="tvw_bad"))
     recent = client.get(f"/api/orgs/{org_id}/webhook").json()["recent"]
     assert [r["outcome"] for r in recent] == ["rejected", "accepted"]
+
+
+# ============================================================ vt_ltf_timeframes setting
+
+
+def test_get_webhook_reports_vt_ltf_timeframes(org_client, db):
+    client, org_id, seed = org_client
+    _arm(db, org_id)
+    _allow_timeframes(db, org_id, "1", "5")
+
+    r = client.get(f"/api/orgs/{org_id}/webhook")
+
+    assert r.status_code == 200
+    assert sorted(r.json()["vt_ltf_timeframes"]) == ["1", "5"]
+
+
+def test_get_webhook_defaults_vt_ltf_timeframes_to_empty(org_client, db):
+    client, org_id, seed = org_client
+    _arm(db, org_id)
+
+    r = client.get(f"/api/orgs/{org_id}/webhook")
+
+    assert r.json()["vt_ltf_timeframes"] == []
+
+
+def test_admin_can_set_vt_ltf_timeframes(org_client, db):
+    client, org_id, seed = org_client
+    _arm(db, org_id)
+
+    r = client.put(f"/api/orgs/{org_id}/webhook", json={"vt_ltf_timeframes": ["1", "15"]},
+                   headers=_csrf(client))
+
+    assert r.status_code == 200
+    with psycopg.connect(db, autocommit=True) as conn:
+        (tfs,) = conn.execute(
+            "SELECT vt_ltf_timeframes FROM org_webhooks WHERE org_id = %s", (org_id,)).fetchone()
+    assert sorted(tfs) == ["1", "15"]
+    events = _events_by_action(db, org_id, "webhook_settings_changed")
+    assert events[-1]["vt_ltf_timeframes"]["to"] == ["1", "15"]
+
+
+def test_an_unknown_timeframe_is_refused(org_client, db):
+    client, org_id, seed = org_client
+    _arm(db, org_id)
+
+    r = client.put(f"/api/orgs/{org_id}/webhook", json={"vt_ltf_timeframes": ["7"]},
+                   headers=_csrf(client))
+
+    assert r.status_code == 400 and "vt_ltf_timeframes" in r.json()["detail"]
 
 
 # ============================================================ VT bridge: htf

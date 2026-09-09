@@ -72,7 +72,7 @@ import secrets
 import time
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 import psycopg
@@ -127,6 +127,11 @@ _TRANSIENT_400 = (
     "no client for account", "not found", "not authorized",
     "no live price", "is starting", "not connected",
 )
+
+# The timeframes the Automation page's multi-select offers, and the only
+# values vt_ltf_timeframes may hold -- TradingView's own minute strings for
+# the intraday range this bridge is meant for.
+VT_LTF_TIMEFRAME_CHOICES = ("1", "3", "5", "15", "30", "45", "60")
 
 
 def _json(status: int, payload: Dict[str, Any]) -> JSONResponse:
@@ -760,6 +765,7 @@ class WebhookUpdate(BaseModel):
     max_per_minute: Optional[int] = None
     max_open_positions: Optional[int] = None
     symbol_aliases: Optional[Dict[str, str]] = None
+    vt_ltf_timeframes: Optional[List[str]] = None
 
 
 def _template(secret: str) -> str:
@@ -795,7 +801,8 @@ def create_webhook_settings_router() -> APIRouter:
                           cfg: ApiConfig = Depends(ApiConfig.from_env)):
         row = conn.execute(
             "SELECT hook_id, secret_hash IS NOT NULL, secret_created_at, enabled, max_lots, "
-            "max_per_minute, max_open_positions, symbol_aliases FROM org_webhooks WHERE org_id = %s",
+            "max_per_minute, max_open_positions, symbol_aliases, vt_ltf_timeframes "
+            "FROM org_webhooks WHERE org_id = %s",
             (ctx.org_id,)).fetchone()
         recent = conn.execute(
             "SELECT id, received_at, outcome, reason, action, symbol, lots, source_ip, latency_ms "
@@ -817,6 +824,7 @@ def create_webhook_settings_router() -> APIRouter:
             "max_per_minute": int(row[5]) if row else 10,
             "max_open_positions": int(row[6]) if row else 3,
             "symbol_aliases": row[7] if row else {},
+            "vt_ltf_timeframes": row[8] if row else [],
             "master_account_id": master,
             "dry_run": bool(dry[0]) if dry else False,
             "copying_enabled": bool(dry[1]) if dry else True,
@@ -854,7 +862,8 @@ def create_webhook_settings_router() -> APIRouter:
                              cfg: ApiConfig = Depends(ApiConfig.from_env)):
         current = conn.execute(
             "SELECT secret_hash, enabled, max_lots, max_per_minute, max_open_positions, "
-            "symbol_aliases FROM org_webhooks WHERE org_id = %s", (ctx.org_id,)).fetchone()
+            "symbol_aliases, vt_ltf_timeframes FROM org_webhooks WHERE org_id = %s",
+            (ctx.org_id,)).fetchone()
         if current is None:
             raise HTTPException(400, "generate a secret first")
         updates, params, changed = [], [], {}
@@ -893,6 +902,14 @@ def create_webhook_settings_router() -> APIRouter:
                 raise HTTPException(400, f"symbol_aliases: {exc}")
             updates.append("symbol_aliases = %s"); params.append(Jsonb(aliases))
             changed["symbol_aliases"] = {"to": aliases}
+        if body.vt_ltf_timeframes is not None:
+            bad = [tf for tf in body.vt_ltf_timeframes if tf not in VT_LTF_TIMEFRAME_CHOICES]
+            if bad:
+                raise HTTPException(
+                    400, f"vt_ltf_timeframes: {bad!r} not in {VT_LTF_TIMEFRAME_CHOICES}")
+            tfs = sorted(set(body.vt_ltf_timeframes))
+            updates.append("vt_ltf_timeframes = %s"); params.append(tfs)
+            changed["vt_ltf_timeframes"] = {"from": current[6], "to": tfs}
 
         if updates:
             conn.execute(f"UPDATE org_webhooks SET {', '.join(updates)} WHERE org_id = %s",
