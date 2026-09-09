@@ -112,6 +112,36 @@ def _post(client, body, hook=HOOK, raw=None):
     return client.post(f"/api/webhooks/tradingview/{hook}", json=body)
 
 
+def _vt_htf(**over):
+    body = {"secret": SECRET, "role": "htf", "symbol": "XAUUSD", "tf": "60",
+            "bias": "long", "entry": 4385.34, "stop": 4413.15, "target": 4301.91,
+            "price": 4355.28, "valid": True, "bar_ms": 1757400000000}
+    body.update(over)
+    return body
+
+
+def _vt_ltf(**over):
+    body = {"secret": SECRET, "role": "ltf", "symbol": "XAUUSD", "tf": "1",
+            "bias": "long", "entry": 4350.00, "stop": 4340.00, "target": 4370.00,
+            "price": 4350.00, "valid": True, "trigger": True, "lots": 0.01,
+            "bar_ms": 1757400060000}
+    body.update(over)
+    return body
+
+
+def _htf_snapshot(db, org_id, symbol="XAUUSD"):
+    with psycopg.connect(db, autocommit=True) as conn:
+        return conn.execute(
+            "SELECT bias, entry, stop, target, price, tf FROM vt_htf_snapshots "
+            "WHERE org_id = %s AND symbol = %s", (org_id, symbol)).fetchone()
+
+
+def _allow_timeframes(db, org_id, *tfs):
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute("UPDATE org_webhooks SET vt_ltf_timeframes = %s WHERE org_id = %s",
+                     (list(tfs), org_id))
+
+
 # ====================================================== the front door
 
 
@@ -677,6 +707,82 @@ def test_recent_receipts_are_listed_for_the_operator(org_client, db):
     _post(client, _alert()); _post(client, _alert(secret="tvw_bad"))
     recent = client.get(f"/api/orgs/{org_id}/webhook").json()["recent"]
     assert [r["outcome"] for r in recent] == ["rejected", "accepted"]
+
+
+# ============================================================ VT bridge: htf
+
+
+def test_a_valid_htf_alert_is_stored(org_client, db):
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+
+    r = _post(client, _vt_htf())
+
+    assert r.status_code == 200 and r.json()["status"] == "accepted"
+    row = _htf_snapshot(db, org_id)
+    assert row == ("long", 4385.34, 4413.15, 4301.91, 4355.28, "60")
+
+
+def test_a_second_htf_alert_overwrites_the_first_no_history(org_client, db):
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+    _post(client, _vt_htf(bias="long", entry=4385.34))
+
+    _post(client, _vt_htf(bias="short", entry=4390.00, stop=4400.00, target=4370.00))
+
+    row = _htf_snapshot(db, org_id)
+    assert row == ("short", 4390.00, 4400.00, 4370.00, 4355.28, "60")
+    with psycopg.connect(db, autocommit=True) as conn:
+        (count,) = conn.execute(
+            "SELECT count(*) FROM vt_htf_snapshots WHERE org_id = %s", (org_id,)).fetchone()
+    assert count == 1
+
+
+def test_an_invalid_htf_reading_is_not_stored_and_does_not_clear_a_good_one(org_client, db):
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+    _post(client, _vt_htf())  # a good snapshot is standing
+
+    r = _post(client, _vt_htf(valid=False, bar_ms=1757400001000))
+
+    assert r.status_code == 200
+    assert r.json()["reason"] == "htf setup not valid, not stored"
+    row = _htf_snapshot(db, org_id)
+    assert row == ("long", 4385.34, 4413.15, 4301.91, 4355.28, "60")  # unchanged
+
+
+def test_htf_never_calls_the_copier(org_client, db):
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+    calls = _copier(client)
+
+    _post(client, _vt_htf())
+
+    assert calls == []
+
+
+def test_a_malformed_vt_alert_is_recorded_not_a_crash(org_client, db):
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+
+    r = _post(client, _vt_htf(bias="sideways"))
+
+    assert r.status_code == 422
+    assert "bias" in r.json()["reason"]
+
+
+def test_the_existing_action_contract_is_completely_unaffected(org_client, db):
+    """Regression: both shapes share _handle -- the FVG script's alerts
+    must keep working byte for byte."""
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+    calls = _copier(client)
+
+    r = _post(client, _alert(stop_loss=4570, take_profit=4600))
+
+    assert r.status_code == 200 and r.json()["status"] == "accepted"
+    url, sent = next((u, b) for u, b in calls if "/order" in u)
+    assert sent["order_type"] == "MARKET"
 
 
 # ================================================ shared redaction

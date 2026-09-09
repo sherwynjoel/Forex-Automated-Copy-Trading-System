@@ -69,6 +69,7 @@ import os
 import re
 import secrets
 import time
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, Optional
 
@@ -87,6 +88,8 @@ from ..rbac import OrgContext, require_org_role
 from ..tradingview_alerts import (
     Alert, AlertError, HARD_MAX_LOTS, find_master_positions, normalise_ticker,
     parse_alert)
+from ..vt_bridge_alerts import (
+    GateResult, VTAlert, VTSnapshot, check_gate, parse_vt_alert)
 from .settings_control import audit
 
 logger = logging.getLogger(__name__)
@@ -322,13 +325,16 @@ def create_webhooks_router(rate_limiter: LoginRateLimiter) -> APIRouter:
         # ---- 3. resolve the mailbox ----
         row = conn.execute(
             "SELECT org_id, secret_hash, enabled, max_lots, max_per_minute, "
-            "max_open_positions, symbol_aliases FROM org_webhooks WHERE hook_id = %s",
+            "max_open_positions, symbol_aliases, vt_ltf_timeframes FROM org_webhooks "
+            "WHERE hook_id = %s",
             (hook_id,)).fetchone()
         if row is None:
             rate_limiter.is_limited(f"webhook-source:{ip}", 30)
             return _json(404, {"detail": "Not found"})
-        org_id, secret_hash, enabled, max_lots, max_per_minute, max_open, aliases = row
+        (org_id, secret_hash, enabled, max_lots, max_per_minute, max_open, aliases,
+         vt_ltf_timeframes) = row
         max_lots = float(max_lots) if max_lots is not None else None
+        allowed_tfs = set(vt_ltf_timeframes or [])
 
         # ---- 4. parse, whatever the content-type says ----
         try:
@@ -372,6 +378,10 @@ def create_webhooks_router(rate_limiter: LoginRateLimiter) -> APIRouter:
                 raise WebhookRejected(422, "this workspace has no master account")
 
             # ---- 7. validate ----
+            if isinstance(body, dict) and "role" in body:
+                return await _handle_vt_bridge(
+                    conn, request, cfg, org_id, master, max_lots, max_open,
+                    allowed_tfs, body, redacted, ip, t0)
             try:
                 alert = parse_alert(body, max_lots)
             except AlertError as exc:
@@ -481,6 +491,55 @@ def create_webhooks_router(rate_limiter: LoginRateLimiter) -> APIRouter:
             _audit(conn, org_id, master, alert, "unknown", {"reason": str(exc)}, ip, t0, receipt_id)
             return _json(200, {"status": "unknown", "receipt_id": receipt_id,
                                       "reason": "order may be on the wire -- check Positions"})
+
+    async def _handle_vt_bridge(conn, request, cfg, org_id, master, max_lots, max_open,
+                                allowed_tfs, body, redacted, ip, t0):
+        """Both VT bridge alert kinds. Told apart by `role`; see
+        vt_bridge_alerts.py for the parsing/gating rules this only wires up.
+        """
+        try:
+            vt = parse_vt_alert(body, max_lots)
+        except AlertError as exc:
+            return _record(conn, org_id, ip, t0, redacted, None, WebhookRejected(422, str(exc)))
+
+        # A VTAlert stands in for an Alert in the shared receipts/audit
+        # plumbing -- role becomes the "action" column, so both alert kinds
+        # show on the same Automation page list with zero UI changes there.
+        receipt_alert = Alert(vt.role, vt.symbol, vt.lots, None, None, str(vt.bar_ms))
+
+        if vt.role == "htf":
+            if vt.valid:
+                conn.execute(
+                    "INSERT INTO vt_htf_snapshots "
+                    "(org_id, symbol, bias, entry, stop, target, price, tf, received_at) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s, now()) "
+                    "ON CONFLICT (org_id, symbol) DO UPDATE SET "
+                    "bias = EXCLUDED.bias, entry = EXCLUDED.entry, stop = EXCLUDED.stop, "
+                    "target = EXCLUDED.target, price = EXCLUDED.price, tf = EXCLUDED.tf, "
+                    "received_at = EXCLUDED.received_at",
+                    (org_id, vt.symbol, vt.bias, vt.entry, vt.stop, vt.target,
+                     vt.price, vt.tf))
+                return _record_vt_ok(conn, org_id, ip, t0, redacted, receipt_alert, None)
+            return _record_vt_ok(conn, org_id, ip, t0, redacted, receipt_alert,
+                                 "htf setup not valid, not stored")
+
+        return await _handle_vt_ltf(conn, request, cfg, org_id, master, max_open,
+                                    allowed_tfs, vt, receipt_alert, redacted, ip, t0)
+
+    def _record_vt_ok(conn, org_id, ip, t0, redacted, receipt_alert, reason):
+        """A VT-bridge outcome that is neither a rejection nor an order --
+        an htf store/skip. Always outcome 'accepted', status 200: nothing
+        was refused, there just might be nothing further to do."""
+        rid = _insert(conn, org_id, ip, t0, redacted, receipt_alert, "accepted", reason, fp=None)
+        conn.execute(
+            "INSERT INTO events (org_id, category, severity, payload, actor_email) "
+            "VALUES (%s, 'control', 'info', %s, 'tradingview')",
+            (org_id, Jsonb({"action": "webhook_alert", "receipt_id": rid, "outcome": "accepted",
+                            "role": receipt_alert.action, "symbol": receipt_alert.symbol,
+                            **({"reason": reason} if reason else {})})))
+        return _json(200, {"status": "accepted", "receipt_id": rid, "role": receipt_alert.action,
+                                  "symbol": receipt_alert.symbol,
+                                  **({"reason": reason} if reason else {})})
 
     async def _close(client, base, master, org_id, alert, remaining):
         state = await _copier(client, "GET", f"{base}/state?org_id={org_id}", None, remaining())
