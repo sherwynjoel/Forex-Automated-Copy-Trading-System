@@ -1,0 +1,88 @@
+//@version=6
+indicator("MirrorFleet VT HTF-LTF Relay", overlay = true)
+
+// Relays VT Screener's Entry/Stop/Target (a separate, already-running,
+// protected indicator -- out of scope here) to MirrorFleet as either an
+// HTF permission or an LTF trigger. One instance per chart; Role picks
+// which. See docs/superpowers/specs/2026-09-09-vt-htf-ltf-bridge-design.md.
+
+// ============================================================ MirrorFleet
+secret = input.string("tvw_PASTE_SECRET_HERE", "MirrorFleet secret", group = "MirrorFleet")
+role   = input.string("HTF", "Role", options = ["HTF", "LTF"], group = "MirrorFleet")
+lots   = input.float(0.01, "Lots (LTF role only)", step = 0.01, minval = 0.01, group = "MirrorFleet")
+
+// ============================================================ VT Screener
+// Point each of these at VT Screener's own plot in this script's Settings
+// after adding it to the chart -- Pine cannot discover them by name.
+entrySrc  = input.source(close, "VT Screener Entry", group = "VT Screener")
+stopSrc   = input.source(close, "VT Screener Stop", group = "VT Screener")
+targetSrc = input.source(close, "VT Screener Target", group = "VT Screener")
+
+// VT Screener's plots go na between setups; hold the last real value.
+var float entry = na
+var float stop = na
+var float target = na
+if not na(entrySrc)
+    entry := entrySrc
+if not na(stopSrc)
+    stop := stopSrc
+if not na(targetSrc)
+    target := targetSrc
+
+bias  = target > entry ? "long" : "short"
+valid = bias == "long" ? (stop < entry and target > entry) : (stop > entry and target < entry)
+haveLevels = not na(entry) and not na(stop) and not na(target)
+
+// ============================================================ The MirrorFleet alert
+// tf is read automatically, never typed by hand -- adding this script to a
+// 1m/3m/5m/15m/... chart is what makes it that timeframe's source. The
+// workspace's own Automation page, not this script, decides which
+// timeframes actually trade.
+tf = timeframe.period
+
+// bar_ms is quoted: str.tostring() on a UNIX-ms value this large can render
+// in scientific notation, and as a string it still parses fine on the
+// server (int("1757400000000") == int(1757400000000)) -- the same reason
+// fvg-multi-timeframe.pine quotes its own bar-time id.
+htfMsg() =>
+    '{"secret": "' + secret + '", "role": "htf", "symbol": "' + syminfo.ticker +
+     '", "tf": "' + tf + '", "bias": "' + bias +
+     '", "entry": ' + str.tostring(entry, format.mintick) +
+     ', "stop": ' + str.tostring(stop, format.mintick) +
+     ', "target": ' + str.tostring(target, format.mintick) +
+     ', "price": ' + str.tostring(close, format.mintick) +
+     ', "valid": ' + str.tostring(valid) +
+     ', "bar_ms": "' + str.tostring(time) + '"}'
+
+ltfMsg() =>
+    '{"secret": "' + secret + '", "role": "ltf", "symbol": "' + syminfo.ticker +
+     '", "tf": "' + tf + '", "bias": "' + bias +
+     '", "entry": ' + str.tostring(entry, format.mintick) +
+     ', "stop": ' + str.tostring(stop, format.mintick) +
+     ', "target": ' + str.tostring(target, format.mintick) +
+     ', "price": ' + str.tostring(close, format.mintick) +
+     ', "valid": ' + str.tostring(valid) +
+     ', "trigger": true, "lots": ' + str.tostring(lots) +
+     ', "bar_ms": "' + str.tostring(time) + '"}'
+
+isHTF = role == "HTF"
+isLTF = role == "LTF"
+
+// HTF: once per confirmed bar, while VT Screener's current setup is valid.
+if isHTF and haveLevels and valid
+    alert(htfMsg(), alert.freq_once_per_bar_close)
+
+// LTF: only on the bar price actually reaches the held entry level.
+// Note: if price keeps straddling `entry` for several bars in a row, this
+// fires again on each one (a different bar, a different bar_ms, so
+// MirrorFleet's dedup does not catch it) -- MirrorFleet's own
+// max-open-positions cap is what bounds that, by design (risk is handled
+// there, not in this script).
+triggered = isLTF and haveLevels and valid and low <= entry and high >= entry
+if triggered
+    alert(ltfMsg(), alert.freq_once_per_bar_close)
+
+plotshape(isHTF and haveLevels and valid, "HTF reading", shape.circle,
+         location.top, color.blue, size = size.tiny)
+plotshape(triggered, "LTF trigger", shape.triangleup, location.belowbar,
+         color.lime, size = size.small)
