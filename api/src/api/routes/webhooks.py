@@ -541,6 +541,68 @@ def create_webhooks_router(rate_limiter: LoginRateLimiter) -> APIRouter:
                                   "symbol": receipt_alert.symbol,
                                   **({"reason": reason} if reason else {})})
 
+    def _vt_fingerprint(org_id, vt: VTAlert) -> str:
+        """Same idea as _fingerprint: the alert's TRADING content, keyed so
+        a resend of the same bar's signal is one alert, not two."""
+        parts = (org_id, "vt", vt.role, vt.symbol, vt.tf, vt.bar_ms)
+        return hashlib.sha256(json.dumps(parts).encode()).hexdigest()
+
+    def _vt_audit(conn, org_id, master, vt: VTAlert, outcome, detail, ip, t0, receipt_id):
+        severity = {"accepted": "info", "duplicate": "info", "rejected": "warning",
+                   "failed": "warning", "unknown": "error"}[outcome]
+        conn.execute(
+            "INSERT INTO events (org_id, account_id, category, severity, latency_ms, "
+            "payload, actor_email) VALUES (%s, %s, 'control', %s, %s, %s, 'tradingview')",
+            (org_id, master, severity, int((time.monotonic() - t0) * 1000),
+             Jsonb({"action": "webhook_alert", "receipt_id": receipt_id, "outcome": outcome,
+                    "alert": {"role": vt.role, "symbol": vt.symbol, "tf": vt.tf,
+                              "bias": vt.bias, "entry": vt.entry, "stop": vt.stop,
+                              "target": vt.target, "lots": vt.lots, "bar_ms": vt.bar_ms},
+                    "source_ip": ip, **({"detail": detail} if detail else {})})))
+
+    async def _handle_vt_ltf(conn, request, cfg, org_id, master, max_open, allowed_tfs,
+                             vt: VTAlert, receipt_alert, redacted, ip, t0):
+        if not vt.trigger:
+            return _record_vt_ok(conn, org_id, ip, t0, redacted, receipt_alert,
+                                 "ltf informational (trigger=false), no action")
+
+        fp = _vt_fingerprint(org_id, vt)
+        with conn.transaction():
+            conn.execute("SELECT pg_advisory_xact_lock(%s)", (org_id,))
+            dup = conn.execute(
+                "SELECT id FROM webhook_receipts WHERE org_id = %s AND fingerprint = %s "
+                "AND outcome IN ('accepted','unknown') "
+                "AND received_at > now() - make_interval(secs => %s) "
+                "ORDER BY received_at DESC LIMIT 1",
+                (org_id, fp, DEDUP_WINDOW_S)).fetchone()
+            if dup:
+                receipt_id = _insert(conn, org_id, ip, t0, redacted, receipt_alert, "duplicate",
+                                     f"same alert accepted {dup[0]} seconds ago", fp=None)
+                return _json(200, {"status": "duplicate", "receipt_id": receipt_id,
+                                          "duplicate_of": dup[0]})
+            receipt_id = _insert(conn, org_id, ip, t0, redacted, receipt_alert, "accepted",
+                                 None, fp=fp)
+
+        htf_row = conn.execute(
+            "SELECT bias, stop, target, tf, received_at FROM vt_htf_snapshots "
+            "WHERE org_id = %s AND symbol = %s", (org_id, vt.symbol)).fetchone()
+        htf = VTSnapshot(htf_row[0], float(htf_row[1]), float(htf_row[2]), htf_row[3],
+                         htf_row[4]) if htf_row else None
+
+        gate = check_gate(htf, vt, allowed_tfs, datetime.now(timezone.utc))
+        if not gate.passed:
+            _finish(conn, receipt_id, "rejected", gate.reason, clear_fp=True)
+            _vt_audit(conn, org_id, master, vt, "rejected", {"reason": gate.reason}, ip, t0,
+                      receipt_id)
+            return _json(422, {"status": "rejected", "receipt_id": receipt_id,
+                                      "reason": gate.reason})
+
+        # Order placement is added in the next sub-step.
+        _finish(conn, receipt_id, "rejected", "order placement not yet implemented",
+               clear_fp=True)
+        return _json(422, {"status": "rejected", "receipt_id": receipt_id,
+                                  "reason": "order placement not yet implemented"})
+
     async def _close(client, base, master, org_id, alert, remaining):
         state = await _copier(client, "GET", f"{base}/state?org_id={org_id}", None, remaining())
         held = find_master_positions(state, alert.symbol)

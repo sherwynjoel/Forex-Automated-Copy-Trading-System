@@ -785,6 +785,97 @@ def test_the_existing_action_contract_is_completely_unaffected(org_client, db):
     assert sent["order_type"] == "MARKET"
 
 
+# ============================================================ VT bridge: ltf gates
+
+
+def test_ltf_trigger_false_is_a_no_op(org_client, db):
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+    calls = _copier(client)
+
+    r = _post(client, _vt_ltf(trigger=False))
+
+    assert r.status_code == 200 and r.json()["status"] == "accepted"
+    assert r.json()["reason"] == "ltf informational (trigger=false), no action"
+    assert calls == []
+
+
+def test_ltf_trigger_on_a_disallowed_timeframe_is_rejected(org_client, db):
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+    calls = _copier(client)
+
+    r = _post(client, _vt_ltf(tf="1"))  # allowlist is empty by default
+
+    assert r.status_code == 422 and "not enabled" in r.json()["reason"]
+    assert calls == []
+
+
+def test_ltf_trigger_with_no_htf_ever_received_is_rejected(org_client, db):
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+    _allow_timeframes(db, org_id, "1")
+    calls = _copier(client)
+
+    r = _post(client, _vt_ltf())
+
+    assert r.status_code == 422 and "no HTF snapshot" in r.json()["reason"]
+    assert calls == []
+
+
+def test_ltf_trigger_against_a_stale_htf_is_rejected(org_client, db):
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+    _allow_timeframes(db, org_id, "1")
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO vt_htf_snapshots (org_id, symbol, bias, entry, stop, target, "
+            "price, tf, received_at) VALUES (%s,'XAUUSD','long',4385.34,4340.00,4400.00,"
+            "4355.28,'60', now() - interval '3 hours')", (org_id,))
+    calls = _copier(client)
+
+    r = _post(client, _vt_ltf())
+
+    assert r.status_code == 422 and "old" in r.json()["reason"]
+    assert calls == []
+
+
+def test_ltf_trigger_with_wrong_bias_is_rejected(org_client, db):
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+    _allow_timeframes(db, org_id, "1")
+    _post(client, _vt_htf(bias="short", stop=4413.15, target=4301.91))
+    calls = _copier(client)
+
+    r = _post(client, _vt_ltf(bias="long", entry=4350.00))
+
+    assert r.status_code == 422 and "does not match" in r.json()["reason"]
+    assert calls == []
+
+
+def test_ltf_trigger_with_entry_outside_the_band_is_rejected(org_client, db):
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+    _allow_timeframes(db, org_id, "1")
+    _post(client, _vt_htf(bias="long", stop=4340.00, target=4400.00))  # band [4340, 4400]
+    calls = _copier(client)
+
+    r = _post(client, _vt_ltf(bias="long", entry=4200.00))
+
+    assert r.status_code == 422 and "outside the HTF band" in r.json()["reason"]
+    assert calls == []
+
+
+def test_a_gate_rejection_is_recorded_on_the_receipt(org_client, db):
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+
+    _post(client, _vt_ltf(tf="1"))
+
+    outcome, reason, *_ = _receipts(db, org_id)[-1]
+    assert outcome == "rejected" and "not enabled" in reason
+
+
 # ================================================ shared redaction
 
 
