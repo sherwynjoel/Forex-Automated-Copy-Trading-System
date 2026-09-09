@@ -23,7 +23,9 @@ small relay scripts and a stateful gate on the server side join them:
   MirrorFleet's own UI, which of those timeframes are actually allowed to
   trade (see "Selectable entry timeframes" below).
 - The trade is built **entirely** from the triggering LTF alert's own levels
-  — limit at its entry, stop at its stop, target at its target. The 1H
+  — a market order when its entry triggers, stop at its stop, target at its
+  target. (See the `role: "ltf"` section: entry execution is a MARKET order
+  at trigger, not a resting limit.) The 1H
   levels are never traded; they exist purely to permit or block an LTF
   trigger.
 
@@ -255,9 +257,15 @@ from "arrived once, then stopped."
      identical to the existing path's runs inside the dedup transaction; and
      `org_webhooks.symbol_aliases` renames are applied to both `htf` and
      `ltf` alerts before storage and gating. Then
-     `POST {copier}/order` with `order_type: "LIMIT"`, `limit_price: entry`,
+     `POST {copier}/order` with `order_type: "MARKET"`,
      `stop_loss: stop`, `take_profit: target`, `volume_lots: lots`,
-     `actor_email: "tradingview"`. Same `CopierDown`/`CopierUnknown`
+     `actor_email: "tradingview"`. (Originally specced as a LIMIT at the
+     entry price; changed to MARKET after live testing — the LTF trigger
+     only fires once price has already reached the entry level, so a market
+     fill lands at the intended entry, whereas a LIMIT placed on the wrong
+     side of the current price is rejected by the broker as "invalid price"
+     since VT's entry can be a pullback or a breakout level.) Same
+     `CopierDown`/`CopierUnknown`
      handling as today (fingerprint freed on `CopierDown` so TradingView's
      resend is not swallowed; `unknown` answered 200 so TradingView does not
      retry into a possibly-live order).

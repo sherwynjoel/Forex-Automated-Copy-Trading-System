@@ -941,7 +941,7 @@ def _pass_the_gate(db, org_id, client):
     _post(client, _vt_htf(bias="long", stop=4340.00, target=4400.00))  # band [4340, 4400]
 
 
-def test_a_passing_gate_places_a_limit_order(org_client, db):
+def test_a_passing_gate_places_a_market_order(org_client, db):
     client, org_id, seed = org_client
     seed(MASTER, role="master"); _arm(db, org_id)
     _pass_the_gate(db, org_id, client)
@@ -951,13 +951,16 @@ def test_a_passing_gate_places_a_limit_order(org_client, db):
 
     assert r.status_code == 200 and r.json()["status"] == "accepted"
     url, sent = next((u, b) for u, b in calls if "/order" in u)
+    # MARKET, not LIMIT: the trigger fired at the entry level, and a LIMIT on
+    # the wrong side of price is rejected by the broker -- no limit_price key.
     assert sent == {"account_id": MASTER, "symbol": "XAUUSD", "side": "BUY",
-                    "order_type": "LIMIT", "volume_lots": 0.01, "limit_price": 4350.00,
+                    "order_type": "MARKET", "volume_lots": 0.01,
                     "stop_loss": 4340.00, "take_profit": 4390.00,
                     "actor_email": "tradingview"}
+    assert "limit_price" not in sent
 
 
-def test_a_short_ltf_places_a_sell_limit(org_client, db):
+def test_a_short_ltf_places_a_sell_market(org_client, db):
     client, org_id, seed = org_client
     seed(MASTER, role="master"); _arm(db, org_id)
     _allow_timeframes(db, org_id, "1")
@@ -968,7 +971,7 @@ def test_a_short_ltf_places_a_sell_limit(org_client, db):
 
     assert r.status_code == 200
     url, sent = next((u, b) for u, b in calls if "/order" in u)
-    assert sent["side"] == "SELL" and sent["order_type"] == "LIMIT"
+    assert sent["side"] == "SELL" and sent["order_type"] == "MARKET"
 
 
 def test_ltf_invalid_setup_is_rejected_even_past_the_gate(org_client, db):

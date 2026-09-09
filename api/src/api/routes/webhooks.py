@@ -641,10 +641,18 @@ def create_webhooks_router(rate_limiter: LoginRateLimiter) -> APIRouter:
                     422, f"master already holds {max_open} open positions or pending orders; "
                          f"raise the limit in Automation if this is intended")
 
+            # MARKET, not LIMIT: the LTF alert fires only when price has
+            # already reached the entry level (low <= entry <= high on the
+            # trigger bar), so the fill lands at the intended entry anyway --
+            # and a LIMIT placed on the wrong side of the current price is
+            # rejected by the broker as "invalid price" (a BUY LIMIT must sit
+            # below the market, a SELL LIMIT above it). VT's entry sits on
+            # either side depending on pullback vs breakout, so a market fill
+            # at trigger is the only order that places reliably every time.
             order = {
                 "account_id": master, "symbol": vt.symbol,
-                "side": "BUY" if vt.bias == "long" else "SELL", "order_type": "LIMIT",
-                "volume_lots": vt.lots, "limit_price": vt.entry,
+                "side": "BUY" if vt.bias == "long" else "SELL", "order_type": "MARKET",
+                "volume_lots": vt.lots,
                 "stop_loss": vt.stop, "take_profit": vt.target,
                 "actor_email": "tradingview",
             }
