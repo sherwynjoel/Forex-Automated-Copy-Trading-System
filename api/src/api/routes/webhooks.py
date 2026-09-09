@@ -597,11 +597,61 @@ def create_webhooks_router(rate_limiter: LoginRateLimiter) -> APIRouter:
             return _json(422, {"status": "rejected", "receipt_id": receipt_id,
                                       "reason": gate.reason})
 
-        # Order placement is added in the next sub-step.
-        _finish(conn, receipt_id, "rejected", "order placement not yet implemented",
-               clear_fp=True)
-        return _json(422, {"status": "rejected", "receipt_id": receipt_id,
-                                  "reason": "order placement not yet implemented"})
+        client = request.app.app.state.http if hasattr(request.app, "app") else request.app.state.http
+        base = cfg.copier_control_url
+        try:
+            def remaining() -> float:
+                left = DEADLINE_S - (time.monotonic() - t0)
+                if left <= 0:
+                    raise CopierDown("too slow, nothing sent")
+                return left
+
+            state = await _copier(client, "GET", f"{base}/state?org_id={org_id}", None, remaining())
+            held = find_master_positions(state, vt.symbol)
+            opposite = "SELL" if vt.bias == "long" else "BUY"
+            if any(str(p.get("side", "")).upper() == opposite for p in held):
+                raise WebhookRejected(
+                    422, f"master holds an opposite position on {vt.symbol}; "
+                         f"reverse-on-signal is not supported -- send close first")
+            if len(state.get("master_positions") or []) >= max_open:
+                raise WebhookRejected(
+                    422, f"master already holds {max_open} open positions; "
+                         f"raise the limit in Automation if this is intended")
+
+            order = {
+                "account_id": master, "symbol": vt.symbol,
+                "side": "BUY" if vt.bias == "long" else "SELL", "order_type": "LIMIT",
+                "volume_lots": vt.lots, "limit_price": vt.entry,
+                "stop_loss": vt.stop, "take_profit": vt.target,
+                "actor_email": "tradingview",
+            }
+            remaining()  # the deadline check right before the only irreversible call
+            summary = await _copier(client, "POST", f"{base}/order", order, remaining())
+
+            _finish(conn, receipt_id, "accepted", None)
+            _vt_audit(conn, org_id, master, vt, "accepted", summary, ip, t0, receipt_id)
+            return _json(200, {"status": "accepted", "receipt_id": receipt_id,
+                                      "role": "ltf", "symbol": vt.symbol,
+                                      "account_id": master, "order": summary})
+
+        except WebhookRejected as exc:
+            _finish(conn, receipt_id, "rejected", exc.reason, clear_fp=True)
+            _vt_audit(conn, org_id, master, vt, "rejected", {"reason": exc.reason}, ip, t0,
+                      receipt_id)
+            return _json(exc.status, {"status": "rejected", "receipt_id": receipt_id,
+                                             "reason": exc.reason})
+        except CopierDown as exc:
+            _finish(conn, receipt_id, "failed", f"copier unreachable: {exc}", clear_fp=True)
+            _vt_audit(conn, org_id, master, vt, "failed", {"reason": str(exc)}, ip, t0,
+                      receipt_id)
+            return _json(503, {"status": "failed", "receipt_id": receipt_id,
+                                      "reason": "copier unreachable"})
+        except CopierUnknown as exc:
+            _finish(conn, receipt_id, "unknown", f"copier did not confirm: {exc}")
+            _vt_audit(conn, org_id, master, vt, "unknown", {"reason": str(exc)}, ip, t0,
+                      receipt_id)
+            return _json(200, {"status": "unknown", "receipt_id": receipt_id,
+                                      "reason": "order may be on the wire -- check Positions"})
 
     async def _close(client, base, master, org_id, alert, remaining):
         state = await _copier(client, "GET", f"{base}/state?org_id={org_id}", None, remaining())

@@ -876,6 +876,97 @@ def test_a_gate_rejection_is_recorded_on_the_receipt(org_client, db):
     assert outcome == "rejected" and "not enabled" in reason
 
 
+# ============================================================ VT bridge: ltf order
+
+
+def _pass_the_gate(db, org_id, client):
+    _allow_timeframes(db, org_id, "1")
+    _post(client, _vt_htf(bias="long", stop=4340.00, target=4400.00))  # band [4340, 4400]
+
+
+def test_a_passing_gate_places_a_limit_order(org_client, db):
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+    _pass_the_gate(db, org_id, client)
+    calls = _copier(client)
+
+    r = _post(client, _vt_ltf(bias="long", entry=4350.00, stop=4340.00, target=4390.00))
+
+    assert r.status_code == 200 and r.json()["status"] == "accepted"
+    url, sent = next((u, b) for u, b in calls if "/order" in u)
+    assert sent == {"account_id": MASTER, "symbol": "XAUUSD", "side": "BUY",
+                    "order_type": "LIMIT", "volume_lots": 0.01, "limit_price": 4350.00,
+                    "stop_loss": 4340.00, "take_profit": 4390.00,
+                    "actor_email": "tradingview"}
+
+
+def test_a_short_ltf_places_a_sell_limit(org_client, db):
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+    _allow_timeframes(db, org_id, "1")
+    _post(client, _vt_htf(bias="short", stop=4413.15, target=4301.91))
+    calls = _copier(client)
+
+    r = _post(client, _vt_ltf(bias="short", entry=4380.63, stop=4390.10, target=4360.00))
+
+    assert r.status_code == 200
+    url, sent = next((u, b) for u, b in calls if "/order" in u)
+    assert sent["side"] == "SELL" and sent["order_type"] == "LIMIT"
+
+
+def test_ltf_still_respects_the_opposite_position_guard(org_client, db):
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+    _pass_the_gate(db, org_id, client)
+    calls = _copier(client, state={"master_positions": [
+        {"position_id": 1, "symbol": "XAUUSD", "side": "SELL", "volume": 100}]})
+
+    r = _post(client, _vt_ltf(bias="long", entry=4350.00))
+
+    assert r.status_code == 422 and "opposite position" in r.json()["reason"]
+    assert not any("/order" in u for u, _ in calls)
+
+
+def test_ltf_still_respects_max_open_positions(org_client, db):
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id, max_open=1)
+    _pass_the_gate(db, org_id, client)
+    calls = _copier(client, state={"master_positions": [
+        {"position_id": 1, "symbol": "EURUSD", "side": "BUY", "volume": 100}]})
+
+    r = _post(client, _vt_ltf(bias="long", entry=4350.00))
+
+    assert r.status_code == 422 and "open positions" in r.json()["reason"]
+    assert not any("/order" in u for u, _ in calls)
+
+
+def test_duplicate_ltf_bar_ms_places_one_order(org_client, db):
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+    _pass_the_gate(db, org_id, client)
+    calls = _copier(client)
+
+    first = _post(client, _vt_ltf(bar_ms=1))
+    second = _post(client, _vt_ltf(bar_ms=1))
+
+    assert first.json()["status"] == "accepted"
+    assert second.json()["status"] == "duplicate"
+    assert len([u for u, _ in calls if "/order" in u]) == 1
+
+
+def test_a_placed_ltf_order_is_audited_as_tradingview(org_client, db):
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+    _pass_the_gate(db, org_id, client)
+    _copier(client)
+
+    _post(client, _vt_ltf(bias="long", entry=4350.00))
+
+    severity, payload, actor = _events(db, org_id)[-1]
+    assert actor == "tradingview" and payload["outcome"] == "accepted"
+    assert payload["alert"]["role"] == "ltf"
+
+
 # ================================================ shared redaction
 
 
