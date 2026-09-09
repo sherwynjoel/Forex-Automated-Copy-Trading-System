@@ -20,6 +20,31 @@
 - No changes to `copier` — `/order` already accepts `order_type: LIMIT` with `limit_price`/`stop_loss`/`take_profit`.
 - No R:R filters, daily caps, cooldowns, extra position sizing, or momentum/EMA filters — explicitly out of scope.
 
+## Ruled deviations during execution
+
+The code below is the plan AS WRITTEN; execution surfaced defects in it that
+were ruled on by the controller (the run ledger was git-ignored scratch, so
+the rulings are recorded here). Where a snippet below disagrees with the
+committed code, the CODE is authoritative:
+
+- `TestCheckGate._ltf()` helper: keyword-collision bug; replaced with a
+  dict-merge override pattern.
+- `parse_vt_alert`: the plan's `.strip().lower()` normalization on
+  role/bias/tf contradicted the plan's own strict tests; STRICT parsing
+  shipped (both producers are scripts emitting exact lowercase).
+- The VT LTF trigger path enforces `max_per_minute` inside its dedup
+  transaction (the plan omitted it).
+- The VT path's `max_open` guard counts open positions PLUS resting pending
+  orders from /state (the plan's guard was blind to resting LIMIT orders),
+  and its opposite-position guard also sees resting opposite orders.
+- `org_webhooks.symbol_aliases` renames are applied to VT alerts of both
+  roles before storage and gating (the plan skipped them).
+- The Automation test's ambiguous `getByText(/Entry timeframes/i)` became
+  `getByRole('heading', ...)`.
+- `check_gate` gained a `valid` gate after the allowlist check, and the Pine
+  relay fires once per distinct held entry level, both from the final
+  whole-branch review.
+
 ---
 
 ## File Structure

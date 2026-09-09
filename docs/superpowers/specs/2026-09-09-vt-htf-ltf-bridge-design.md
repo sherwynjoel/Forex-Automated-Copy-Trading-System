@@ -111,16 +111,17 @@ real:
   even runs, with its own distinct reason, so turning a timeframe on or off
   is a dashboard action, never a Pine edit or a new webhook secret.
 
-This becomes gate **0**, ahead of the four already defined, in
+This becomes gate **0**, ahead of the five already defined, in
 `check_gate`'s ordered list — cheapest check first, and it is now also
 `org`-scoped rather than purely a function of `(htf, ltf)`, so `check_gate`
 gains an `allowed_timeframes: set[str]` parameter:
 
 0. `ltf.tf in allowed_timeframes` — else `"entry timeframe {tf} is not enabled for this workspace"`
-1. `htf is not None` — else `"no HTF snapshot for {symbol} yet"`
-2. not stale — else `"HTF snapshot for {symbol} is {age}s old (max {2*tf}s)"`
-3. `ltf.bias == htf.bias` — else `"LTF bias ({ltf.bias}) does not match HTF bias ({htf.bias})"`
-4. entry inside band — else `"LTF entry {entry} is outside the HTF band [{lo}, {hi}] (±{tol})"`
+1. `ltf.valid is true` — else `"LTF setup is not valid (stop/target on the wrong side of entry)"`
+2. `htf is not None` — else `"no HTF snapshot for {symbol} yet"`
+3. not stale — else `"HTF snapshot for {symbol} is {age}s old (max {2*tf}s)"`
+4. `ltf.bias == htf.bias` — else `"LTF bias ({ltf.bias}) does not match HTF bias ({htf.bias})"`
+5. entry inside band — else `"LTF entry {entry} is outside the HTF band [{lo}, {hi}] (±{tol})"`
 
 `vt_ltf_timeframes` is edited through a small addition to the existing
 webhook-settings API/UI (same admin-only surface that already edits
@@ -184,9 +185,11 @@ testable):
   non-finite or non-positive prices, `bias` not in `("long","short")`,
   `role` not in `("htf","ltf")`, `lots` missing/invalid/over-cap on `ltf`,
   all rejected with an operator-readable reason, never a stack trace.
-- `check_gate(htf: VTSnapshot | None, ltf: VTAlert, allowed_timeframes: set[str], tol: float, now: datetime) -> GateResult` —
+- `check_gate(htf: VTSnapshot | None, ltf: VTAlert, allowed_timeframes: set[str], now: datetime) -> GateResult` —
   pure function, no I/O, returns `(passed: bool, reason: str | None)`, first
-  failure wins. The full ordered check list (0-4) is in "Selectable entry
+  failure wins. Tolerance is not a caller argument: it is the module
+  constant `TOL_PCT = 0.02`, applied to the band's own width inside the
+  function. The full ordered check list (0-5) is in "Selectable entry
   timeframes" above, since gate 0 (the allowed-timeframes check) is
   introduced there.
 
@@ -225,7 +228,10 @@ from "arrived once, then stopped."
 4. Never calls the copier. Never dedups against `webhook_receipts` trading
    fields (there is no trade) — dedup fingerprint is
    `(org_id, "htf", symbol, tf, bar_ms)`, same table/window/lock as today,
-   purely to protect against TradingView's own retry storms.
+   purely to protect against TradingView's own retry storms. As shipped,
+   HTF receipts are **not** actually fingerprinted (`fp=None`) — the
+   upsert is idempotent and HTF always answers 200, so TradingView never
+   resends. The dedup promise above applies to the LTF trigger path.
 
 ### `role: "ltf"`
 
@@ -242,8 +248,13 @@ from "arrived once, then stopped."
      other rejection today, visible on the Automation page's Recent Alerts
      table without any new UI work.
    - Passes: reuses the existing "opposite position" and `max_open`
-     guards already in `_handle` (unchanged — a resting limit order is still
-     subject to them), then
+     guards already in `_handle`. As shipped: the `max_open` guard counts
+     open positions **plus** resting pending orders from `/state`; the
+     opposite-position guard likewise also sees resting opposite pending
+     orders on the symbol, not just filled positions; a per-minute cap
+     identical to the existing path's runs inside the dedup transaction; and
+     `org_webhooks.symbol_aliases` renames are applied to both `htf` and
+     `ltf` alerts before storage and gating. Then
      `POST {copier}/order` with `order_type: "LIMIT"`, `limit_price: entry`,
      `stop_loss: stop`, `take_profit: target`, `volume_lots: lots`,
      `actor_email: "tradingview"`. Same `CopierDown`/`CopierUnknown`
@@ -277,6 +288,10 @@ the owner's spec exactly:
   <= entry and high >= entry` on a fresh bar, once per bar close, mirroring
   the "confirmed bars only, no repaint" discipline already used in
   `fvg-multi-timeframe.pine`.
+- The LTF role fires once per **distinct** held entry level, not on every
+  bar that straddles it — a na-guarded `var float alertedEntry`, same
+  pattern as `fvg-multi-timeframe.pine`'s `lastSignalledTime`, suppresses
+  the repeat alerts that would otherwise stack identical resting orders.
 - Same MirrorFleet `secret` input group as the FVG script; same one webhook
   URL, since role/secret are shared per the owner's decision above.
 
