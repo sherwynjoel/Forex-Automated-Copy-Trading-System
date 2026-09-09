@@ -1,6 +1,7 @@
 # VT HTF→LTF Bridge — Design
 
-Status: approved by the owner on 2026-09-09.
+Status: approved by the owner on 2026-09-09; extended with selectable entry
+timeframes on 2026-09-09.
 
 ## Goal
 
@@ -15,11 +16,16 @@ small relay scripts and a stateful gate on the server side join them:
 - **1H chart**: VT Screener's current Entry/Stop/Target, relayed every
   confirmed bar. Permission only — never itself traded. Each alert overwrites
   the previous one; MirrorFleet keeps no history, only the latest.
-- **1m chart**: VT Screener's current Entry/Stop/Target on that chart, relayed
-  **only** when price actually reaches its own entry level.
-- The trade is built **entirely** from the 1m levels — limit at 1m entry, stop
-  at 1m stop, target at 1m target. The 1H levels are never traded; they exist
-  purely to permit or block the 1m trigger.
+- **LTF chart(s)**: VT Screener's current Entry/Stop/Target on that chart,
+  relayed **only** when price actually reaches its own entry level. Not
+  fixed to one timeframe — the owner runs this on however many LTF charts
+  they choose (1m, 3m, 5m, 15m, ...), and the workspace decides, in
+  MirrorFleet's own UI, which of those timeframes are actually allowed to
+  trade (see "Selectable entry timeframes" below).
+- The trade is built **entirely** from the triggering LTF alert's own levels
+  — limit at its entry, stop at its stop, target at its target. The 1H
+  levels are never traded; they exist purely to permit or block an LTF
+  trigger.
 
 Non-goals (explicitly excluded by the owner): R:R filters, daily trade caps,
 cooldowns, position sizing beyond the alert's own `lots` field, EMA/momentum
@@ -76,6 +82,50 @@ CREATE TABLE vt_htf_snapshots (
 Keyed on `(org_id, symbol)` only, **not** `tf` — matching "one HTF record per
 symbol": there is exactly one active HTF permission per symbol per org at a
 time, whatever timeframe produced it.
+
+`org_webhooks` gets one new column: `vt_ltf_timeframes TEXT[] NOT NULL DEFAULT '{}'`
+— the set of LTF timeframes (TradingView's own strings: `"1"`, `"3"`, `"5"`,
+`"15"`, ...) this workspace currently allows to trade. **Defaults to empty**,
+matching the app's existing safe-by-default posture (an unconfigured
+workspace already hard-blocks on "no master account"; an unconfigured LTF
+allowlist hard-blocks the same way, rather than silently trading every
+timeframe a relay script happens to send).
+
+## Selectable entry timeframes
+
+The owner is not limited to one LTF chart. VT Screener (and the relay
+script) can run on as many LTF charts as they want live — 1m, 3m, 5m, 15m,
+each its own chart, its own relay-script instance, its own TradingView
+alert, all pointed at the same webhook URL. Two things make "selectable"
+real:
+
+- **Pine side**: the relay script does not ask the owner to type or pick a
+  timeframe — it reads `timeframe.period` (the chart's own timeframe,
+  built into Pine) and puts that straight into the outgoing `tf` field.
+  Adding the relay script to a 3m chart alone is what makes it a 3m source;
+  there is nothing to misconfigure.
+- **MirrorFleet side**: the Automation page gets a new control next to the
+  existing Limits section — a multi-select of the timeframes the workspace
+  currently allows (starting empty, per the owner's decision). An LTF
+  trigger whose `tf` is not in this set is rejected before the HTF gate
+  even runs, with its own distinct reason, so turning a timeframe on or off
+  is a dashboard action, never a Pine edit or a new webhook secret.
+
+This becomes gate **0**, ahead of the four already defined, in
+`check_gate`'s ordered list — cheapest check first, and it is now also
+`org`-scoped rather than purely a function of `(htf, ltf)`, so `check_gate`
+gains an `allowed_timeframes: set[str]` parameter:
+
+0. `ltf.tf in allowed_timeframes` — else `"entry timeframe {tf} is not enabled for this workspace"`
+1. `htf is not None` — else `"no HTF snapshot for {symbol} yet"`
+2. not stale — else `"HTF snapshot for {symbol} is {age}s old (max {2*tf}s)"`
+3. `ltf.bias == htf.bias` — else `"LTF bias ({ltf.bias}) does not match HTF bias ({htf.bias})"`
+4. entry inside band — else `"LTF entry {entry} is outside the HTF band [{lo}, {hi}] (±{tol})"`
+
+`vt_ltf_timeframes` is edited through a small addition to the existing
+webhook-settings API/UI (same admin-only surface that already edits
+`max_lots`/`max_per_minute`/`max_open_positions`), audited the same way
+those changes already are (`settings_changed` event).
 
 ## JSON contract
 
@@ -134,14 +184,11 @@ testable):
   non-finite or non-positive prices, `bias` not in `("long","short")`,
   `role` not in `("htf","ltf")`, `lots` missing/invalid/over-cap on `ltf`,
   all rejected with an operator-readable reason, never a stack trace.
-- `check_gate(htf: VTSnapshot | None, ltf: VTAlert, tol: float, now: datetime) -> GateResult` —
-  pure function, no I/O, returns `(passed: bool, reason: str | None)`. Order
-  of checks (first failure wins, matching "log the specific gate that
-  blocked it"):
-  1. `htf is not None` — else `"no HTF snapshot for {symbol} yet"`
-  2. not stale — else `"HTF snapshot for {symbol} is {age}s old (max {2*tf}s)"`
-  3. `ltf.bias == htf.bias` — else `"LTF bias ({ltf.bias}) does not match HTF bias ({htf.bias})"`
-  4. entry inside band — else `"LTF entry {entry} is outside the HTF band [{lo}, {hi}] (±{tol})"`
+- `check_gate(htf: VTSnapshot | None, ltf: VTAlert, allowed_timeframes: set[str], tol: float, now: datetime) -> GateResult` —
+  pure function, no I/O, returns `(passed: bool, reason: str | None)`, first
+  failure wins. The full ordered check list (0-4) is in "Selectable entry
+  timeframes" above, since gate 0 (the allowed-timeframes check) is
+  introduced there.
 
 Band math, direction-agnostic (owner's own formula):
 
@@ -212,6 +259,12 @@ the owner's spec exactly:
 
 - `input.source()` × 3 for VT Screener's Entry, Stop, Target plots (owner
   binds them in the indicator's settings after adding it to each chart).
+- `tf: timeframe.period` in the outgoing JSON on both roles — the chart's
+  own timeframe, read automatically, never typed in by the owner. This is
+  what makes the script safe to add to any number of LTF charts (1m, 3m,
+  5m, 15m, ...) unmodified: each instance tags itself correctly, and
+  MirrorFleet's allowed-timeframes setting (see "Selectable entry
+  timeframes" above) decides which of those instances are actually live.
 - Holds the last non-`na` value of each (`var float` + reassign only when not
   `na`), since VT Screener's plots go `na` between setups.
 - `bias := target > entry ? "long" : "short"`.
@@ -235,24 +288,30 @@ implementation detail for the plan step, not fixed further here.
 
 - **Unit** (`api/tests/test_vt_bridge_alerts.py`, new): `parse_vt_alert`
   error cases (missing role, missing lots on ltf, bad bias, non-finite
-  prices, oversized lots); `check_gate` — band boundary exactness (entry
-  exactly at `lo`/`hi`, exactly at `lo - tol`/`hi + tol`), bias mismatch,
-  missing snapshot, stale snapshot at exactly `2×tf` and just past it,
-  long vs. short band math both directions.
+  prices, oversized lots); `check_gate` — the allowed-timeframes check
+  (empty set rejects everything, a `tf` present/absent from the set),
+  band boundary exactness (entry exactly at `lo`/`hi`, exactly at
+  `lo - tol`/`hi + tol`), bias mismatch, missing snapshot, stale snapshot
+  at exactly `2×tf` and just past it, long vs. short band math both
+  directions.
 - **Integration** (`api/tests/test_webhooks.py`, extended): full htf-then-ltf
-  sequences ending in an accepted LIMIT order; ltf trigger with no htf ever
-  received; ltf trigger against a stale htf; ltf trigger with wrong bias;
-  ltf trigger with entry outside the band; duplicate `bar_ms` on both roles;
-  htf `valid: false` does not clear a standing good snapshot; the existing
-  `action`-shaped contract continues to pass through completely unaffected
-  (regression coverage, since both share `_handle`).
+  sequences ending in an accepted LIMIT order, across more than one allowed
+  LTF timeframe (e.g. a 1m and a 5m trigger against the same HTF snapshot,
+  both accepted independently); an LTF trigger on a `tf` the workspace has
+  not enabled; ltf trigger with no htf ever received; ltf trigger against a
+  stale htf; ltf trigger with wrong bias; ltf trigger with entry outside the
+  band; duplicate `bar_ms` on both roles; htf `valid: false` does not clear
+  a standing good snapshot; the existing `action`-shaped contract continues
+  to pass through completely unaffected (regression coverage, since both
+  share `_handle`).
 - **Pine**: manual compile-and-verify in the TradingView editor by the owner
   (0 errors/0 warnings), the same verification step already used for the FVG
   script — there is no automated Pine test harness in this repo.
 
 ## Rollout
 
-Same pattern as every other change this session: migration (new table) →
-`docker compose up migrate` → rebuild + restart `api` (this is entirely an
-`api`-side change; `copier` is untouched, since `/order` already does
-everything needed). No `copier` rebuild or restart required.
+Same pattern as every other change this session: migration (new table +
+`org_webhooks.vt_ltf_timeframes` column) → `docker compose up migrate` →
+rebuild + restart `api` and `dashboard` (the Automation page's new
+allowed-timeframes control). `copier` is untouched — `/order` already does
+everything needed — so no `copier` rebuild or restart.
