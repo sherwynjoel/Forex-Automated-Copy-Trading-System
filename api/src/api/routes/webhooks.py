@@ -61,6 +61,7 @@ very likely succeed, and a 422 would lose the alert for good.
 """
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import hmac
 import json
@@ -380,8 +381,8 @@ def create_webhooks_router(rate_limiter: LoginRateLimiter) -> APIRouter:
             # ---- 7. validate ----
             if isinstance(body, dict) and "role" in body:
                 return await _handle_vt_bridge(
-                    conn, request, cfg, org_id, master, max_lots, max_open,
-                    allowed_tfs, body, redacted, ip, t0)
+                    conn, request, cfg, org_id, master, max_lots, max_per_minute, max_open,
+                    aliases, allowed_tfs, body, redacted, ip, t0)
             try:
                 alert = parse_alert(body, max_lots)
             except AlertError as exc:
@@ -492,8 +493,8 @@ def create_webhooks_router(rate_limiter: LoginRateLimiter) -> APIRouter:
             return _json(200, {"status": "unknown", "receipt_id": receipt_id,
                                       "reason": "order may be on the wire -- check Positions"})
 
-    async def _handle_vt_bridge(conn, request, cfg, org_id, master, max_lots, max_open,
-                                allowed_tfs, body, redacted, ip, t0):
+    async def _handle_vt_bridge(conn, request, cfg, org_id, master, max_lots, max_per_minute,
+                                max_open, aliases, allowed_tfs, body, redacted, ip, t0):
         """Both VT bridge alert kinds. Told apart by `role`; see
         vt_bridge_alerts.py for the parsing/gating rules this only wires up.
         """
@@ -501,6 +502,12 @@ def create_webhooks_router(rate_limiter: LoginRateLimiter) -> APIRouter:
             vt = parse_vt_alert(body, max_lots)
         except AlertError as exc:
             return _record(conn, org_id, ip, t0, redacted, None, WebhookRejected(422, str(exc)))
+
+        # Same rename the action-shaped path applies -- before storage or
+        # gating, so an htf snapshot and a later ltf lookup agree on the
+        # symbol under the rename either alert kind arrived under.
+        if isinstance(aliases, dict) and vt.symbol in aliases:
+            vt = dataclasses.replace(vt, symbol=normalise_ticker(aliases[vt.symbol]))
 
         # A VTAlert stands in for an Alert in the shared receipts/audit
         # plumbing -- role becomes the "action" column, so both alert kinds
@@ -523,7 +530,7 @@ def create_webhooks_router(rate_limiter: LoginRateLimiter) -> APIRouter:
             return _record_vt_ok(conn, org_id, ip, t0, redacted, receipt_alert,
                                  "htf setup not valid, not stored")
 
-        return await _handle_vt_ltf(conn, request, cfg, org_id, master, max_open,
+        return await _handle_vt_ltf(conn, request, cfg, org_id, master, max_per_minute, max_open,
                                     allowed_tfs, vt, receipt_alert, redacted, ip, t0)
 
     def _record_vt_ok(conn, org_id, ip, t0, redacted, receipt_alert, reason):
@@ -560,8 +567,8 @@ def create_webhooks_router(rate_limiter: LoginRateLimiter) -> APIRouter:
                               "target": vt.target, "lots": vt.lots, "bar_ms": vt.bar_ms},
                     "source_ip": ip, **({"detail": detail} if detail else {})})))
 
-    async def _handle_vt_ltf(conn, request, cfg, org_id, master, max_open, allowed_tfs,
-                             vt: VTAlert, receipt_alert, redacted, ip, t0):
+    async def _handle_vt_ltf(conn, request, cfg, org_id, master, max_per_minute, max_open,
+                             allowed_tfs, vt: VTAlert, receipt_alert, redacted, ip, t0):
         if not vt.trigger:
             return _record_vt_ok(conn, org_id, ip, t0, redacted, receipt_alert,
                                  "ltf informational (trigger=false), no action")
@@ -580,6 +587,14 @@ def create_webhooks_router(rate_limiter: LoginRateLimiter) -> APIRouter:
                                      f"same alert accepted {dup[0]} seconds ago", fp=None)
                 return _json(200, {"status": "duplicate", "receipt_id": receipt_id,
                                           "duplicate_of": dup[0]})
+            (accepted_last_minute,) = conn.execute(
+                "SELECT count(*) FROM webhook_receipts WHERE org_id = %s "
+                "AND outcome IN ('accepted','unknown') "
+                "AND received_at > now() - interval '1 minute'", (org_id,)).fetchone()
+            if accepted_last_minute >= max_per_minute:
+                raise_ = WebhookRejected(429, f"more than {max_per_minute} alerts accepted in a minute; "
+                                              f"raise the limit in Automation if this is intended")
+                return _record(conn, org_id, ip, t0, redacted, receipt_alert, raise_)
             receipt_id = _insert(conn, org_id, ip, t0, redacted, receipt_alert, "accepted",
                                  None, fp=fp)
 
@@ -613,9 +628,10 @@ def create_webhooks_router(rate_limiter: LoginRateLimiter) -> APIRouter:
                 raise WebhookRejected(
                     422, f"master holds an opposite position on {vt.symbol}; "
                          f"reverse-on-signal is not supported -- send close first")
-            if len(state.get("master_positions") or []) >= max_open:
+            if (len(state.get("master_positions") or []) +
+                    len(state.get("pending_orders") or [])) >= max_open:
                 raise WebhookRejected(
-                    422, f"master already holds {max_open} open positions; "
+                    422, f"master already holds {max_open} open positions or pending orders; "
                          f"raise the limit in Automation if this is intended")
 
             order = {

@@ -967,6 +967,95 @@ def test_a_placed_ltf_order_is_audited_as_tradingview(org_client, db):
     assert payload["alert"]["role"] == "ltf"
 
 
+# ================================== VT bridge: caps and aliasing (fix round 1)
+
+
+def test_vt_ltf_respects_max_per_minute(org_client, db):
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id, max_per_minute=1)
+    _allow_timeframes(db, org_id, "1")
+    # Insert the standing snapshot directly, so this doesn't itself spend
+    # the one-per-minute budget being tested.
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO vt_htf_snapshots (org_id, symbol, bias, entry, stop, target, "
+            "price, tf, received_at) VALUES (%s,'XAUUSD','long',4385.34,4340.00,4400.00,"
+            "4355.28,'60', now())", (org_id,))
+    calls = _copier(client)
+
+    first = _post(client, _vt_ltf(bias="long", entry=4350.00, bar_ms=1))
+    second = _post(client, _vt_ltf(bias="long", entry=4350.00, bar_ms=2))
+
+    assert first.status_code == 200 and first.json()["status"] == "accepted"
+    assert second.status_code == 429
+    assert "more than 1 alerts accepted in a minute" in second.json()["reason"]
+    assert len([u for u, _ in calls if "/order" in u]) == 1
+
+
+def test_vt_max_open_counts_resting_pending_orders(org_client, db):
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id, max_open=2)
+    _pass_the_gate(db, org_id, client)
+    calls = _copier(client, state={
+        "master_positions": [{"position_id": 1, "symbol": "EURUSD", "side": "BUY", "volume": 100}],
+        "pending_orders": [{"order_id": 9, "symbol": "GBPUSD", "side": "BUY", "volume": 100}]})
+
+    r = _post(client, _vt_ltf(bias="long", entry=4350.00))
+
+    assert r.status_code == 422 and "pending" in r.json()["reason"]
+    assert not any("/order" in u for u, _ in calls)
+
+
+def test_vt_symbol_alias_renames_both_roles(org_client, db):
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE org_webhooks SET symbol_aliases = '{\"GOLD\": \"XAUUSD\"}'::jsonb "
+            "WHERE org_id = %s", (org_id,))
+    _allow_timeframes(db, org_id, "1")
+    calls = _copier(client)
+
+    _post(client, _vt_htf(symbol="GOLD", bias="long", stop=4340.00, target=4400.00))
+    r = _post(client, _vt_ltf(symbol="GOLD", bias="long", entry=4350.00,
+                              stop=4340.00, target=4390.00))
+
+    assert r.status_code == 200 and r.json()["status"] == "accepted"
+    assert _htf_snapshot(db, org_id, "XAUUSD") is not None
+    url, sent = next((u, b) for u, b in calls if "/order" in u)
+    assert sent["symbol"] == "XAUUSD"
+
+
+def test_vt_copier_down_frees_the_fingerprint(org_client, db):
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+    _pass_the_gate(db, org_id, client)
+    _copier(client, raise_on={"/order": httpx.ConnectError("boom")})
+
+    r = _post(client, _vt_ltf(bias="long", entry=4350.00))
+    assert r.status_code == 503 and r.json()["status"] == "failed"
+
+    calls = _copier(client)   # copier back
+    r2 = _post(client, _vt_ltf(bias="long", entry=4350.00))
+    assert r2.json()["status"] == "accepted", "the resend was treated as a duplicate"
+    assert sum("/order" in u for u, _ in calls) == 1
+
+
+def test_vt_copier_unknown_keeps_the_fingerprint(org_client, db):
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+    _pass_the_gate(db, org_id, client)
+    _copier(client, raise_on={"/order": httpx.ReadTimeout("slow")})
+
+    r = _post(client, _vt_ltf(bias="long", entry=4350.00))
+    assert r.status_code == 200 and r.json()["status"] == "unknown"
+
+    calls = _copier(client)   # copier back, healthy
+    r2 = _post(client, _vt_ltf(bias="long", entry=4350.00))
+    assert r2.json()["status"] == "duplicate"
+    assert not any("/order" in u for u, _ in calls)
+
+
 # ================================================ shared redaction
 
 
