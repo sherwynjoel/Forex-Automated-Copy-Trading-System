@@ -1,0 +1,154 @@
+//@version=6
+indicator("Rajan trades Dollar Bot", overlay = true)
+
+// The owner's UT-Bot-with-breakout-confirmation system, wired to
+// MirrorFleet: fills send buy/sell (with the signal candle's stop as the
+// broker-side stop_loss), exits and trail hits send close. The step-trail
+// itself lives in this script -- MirrorFleet's webhook contract has no
+// amend, so the trail exits by sending close when its level is hit, and
+// the broker-side stop_loss is the disaster backstop if TradingView dies.
+// Keep "Confirm on bar close" ON when using the webhook: intrabar state
+// churn would otherwise fire alerts off unconfirmed flips.
+// Reversal bars fire close + the opposite entry together; if the entry
+// lands first the webhook refuses it ("opposite position -- send close
+// first") and only the flatten happens -- never doubled, never stuck,
+// occasionally a missed reversal. Known v1 tradeoff.
+
+// ============================================================ MirrorFleet
+secret = input.string("tvw_PASTE_SECRET_HERE", "MirrorFleet secret", group = "MirrorFleet")
+lots   = input.float(0.01, "Lots", step = 0.01, minval = 0.01, group = "MirrorFleet")
+
+a = input.float(1.0, "Key Value (sensitivity)", step = 0.1)
+c = input.int(10, "ATR Period", minval = 1)
+h = input.bool(false, "Signals from Heikin Ashi Candles")
+confirmOnClose = input.bool(true, "Confirm on bar close (no repaint)")
+validBars = input.int(3, "Pending entry valid for (bars)", minval = 1)
+trailStart = input.float(1.0, "Start trailing after (points)", minval = 0.1, step = 0.1)
+trailStep = input.float(0.5, "Trail step (points)", minval = 0.1, step = 0.1)
+
+xATR = ta.atr(c)
+nLoss = a * xATR
+src = h ? request.security(ticker.heikinashi(syminfo.tickerid), timeframe.period, close, lookahead = barmerge.lookahead_off) : close
+
+ts = 0.0
+ts := src > nz(ts[1], 0) and src[1] > nz(ts[1], 0) ? math.max(nz(ts[1]), src - nLoss) : src < nz(ts[1], 0) and src[1] < nz(ts[1], 0) ? math.min(nz(ts[1]), src + nLoss) : src > nz(ts[1], 0) ? src - nLoss : src + nLoss
+
+plot(ts, "UT Trail", color.new(color.gray, 40))
+
+ema = ta.ema(src, 1)
+confirmed = confirmOnClose ? barstate.isconfirmed : true
+buy = src > ts and ta.crossover(ema, ts) and confirmed
+sell = src < ts and ta.crossover(ts, ema) and confirmed
+
+var int inPos = 0
+var float entryPx = na
+var float stopLvl = na
+var float maxFav = na
+var float pLT = na
+var float pLS = na
+var int pLA = 0
+var float pST = na
+var float pSS = na
+var int pSA = 0
+
+stopHitLong = inPos == 1 and low <= stopLvl and confirmed
+stopHitShort = inPos == -1 and high >= stopLvl and confirmed
+
+trigLong = not na(pLT) and pLA >= 1 and high >= pLT and confirmed and not stopHitLong
+trigShort = not na(pST) and pSA >= 1 and low <= pST and confirmed and not stopHitShort
+
+fillLong = trigLong
+fillShort = trigShort
+exitLong = stopHitLong or (trigShort and inPos == 1)
+exitShort = stopHitShort or (trigLong and inPos == -1)
+
+// ============================================================ MirrorFleet messages
+entryMsg(action, sl) =>
+    '{"secret": "' + secret + '", "action": "' + action + '", "symbol": "' + syminfo.ticker +
+     '", "lots": ' + str.tostring(lots) +
+     ', "stop_loss": ' + str.tostring(sl, format.mintick) +
+     ', "id": "' + str.tostring(time) + '"}'
+
+closeMsg() =>
+    '{"secret": "' + secret + '", "action": "close", "symbol": "' + syminfo.ticker +
+     '", "id": "' + str.tostring(time) + '"}'
+
+// Exits first: on a reversal bar the flatten should be on the wire before
+// (or at worst alongside) the opposite entry.
+if exitLong or exitShort
+    alert(closeMsg(), alert.freq_once_per_bar_close)
+
+if stopHitLong or stopHitShort
+    inPos := 0
+    entryPx := na
+    stopLvl := na
+    maxFav := na
+
+if inPos == 1
+    maxFav := math.max(nz(maxFav), high - entryPx)
+    if maxFav >= trailStart
+        stopLvl := math.max(stopLvl, entryPx + trailStart - trailStep + math.floor((maxFav - trailStart) / trailStep) * trailStep)
+
+if inPos == -1
+    maxFav := math.max(nz(maxFav), entryPx - low)
+    if maxFav >= trailStart
+        stopLvl := math.min(stopLvl, entryPx - (trailStart - trailStep + math.floor((maxFav - trailStart) / trailStep) * trailStep))
+
+if trigLong
+    inPos := 1
+    entryPx := math.max(pLT, open)
+    stopLvl := pLS
+    maxFav := high - entryPx
+    pLT := na
+    pST := na
+    alert(entryMsg("buy", stopLvl), alert.freq_once_per_bar_close)
+
+if trigShort
+    inPos := -1
+    entryPx := math.min(pST, open)
+    stopLvl := pSS
+    maxFav := entryPx - low
+    pST := na
+    pLT := na
+    alert(entryMsg("sell", stopLvl), alert.freq_once_per_bar_close)
+
+if buy
+    pLT := high
+    pLS := low
+    pLA := 0
+    pST := na
+
+if sell
+    pST := low
+    pSS := high
+    pSA := 0
+    pLT := na
+
+if confirmed
+    if not na(pLT) and not buy
+        pLA += 1
+        if pLA > validBars
+            pLT := na
+    if not na(pST) and not sell
+        pSA += 1
+        if pSA > validBars
+            pST := na
+
+plotshape(buy, "Buy signal", shape.labelup, location.belowbar, color.new(color.green, 0), text = "Buy", textcolor = color.white, size = size.tiny)
+plotshape(sell, "Sell signal", shape.labeldown, location.abovebar, color.new(color.red, 0), text = "Sell", textcolor = color.white, size = size.tiny)
+plotshape(fillLong, "Long filled", shape.triangleup, location.belowbar, color.new(color.lime, 0), size = size.small)
+plotshape(fillShort, "Short filled", shape.triangledown, location.abovebar, color.new(color.fuchsia, 0), size = size.small)
+plotshape(exitLong, "Exit Long", shape.xcross, location.belowbar, color.new(color.orange, 0), size = size.tiny)
+plotshape(exitShort, "Exit Short", shape.xcross, location.abovebar, color.new(color.orange, 0), size = size.tiny)
+
+plot(inPos != 0 ? entryPx : na, "Entry", color.new(color.blue, 0), 2, plot.style_linebr)
+plot(inPos != 0 ? stopLvl : na, "Trail Stop", color.new(color.orange, 0), 2, plot.style_linebr)
+plot(inPos == 0 and not na(pLT) ? pLT : na, "Pending Buy", color.new(color.teal, 0), 1, plot.style_linebr)
+plot(inPos == 0 and not na(pST) ? pST : na, "Pending Sell", color.new(color.maroon, 0), 1, plot.style_linebr)
+
+barcolor(src > ts ? color.green : color.red)
+
+alertcondition(fillLong, "Rajan dollar Bot Long", "Rajan dollar Bot Long")
+alertcondition(fillShort, "Rajan dollar Bot Short", "Rajan dollar Bot Short")
+alertcondition(exitLong, "Rajan dollar Bot Exit Long", "Rajan dollar Bot Exit Long")
+alertcondition(exitShort, "Rajan dollar Bot Exit Short", "Rajan dollar Bot Exit Short")
