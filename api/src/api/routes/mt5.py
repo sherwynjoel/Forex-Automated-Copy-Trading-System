@@ -336,6 +336,56 @@ def create_mt5_operator_router() -> APIRouter:
         audit(conn, ctx.org_id, ctx.user_email, "mt5_key_rotated", {}, account_id=account_id)
         return {"key": key}
 
+    @router.delete("/mt5/accounts/{account_id}", response_model=Dict[str, Any])
+    async def remove_mt5_account(account_id: int, request: Request,
+                                 ctx: OrgContext = Depends(require_org_role("admin")),
+                                 conn: psycopg.Connection = Depends(get_conn),
+                                 cfg: ApiConfig = Depends(ApiConfig.from_env)):
+        """Remove an MT5 account permanently.
+
+        A cTrader account leaves by disconnecting the grant behind it; an
+        MT5 account has no grant, only its key, so removal deletes the
+        account row and cascades to everything keyed on it (link, command
+        outbox, symbol cache, aliases, mappings). The terminal's key stops
+        at the door on its next poll -- the lookup is per request and
+        nothing caches it. The MASTER is refused outright: deleting the
+        account every trade routes through must never be one click; give
+        the master role to another account (or set this one to Ignored)
+        first, then remove it.
+        """
+        row = conn.execute(
+            "SELECT platform, role, trader_login, nickname FROM accounts "
+            "WHERE ctid_trader_account_id = %s AND org_id = %s",
+            (account_id, ctx.org_id)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Account not found")
+        platform, acc_role, trader_login, nickname = row
+        if platform != "mt5":
+            raise HTTPException(status_code=400,
+                                detail="not an MT5 account -- a cTrader account is "
+                                       "removed by disconnecting its grant")
+        if acc_role == "master":
+            raise HTTPException(status_code=400,
+                                detail="this account is the master -- move the master "
+                                       "role to another account (or set this one to "
+                                       "Ignored) before removing it")
+        # The role/platform predicates repeat the checks above INSIDE the
+        # statement: the checks ran in their own autocommit transaction, and
+        # today's single-worker deployment is the only thing making that
+        # window unreachable. The predicate keeps the master-guard true by
+        # construction, not by deployment shape.
+        deleted = conn.execute(
+            "DELETE FROM accounts WHERE ctid_trader_account_id = %s AND org_id = %s "
+            "AND platform = 'mt5' AND role <> 'master'",
+            (account_id, ctx.org_id))
+        if deleted.rowcount == 0:
+            raise HTTPException(status_code=409,
+                                detail="the account changed while removing it -- reload and retry")
+        audit(conn, ctx.org_id, ctx.user_email, "mt5_account_removed",
+              {"trader_login": trader_login, "nickname": nickname}, account_id=account_id)
+        await _reload_copier(request, cfg)
+        return {"status": "removed", "account_id": account_id}
+
     @router.get("/accounts/{account_id}/symbol-aliases", response_model=Dict[str, Any])
     async def get_symbol_aliases(account_id: int,
                                  ctx: OrgContext = Depends(require_org_role("trader")),

@@ -469,6 +469,79 @@ def test_a_trader_can_neither_add_nor_rotate(org_client, make_user, login_as, db
                        headers=_csrf(client)).status_code == 403
 
 
+# ================================================ operator: remove
+
+
+def test_an_admin_removes_an_mt5_account_and_everything_keyed_on_it(org_client, db):
+    client, org_id, seed = org_client
+    account_id = seed_mt5(db, org_id, KEY)
+    calls = _copier(client)
+
+    r = client.delete(f"/api/orgs/{org_id}/mt5/accounts/{account_id}", headers=_csrf(client))
+
+    assert r.status_code == 200 and r.json()["status"] == "removed"
+    with psycopg.connect(db, autocommit=True) as conn:
+        (accounts,) = conn.execute(
+            "SELECT count(*) FROM accounts WHERE ctid_trader_account_id = %s",
+            (account_id,)).fetchone()
+        (links,) = conn.execute(
+            "SELECT count(*) FROM mt5_links WHERE account_id = %s", (account_id,)).fetchone()
+    assert accounts == 0 and links == 0
+    (audited_id, _, actor), = _events(db, org_id, "mt5_account_removed")
+    assert audited_id == account_id and actor == "admin@example.com"
+    assert any("/reload" in url for url, _ in calls)
+
+
+def test_the_master_is_refused_and_still_there(org_client, db):
+    client, org_id, seed = org_client
+    account_id = seed_mt5(db, org_id, KEY)
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute("UPDATE accounts SET role = 'master' WHERE ctid_trader_account_id = %s",
+                     (account_id,))
+
+    r = client.delete(f"/api/orgs/{org_id}/mt5/accounts/{account_id}", headers=_csrf(client))
+
+    assert r.status_code == 400 and "master" in r.json()["detail"]
+    with psycopg.connect(db, autocommit=True) as conn:
+        (count,) = conn.execute(
+            "SELECT count(*) FROM accounts WHERE ctid_trader_account_id = %s",
+            (account_id,)).fetchone()
+    assert count == 1
+
+
+def test_a_ctrader_account_is_refused_removal_here(org_client, db):
+    client, org_id, seed = org_client
+    ctrader_id = seed(777, role="slave")
+
+    r = client.delete(f"/api/orgs/{org_id}/mt5/accounts/{ctrader_id}", headers=_csrf(client))
+
+    assert r.status_code == 400 and "cTrader" in r.json()["detail"]
+
+
+def test_removing_an_unknown_or_foreign_account_is_404(org_client, make_user, make_org, db):
+    client, org_id, seed = org_client
+    other_org = make_org(name="Other desk")
+    theirs = seed_mt5(db, other_org, "mt5_other-key-value-0123456789abcdefghij")
+
+    assert client.delete(f"/api/orgs/{org_id}/mt5/accounts/424242",
+                         headers=_csrf(client)).status_code == 404
+    assert client.delete(f"/api/orgs/{org_id}/mt5/accounts/{theirs}",
+                         headers=_csrf(client)).status_code == 404
+
+
+def test_a_trader_cannot_remove(org_client, make_user, login_as, db):
+    client, org_id, seed = org_client
+    mine = seed_mt5(db, org_id, KEY)
+    trader = make_user(email="trader2@example.com")
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute("INSERT INTO org_memberships (org_id, user_id, role) VALUES (%s, %s, 'trader')",
+                     (org_id, trader["id"]))
+    login_as(client, trader)
+
+    assert client.delete(f"/api/orgs/{org_id}/mt5/accounts/{mine}",
+                         headers=_csrf(client)).status_code == 403
+
+
 # ================================================ operator: symbol aliases
 
 

@@ -992,3 +992,34 @@ test('a new canonical → broker mapping can be added from the drawer', async ()
     expect(JSON.parse(String((call![1] as RequestInit).body))).toEqual({ aliases: { US500: 'US500.cash' } })
   })
 })
+
+test('Remove appears only on MT5 non-master rows, confirms, then DELETEs', async () => {
+  setRole('admin')
+  const fetchMock = mockMt5Routes()
+  renderAccounts()
+
+  const rows = await screen.findAllByRole('row')
+  expect(rows.some((r) => r.textContent?.includes('XYZ Ltd'))).toBe(true)
+
+  // Exactly one Remove button: the MT5 slave. cTrader rows never get one
+  // (they disconnect their grant instead).
+  const removeButtons = screen.getAllByRole('button', { name: /^remove$/i })
+  expect(removeButtons).toHaveLength(1)
+
+  await userEvent.click(removeButtons[0])
+
+  // No DELETE yet: removal is permanent, so it asks first.
+  const dialog = await screen.findByRole('dialog')
+  expect(dialog).toHaveTextContent(/permanently deletes/i)
+  expect(fetchMock.mock.calls.some(([, init]) =>
+    (init as RequestInit)?.method === 'DELETE')).toBe(false)
+
+  await userEvent.click(within(dialog).getByRole('button', { name: /remove permanently/i }))
+
+  await waitFor(() => {
+    const call = fetchMock.mock.calls.find(([u, init]) =>
+      String(u) === '/api/orgs/1/mt5/accounts/1000000000001' &&
+      (init as RequestInit)?.method === 'DELETE')
+    expect(call).toBeTruthy()
+  })
+})

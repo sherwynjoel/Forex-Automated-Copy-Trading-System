@@ -57,6 +57,9 @@ export default function Accounts() {
   const [nicknameDrafts, setNicknameDrafts] = useState<Record<number, string>>({})
   const [cutoffDrafts, setCutoffDrafts] = useState<Record<number, string>>({})
   const [disconnecting, setDisconnecting] = useState<Account | null>(null)
+  // MT5 removal is permanent (no grant to revoke, the row itself goes);
+  // it always confirms first and the master is never offered the button.
+  const [removing, setRemoving] = useState<Account | null>(null)
   const [flattening, setFlattening] = useState<Account | null>(null)
   // Master promotion re-shapes the whole fleet; it always confirms first.
   const [promoting, setPromoting] = useState<Account | null>(null)
@@ -212,6 +215,23 @@ export default function Accounts() {
         setError(`Failed to update cutoff date (${err instanceof Error ? err.message : 'unknown'})`)
       }
     })
+  }
+
+  const handleRemove = async () => {
+    if (!removing) return
+    const accountId = removing.ctid_trader_account_id
+    try {
+      setBusy(true)
+      await orgApi(orgId, `mt5/accounts/${accountId}`, { method: 'DELETE' })
+      setNotice('Account removed. Its terminal key stops working immediately.')
+      setRemoving(null)
+      await fetchAccounts()
+    } catch (err) {
+      setRemoving(null)
+      setError(err instanceof Error ? err.message : 'Failed to remove account')
+    } finally {
+      setBusy(false)
+    }
   }
 
   const handleDisconnect = async () => {
@@ -685,6 +705,15 @@ export default function Accounts() {
                             Rotate key
                           </button>
                         )}
+                        {can(role, 'control') && onMt5 && account.role !== 'master' && (
+                          <button
+                            onClick={() => setRemoving(account)}
+                            disabled={isPending}
+                            className="px-2.5 py-1 text-xs font-medium rounded border border-line-strong text-ink-soft hover:text-loss hover:border-loss transition-colors disabled:opacity-50"
+                          >
+                            Remove
+                          </button>
+                        )}
                         {can(role, 'control') && !onMt5 && (
                           <button
                             onClick={() => setDisconnecting(account)}
@@ -720,6 +749,25 @@ export default function Accounts() {
           are not touched; the copier just stops seeing these accounts.
         </p>
         <p>You can reconnect any time with Connect cTrader ID.</p>
+      </ConfirmDialog>
+
+      {/* MT5 removal confirmation */}
+      <ConfirmDialog
+        open={removing != null}
+        title={`Remove account ${removing?.nickname || removing?.mt5?.login || ''}`}
+        confirmLabel="Remove permanently"
+        danger
+        busy={busy}
+        onConfirm={handleRemove}
+        onCancel={() => setRemoving(null)}
+      >
+        <p>
+          This <strong>permanently deletes</strong> this MT5 account from
+          MirrorFleet — its history disappears from every page, and the
+          terminal&apos;s key stops working on its next poll. Open positions
+          on the broker are not touched.
+        </p>
+        <p>Adding the login again later creates a fresh account.</p>
       </ConfirmDialog>
 
       {/* Master promotion */}
