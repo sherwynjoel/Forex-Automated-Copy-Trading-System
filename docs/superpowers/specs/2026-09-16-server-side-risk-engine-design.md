@@ -63,8 +63,22 @@ any R:R or position-sizing logic beyond the lot cap that already exists.
   (`settings_changed` event, admin-only).
 - **The webhook contract's optional fields are unchanged.** `stop_loss`
   and `take_profit` in `tradingview_alerts.parse_alert` are already
-  optional (`None` when absent) — this feature adds a fill-in step after
-  parsing, not a change to parsing itself.
+  optional (`None` when absent) — the api's order-building code in
+  `webhooks.py` needs **no change at all**: it already passes these
+  through when present and omits them when absent, which is exactly the
+  signal the copier-side fill-in step (below) needs.
+- **`POST /order` does not return a fill.** `CopierApp.place_order`
+  returns `{"status": "submitted", ...}` synchronously — the broker's
+  fill arrives later as an execution event. This rules out "place order,
+  read back the fill price, amend" as something the api layer can do in
+  one request/response cycle. The fill-in step has to live where the fill
+  event itself lands: `copier/src/copier/engine/service.py`'s
+  `CopierService`, which already turns a market-order fill into a
+  `MasterPositionOpened` event (`entry_price` included) for both cTrader
+  (`engine/normalize.py`) and MT5 (`mt5/ingress.py`) — one shared handler
+  covers both platforms. `CopierService` already has direct access to
+  `self._repo` and `self._dispatcher` (or `mt5_lane`), so no new plumbing
+  between processes is needed.
 
 ## Data model
 
@@ -113,33 +127,49 @@ deleted when the position closes (hooked into wherever the copier already
 notices a position is gone — the same place `reconciler`/`repo` already
 drops closed positions from its tracked state).
 
-## Alert-time behaviour (filling in defaults)
+## Fill-time behaviour (filling in defaults)
 
-Immediately after `parse_alert` succeeds and before the order is built —
-for the plain `action`-shaped contract only (the VT bridge path already
-carries its own explicit stop/target and is untouched):
+**Correction from the first draft of this spec**: this does not happen in
+`api/src/api/routes/webhooks.py`. The api's order-building code is
+unchanged — it sends `stop_loss`/`take_profit` when the alert has them,
+omits them when it doesn't, exactly as today. Everything below happens
+copier-side, in `CopierService` (`engine/service.py`), triggered off the
+`MasterPositionOpened` event that already fires the instant a market
+order fills (cTrader via `engine/normalize.py`, MT5 via
+`mt5/ingress.py` — same event type, two producers, one handler). This
+event already carries `entry_price`, `symbol`, `stop_loss`, `take_profit`
+— everything needed, with no new plumbing between the api and the
+copier processes.
+
+`CopierService` already special-cases a `MasterPositionOpened` whose
+`(stop_loss, take_profit) == (None, None)` (existing code, near
+`_remember_master_protection`) — that is exactly the "alert sent
+nothing" case. Extend that same branch:
 
 ```
-rule = load org_risk_rules for (org_id, alert.symbol)
-stop_loss   = alert.stop_loss   if alert.stop_loss   is not None else (rule.stop_points   and entry_price ± rule.stop_points)
-take_profit = alert.take_profit if alert.take_profit is not None else (rule.target_points and entry_price ± rule.target_points)
+rule = repo.load_risk_rule(org_id, event.symbol)
+if rule is not None:
+    stop_loss   = event.stop_loss   if event.stop_loss   is not None else (rule.stop_points   and entry_price ± rule.stop_points)
+    take_profit = event.take_profit if event.take_profit is not None else (rule.target_points and entry_price ± rule.target_points)
+    if (stop_loss, take_profit) != (event.stop_loss, event.take_profit):
+        amend_position_sltp(event.account_id, event.position_id, stop_loss, take_profit, actor="risk-engine")
+    if rule.trailing_enabled:
+        repo.upsert_trailing_state(event.account_id, event.position_id,
+                                   best_price=entry_price, current_stop=stop_loss)
 ```
 
-`entry_price` for a MARKET order is not known until the fill comes back
-from the broker — the stop/target derived from `*_points` must be
-computed from the **fill price**, not the alert-time quote, the same way
-the existing wired bots compute their stop from the actual entry candle
-rather than a pre-trade estimate. This means: place the order first
-(current behaviour, unchanged), then once the fill/position is confirmed,
-issue the amend that sets the rule-derived stop/target — a second step,
-not a change to the order-placement call itself. An alert that already
-supplied explicit prices skips this second step entirely (they go in at
-order-placement time as they do today).
+`entry_price` here is the real fill price the event already carries —
+computed the same way the wired bots compute their stop from the actual
+entry candle rather than a pre-trade estimate, just server-side instead
+of in Pine. An alert that already supplied both `stop_loss` and
+`take_profit` skips the amend entirely (nothing changed, so nothing is
+sent) but still gets a `position_trailing_state` row seeded if the
+symbol's rule has trailing on — trailing applies regardless of where the
+starting stop came from, per the Goal section above.
 
-If trailing is enabled for the symbol, a `position_trailing_state` row is
-created at this same point, seeded with `best_price = fill_price` and
-`current_stop` = whatever stop is now in force (alert's own, or the
-rule's default).
+Symmetrically, `CopierService`'s existing `MasterPositionClosed` handling
+(same file, already used to clean up other per-position tracking state)
+gets one line added: `repo.delete_trailing_state(account_id, position_id)`.
 
 ## The trailing engine
 
@@ -153,8 +183,17 @@ fixed further here.
 
 Each tick, for every row in `position_trailing_state`:
 
-1. Look up the position's current price (the same live price the
-   Positions page's `get_ticks` already serves — no new price feed).
+1. Look up the position's current price. No single cross-platform helper
+   for "one position's current price" exists today — branch the same way
+   the rest of `main.py` already does (`self._is_mt5(account_id)`):
+   cTrader reads from `self.state_trackers[org_id].snapshot()` (the same
+   in-memory source `get_ticks` reads), MT5 reads from
+   `self.mt5_registry`. If the position is not found in either (already
+   closed, broker-side stop-out, anything), delete its
+   `position_trailing_state` row on this same tick and skip it — a
+   defensive second cleanup path alongside the `MasterPositionClosed`
+   hook above, since that guarantees a vanished position's row cannot
+   linger even if some future close path doesn't go through that event.
 2. Update `best_price = max(best_price, current)` for a long position (
    `min` for a short).
 3. If `best_price` has moved at least `trail_start_points` past entry,
@@ -197,21 +236,31 @@ CRUD addition to the webhook-settings API (list/upsert/delete a
   produce identical numbers to the existing Pine formula for the same
   inputs (a direct port, checked against hand-computed cases from the
   Pine bots' own behaviour).
-- **Unit** (`api/tests/test_risk_rules.py`, new): the alert-time fill-in
-  logic — alert's own values always win, a symbol with no configured rule
-  behaves identically to today, `stop_points`/`target_points` correctly
-  applied against a fill price.
+- **Unit** (`api/tests/test_risk_rules.py`, new): the risk-rules CRUD
+  endpoints only (admin-only, validation, audit) — the plain buy/sell
+  webhook path itself is regression-covered by its existing tests, which
+  must keep passing unchanged since that code is not touched.
+- **Unit** (`copier/tests/unit/test_service_risk_engine.py`, new): the
+  fill-in logic in `CopierService` — alert's own values always win, a
+  symbol with no configured rule behaves identically to today (no amend
+  call at all), `stop_points`/`target_points` correctly applied against
+  `entry_price`, a `position_trailing_state` row is seeded only when
+  `trailing_enabled` is true.
 - **Integration**: a position that crosses `trail_start` gets its stop
   amended with the target preserved (regression-guards the "omitted =
   removed" sharp edge directly); a closed position's `position_trailing_state`
-  row is cleaned up; a trailing-check tick that fails for one position
-  does not stop the loop for the next tick or the next position.
+  row is cleaned up via `MasterPositionClosed`; a trailing-check tick that
+  fails for one position does not stop the loop for the next tick or the
+  next position; a position missing from both `state_trackers` and
+  `mt5_registry` has its row cleaned up defensively.
 
 ## Rollout
 
 Same pattern as every prior change: migration (`org_risk_rules`,
 `position_trailing_state`) → `docker compose up migrate` → rebuild +
-restart `api` (new CRUD + fill-in logic), `dashboard` (new Automation
-section), and `copier` (new `LoopingCall`, new amend-on-trail logic) —
-this is the first of this session's features that actually touches
-`copier`, unlike the VT bridge which needed no copier changes at all.
+restart `api` (new CRUD endpoints only — the webhook order-building path
+is untouched), `dashboard` (new Automation section), and `copier` (new
+`LoopingCall`, new fill-in logic in `CopierService`, new amend-on-trail
+logic) — this is the first of this session's features that actually
+touches `copier`, unlike the VT bridge which needed no copier changes at
+all.
