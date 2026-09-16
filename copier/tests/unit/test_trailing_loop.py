@@ -14,9 +14,17 @@ account, not globally unique, and one org's tracker holds both the
 master's and every slave's positions in the same dict, so an unscoped
 lookup could return another account's price for a colliding id. See
 _current_position_price below.
+
+A missing live price does NOT mean the position is closed -- see
+TRAILING_STATE_STALE_AFTER_S's docstring in main.py for the legitimate
+gaps (fresh seed, restart, reconnect) where a still-open position is
+briefly unpriceable. The staleness tests below construct TrailingState
+rows with an explicit `updated_at` to exercise both sides of that grace
+period.
 """
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
-from copier.main import CopierApp
+from copier.main import CopierApp, TRAILING_STATE_STALE_AFTER_S
 from copier.db.repo import TrailingState
 
 
@@ -61,15 +69,74 @@ def test_a_position_past_trail_start_gets_amended():
     app.state_trackers[1].position_current_price.assert_called_once_with(10, 1)
 
 
-def test_a_position_not_found_live_is_cleaned_up():
+def test_a_stale_position_not_found_live_is_cleaned_up():
+    """A row that has gone unpriceable for well over
+    TRAILING_STATE_STALE_AFTER_S is genuinely gone -- closed, stopped out,
+    anything -- and its trailing state is cleaned up."""
     app = _app_with_price(current_price=None)
+    old = datetime.now(timezone.utc) - timedelta(seconds=TRAILING_STATE_STALE_AFTER_S + 30)
     app.repo.load_all_trailing_state_rows.return_value = [
-        TrailingState(account_id=10, position_id=1, best_price=4200.0, current_stop=4150.0)]
+        TrailingState(account_id=10, position_id=1, best_price=4200.0, current_stop=4150.0,
+                     updated_at=old)]
 
     app.check_trailing_stops()
 
     app.repo.delete_trailing_state.assert_called_once_with(account_id=10, position_id=1)
     app.amend_position_sltp.assert_not_called()
+
+
+def test_a_freshly_seeded_position_not_found_live_is_skipped_not_deleted():
+    """The headline bug this fix closes: a tick landing in the resync gap
+    right after a fresh seed (tracker/registry lags the synchronous seed by
+    ~0.2-0.5s), or during a restart/reconnect, must NOT permanently delete
+    trailing state for a still-open position -- nothing ever re-seeds this
+    row for an already-open position, so a wrongful delete here silently
+    ends trailing for that position's entire remaining life."""
+    app = _app_with_price(current_price=None)
+    recent = datetime.now(timezone.utc) - timedelta(seconds=1)
+    app.repo.load_all_trailing_state_rows.return_value = [
+        TrailingState(account_id=10, position_id=1, best_price=4200.0, current_stop=4150.0,
+                     updated_at=recent)]
+
+    app.check_trailing_stops()
+
+    app.repo.delete_trailing_state.assert_not_called()
+    app.amend_position_sltp.assert_not_called()
+    app.repo.upsert_trailing_state.assert_not_called()
+
+
+def test_a_position_with_unknown_row_age_is_skipped_not_deleted():
+    """updated_at=None (a test double, or any row somehow missing it) is
+    treated as NOT proven stale -- unproven staleness must never delete."""
+    app = _app_with_price(current_price=None)
+    app.repo.load_all_trailing_state_rows.return_value = [
+        TrailingState(account_id=10, position_id=1, best_price=4200.0, current_stop=4150.0,
+                     updated_at=None)]
+
+    app.check_trailing_stops()
+
+    app.repo.delete_trailing_state.assert_not_called()
+
+
+def test_a_position_missing_from_positions_table_is_skipped_not_raised():
+    """get_position_side_and_entry can return None -- the positions table
+    row lags the synchronous trailing-state seed by the same resync gap as
+    the price lookup. Unpacking that unconditionally used to raise
+    TypeError (caught by the outer per-position guard, but noisily, and it
+    skipped the graceful rule-lookup branch). Must instead skip this tick
+    cleanly."""
+    app = _app_with_price(current_price=4212.0)
+    app.repo.load_all_trailing_state_rows.return_value = [
+        TrailingState(account_id=10, position_id=1, best_price=4200.0, current_stop=4150.0,
+                     updated_at=datetime.now(timezone.utc))]
+    app.repo.get_position_side_and_entry = MagicMock(return_value=None)
+
+    app.check_trailing_stops()  # must not raise
+
+    app.amend_position_sltp.assert_not_called()
+    app.repo.load_risk_rule_for_position.assert_not_called()
+    app.repo.upsert_trailing_state.assert_not_called()
+    app.repo.delete_trailing_state.assert_not_called()
 
 
 def test_a_failing_amend_does_not_stop_the_rest_of_the_tick():

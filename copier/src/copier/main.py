@@ -189,6 +189,19 @@ MT5_OFFLINE_CHECK_INTERVAL_S = 5.0
 # infrequent enough to stay well inside the existing TokenBucket's
 # request-rate budget alongside everything else it already throttles.
 TRAILING_CHECK_INTERVAL_S = 5.0
+# Grace period before a position whose live price can't be resolved is
+# treated as closed and its trailing state deleted. Price can legitimately
+# be unavailable for a LIVE, still-open position: right after a fill (the
+# tracker/registry is populated by resync, which lags the synchronous seed
+# in _apply_risk_engine by ~0.2-0.5s -- a tick landing in that window must
+# not delete state just created), after a copier restart while the market
+# is closed (no spot has arrived yet), or any reconnect/re-subscription
+# gap. Nothing ever re-seeds position_trailing_state for an already-open
+# position (a new MasterPositionOpened never fires again for it), so
+# deleting on the first missed price would silently and PERMANENTLY stop
+# trailing for that position's entire life. Comfortably longer than any of
+# those gaps -- only a position unpriceable for minutes is actually gone.
+TRAILING_STATE_STALE_AFTER_S = 180.0
 # The mt5_links balance/equity/last_seen_at write from a sync is throttled to
 # this per account -- the same window the api uses for its own write of those
 # columns (contract §3) -- so a terminal polling four times a second is not
@@ -3189,15 +3202,39 @@ class CopierApp:
     def _check_one_trailing_position(self, state) -> None:
         current_price = self._current_position_price(state.account_id, state.position_id)
         if current_price is None:
-            # Position is gone from both live sources -- closed, stopped
-            # out, anything. MasterPositionClosed should already have
-            # cleared this row; this is the defensive second path.
+            # A missing live price does NOT mean the position is closed --
+            # see TRAILING_STATE_STALE_AFTER_S's docstring above for the
+            # legitimate gaps (fresh seed, restart, reconnect) that also
+            # look like this. Only delete once the row has gone unpriceable
+            # for longer than any of those gaps could plausibly last;
+            # otherwise skip this tick and let the next one try again.
+            age = self._trailing_state_age_seconds(state)
+            if age is None or age < TRAILING_STATE_STALE_AFTER_S:
+                log.debug(
+                    "trailing check: no live price yet for account %s position %s "
+                    "(row age %s) -- skipping this tick, not deleting",
+                    state.account_id, state.position_id,
+                    f"{age:.1f}s" if age is not None else "unknown")
+                return
+            log.info(
+                "trailing check: account %s position %s has had no live price "
+                "for over %.0fs -- treating as closed and clearing trailing state",
+                state.account_id, state.position_id, TRAILING_STATE_STALE_AFTER_S)
             self.repo.delete_trailing_state(
                 account_id=state.account_id, position_id=state.position_id)
             return
 
-        side, entry_price = self.repo.get_position_side_and_entry(
-            state.account_id, state.position_id)
+        # positions can lag the trailing-state seed by the same resync gap
+        # as the price lookup above -- skip this tick rather than raising
+        # on an unguarded unpack of None.
+        result = self.repo.get_position_side_and_entry(state.account_id, state.position_id)
+        if result is None:
+            log.debug(
+                "trailing check: no positions row yet for account %s position %s "
+                "-- skipping this tick", state.account_id, state.position_id)
+            return
+        side, entry_price = result
+
         rule = self.repo.load_risk_rule_for_position(state.account_id, state.position_id)
         if rule is None or not rule.trailing_enabled:
             return
@@ -3220,6 +3257,18 @@ class CopierApp:
         self.repo.upsert_trailing_state(
             account_id=state.account_id, position_id=state.position_id,
             best_price=best_price, current_stop=new_stop)
+
+    @staticmethod
+    def _trailing_state_age_seconds(state) -> float | None:
+        """Wall-clock seconds since this row's position_trailing_state.updated_at,
+        or None if unknown. Real DB rows always carry it (NOT NULL DEFAULT
+        now(), and upsert_trailing_state stamps it on every write); the
+        None case only exists for test doubles that construct TrailingState
+        without it, and is deliberately treated as NOT stale by the caller
+        -- unproven staleness must never delete a row."""
+        if state.updated_at is None:
+            return None
+        return (datetime.now(timezone.utc) - state.updated_at).total_seconds()
 
     def _current_position_price(self, account_id: int, position_id: int) -> float | None:
         """One position's live current price, cTrader or MT5. No single
@@ -3498,6 +3547,12 @@ def build_app(
     # its ctor: any fill/close/cancel refreshes /state within ~1s.
     service.on_positions_changed = app.request_resync
     service.state_tracker_provider = app.state_tracker_for_account
+    # The risk engine's fill-in amend protects the operator's OWN master
+    # position, not a copy -- it must reach the broker the same way the
+    # trailing loop's amends and the manual Trade-page button already do
+    # (platform-routed, bypassing copying_enabled/dry_run), not through
+    # the copy-gated Dispatcher.dispatch() path. See _apply_risk_engine.
+    service.master_amend_sltp = app.amend_position_sltp
 
     # Wire every push-event consumer to EVERY client (all shards, both
     # environments) -- slave shards must deliver execution events too, and any

@@ -714,6 +714,19 @@ def test_build_app_wires_the_position_change_hook(db, fernet_key):
     assert app.service.on_positions_changed == app.request_resync
 
 
+def test_build_app_wires_the_master_amend_hook(db, fernet_key):
+    """The risk engine's fill-in amend (service._apply_risk_engine) must be
+    attached to app.amend_position_sltp -- the same gate-bypassing,
+    platform-routed path the trailing loop and the manual Trade-page amend
+    button already use -- not left unwired (which would silently no-op
+    every fill-in amend) or routed through the copy-gated dispatcher."""
+    seed_db(db, fernet_key)
+    repo = Repo(db)
+    token_store = TokenStore(db, fernet_key)
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    assert app.service.master_amend_sltp == app.amend_position_sltp
+
+
 # ---------- /health ----------
 
 def test_get_health_lists_all_orgs(db, fernet_key):

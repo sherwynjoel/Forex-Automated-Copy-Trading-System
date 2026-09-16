@@ -5,20 +5,30 @@ CopierService amends the position to the rule's defaults and seeds
 position_trailing_state if trailing is on. An alert that already carries
 its own stop/target is left exactly alone -- MirrorFleet never overrides
 what an indicator explicitly sent.
+
+The fill-in amend protects the operator's OWN master position, not a
+copy, so it goes through master_amend_sltp (wired by build_app() to
+CopierApp.amend_position_sltp) rather than the copy-gated
+self._dispatcher.dispatch() -- see test_bare_open_with_a_rule_amends_...
+below. This mirrors how the trailing loop's amends and the manual
+Trade-page amend button already bypass copying_enabled/dry_run: those
+gates exist to stop COPYING, not to stop the operator protecting their
+own account.
 """
 from unittest.mock import MagicMock
 from copier.engine.service import CopierService
 from copier.domain.models import MasterPositionOpened, MasterPositionClosed, Side
-from copier.domain.models import AmendPositionSLTP
 from copier.db.repo import RiskRule
 
 
 def _service(repo):
-    return CopierService(
+    service = CopierService(
         repo=repo, dispatcher=MagicMock(),
         routing_provider=lambda: MagicMock(slaves_by_org={}),
         master_symbols_by_org={},
     )
+    service.master_amend_sltp = MagicMock(return_value={"status": "submitted"})
+    return service
 
 
 def test_bare_open_with_no_rule_does_nothing():
@@ -32,6 +42,7 @@ def test_bare_open_with_no_rule_does_nothing():
     service._after_master_event(org_id=1, master_account_id=10, normalized=event)
 
     service._dispatcher.dispatch.assert_not_called()
+    service.master_amend_sltp.assert_not_called()
     repo.upsert_trailing_state.assert_not_called()
 
 
@@ -47,10 +58,70 @@ def test_bare_open_with_a_rule_amends_to_the_defaults():
 
     service._after_master_event(org_id=1, master_account_id=10, normalized=event)
 
-    (intents,), kwargs = service._dispatcher.dispatch.call_args
-    assert kwargs == {"org_id": 1}
-    assert intents == [AmendPositionSLTP(10, 1, 4150.0, 4350.0)]
+    service.master_amend_sltp.assert_called_once_with(10, 1, 4150.0, 4350.0, actor="risk-engine")
+    # Never through the copy-gated path -- this protects the master's OWN
+    # position, not a copy.
+    service._dispatcher.dispatch.assert_not_called()
     repo.upsert_trailing_state.assert_not_called()  # trailing_enabled is False
+
+
+def test_bare_open_with_a_rule_amends_even_with_dry_run_and_kill_switch_semantics():
+    """The fill-in amend must reach the broker regardless of the org's
+    copying_enabled/dry_run gates -- those exist to stop COPYING, and this
+    is the operator's own master position, exactly like the trailing
+    loop's amends and the manual Trade-page amend button. Proven here by
+    never even touching org gating: master_amend_sltp is called
+    unconditionally and repo.get_org (what Dispatcher.dispatch reads the
+    gates from) is never consulted."""
+    repo = MagicMock()
+    repo.load_risk_rule.return_value = RiskRule(
+        org_id=1, symbol="XAUUSD", stop_points=50.0, target_points=150.0,
+        trailing_enabled=False, trail_start_points=None, trail_step_points=None)
+    service = _service(repo)
+    event = MasterPositionOpened(position_id=1, symbol_name="XAUUSD", side=Side.BUY,
+                                 volume=100000, lot_size=100, stop_loss=None,
+                                 take_profit=None, entry_price=4200.0)
+
+    service._after_master_event(org_id=1, master_account_id=10, normalized=event)
+
+    service.master_amend_sltp.assert_called_once_with(10, 1, 4150.0, 4350.0, actor="risk-engine")
+    repo.get_org.assert_not_called()
+    service._dispatcher.dispatch.assert_not_called()
+
+
+def test_a_failing_master_amend_is_swallowed_not_raised():
+    repo = MagicMock()
+    repo.load_risk_rule.return_value = RiskRule(
+        org_id=1, symbol="XAUUSD", stop_points=50.0, target_points=150.0,
+        trailing_enabled=False, trail_start_points=None, trail_step_points=None)
+    service = _service(repo)
+    service.master_amend_sltp = MagicMock(side_effect=Exception("broker unreachable"))
+    event = MasterPositionOpened(position_id=1, symbol_name="XAUUSD", side=Side.BUY,
+                                 volume=100000, lot_size=100, stop_loss=None,
+                                 take_profit=None, entry_price=4200.0)
+
+    service._after_master_event(org_id=1, master_account_id=10, normalized=event)  # must not raise
+
+    service.master_amend_sltp.assert_called_once()
+
+
+def test_no_master_amend_sltp_wired_logs_but_does_not_raise():
+    """Defensive: if build_app() somehow left master_amend_sltp unwired,
+    the fill-in step must not crash the event pump -- it logs and moves
+    on, same as every other best-effort step in this class."""
+    repo = MagicMock()
+    repo.load_risk_rule.return_value = RiskRule(
+        org_id=1, symbol="XAUUSD", stop_points=50.0, target_points=150.0,
+        trailing_enabled=False, trail_start_points=None, trail_step_points=None)
+    service = _service(repo)
+    service.master_amend_sltp = None
+    event = MasterPositionOpened(position_id=1, symbol_name="XAUUSD", side=Side.BUY,
+                                 volume=100000, lot_size=100, stop_loss=None,
+                                 take_profit=None, entry_price=4200.0)
+
+    service._after_master_event(org_id=1, master_account_id=10, normalized=event)  # must not raise
+
+    service._dispatcher.dispatch.assert_not_called()
 
 
 def test_open_that_already_carries_its_own_levels_is_left_alone():
@@ -66,6 +137,7 @@ def test_open_that_already_carries_its_own_levels_is_left_alone():
     service._after_master_event(org_id=1, master_account_id=10, normalized=event)
 
     service._dispatcher.dispatch.assert_not_called()
+    service.master_amend_sltp.assert_not_called()
 
 
 def test_trailing_enabled_seeds_state_even_when_alert_supplied_its_own_stop():

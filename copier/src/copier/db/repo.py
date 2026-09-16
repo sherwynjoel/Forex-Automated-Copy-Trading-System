@@ -73,6 +73,12 @@ class TrailingState:
     position_id: int
     best_price: float
     current_stop: float
+    # When this row was last written. upsert_trailing_state refreshes it on
+    # every successful tick, so its age is exactly "how long has this
+    # position gone without a resolvable price" -- what the trailing loop's
+    # staleness check keys off (main.py, TRAILING_STATE_STALE_AFTER_S).
+    # Optional/defaulted so existing direct constructions (tests) keep working.
+    updated_at: datetime | None = None
 
 
 def _deal_row(account_id: int, org_id: int | None, d: dict) -> dict:
@@ -1984,14 +1990,14 @@ class Repo:
     def load_trailing_state(self, account_id: int, position_id: int) -> TrailingState | None:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT account_id, position_id, best_price, current_stop "
+                "SELECT account_id, position_id, best_price, current_stop, updated_at "
                 "FROM position_trailing_state WHERE account_id = %s AND position_id = %s",
                 (account_id, position_id),
             ).fetchone()
         if not row:
             return None
         return TrailingState(account_id=row[0], position_id=row[1],
-                             best_price=row[2], current_stop=row[3])
+                             best_price=row[2], current_stop=row[3], updated_at=row[4])
 
     def delete_trailing_state(self, account_id: int, position_id: int) -> None:
         with self._connect() as conn:
@@ -2005,11 +2011,11 @@ class Repo:
         account -- what the trailing LoopingCall sweeps each tick."""
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT account_id, position_id, best_price, current_stop "
+                "SELECT account_id, position_id, best_price, current_stop, updated_at "
                 "FROM position_trailing_state"
             ).fetchall()
         return [TrailingState(account_id=r[0], position_id=r[1],
-                              best_price=r[2], current_stop=r[3]) for r in rows]
+                              best_price=r[2], current_stop=r[3], updated_at=r[4]) for r in rows]
 
     # ---------- trailing check loop (Task 5) ----------
 
@@ -2048,13 +2054,43 @@ class Repo:
         """The configured risk rule for whatever org/symbol this position
         currently belongs to -- org_risk_rules joined through the same
         `positions` row get_position_side_and_entry reads, rather than a
-        second, independent way of resolving a position's org and symbol."""
+        second, independent way of resolving a position's org and symbol.
+
+        positions.symbol is NOT guaranteed to already be canonical.
+        org_risk_rules.symbol is always the canonical name (normalise_ticker,
+        e.g. "XAUUSD"). MasterPositionOpened.symbol_name -- what
+        CopierService._apply_risk_engine matches the rule against at fill
+        time -- is canonicalized on the way in (mt5/ingress.py's
+        `canonical()` helper maps the broker's name through symbol_aliases
+        before the event is even built). positions.symbol, by contrast, is
+        written by upsert_positions straight from SymbolInfo.name, which
+        for an MT5 account is keyed by the account's OWN broker-side symbol
+        map (MT5Registry.symbols_by_name) -- so an MT5 account with a
+        configured alias (symbol_aliases: canonical "XAUUSD" -> broker
+        "XAUUSDm") keeps the broker's suffixed name in positions.symbol.
+        A raw `r.symbol = p.symbol` join would then silently never match
+        for that position, even though the fill-time fill-in found the
+        rule just fine -- trailing would never activate, with nothing
+        visible anywhere.
+
+        Resolved here the same way: look up the position's symbol in
+        symbol_aliases (scoped to ITS OWN account_id -- the same broker
+        name can mean a different instrument on a different account/
+        broker) and use the canonical name if an alias row exists, else
+        fall back to positions.symbol unchanged -- which is already
+        correct for a cTrader account (no symbol_aliases rows exist at
+        all) and for an MT5 symbol with no configured alias (broker name
+        already equals canonical)."""
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT r.org_id, r.symbol, r.stop_points, r.target_points, "
                 "r.trailing_enabled, r.trail_start_points, r.trail_step_points "
                 "FROM positions p "
-                "JOIN org_risk_rules r ON r.org_id = p.org_id AND r.symbol = p.symbol "
+                "JOIN org_risk_rules r ON r.org_id = p.org_id "
+                "AND r.symbol = COALESCE("
+                "  (SELECT sa.canonical FROM symbol_aliases sa "
+                "   WHERE sa.account_id = p.account_id AND sa.broker_name = p.symbol), "
+                "  p.symbol) "
                 "WHERE p.account_id = %s AND p.position_id = %s AND p.status = 'open'",
                 (account_id, position_id),
             ).fetchone()

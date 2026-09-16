@@ -139,6 +139,19 @@ class CopierService:
         # records a null quote rather than failing.
         self.state_tracker_provider: Callable[[int], object | None] | None = None
 
+        # Set by build_app() to CopierApp.amend_position_sltp, same pattern
+        # as the two callbacks above. _apply_risk_engine's fill-in amend
+        # protects the operator's OWN master position -- not a copy -- so
+        # it must reach the broker regardless of that org's copying_enabled/
+        # dry_run gates, exactly like the trailing loop's amends and the
+        # manual Trade-page amend button (main.py's amend_position_sltp
+        # bypasses Dispatcher.dispatch() entirely via send_direct/mt5_lane,
+        # and is also the only path that correctly routes an MT5 master's
+        # amend through the MT5 outbox rather than building a cTrader
+        # protobuf request for an account with no cTrader client). None in
+        # unit tests that do not exercise the fill-in amend.
+        self.master_amend_sltp: Callable[..., dict] | None = None
+
         # master position id -> (stop_loss, take_profit) currently on it.
         # See _remember_master_protection for the race this exists to close.
         self._master_protection: dict[int, tuple[float | None, float | None]] = {}
@@ -526,17 +539,38 @@ class CopierService:
             take_profit = entry + side_sign * rule.target_points
 
         if (stop_loss, take_profit) != (normalized.stop_loss, normalized.take_profit):
-            try:
-                self._dispatcher.dispatch(
-                    [AmendPositionSLTP(master_account_id, normalized.position_id,
-                                       stop_loss, take_profit)],
-                    org_id=org_id,
-                )
-            except Exception:
-                log.exception(
-                    "risk engine: could not amend master position %s on account %s",
+            # Deliberately NOT self._dispatcher.dispatch(): this protects the
+            # operator's OWN master position, not a copy, so it must reach
+            # the broker regardless of copying_enabled/dry_run -- the same
+            # reasoning that already routes the trailing loop's amends and
+            # the manual Trade-page button through amend_position_sltp
+            # instead of the copy-gated dispatch path. See
+            # CopierService.__init__'s master_amend_sltp docstring.
+            if self.master_amend_sltp is None:
+                log.warning(
+                    "risk engine: no master_amend_sltp wired; cannot fill in "
+                    "protection for master position %s on account %s",
                     normalized.position_id, master_account_id)
+            else:
+                try:
+                    self.master_amend_sltp(
+                        master_account_id, normalized.position_id,
+                        stop_loss, take_profit, actor="risk-engine")
+                except Exception:
+                    log.exception(
+                        "risk engine: could not amend master position %s on account %s",
+                        normalized.position_id, master_account_id)
 
+        # NOTE (known gap, left as-is -- see final-review-fix-report.md):
+        # trailing_enabled=True with stop_points=None and no stop of its
+        # own on the alert leaves stop_loss None here, so neither a
+        # protective stop nor trailing state is ever seeded for that
+        # position. No error, nothing visible. Mirroring
+        # trail_start_points/trail_step_points's already-required-together
+        # validation onto stop_points would need an API-layer change
+        # (api/src/api/routes/webhooks.py's put_risk_rule) affecting
+        # already-configured rules, which is out of scope for this fix
+        # wave; documented here for a future pass.
         if rule.trailing_enabled and stop_loss is not None:
             self._repo.upsert_trailing_state(
                 account_id=master_account_id, position_id=normalized.position_id,
