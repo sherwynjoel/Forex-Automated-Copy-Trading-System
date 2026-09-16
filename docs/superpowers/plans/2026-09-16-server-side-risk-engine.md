@@ -686,6 +686,7 @@ git commit -m "feat(copier): fill in risk-rule defaults and seed trailing state 
 
 **Files:**
 - Modify: `copier/src/copier/main.py`
+- Modify: `copier/src/copier/db/repo.py` (four new methods: `get_org_for_account`, `get_position_side_and_entry`, `load_risk_rule_for_position`, `load_position_protection` — additive only, alongside Task 3's earlier additions to this same file, which already exist by the time this task runs)
 - Test: `copier/tests/unit/test_trailing_loop.py`
 
 **Interfaces:**
