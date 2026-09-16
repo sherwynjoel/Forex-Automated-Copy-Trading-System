@@ -26,7 +26,7 @@ from copier.ctrader.symbols import by_id as symbols_by_id
 from copier.db.repo import Repo, MappingNotFound
 from copier.domain.models import (
     MANUAL_ORDER_LABEL, SymbolInfo, MasterEvent, MasterPendingFilled, AmendPositionSLTP,
-    MasterPositionOpened, MasterPositionClosed, MasterPositionSLTPAmended)
+    MasterPositionOpened, MasterPositionClosed, MasterPositionSLTPAmended, Side)
 from copier.domain.decision import decide
 from copier.engine.capture import execution_row
 from copier.engine.normalize import normalize
@@ -416,7 +416,7 @@ class CopierService:
                 evt.deal.executionTimestamp or None,
             )
 
-        self._after_master_event(org_id, normalized)
+        self._after_master_event(org_id, master_account_id, normalized)
 
     def act_on_master_event(self, org_id: int, master_account_id: int,
                             normalized: MasterEvent, *, source: str) -> None:
@@ -431,7 +431,7 @@ class CopierService:
         payload = {'source': source, 'normalized': type(normalized).__name__}
         self._decide_dispatch_audit(org_id, master_account_id, normalized, routing,
                                     payload, start_time)
-        self._after_master_event(org_id, normalized)
+        self._after_master_event(org_id, master_account_id, normalized)
 
     def _decide_dispatch_audit(self, org_id: int, master_account_id: int,
                                normalized: MasterEvent, routing: OrgRouting,
@@ -477,13 +477,70 @@ class CopierService:
             log.exception(
                 "master_event audit write failed (copy already dispatched)")
 
-    def _after_master_event(self, org_id: int, normalized: MasterEvent) -> None:
+    def _after_master_event(self, org_id: int, master_account_id: int,
+                            normalized: MasterEvent) -> None:
         # Schedule pending fill alert if this is a pending fill
         if isinstance(normalized, MasterPendingFilled):
             self._schedule_pending_fill_check(org_id, normalized)
 
+        self._apply_risk_engine(org_id, master_account_id, normalized)
+
         # The master's positions/orders just changed; let /state catch up now.
         self._notify_positions_changed(org_id)
+
+    def _apply_risk_engine(self, org_id: int, master_account_id: int,
+                           normalized: MasterEvent) -> None:
+        """Fill in a configured symbol's default stop/target on a bare
+        open, and track/clear trailing state -- the server-side half of
+        every indicator getting protection, not just the two Pine bots
+        that compute their own. See
+        docs/superpowers/specs/2026-09-16-server-side-risk-engine-design.md.
+
+        Runs AFTER decide/dispatch/audit (called from _after_master_event,
+        itself always last): the copy fan-out to every slave is never
+        delayed or risked by this step.
+        """
+        if isinstance(normalized, MasterPositionClosed):
+            if normalized.remaining_volume == 0:
+                self._repo.delete_trailing_state(
+                    account_id=master_account_id, position_id=normalized.position_id)
+            return
+
+        if not isinstance(normalized, MasterPositionOpened):
+            return
+
+        rule = self._repo.load_risk_rule(org_id, normalized.symbol_name)
+        if rule is None:
+            return
+
+        entry = normalized.entry_price
+        if entry is None:
+            return  # no fill price to measure a *_points distance from
+
+        side_sign = 1 if normalized.side == Side.BUY else -1
+        stop_loss = normalized.stop_loss
+        if stop_loss is None and rule.stop_points is not None:
+            stop_loss = entry - side_sign * rule.stop_points
+        take_profit = normalized.take_profit
+        if take_profit is None and rule.target_points is not None:
+            take_profit = entry + side_sign * rule.target_points
+
+        if (stop_loss, take_profit) != (normalized.stop_loss, normalized.take_profit):
+            try:
+                self._dispatcher.dispatch(
+                    [AmendPositionSLTP(master_account_id, normalized.position_id,
+                                       stop_loss, take_profit)],
+                    org_id=org_id,
+                )
+            except Exception:
+                log.exception(
+                    "risk engine: could not amend master position %s on account %s",
+                    normalized.position_id, master_account_id)
+
+        if rule.trailing_enabled and stop_loss is not None:
+            self._repo.upsert_trailing_state(
+                account_id=master_account_id, position_id=normalized.position_id,
+                best_price=entry, current_stop=stop_loss)
 
     def _schedule_pending_fill_check(
         self, org_id: int, pending_filled: MasterPendingFilled
