@@ -778,6 +778,14 @@ class WebhookUpdate(BaseModel):
     vt_ltf_timeframes: Optional[List[str]] = None
 
 
+class RiskRuleUpdate(BaseModel):
+    stop_points: Optional[float] = None
+    target_points: Optional[float] = None
+    trailing_enabled: bool = False
+    trail_start_points: Optional[float] = None
+    trail_step_points: Optional[float] = None
+
+
 def _template(secret: str) -> str:
     """The alert message the operator pastes, with their secret filled in.
 
@@ -927,5 +935,63 @@ def create_webhook_settings_router() -> APIRouter:
             if changed:
                 audit(conn, ctx.org_id, ctx.user_email, "webhook_settings_changed", changed)
         return {"status": "ok", "changed": changed}
+
+    @router.get("/risk-rules", response_model=list)
+    async def list_risk_rules(ctx: OrgContext = Depends(require_org_role("viewer")),
+                              conn: psycopg.Connection = Depends(get_conn)):
+        rows = conn.execute(
+            "SELECT symbol, stop_points, target_points, trailing_enabled, "
+            "trail_start_points, trail_step_points FROM org_risk_rules "
+            "WHERE org_id = %s ORDER BY symbol", (ctx.org_id,)).fetchall()
+        return [{"symbol": r[0], "stop_points": r[1], "target_points": r[2],
+                "trailing_enabled": r[3], "trail_start_points": r[4],
+                "trail_step_points": r[5]} for r in rows]
+
+    @router.put("/risk-rules/{symbol}", response_model=Dict[str, Any])
+    async def put_risk_rule(symbol: str, body: RiskRuleUpdate,
+                            ctx: OrgContext = Depends(require_org_role("admin")),
+                            conn: psycopg.Connection = Depends(get_conn)):
+        """Set (create or replace) the org's default stop/target/trailing
+        for one symbol. A rule with no configured stop or target simply
+        leaves that side unfilled -- the alert's own value, or nothing,
+        still applies."""
+        try:
+            clean_symbol = normalise_ticker(symbol)
+        except AlertError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        if body.trailing_enabled and (body.trail_start_points is None
+                                      or body.trail_step_points is None):
+            raise HTTPException(
+                status_code=400,
+                detail="trail_start_points and trail_step_points are required when trailing_enabled")
+        conn.execute(
+            "INSERT INTO org_risk_rules (org_id, symbol, stop_points, target_points, "
+            "trailing_enabled, trail_start_points, trail_step_points, updated_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, now()) "
+            "ON CONFLICT (org_id, symbol) DO UPDATE SET "
+            "stop_points = EXCLUDED.stop_points, target_points = EXCLUDED.target_points, "
+            "trailing_enabled = EXCLUDED.trailing_enabled, "
+            "trail_start_points = EXCLUDED.trail_start_points, "
+            "trail_step_points = EXCLUDED.trail_step_points, updated_at = now()",
+            (ctx.org_id, clean_symbol, body.stop_points, body.target_points,
+             body.trailing_enabled, body.trail_start_points, body.trail_step_points))
+        audit(conn, ctx.org_id, ctx.user_email, "risk_rule_set",
+              {"symbol": clean_symbol, "stop_points": body.stop_points,
+               "target_points": body.target_points,
+               "trailing_enabled": body.trailing_enabled})
+        return {"symbol": clean_symbol, "stop_points": body.stop_points,
+                "target_points": body.target_points,
+                "trailing_enabled": body.trailing_enabled,
+                "trail_start_points": body.trail_start_points,
+                "trail_step_points": body.trail_step_points}
+
+    @router.delete("/risk-rules/{symbol}", status_code=204)
+    async def delete_risk_rule(symbol: str,
+                               ctx: OrgContext = Depends(require_org_role("admin")),
+                               conn: psycopg.Connection = Depends(get_conn)):
+        clean_symbol = normalise_ticker(symbol)
+        conn.execute("DELETE FROM org_risk_rules WHERE org_id = %s AND symbol = %s",
+                    (ctx.org_id, clean_symbol))
+        audit(conn, ctx.org_id, ctx.user_email, "risk_rule_deleted", {"symbol": clean_symbol})
 
     return router
