@@ -184,3 +184,24 @@ test('can delete a risk rule', async () => {
 
   await waitFor(() => expect(screen.queryByText('XAUUSD')).not.toBeInTheDocument())
 })
+
+test('a rejected risk rule save shows the server error instead of doing nothing', async () => {
+  // Exactly what the api returns for this validation failure (see
+  // put_risk_rule in webhooks.py): trailing on with no start/step.
+  mockRoutes({
+    'GET /risk-rules': () => jsonResponse([]),
+    'PUT /risk-rules': () => jsonResponse(
+      { detail: 'trail_start_points and trail_step_points are required when trailing_enabled' }, 400),
+  })
+  render(<MemoryRouter><Automation /></MemoryRouter>)
+  await screen.findByText(/automation is on/i)
+
+  await userEvent.type(screen.getByLabelText(/symbol/i), 'EURUSD')
+  await userEvent.click(screen.getByRole('checkbox', { name: /trailing/i }))
+  await userEvent.click(screen.getByRole('button', { name: /add rule/i }))
+
+  expect(await screen.findByText(/required when trailing_enabled/i)).toBeInTheDocument()
+  // The failed save never got a response to add, so the list stays empty --
+  // no silent success, and no half-added row either.
+  expect(screen.queryByText('EURUSD')).not.toBeInTheDocument()
+})
