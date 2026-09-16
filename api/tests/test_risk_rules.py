@@ -68,6 +68,15 @@ def test_delete_removes_the_rule(org_client):
     assert client.get(f"/api/orgs/{org_id}/risk-rules").json() == []
 
 
+def test_delete_with_a_malformed_symbol_is_400_not_500(org_client):
+    """normalise_ticker rejects anything under 3 chars (see _ALLOWED in
+    tradingview_alerts.py); DELETE must catch AlertError the same way PUT
+    does, not let it escape as an uncaught 500."""
+    client, org_id, seed = org_client
+    r = client.delete(f"/api/orgs/{org_id}/risk-rules/AB", headers=_csrf(client))
+    assert r.status_code == 400
+
+
 def test_viewer_role_cannot_write(org_client, make_user, login_as, db):
     """org_client's own user is already an org "admin" (make_org seeds it that
     way); to exercise a lower role we add a second user as "viewer" directly,

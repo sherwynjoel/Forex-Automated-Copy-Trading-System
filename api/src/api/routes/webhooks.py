@@ -989,7 +989,10 @@ def create_webhook_settings_router() -> APIRouter:
     async def delete_risk_rule(symbol: str,
                                ctx: OrgContext = Depends(require_org_role("admin")),
                                conn: psycopg.Connection = Depends(get_conn)):
-        clean_symbol = normalise_ticker(symbol)
+        try:
+            clean_symbol = normalise_ticker(symbol)
+        except AlertError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
         conn.execute("DELETE FROM org_risk_rules WHERE org_id = %s AND symbol = %s",
                     (ctx.org_id, clean_symbol))
         audit(conn, ctx.org_id, ctx.user_email, "risk_rule_deleted", {"symbol": clean_symbol})
