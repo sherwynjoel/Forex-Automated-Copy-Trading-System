@@ -5,10 +5,15 @@ coverage) -- a real CopierApp with its repo/registries stubbed, asserting
 on what amend_position_sltp was called with.
 
 Accessor names: mt5_registry.position_price(account_id, position_id) and
-tracker.position_current_price(position_id) are the REAL methods added to
-MT5Registry (copier/src/copier/mt5/registry.py) and AccountStateTracker
-(copier/src/copier/engine/state.py) for this task -- neither class had a
-direct by-position price lookup before. See _current_position_price below.
+tracker.position_current_price(account_id, position_id) are the REAL
+methods added to MT5Registry (copier/src/copier/mt5/registry.py) and
+AccountStateTracker (copier/src/copier/engine/state.py) for this task --
+neither class had a direct by-position price lookup before. Both are
+scoped by account_id: cTrader position ids are broker-assigned per
+account, not globally unique, and one org's tracker holds both the
+master's and every slave's positions in the same dict, so an unscoped
+lookup could return another account's price for a colliding id. See
+_current_position_price below.
 """
 from unittest.mock import MagicMock, patch
 from copier.main import CopierApp
@@ -51,6 +56,9 @@ def test_a_position_past_trail_start_gets_amended():
     app.amend_position_sltp.assert_called_once_with(10, 1, 4205.0, 4400.0, actor="risk-engine")
     app.repo.upsert_trailing_state.assert_called_once_with(
         account_id=10, position_id=1, best_price=4212.0, current_stop=4205.0)
+    # The price lookup must be scoped to the position's OWN account, not a
+    # global by-id scan (see test_state.py's dedicated collision test).
+    app.state_trackers[1].position_current_price.assert_called_once_with(10, 1)
 
 
 def test_a_position_not_found_live_is_cleaned_up():
@@ -78,3 +86,21 @@ def test_a_failing_amend_does_not_stop_the_rest_of_the_tick():
     app.check_trailing_stops()  # must not raise
 
     assert app.amend_position_sltp.call_count == 2
+
+
+def test_a_failure_loading_the_trailing_rows_themselves_does_not_crash_the_loop():
+    """load_all_trailing_state_rows() sits OUTSIDE _check_one_trailing_position's
+    per-position guard -- it must be guarded on its own. Repo._connect()
+    names a killed idle connection as an expected failure mode; if that
+    propagated out of check_trailing_stops, it would fail the LoopingCall's
+    Deferred and permanently stop trailing for every account, which is
+    worse than the failure mode the per-position guard protects against."""
+    app = CopierApp.__new__(CopierApp)
+    app.repo = MagicMock()
+    app.repo.load_all_trailing_state_rows = MagicMock(
+        side_effect=Exception("connection killed"))
+    app.amend_position_sltp = MagicMock()
+
+    app.check_trailing_stops()  # must not raise
+
+    app.amend_position_sltp.assert_not_called()

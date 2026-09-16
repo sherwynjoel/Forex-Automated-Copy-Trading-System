@@ -3169,15 +3169,22 @@ class CopierApp:
         favourably, using the same amend_position_sltp a person uses
         from the Trade page -- which already propagates to every slave.
         Never raises: a LoopingCall whose Deferred fails stops looping
-        permanently, and one bad price read or one failed amend must not
-        silently end trailing for every other open position for the rest
-        of the process's life."""
-        for state in self.repo.load_all_trailing_state_rows():
-            try:
-                self._check_one_trailing_position(state)
-            except Exception:
-                log.exception("trailing check failed for account %s position %s",
-                              state.account_id, state.position_id)
+        permanently. The outer guard covers load_all_trailing_state_rows()
+        itself -- a killed idle connection is a named failure mode of
+        Repo._connect() -- the same way check_mt5_offline's single
+        try/except covers its own initial load_accounts() call. The inner
+        guard is additionally kept per-position: one bad price read or one
+        failed amend must not silently end trailing for every OTHER open
+        position for the rest of the process's life."""
+        try:
+            for state in self.repo.load_all_trailing_state_rows():
+                try:
+                    self._check_one_trailing_position(state)
+                except Exception:
+                    log.exception("trailing check failed for account %s position %s",
+                                  state.account_id, state.position_id)
+        except Exception:
+            log.exception("trailing check tick failed")
 
     def _check_one_trailing_position(self, state) -> None:
         current_price = self._current_position_price(state.account_id, state.position_id)
@@ -3217,14 +3224,21 @@ class CopierApp:
     def _current_position_price(self, account_id: int, position_id: int) -> float | None:
         """One position's live current price, cTrader or MT5. No single
         existing helper covers both platforms -- branches the same way
-        the rest of this class already does via _is_mt5."""
+        the rest of this class already does via _is_mt5.
+
+        account_id is passed all the way through on the cTrader side too:
+        one org's tracker holds BOTH the master's and every slave's
+        positions in the same dict, and cTrader position ids are
+        broker-assigned per account, not globally unique -- an unscoped
+        by-id lookup could return another account's price for a colliding
+        id, which would then be applied to THIS account's real position."""
         if self._is_mt5(account_id):
             return self.mt5_registry.position_price(account_id, position_id)
         org_id = self.repo.get_org_for_account(account_id)
         tracker = self.state_trackers.get(org_id)
         if tracker is None:
             return None
-        return tracker.position_current_price(position_id)
+        return tracker.position_current_price(account_id, position_id)
 
 
 # ---------- composition ----------
