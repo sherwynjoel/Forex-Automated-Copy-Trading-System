@@ -54,6 +54,27 @@ class AccountRow:
     platform: str = "ctrader"
 
 
+@dataclass(frozen=True)
+class RiskRule:
+    """One org's configured risk rule for one symbol (org_risk_rules)."""
+    org_id: int
+    symbol: str
+    stop_points: float | None
+    target_points: float | None
+    trailing_enabled: bool
+    trail_start_points: float | None
+    trail_step_points: float | None
+
+
+@dataclass(frozen=True)
+class TrailingState:
+    """The trailing ratchet's memory for one tracked position (position_trailing_state)."""
+    account_id: int
+    position_id: int
+    best_price: float
+    current_stop: float
+
+
 def _deal_row(account_id: int, org_id: int | None, d: dict) -> dict:
     """One `deals` row from a queries._map_deal-shaped dict.
 
@@ -1928,3 +1949,64 @@ class Repo:
                         continue
                     created.append(name)
         return created
+
+    def load_risk_rule(self, org_id: int, symbol: str) -> RiskRule | None:
+        """The org's configured risk rule for one symbol, if any. None
+        means: no default stop/target, no trailing -- this feature adds
+        nothing for that symbol."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT org_id, symbol, stop_points, target_points, "
+                "trailing_enabled, trail_start_points, trail_step_points "
+                "FROM org_risk_rules WHERE org_id = %s AND symbol = %s",
+                (org_id, symbol),
+            ).fetchone()
+        if not row:
+            return None
+        return RiskRule(org_id=row[0], symbol=row[1], stop_points=row[2],
+                        target_points=row[3], trailing_enabled=row[4],
+                        trail_start_points=row[5], trail_step_points=row[6])
+
+    def upsert_trailing_state(self, account_id: int, position_id: int,
+                              best_price: float, current_stop: float) -> None:
+        """Create or overwrite one position's trailing memory."""
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO position_trailing_state "
+                "(account_id, position_id, best_price, current_stop, updated_at) "
+                "VALUES (%s, %s, %s, %s, now()) "
+                "ON CONFLICT (account_id, position_id) DO UPDATE SET "
+                "best_price = EXCLUDED.best_price, current_stop = EXCLUDED.current_stop, "
+                "updated_at = now()",
+                (account_id, position_id, best_price, current_stop),
+            )
+
+    def load_trailing_state(self, account_id: int, position_id: int) -> TrailingState | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT account_id, position_id, best_price, current_stop "
+                "FROM position_trailing_state WHERE account_id = %s AND position_id = %s",
+                (account_id, position_id),
+            ).fetchone()
+        if not row:
+            return None
+        return TrailingState(account_id=row[0], position_id=row[1],
+                             best_price=row[2], current_stop=row[3])
+
+    def delete_trailing_state(self, account_id: int, position_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM position_trailing_state WHERE account_id = %s AND position_id = %s",
+                (account_id, position_id),
+            )
+
+    def load_all_trailing_state_rows(self) -> list[TrailingState]:
+        """Every currently-tracked position, across every org and
+        account -- what the trailing LoopingCall sweeps each tick."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT account_id, position_id, best_price, current_stop "
+                "FROM position_trailing_state"
+            ).fetchall()
+        return [TrailingState(account_id=r[0], position_id=r[1],
+                              best_price=r[2], current_stop=r[3]) for r in rows]
