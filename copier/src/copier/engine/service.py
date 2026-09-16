@@ -26,7 +26,7 @@ from copier.ctrader.symbols import by_id as symbols_by_id
 from copier.db.repo import Repo, MappingNotFound
 from copier.domain.models import (
     MANUAL_ORDER_LABEL, SymbolInfo, MasterEvent, MasterPendingFilled, AmendPositionSLTP,
-    MasterPositionOpened, MasterPositionClosed, MasterPositionSLTPAmended)
+    MasterPositionOpened, MasterPositionClosed, MasterPositionSLTPAmended, Side)
 from copier.domain.decision import decide
 from copier.engine.capture import execution_row
 from copier.engine.normalize import normalize
@@ -138,6 +138,19 @@ class CopierService:
         # was live at fill time. None in unit tests, where a capture then
         # records a null quote rather than failing.
         self.state_tracker_provider: Callable[[int], object | None] | None = None
+
+        # Set by build_app() to CopierApp.amend_position_sltp, same pattern
+        # as the two callbacks above. _apply_risk_engine's fill-in amend
+        # protects the operator's OWN master position -- not a copy -- so
+        # it must reach the broker regardless of that org's copying_enabled/
+        # dry_run gates, exactly like the trailing loop's amends and the
+        # manual Trade-page amend button (main.py's amend_position_sltp
+        # bypasses Dispatcher.dispatch() entirely via send_direct/mt5_lane,
+        # and is also the only path that correctly routes an MT5 master's
+        # amend through the MT5 outbox rather than building a cTrader
+        # protobuf request for an account with no cTrader client). None in
+        # unit tests that do not exercise the fill-in amend.
+        self.master_amend_sltp: Callable[..., dict] | None = None
 
         # master position id -> (stop_loss, take_profit) currently on it.
         # See _remember_master_protection for the race this exists to close.
@@ -416,7 +429,7 @@ class CopierService:
                 evt.deal.executionTimestamp or None,
             )
 
-        self._after_master_event(org_id, normalized)
+        self._after_master_event(org_id, master_account_id, normalized)
 
     def act_on_master_event(self, org_id: int, master_account_id: int,
                             normalized: MasterEvent, *, source: str) -> None:
@@ -431,7 +444,7 @@ class CopierService:
         payload = {'source': source, 'normalized': type(normalized).__name__}
         self._decide_dispatch_audit(org_id, master_account_id, normalized, routing,
                                     payload, start_time)
-        self._after_master_event(org_id, normalized)
+        self._after_master_event(org_id, master_account_id, normalized)
 
     def _decide_dispatch_audit(self, org_id: int, master_account_id: int,
                                normalized: MasterEvent, routing: OrgRouting,
@@ -477,13 +490,91 @@ class CopierService:
             log.exception(
                 "master_event audit write failed (copy already dispatched)")
 
-    def _after_master_event(self, org_id: int, normalized: MasterEvent) -> None:
+    def _after_master_event(self, org_id: int, master_account_id: int,
+                            normalized: MasterEvent) -> None:
         # Schedule pending fill alert if this is a pending fill
         if isinstance(normalized, MasterPendingFilled):
             self._schedule_pending_fill_check(org_id, normalized)
 
+        self._apply_risk_engine(org_id, master_account_id, normalized)
+
         # The master's positions/orders just changed; let /state catch up now.
         self._notify_positions_changed(org_id)
+
+    def _apply_risk_engine(self, org_id: int, master_account_id: int,
+                           normalized: MasterEvent) -> None:
+        """Fill in a configured symbol's default stop/target on a bare
+        open, and track/clear trailing state -- the server-side half of
+        every indicator getting protection, not just the two Pine bots
+        that compute their own. See
+        docs/superpowers/specs/2026-09-16-server-side-risk-engine-design.md.
+
+        Runs AFTER decide/dispatch/audit (called from _after_master_event,
+        itself always last): the copy fan-out to every slave is never
+        delayed or risked by this step.
+        """
+        if isinstance(normalized, MasterPositionClosed):
+            if normalized.remaining_volume == 0:
+                self._repo.delete_trailing_state(
+                    account_id=master_account_id, position_id=normalized.position_id)
+            return
+
+        if not isinstance(normalized, MasterPositionOpened):
+            return
+
+        rule = self._repo.load_risk_rule(org_id, normalized.symbol_name)
+        if rule is None:
+            return
+
+        entry = normalized.entry_price
+        if entry is None:
+            return  # no fill price to measure a *_points distance from
+
+        side_sign = 1 if normalized.side == Side.BUY else -1
+        stop_loss = normalized.stop_loss
+        if stop_loss is None and rule.stop_points is not None:
+            stop_loss = entry - side_sign * rule.stop_points
+        take_profit = normalized.take_profit
+        if take_profit is None and rule.target_points is not None:
+            take_profit = entry + side_sign * rule.target_points
+
+        if (stop_loss, take_profit) != (normalized.stop_loss, normalized.take_profit):
+            # Deliberately NOT self._dispatcher.dispatch(): this protects the
+            # operator's OWN master position, not a copy, so it must reach
+            # the broker regardless of copying_enabled/dry_run -- the same
+            # reasoning that already routes the trailing loop's amends and
+            # the manual Trade-page button through amend_position_sltp
+            # instead of the copy-gated dispatch path. See
+            # CopierService.__init__'s master_amend_sltp docstring.
+            if self.master_amend_sltp is None:
+                log.warning(
+                    "risk engine: no master_amend_sltp wired; cannot fill in "
+                    "protection for master position %s on account %s",
+                    normalized.position_id, master_account_id)
+            else:
+                try:
+                    self.master_amend_sltp(
+                        master_account_id, normalized.position_id,
+                        stop_loss, take_profit, actor="risk-engine")
+                except Exception:
+                    log.exception(
+                        "risk engine: could not amend master position %s on account %s",
+                        normalized.position_id, master_account_id)
+
+        # NOTE (known gap, left as-is -- see final-review-fix-report.md):
+        # trailing_enabled=True with stop_points=None and no stop of its
+        # own on the alert leaves stop_loss None here, so neither a
+        # protective stop nor trailing state is ever seeded for that
+        # position. No error, nothing visible. Mirroring
+        # trail_start_points/trail_step_points's already-required-together
+        # validation onto stop_points would need an API-layer change
+        # (api/src/api/routes/webhooks.py's put_risk_rule) affecting
+        # already-configured rules, which is out of scope for this fix
+        # wave; documented here for a future pass.
+        if rule.trailing_enabled and stop_loss is not None:
+            self._repo.upsert_trailing_state(
+                account_id=master_account_id, position_id=normalized.position_id,
+                best_price=entry, current_stop=stop_loss)
 
     def _schedule_pending_fill_check(
         self, org_id: int, pending_filled: MasterPendingFilled

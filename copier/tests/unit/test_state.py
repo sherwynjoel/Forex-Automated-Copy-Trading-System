@@ -80,6 +80,47 @@ def test_snapshot_equity_is_balance_plus_open_pnl():
     assert account_state["equity"] == pytest.approx(1500.0)
 
 
+def test_position_current_price_is_scoped_by_account_not_a_global_id_scan():
+    """cTrader position ids are broker-assigned PER ACCOUNT, not globally
+    unique, and one org's tracker holds BOTH the master's and every
+    slave's positions in the same dict (main.py's engine wiring calls
+    set_positions once for the master and once per slave). Two different
+    accounts that happen to hold the same numeric position_id must each
+    resolve to their OWN price -- an unscoped scan could otherwise hand a
+    trailing check for one account the other account's (possibly
+    wrong-symbol) price."""
+    sdk, clock = StubSdk(), Clock()
+    client = CTraderClient(sdk, "cid", "csecret", clock=clock)
+    client.start()
+    sdk.connect()
+
+    class MockRepo:
+        pass
+
+    symbols = {
+        1: SymbolInfo(symbol_id=1, name="EURUSD", digits=5,
+                     lot_size=10_000_000, min_volume=100_000, step_volume=100_000),
+        2: SymbolInfo(symbol_id=2, name="GBPUSD", digits=5,
+                     lot_size=10_000_000, min_volume=100_000, step_volume=100_000),
+    }
+    tracker = AccountStateTracker(client, MockRepo(), 1001, symbols)
+
+    # Master (1001) and a slave (2002) each hold a position with the SAME
+    # numeric id (77), on different symbols with different live prices.
+    tracker._positions[1001] = [
+        PositionSnapshot(position_id=77, symbol_id=1, side=Side.BUY,
+                        volume=10_000_000, price=1.1000, label="")]
+    tracker._positions[2002] = [
+        PositionSnapshot(position_id=77, symbol_id=2, side=Side.BUY,
+                        volume=10_000_000, price=1.3000, label="")]
+    tracker._spots = {1: (1.1050, 1.1052), 2: (1.3100, 1.3102)}
+
+    assert tracker.position_current_price(1001, 77) == 1.1050
+    assert tracker.position_current_price(2002, 77) == 1.3100
+    assert tracker.position_current_price(9999, 77) is None  # unknown account
+    assert tracker.position_current_price(1001, 999) is None  # unknown position for that account
+
+
 def test_spot_event_updates_pnl_with_5_digit_symbol():
     """on_spot callback updates open P&L calculations with 5-digit scaling."""
     sdk, clock = StubSdk(), Clock()

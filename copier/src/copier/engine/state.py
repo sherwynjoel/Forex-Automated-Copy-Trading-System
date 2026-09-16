@@ -341,6 +341,32 @@ class AccountStateTracker:
                 out[info.name] = {"bid": bid, "ask": ask}
         return out
 
+    def position_current_price(self, account_id: int, position_id: int) -> float | None:
+        """One position's live marking price, scoped to its account -- the
+        same value snapshot()'s per-position `current_price` field carries
+        (BUY closes at bid, SELL at ask; None before that side's first
+        tick), without the caller having to walk every account's snapshot
+        for one lookup. None also when no open position with this id is
+        tracked for THIS account, which is how the trailing check loop
+        notices a position has closed.
+
+        Scoped by account_id (unlike a bare by-id scan of self._positions)
+        because this tracker holds BOTH the master's and every slave's
+        positions in the same dict, and cTrader position ids are
+        broker-assigned per account, not globally unique -- a slave could
+        hold a position whose id happens to collide with a master's, and
+        an unscoped lookup could hand back the wrong (possibly
+        wrong-symbol) price for whichever account is being trailed.
+        """
+        for pos in self._positions.get(account_id, []):
+            if pos.position_id != position_id:
+                continue
+            if pos.symbol_id not in self._symbols_by_id:
+                return None
+            raw_bid, raw_ask = self._spots.get(pos.symbol_id, (None, None))
+            return raw_bid if pos.side.value == "BUY" else raw_ask
+        return None
+
     def snapshot(self) -> dict[int, dict[str, Any]]:
         """Return current state snapshot.
 

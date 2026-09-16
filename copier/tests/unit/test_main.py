@@ -448,9 +448,10 @@ def test_boot_composes_without_crashing_and_binds_all_interfaces(db, fernet_key)
     assert call["interface"] != "127.0.0.1"
     # startup + token-refresh loop + balance-refresh loop (N9) + resync
     # loop + cutoff-reminder loop + commission-refresh loop +
-    # partition-maintenance loop + deal-backfill loop + MT5 offline check
-    # were scheduled, not run inline (no reactor loop here).
-    assert len(fake_reactor.callWhenRunning_calls) == 9
+    # partition-maintenance loop + deal-backfill loop + MT5 offline check +
+    # trailing check loop were scheduled, not run inline (no reactor loop
+    # here).
+    assert len(fake_reactor.callWhenRunning_calls) == 10
     assert app.mt5_offline_call.interval is None       # not started until the reactor runs
     assert app.balance_refresh_call.interval is None   # not started until the reactor runs
     assert app.resync_call.interval is None            # not started until the reactor runs
@@ -460,6 +461,7 @@ def test_boot_composes_without_crashing_and_binds_all_interfaces(db, fernet_key)
     assert app.commission_refresh_call.interval is None
     assert app.partition_call.interval is None
     assert app.deal_backfill_call.interval is None
+    assert app.trailing_check_call.interval is None    # not started until the reactor runs
     # The writer's drain is registered as a shutdown trigger, so a clean
     # restart loses nothing that was still queued.
     assert len(fake_reactor.addSystemEventTrigger_calls) == 1
@@ -710,6 +712,19 @@ def test_build_app_wires_the_position_change_hook(db, fernet_key):
     token_store = TokenStore(db, fernet_key)
     app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
     assert app.service.on_positions_changed == app.request_resync
+
+
+def test_build_app_wires_the_master_amend_hook(db, fernet_key):
+    """The risk engine's fill-in amend (service._apply_risk_engine) must be
+    attached to app.amend_position_sltp -- the same gate-bypassing,
+    platform-routed path the trailing loop and the manual Trade-page amend
+    button already use -- not left unwired (which would silently no-op
+    every fill-in amend) or routed through the copy-gated dispatcher."""
+    seed_db(db, fernet_key)
+    repo = Repo(db)
+    token_store = TokenStore(db, fernet_key)
+    app = main.build_app(repo, token_store, make_stub_client_factory(), shards=1)
+    assert app.service.master_amend_sltp == app.amend_position_sltp
 
 
 # ---------- /health ----------

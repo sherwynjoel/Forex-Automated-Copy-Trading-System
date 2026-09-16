@@ -54,6 +54,33 @@ class AccountRow:
     platform: str = "ctrader"
 
 
+@dataclass(frozen=True)
+class RiskRule:
+    """One org's configured risk rule for one symbol (org_risk_rules)."""
+    org_id: int
+    symbol: str
+    stop_points: float | None
+    target_points: float | None
+    trailing_enabled: bool
+    trail_start_points: float | None
+    trail_step_points: float | None
+
+
+@dataclass(frozen=True)
+class TrailingState:
+    """The trailing ratchet's memory for one tracked position (position_trailing_state)."""
+    account_id: int
+    position_id: int
+    best_price: float
+    current_stop: float
+    # When this row was last written. upsert_trailing_state refreshes it on
+    # every successful tick, so its age is exactly "how long has this
+    # position gone without a resolvable price" -- what the trailing loop's
+    # staleness check keys off (main.py, TRAILING_STATE_STALE_AFTER_S).
+    # Optional/defaulted so existing direct constructions (tests) keep working.
+    updated_at: datetime | None = None
+
+
 def _deal_row(account_id: int, org_id: int | None, d: dict) -> dict:
     """One `deals` row from a queries._map_deal-shaped dict.
 
@@ -1928,3 +1955,165 @@ class Repo:
                         continue
                     created.append(name)
         return created
+
+    def load_risk_rule(self, org_id: int, symbol: str) -> RiskRule | None:
+        """The org's configured risk rule for one symbol, if any. None
+        means: no default stop/target, no trailing -- this feature adds
+        nothing for that symbol."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT org_id, symbol, stop_points, target_points, "
+                "trailing_enabled, trail_start_points, trail_step_points "
+                "FROM org_risk_rules WHERE org_id = %s AND symbol = %s",
+                (org_id, symbol),
+            ).fetchone()
+        if not row:
+            return None
+        return RiskRule(org_id=row[0], symbol=row[1], stop_points=row[2],
+                        target_points=row[3], trailing_enabled=row[4],
+                        trail_start_points=row[5], trail_step_points=row[6])
+
+    def upsert_trailing_state(self, account_id: int, position_id: int,
+                              best_price: float, current_stop: float) -> None:
+        """Create or overwrite one position's trailing memory."""
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO position_trailing_state "
+                "(account_id, position_id, best_price, current_stop, updated_at) "
+                "VALUES (%s, %s, %s, %s, now()) "
+                "ON CONFLICT (account_id, position_id) DO UPDATE SET "
+                "best_price = EXCLUDED.best_price, current_stop = EXCLUDED.current_stop, "
+                "updated_at = now()",
+                (account_id, position_id, best_price, current_stop),
+            )
+
+    def load_trailing_state(self, account_id: int, position_id: int) -> TrailingState | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT account_id, position_id, best_price, current_stop, updated_at "
+                "FROM position_trailing_state WHERE account_id = %s AND position_id = %s",
+                (account_id, position_id),
+            ).fetchone()
+        if not row:
+            return None
+        return TrailingState(account_id=row[0], position_id=row[1],
+                             best_price=row[2], current_stop=row[3], updated_at=row[4])
+
+    def delete_trailing_state(self, account_id: int, position_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM position_trailing_state WHERE account_id = %s AND position_id = %s",
+                (account_id, position_id),
+            )
+
+    def load_all_trailing_state_rows(self) -> list[TrailingState]:
+        """Every currently-tracked position, across every org and
+        account -- what the trailing LoopingCall sweeps each tick."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT account_id, position_id, best_price, current_stop, updated_at "
+                "FROM position_trailing_state"
+            ).fetchall()
+        return [TrailingState(account_id=r[0], position_id=r[1],
+                              best_price=r[2], current_stop=r[3], updated_at=r[4]) for r in rows]
+
+    # ---------- trailing check loop (Task 5) ----------
+
+    def get_org_for_account(self, account_id: int) -> int | None:
+        """Same lookup as org_for_account, kept under this name so the
+        trailing check loop's repo calls read consistently alongside the
+        other three lookups added here (get_position_side_and_entry,
+        load_risk_rule_for_position, load_position_protection). Deliberately
+        not routed through anything cached: see org_for_account's own
+        docstring for why."""
+        return self.org_for_account(account_id)
+
+    def get_position_side_and_entry(
+        self, account_id: int, position_id: int
+    ) -> tuple[str, float] | None:
+        """One open position's side and entry price.
+
+        Reads the `positions` table -- the same live cache upsert_positions
+        keeps current from every resync, for cTrader AND MT5 alike (the MT5
+        registry's own _persist calls the identical upsert_positions), so
+        this needs no per-platform branch the way a reconciler walk would.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT side, entry_price FROM positions "
+                "WHERE account_id = %s AND position_id = %s AND status = 'open'",
+                (account_id, position_id),
+            ).fetchone()
+        if not row:
+            return None
+        return (row[0], row[1])
+
+    def load_risk_rule_for_position(
+        self, account_id: int, position_id: int
+    ) -> RiskRule | None:
+        """The configured risk rule for whatever org/symbol this position
+        currently belongs to -- org_risk_rules joined through the same
+        `positions` row get_position_side_and_entry reads, rather than a
+        second, independent way of resolving a position's org and symbol.
+
+        positions.symbol is NOT guaranteed to already be canonical.
+        org_risk_rules.symbol is always the canonical name (normalise_ticker,
+        e.g. "XAUUSD"). MasterPositionOpened.symbol_name -- what
+        CopierService._apply_risk_engine matches the rule against at fill
+        time -- is canonicalized on the way in (mt5/ingress.py's
+        `canonical()` helper maps the broker's name through symbol_aliases
+        before the event is even built). positions.symbol, by contrast, is
+        written by upsert_positions straight from SymbolInfo.name, which
+        for an MT5 account is keyed by the account's OWN broker-side symbol
+        map (MT5Registry.symbols_by_name) -- so an MT5 account with a
+        configured alias (symbol_aliases: canonical "XAUUSD" -> broker
+        "XAUUSDm") keeps the broker's suffixed name in positions.symbol.
+        A raw `r.symbol = p.symbol` join would then silently never match
+        for that position, even though the fill-time fill-in found the
+        rule just fine -- trailing would never activate, with nothing
+        visible anywhere.
+
+        Resolved here the same way: look up the position's symbol in
+        symbol_aliases (scoped to ITS OWN account_id -- the same broker
+        name can mean a different instrument on a different account/
+        broker) and use the canonical name if an alias row exists, else
+        fall back to positions.symbol unchanged -- which is already
+        correct for a cTrader account (no symbol_aliases rows exist at
+        all) and for an MT5 symbol with no configured alias (broker name
+        already equals canonical)."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT r.org_id, r.symbol, r.stop_points, r.target_points, "
+                "r.trailing_enabled, r.trail_start_points, r.trail_step_points "
+                "FROM positions p "
+                "JOIN org_risk_rules r ON r.org_id = p.org_id "
+                "AND r.symbol = COALESCE("
+                "  (SELECT sa.canonical FROM symbol_aliases sa "
+                "   WHERE sa.account_id = p.account_id AND sa.broker_name = p.symbol), "
+                "  p.symbol) "
+                "WHERE p.account_id = %s AND p.position_id = %s AND p.status = 'open'",
+                (account_id, position_id),
+            ).fetchone()
+        if not row:
+            return None
+        return RiskRule(org_id=row[0], symbol=row[1], stop_points=row[2],
+                        target_points=row[3], trailing_enabled=row[4],
+                        trail_start_points=row[5], trail_step_points=row[6])
+
+    def load_position_protection(
+        self, account_id: int, position_id: int
+    ) -> tuple[float | None, float | None] | None:
+        """One open position's current (stop_loss, take_profit), straight
+        from the positions table -- so the trailing loop's amend always
+        carries the position's ACTUAL take-profit rather than guessing at
+        (or dropping) the half of the protection it did not just compute.
+        amend_position_sltp's contract removes whichever side is omitted."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT stop_loss, take_profit FROM positions "
+                "WHERE account_id = %s AND position_id = %s AND status = 'open'",
+                (account_id, position_id),
+            ).fetchone()
+        if not row:
+            return None
+        return (row[0], row[1])

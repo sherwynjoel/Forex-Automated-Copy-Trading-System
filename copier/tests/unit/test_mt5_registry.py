@@ -198,6 +198,27 @@ class TestAccountBlock:
         }
 
 
+class TestPositionPrice:
+    """position_price: the by-id price lookup the trailing check loop uses
+    (main.py's CopierApp._current_position_price)."""
+
+    def test_a_real_ticket_returns_its_current_price(self, world):
+        repo, org_id, mt5_id, registry = world
+        registry.update_from_hello(mt5_id, org_id, _hello([EURUSD]), now=1.0)
+        registry.update_from_sync(mt5_id, org_id, report([position(7001, price=1.102)]), now=2.0)
+        assert registry.position_price(mt5_id, 7001) == 1.102
+
+    def test_an_unknown_ticket_is_none(self, world):
+        repo, org_id, mt5_id, registry = world
+        registry.update_from_hello(mt5_id, org_id, _hello([EURUSD]), now=1.0)
+        registry.update_from_sync(mt5_id, org_id, report([position(7001)]), now=2.0)
+        assert registry.position_price(mt5_id, 9999) is None
+
+    def test_no_report_yet_is_none(self, world):
+        _repo, _org_id, mt5_id, registry = world
+        assert registry.position_price(mt5_id, 1) is None
+
+
 class TestOnline:
     def test_online_within_the_window_offline_after(self, world):
         repo, org_id, mt5_id, registry = world
@@ -253,6 +274,22 @@ class TestNettingMasterViews:
                  p["entry_price"], p["stop_loss"]) for p in block["positions"]] == [
             (1, 50, 50.0, 2410.0, 2400.4, 2390.0), (2, 30, 30.0, 2410.0, 2400.4, 2390.0)]
         assert [p["position_id"] for p in registry.account_block(mt5_id)["positions"]] == [5]
+
+    def test_position_price_resolves_a_virtual_id_from_the_underlying_net_position(self, world):
+        """A netting master's MasterPositionOpened events (ledger.apply_deal)
+        carry the VIRTUAL id, so position_trailing_state can hold one for a
+        netting master -- but a virtual id is never a ticket in
+        state.report.positions (one real position per symbol). The trailing
+        check loop must resolve it through the ledger, exactly the way
+        account_block's own _virtual_marks marks a virtual position: at the
+        underlying net position's current_price."""
+        repo, org_id, mt5_id, registry = self._netting_master(world)
+        assert registry.position_price(mt5_id, 1) == 2410.0
+        assert registry.position_price(mt5_id, 2) == 2410.0
+        # The real ticket itself is still directly resolvable too.
+        assert registry.position_price(mt5_id, 5) == 2410.0
+        # Neither a real ticket nor a known virtual id.
+        assert registry.position_price(mt5_id, 999) is None
 
     def test_persist_writes_the_virtual_book_not_the_net_ticket(self, world):
         repo, org_id, mt5_id, registry = self._netting_master(world)

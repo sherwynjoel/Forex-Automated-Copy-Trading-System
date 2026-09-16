@@ -41,6 +41,12 @@ def db(database):
             "TRUNCATE events, portfolio_snapshots, mappings, symbol_cache, "
             "symbol_commission, "
             "executions, positions, deals, deal_backfill_state, balance_samples, "
+            # position_trailing_state carries no foreign key to accounts/orgs
+            # (by design -- see the migration), so TRUNCATE ... CASCADE from
+            # those tables never reaches it; it must be listed explicitly or
+            # rows leak across tests whenever two tests don't happen to
+            # reuse the same (account_id, position_id).
+            "position_trailing_state, "
             "accounts, ctid_connections, "
             "org_invites, org_memberships, orgs, users "
             "RESTART IDENTITY CASCADE"

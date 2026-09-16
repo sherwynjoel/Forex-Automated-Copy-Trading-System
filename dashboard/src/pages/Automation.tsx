@@ -5,7 +5,7 @@ import { useOrg } from '../lib/org'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
 import Banner from '../components/Banner'
 import ConfirmDialog from '../components/ConfirmDialog'
-import type { WebhookReceipt, WebhookSettings, WebhookSecret } from '../lib/types'
+import type { WebhookReceipt, WebhookSettings, WebhookSecret, RiskRule } from '../lib/types'
 
 const POLL_MS = 5000
 
@@ -34,6 +34,10 @@ export default function Automation() {
   const [confirmRotate, setConfirmRotate] = useState(false)
   const [draft, setDraft] = useState({ max_lots: '', max_per_minute: '', max_open_positions: '' })
   const [tfDraft, setTfDraft] = useState<string[] | null>(null)
+  const [riskRules, setRiskRules] = useState<RiskRule[]>([])
+  const [newRule, setNewRule] = useState({ symbol: '', stop_points: '', target_points: '',
+                                           trailing_enabled: false, trail_start_points: '',
+                                           trail_step_points: '' })
 
   const refresh = useCallback(async () => {
     try {
@@ -45,6 +49,7 @@ export default function Automation() {
         max_open_positions: d.max_open_positions === '' ? String(s.max_open_positions) : d.max_open_positions,
       }))
       setTfDraft((current) => current ?? s.vt_ltf_timeframes)
+      setRiskRules(await orgApi<RiskRule[]>(orgId, 'risk-rules'))
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load automation settings')
     }
@@ -118,6 +123,42 @@ export default function Automation() {
 
   const saveTimeframes = async () => {
     await put({ vt_ltf_timeframes: tfDraft ?? [] }, 'Entry timeframes saved.')
+  }
+
+  const addRiskRule = async () => {
+    const symbol = newRule.symbol.trim().toUpperCase()
+    if (!symbol) return
+    const body = {
+      stop_points: newRule.stop_points ? Number(newRule.stop_points) : null,
+      target_points: newRule.target_points ? Number(newRule.target_points) : null,
+      trailing_enabled: newRule.trailing_enabled,
+      trail_start_points: newRule.trail_start_points ? Number(newRule.trail_start_points) : null,
+      trail_step_points: newRule.trail_step_points ? Number(newRule.trail_step_points) : null,
+    }
+    setBusy(true); setError(null); setNotice(null)
+    try {
+      const saved = await orgApi<RiskRule>(orgId, `risk-rules/${symbol}`, {
+        method: 'PUT', body: JSON.stringify(body) })
+      setRiskRules(prev => [...prev.filter(r => r.symbol !== saved.symbol), saved])
+      setNewRule({ symbol: '', stop_points: '', target_points: '',
+                  trailing_enabled: false, trail_start_points: '', trail_step_points: '' })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save the risk rule')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const removeRiskRule = async (symbol: string) => {
+    setBusy(true); setError(null); setNotice(null)
+    try {
+      await orgApi(orgId, `risk-rules/${symbol}`, { method: 'DELETE' })
+      setRiskRules(prev => prev.filter(r => r.symbol !== symbol))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not remove the risk rule')
+    } finally {
+      setBusy(false)
+    }
   }
 
   const copy = async (text: string, what: 'url' | 'template') => {
@@ -290,6 +331,100 @@ export default function Automation() {
             Save limits
           </button>
         )}
+      </section>
+
+      {/* ---------- symbol risk rules ---------- */}
+      <section className="rounded-lg border border-line bg-card p-5 space-y-4">
+        <h2 className="desk-label">Symbol Risk Rules</h2>
+        <p className="text-sm text-ink-soft">
+          For any alert that doesn't send its own stop/target, MirrorFleet fills these in.
+          An alert that already sends its own is always used as-is.
+        </p>
+        <table className="w-full text-sm">
+          <thead>
+            <tr>
+              <th className="text-left">Symbol</th>
+              <th className="text-left">Stop (points)</th>
+              <th className="text-left">Target (points)</th>
+              <th className="text-left">Trailing</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {riskRules.map(rule => (
+              <tr key={rule.symbol}>
+                <td>{rule.symbol}</td>
+                <td>{rule.stop_points ?? '—'}</td>
+                <td>{rule.target_points ?? '—'}</td>
+                <td>{rule.trailing_enabled ? 'On' : 'Off'}</td>
+                <td>
+                  {control && (
+                    <button aria-label={`remove ${rule.symbol.toLowerCase()}`}
+                            onClick={() => removeRiskRule(rule.symbol)}
+                            disabled={busy}
+                            className="px-2.5 py-1 text-xs font-medium rounded border border-line-strong text-ink-soft hover:text-loss hover:border-loss transition-colors disabled:opacity-50">
+                      Remove
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div className="flex gap-2 items-end flex-wrap">
+          <label className="block w-28">
+            <span className="desk-label block mb-1">Symbol</span>
+            <input aria-label="symbol" value={newRule.symbol}
+                   disabled={!control}
+                   onChange={e => setNewRule({ ...newRule, symbol: e.target.value })}
+                   className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink" />
+          </label>
+          <label className="block w-28">
+            <span className="desk-label block mb-1">Stop (points)</span>
+            <input aria-label="stop (points)" value={newRule.stop_points}
+                   disabled={!control}
+                   onChange={e => setNewRule({ ...newRule, stop_points: e.target.value })}
+                   className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink" />
+          </label>
+          <label className="block w-28">
+            <span className="desk-label block mb-1">Target (points)</span>
+            <input aria-label="target (points)" value={newRule.target_points}
+                   disabled={!control}
+                   onChange={e => setNewRule({ ...newRule, target_points: e.target.value })}
+                   className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink" />
+          </label>
+          <label className="flex items-center gap-2 text-sm text-ink">
+            <input type="checkbox" checked={newRule.trailing_enabled}
+                   disabled={!control}
+                   onChange={e => setNewRule({ ...newRule, trailing_enabled: e.target.checked })}
+                   className="h-4 w-4" />
+            Trailing
+          </label>
+          {newRule.trailing_enabled && (
+            <>
+              <label className="block w-32">
+                <span className="desk-label block mb-1">Start after (points)</span>
+                <input aria-label="start after (points)" value={newRule.trail_start_points}
+                       disabled={!control}
+                       onChange={e => setNewRule({ ...newRule, trail_start_points: e.target.value })}
+                       className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink" />
+              </label>
+              <label className="block w-32">
+                <span className="desk-label block mb-1">Step (points)</span>
+                <input aria-label="step (points)" value={newRule.trail_step_points}
+                       disabled={!control}
+                       onChange={e => setNewRule({ ...newRule, trail_step_points: e.target.value })}
+                       className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink" />
+              </label>
+            </>
+          )}
+          {control && (
+            <button onClick={addRiskRule} disabled={busy}
+                    className="px-4 py-2 text-sm font-semibold rounded bg-brand text-on-accent hover:bg-brand-deep disabled:opacity-50">
+              Add rule
+            </button>
+          )}
+        </div>
       </section>
 
       {/* ---------- entry timeframes ---------- */}

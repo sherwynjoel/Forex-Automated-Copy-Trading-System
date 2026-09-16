@@ -248,6 +248,40 @@ class MT5Registry:
                 "current_price": net.current_price if net is not None else None})
         return out
 
+    def position_price(self, account_id: int, position_id: int) -> float | None:
+        """One open position's live current price, straight from the
+        terminal's last report -- the same `current_price` field
+        account_block's `positions` list already exposes per position,
+        scoped to a single ticket. None when the account has no report yet
+        or no longer reports this ticket (or, for a netting master, no
+        longer reports the underlying net position -- see below), which is
+        how the trailing check loop notices a position has closed.
+
+        A netting master's own MasterPositionOpened events carry the
+        VIRTUAL position id (ledger.apply_deal's `vp.virtual_id`), so
+        position_trailing_state CAN hold a virtual id for a netting
+        master -- a virtual id is never a ticket in state.report.positions
+        (the terminal only ever reports ONE real position per symbol for a
+        netting account). Falls back to the ledger exactly the way
+        account_block's own _virtual_marks already marks a virtual
+        position: find it in net_ledger(account_id), then read
+        current_price off the real report position for THAT SYMBOL -- the
+        one actual terminal position the virtual one is a user-facing
+        slice of.
+        """
+        state = self._accounts.get(account_id)
+        if state is None or state.report is None:
+            return None
+        pos = next((p for p in state.report.positions if p.ticket == position_id), None)
+        if pos is not None:
+            return pos.current_price
+        vp = next((v for v in self.net_ledger(account_id).positions()
+                   if v.virtual_id == position_id), None)
+        if vp is None:
+            return None
+        net = next((p for p in state.report.positions if p.symbol == vp.symbol), None)
+        return net.current_price if net is not None else None
+
     def last_seen(self, account_id: int) -> float | None:
         state = self._accounts.get(account_id)
         return state.last_seen if state is not None else None

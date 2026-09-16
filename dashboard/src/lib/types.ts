@@ -243,6 +243,17 @@ export interface WebhookSettings {
   recent: WebhookReceipt[]
 }
 
+/** A per-symbol stop/target/trailing default the server fills in when an
+ *  alert doesn't send its own. */
+export interface RiskRule {
+  symbol: string
+  stop_points: number | null
+  target_points: number | null
+  trailing_enabled: boolean
+  trail_start_points: number | null
+  trail_step_points: number | null
+}
+
 /** Returned exactly once by POST .../webhook/secret. Hold it only while
  *  the reveal dialog is open. */
 export interface WebhookSecret {

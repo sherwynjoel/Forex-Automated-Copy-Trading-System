@@ -18,6 +18,23 @@
 - A symbol with no `org_risk_rules` row behaves identically to today — no default stop/target, no trailing. This feature only ever adds behavior for symbols the owner has explicitly configured.
 - No `LoopingCall` body may raise out of its top-level `try/except` — a failing tick must not stop future ticks (every existing loop in `copier/src/copier/main.py` follows this; the new one must too).
 
+## How tests actually run in this repo
+
+**Corrected during setup — do not use `docker compose run --rm <service> pytest`, it fails: the compose-built images are production-only and have no dev dependencies (no pytest).** The real convention (see `README.md`'s "Per-service test commands"): a local venv per service, against a Postgres reachable from the host. This worktree's own `postgres` is published on **`127.0.0.1:5434`** (not the repo's usual 5433 — that port is the main checkout's, already running, and would collide).
+
+One-time setup (already done for this worktree as of Task 1's dispatch — an implementer only needs this if a venv is somehow missing):
+```bash
+cd copier && python3 -m venv .venv && .venv/Scripts/pip install -e ".[dev]"   # Windows path; use .venv/bin/pip on Linux/Mac
+cd ../api && python3 -m venv .venv && .venv/Scripts/pip install -e ".[dev]"
+cd ../dashboard && npm install
+```
+
+Every `Run:` line below that says `docker compose run --rm copier python -m pytest ...` actually means:
+```bash
+cd copier && TEST_POSTGRES_ADMIN_DSN="postgresql://copytrader:copytrader@127.0.0.1:5434/copytrader" TEST_POSTGRES_DSN="postgresql://copytrader:copytrader@127.0.0.1:5434/copytrader_test" .venv/Scripts/pytest <same args>
+```
+And every `docker compose run --rm api python -m pytest ...` actually means the same, from `api/` instead of `copier/`. `docker compose run --rm dashboard npm test ...` actually means `cd dashboard && npm test <same args>` (no DB, no env vars needed). Use `.venv/bin/pytest` instead of `.venv/Scripts/pytest` on a Linux/Mac executor.
+
 ---
 
 ## Task 1: Database migration
@@ -669,6 +686,7 @@ git commit -m "feat(copier): fill in risk-rule defaults and seed trailing state 
 
 **Files:**
 - Modify: `copier/src/copier/main.py`
+- Modify: `copier/src/copier/db/repo.py` (four new methods: `get_org_for_account`, `get_position_side_and_entry`, `load_risk_rule_for_position`, `load_position_protection` — additive only, alongside Task 3's earlier additions to this same file, which already exist by the time this task runs)
 - Test: `copier/tests/unit/test_trailing_loop.py`
 
 **Interfaces:**
