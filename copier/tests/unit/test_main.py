@@ -448,9 +448,10 @@ def test_boot_composes_without_crashing_and_binds_all_interfaces(db, fernet_key)
     assert call["interface"] != "127.0.0.1"
     # startup + token-refresh loop + balance-refresh loop (N9) + resync
     # loop + cutoff-reminder loop + commission-refresh loop +
-    # partition-maintenance loop + deal-backfill loop + MT5 offline check
-    # were scheduled, not run inline (no reactor loop here).
-    assert len(fake_reactor.callWhenRunning_calls) == 9
+    # partition-maintenance loop + deal-backfill loop + MT5 offline check +
+    # trailing check loop were scheduled, not run inline (no reactor loop
+    # here).
+    assert len(fake_reactor.callWhenRunning_calls) == 10
     assert app.mt5_offline_call.interval is None       # not started until the reactor runs
     assert app.balance_refresh_call.interval is None   # not started until the reactor runs
     assert app.resync_call.interval is None            # not started until the reactor runs
@@ -460,6 +461,7 @@ def test_boot_composes_without_crashing_and_binds_all_interfaces(db, fernet_key)
     assert app.commission_refresh_call.interval is None
     assert app.partition_call.interval is None
     assert app.deal_backfill_call.interval is None
+    assert app.trailing_check_call.interval is None    # not started until the reactor runs
     # The writer's drain is registered as a shutdown trigger, so a clean
     # restart loses nothing that was still queued.
     assert len(fake_reactor.addSystemEventTrigger_calls) == 1

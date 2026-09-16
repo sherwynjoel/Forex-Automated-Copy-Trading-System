@@ -248,6 +248,26 @@ class MT5Registry:
                 "current_price": net.current_price if net is not None else None})
         return out
 
+    def position_price(self, account_id: int, position_id: int) -> float | None:
+        """One open position's live current price, straight from the
+        terminal's last report -- the same `current_price` field
+        account_block's `positions` list already exposes per position,
+        scoped to a single ticket. None when the account has no report yet
+        or no longer reports this ticket, which is how the trailing check
+        loop notices a position has closed.
+
+        Deliberately real (non-virtual) positions only: a netting master's
+        trailing state, if any, tracks the VIRTUAL position id
+        (position_trailing_state rows are seeded from mapping/master
+        events, not from this registry), so the terminal's own ticket
+        space is the right one to search here.
+        """
+        state = self._accounts.get(account_id)
+        if state is None or state.report is None:
+            return None
+        pos = next((p for p in state.report.positions if p.ticket == position_id), None)
+        return pos.current_price if pos is not None else None
+
     def last_seen(self, account_id: int) -> float | None:
         state = self._accounts.get(account_id)
         return state.last_seen if state is not None else None

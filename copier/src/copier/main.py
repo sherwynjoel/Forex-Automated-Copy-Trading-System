@@ -58,6 +58,7 @@ from copier.ctrader.symbols import fetch_symbol_map, by_id as symbols_by_id
 from copier.db.repo import Repo
 from copier.db.writer import AsyncWriter
 from copier.domain.models import MANUAL_ORDER_LABEL, Side
+from copier.domain.trailing import compute_trailed_stop
 from copier.engine.service import CopierService, SlaveFill
 from copier.engine.reconcile import Reconciler
 from copier.engine.routing import (
@@ -183,6 +184,11 @@ DEAL_BACKFILL_INTERVAL_S = 30
 # How often to notice that an MT5 terminal has stopped reporting (spec: a
 # 5 s timer; the account reads offline OFFLINE_AFTER_S after its last report).
 MT5_OFFLINE_CHECK_INTERVAL_S = 5.0
+# How often every trailing-enabled position's stop is re-checked and
+# ratcheted forward. Frequent enough to feel responsive on gold/majors,
+# infrequent enough to stay well inside the existing TokenBucket's
+# request-rate budget alongside everything else it already throttles.
+TRAILING_CHECK_INTERVAL_S = 5.0
 # The mt5_links balance/equity/last_seen_at write from a sync is throttled to
 # this per account -- the same window the api uses for its own write of those
 # columns (contract §3) -- so a terminal polling four times a second is not
@@ -3157,6 +3163,69 @@ class CopierApp:
         except Exception:
             log.exception("mt5 offline check failed")
 
+    def check_trailing_stops(self) -> None:
+        """LoopingCall body (TRAILING_CHECK_INTERVAL_S): ratchet the stop
+        of every trailing-enabled position forward as price moves
+        favourably, using the same amend_position_sltp a person uses
+        from the Trade page -- which already propagates to every slave.
+        Never raises: a LoopingCall whose Deferred fails stops looping
+        permanently, and one bad price read or one failed amend must not
+        silently end trailing for every other open position for the rest
+        of the process's life."""
+        for state in self.repo.load_all_trailing_state_rows():
+            try:
+                self._check_one_trailing_position(state)
+            except Exception:
+                log.exception("trailing check failed for account %s position %s",
+                              state.account_id, state.position_id)
+
+    def _check_one_trailing_position(self, state) -> None:
+        current_price = self._current_position_price(state.account_id, state.position_id)
+        if current_price is None:
+            # Position is gone from both live sources -- closed, stopped
+            # out, anything. MasterPositionClosed should already have
+            # cleared this row; this is the defensive second path.
+            self.repo.delete_trailing_state(
+                account_id=state.account_id, position_id=state.position_id)
+            return
+
+        side, entry_price = self.repo.get_position_side_and_entry(
+            state.account_id, state.position_id)
+        rule = self.repo.load_risk_rule_for_position(state.account_id, state.position_id)
+        if rule is None or not rule.trailing_enabled:
+            return
+
+        best_price = max(state.best_price, current_price) if side == "BUY" \
+            else min(state.best_price, current_price)
+
+        new_stop = compute_trailed_stop(
+            side=side, entry_price=entry_price, best_price=best_price,
+            trail_start_points=rule.trail_start_points,
+            trail_step_points=rule.trail_step_points,
+            current_stop=state.current_stop)
+
+        if new_stop != state.current_stop:
+            _, take_profit = self.repo.load_position_protection(
+                state.account_id, state.position_id)
+            self.amend_position_sltp(state.account_id, state.position_id,
+                                     new_stop, take_profit, actor="risk-engine")
+
+        self.repo.upsert_trailing_state(
+            account_id=state.account_id, position_id=state.position_id,
+            best_price=best_price, current_stop=new_stop)
+
+    def _current_position_price(self, account_id: int, position_id: int) -> float | None:
+        """One position's live current price, cTrader or MT5. No single
+        existing helper covers both platforms -- branches the same way
+        the rest of this class already does via _is_mt5."""
+        if self._is_mt5(account_id):
+            return self.mt5_registry.position_price(account_id, position_id)
+        org_id = self.repo.get_org_for_account(account_id)
+        tracker = self.state_trackers.get(org_id)
+        if tracker is None:
+            return None
+        return tracker.position_current_price(position_id)
+
 
 # ---------- composition ----------
 
@@ -3638,6 +3707,19 @@ def boot(config: BootConfig, reactor_) -> CopierApp:
         d.addErrback(lambda f: log.error("mt5 offline check loop stopped: %s", f))
 
     reactor_.callWhenRunning(_start_mt5_offline_loop)
+
+    # Ratchets every trailing-enabled position's stop forward as price
+    # moves favourably; a person would otherwise have to do this by hand
+    # from the Trade page's amend button.
+    trailing_check_call = task.LoopingCall(app.check_trailing_stops)
+    trailing_check_call.clock = reactor_
+    app.trailing_check_call = trailing_check_call
+
+    def _start_trailing_check_loop():
+        d = trailing_check_call.start(TRAILING_CHECK_INTERVAL_S, now=False)
+        d.addErrback(lambda f: log.error("trailing check loop stopped: %s", f))
+
+    reactor_.callWhenRunning(_start_trailing_check_loop)
 
     # Drain whatever the writer still holds before the process exits, so a
     # clean restart loses nothing. Bounded: shutdown must not hang.

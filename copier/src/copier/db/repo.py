@@ -2010,3 +2010,74 @@ class Repo:
             ).fetchall()
         return [TrailingState(account_id=r[0], position_id=r[1],
                               best_price=r[2], current_stop=r[3]) for r in rows]
+
+    # ---------- trailing check loop (Task 5) ----------
+
+    def get_org_for_account(self, account_id: int) -> int | None:
+        """Same lookup as org_for_account, kept under this name so the
+        trailing check loop's repo calls read consistently alongside the
+        other three lookups added here (get_position_side_and_entry,
+        load_risk_rule_for_position, load_position_protection). Deliberately
+        not routed through anything cached: see org_for_account's own
+        docstring for why."""
+        return self.org_for_account(account_id)
+
+    def get_position_side_and_entry(
+        self, account_id: int, position_id: int
+    ) -> tuple[str, float] | None:
+        """One open position's side and entry price.
+
+        Reads the `positions` table -- the same live cache upsert_positions
+        keeps current from every resync, for cTrader AND MT5 alike (the MT5
+        registry's own _persist calls the identical upsert_positions), so
+        this needs no per-platform branch the way a reconciler walk would.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT side, entry_price FROM positions "
+                "WHERE account_id = %s AND position_id = %s AND status = 'open'",
+                (account_id, position_id),
+            ).fetchone()
+        if not row:
+            return None
+        return (row[0], row[1])
+
+    def load_risk_rule_for_position(
+        self, account_id: int, position_id: int
+    ) -> RiskRule | None:
+        """The configured risk rule for whatever org/symbol this position
+        currently belongs to -- org_risk_rules joined through the same
+        `positions` row get_position_side_and_entry reads, rather than a
+        second, independent way of resolving a position's org and symbol."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT r.org_id, r.symbol, r.stop_points, r.target_points, "
+                "r.trailing_enabled, r.trail_start_points, r.trail_step_points "
+                "FROM positions p "
+                "JOIN org_risk_rules r ON r.org_id = p.org_id AND r.symbol = p.symbol "
+                "WHERE p.account_id = %s AND p.position_id = %s AND p.status = 'open'",
+                (account_id, position_id),
+            ).fetchone()
+        if not row:
+            return None
+        return RiskRule(org_id=row[0], symbol=row[1], stop_points=row[2],
+                        target_points=row[3], trailing_enabled=row[4],
+                        trail_start_points=row[5], trail_step_points=row[6])
+
+    def load_position_protection(
+        self, account_id: int, position_id: int
+    ) -> tuple[float | None, float | None] | None:
+        """One open position's current (stop_loss, take_profit), straight
+        from the positions table -- so the trailing loop's amend always
+        carries the position's ACTUAL take-profit rather than guessing at
+        (or dropping) the half of the protection it did not just compute.
+        amend_position_sltp's contract removes whichever side is omitted."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT stop_loss, take_profit FROM positions "
+                "WHERE account_id = %s AND position_id = %s AND status = 'open'",
+                (account_id, position_id),
+            ).fetchone()
+        if not row:
+            return None
+        return (row[0], row[1])
