@@ -1,8 +1,10 @@
 import { act, render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi, afterEach, beforeEach } from 'vitest'
 import Automation from './Automation'
 import * as apiModule from '../lib/api'
+import type { RiskRule } from '../lib/types'
 
 const { useOrgMock } = vi.hoisted(() => ({ useOrgMock: vi.fn() }))
 vi.mock('../lib/org', () => ({ useOrg: useOrgMock }))
@@ -32,10 +34,44 @@ const webhook = {
 }
 
 function mockWebhookRoute() {
-  const fetchMock = vi.fn(async () =>
-    new Response(JSON.stringify(webhook), {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    // The page also loads risk rules alongside webhook settings on every
+    // refresh; these tests don't care about that list, so it's just empty.
+    if (String(input).includes('/risk-rules')) {
+      return new Response(JSON.stringify([]), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    return new Response(JSON.stringify(webhook), {
       status: 200, headers: { 'Content-Type': 'application/json' },
-    }))
+    })
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  return fetchMock
+}
+
+function jsonResponse(payload: unknown, status = 200) {
+  return new Response(JSON.stringify(payload), {
+    status, headers: { 'Content-Type': 'application/json' },
+  })
+}
+
+/** Route-based fetch mock: serves the webhook fixture by default (so the
+ *  page can mount) plus whatever risk-rules overrides a test supplies,
+ *  keyed as "METHOD /path-fragment". */
+function mockRoutes(overrides: Record<string, (init?: RequestInit) => Response> = {}) {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input)
+    for (const [fragment, responder] of Object.entries(overrides)) {
+      const [method, path] = fragment.includes(' ') ? fragment.split(' ') : [undefined, fragment]
+      if (url.includes(path) && (!method || (init?.method || 'GET') === method)) {
+        return responder(init)
+      }
+    }
+    if (url.includes('/webhook')) return jsonResponse(webhook)
+    if (url.includes('/risk-rules')) return jsonResponse([])
+    return jsonResponse({})
+  })
   vi.stubGlobal('fetch', fetchMock)
   return fetchMock
 }
@@ -107,3 +143,44 @@ test('entry timeframes shows what is currently allowed and lets an admin change 
 })
 
 function sorted(a: string[]) { return [...a].sort() }
+
+test('lists existing risk rules and can add a new one', async () => {
+  const rules: RiskRule[] = [
+    { symbol: 'XAUUSD', stop_points: 50, target_points: 150,
+      trailing_enabled: false, trail_start_points: null, trail_step_points: null },
+  ]
+  mockRoutes({
+    'GET /risk-rules': () => jsonResponse(rules),
+    'PUT /risk-rules': () => jsonResponse({
+      symbol: 'EURUSD', stop_points: 20, target_points: 60,
+      trailing_enabled: false, trail_start_points: null, trail_step_points: null,
+    }),
+  })
+  render(<MemoryRouter><Automation /></MemoryRouter>)
+
+  expect(await screen.findByText('XAUUSD')).toBeInTheDocument()
+
+  await userEvent.type(screen.getByLabelText(/symbol/i), 'EURUSD')
+  await userEvent.type(screen.getByLabelText(/^stop/i), '20')
+  await userEvent.type(screen.getByLabelText(/^target/i), '60')
+  await userEvent.click(screen.getByRole('button', { name: /add rule/i }))
+
+  expect(await screen.findByText('EURUSD')).toBeInTheDocument()
+})
+
+test('can delete a risk rule', async () => {
+  const rules: RiskRule[] = [
+    { symbol: 'XAUUSD', stop_points: 50, target_points: 150,
+      trailing_enabled: false, trail_start_points: null, trail_step_points: null },
+  ]
+  mockRoutes({
+    'GET /risk-rules': () => jsonResponse(rules),
+    'DELETE /risk-rules': () => new Response(null, { status: 204 }),
+  })
+  render(<MemoryRouter><Automation /></MemoryRouter>)
+  await screen.findByText('XAUUSD')
+
+  await userEvent.click(screen.getByRole('button', { name: /remove xauusd/i }))
+
+  await waitFor(() => expect(screen.queryByText('XAUUSD')).not.toBeInTheDocument())
+})

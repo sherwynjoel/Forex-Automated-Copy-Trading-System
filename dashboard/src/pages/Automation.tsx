@@ -5,7 +5,7 @@ import { useOrg } from '../lib/org'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
 import Banner from '../components/Banner'
 import ConfirmDialog from '../components/ConfirmDialog'
-import type { WebhookReceipt, WebhookSettings, WebhookSecret } from '../lib/types'
+import type { WebhookReceipt, WebhookSettings, WebhookSecret, RiskRule } from '../lib/types'
 
 const POLL_MS = 5000
 
@@ -34,6 +34,10 @@ export default function Automation() {
   const [confirmRotate, setConfirmRotate] = useState(false)
   const [draft, setDraft] = useState({ max_lots: '', max_per_minute: '', max_open_positions: '' })
   const [tfDraft, setTfDraft] = useState<string[] | null>(null)
+  const [riskRules, setRiskRules] = useState<RiskRule[]>([])
+  const [newRule, setNewRule] = useState({ symbol: '', stop_points: '', target_points: '',
+                                           trailing_enabled: false, trail_start_points: '',
+                                           trail_step_points: '' })
 
   const refresh = useCallback(async () => {
     try {
@@ -45,6 +49,7 @@ export default function Automation() {
         max_open_positions: d.max_open_positions === '' ? String(s.max_open_positions) : d.max_open_positions,
       }))
       setTfDraft((current) => current ?? s.vt_ltf_timeframes)
+      setRiskRules(await orgApi<RiskRule[]>(orgId, 'risk-rules'))
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load automation settings')
     }
@@ -118,6 +123,28 @@ export default function Automation() {
 
   const saveTimeframes = async () => {
     await put({ vt_ltf_timeframes: tfDraft ?? [] }, 'Entry timeframes saved.')
+  }
+
+  const addRiskRule = async () => {
+    const symbol = newRule.symbol.trim().toUpperCase()
+    if (!symbol) return
+    const body = {
+      stop_points: newRule.stop_points ? Number(newRule.stop_points) : null,
+      target_points: newRule.target_points ? Number(newRule.target_points) : null,
+      trailing_enabled: newRule.trailing_enabled,
+      trail_start_points: newRule.trail_start_points ? Number(newRule.trail_start_points) : null,
+      trail_step_points: newRule.trail_step_points ? Number(newRule.trail_step_points) : null,
+    }
+    const saved = await orgApi<RiskRule>(orgId, `risk-rules/${symbol}`, {
+      method: 'PUT', body: JSON.stringify(body) })
+    setRiskRules(prev => [...prev.filter(r => r.symbol !== saved.symbol), saved])
+    setNewRule({ symbol: '', stop_points: '', target_points: '',
+                trailing_enabled: false, trail_start_points: '', trail_step_points: '' })
+  }
+
+  const removeRiskRule = async (symbol: string) => {
+    await orgApi(orgId, `risk-rules/${symbol}`, { method: 'DELETE' })
+    setRiskRules(prev => prev.filter(r => r.symbol !== symbol))
   }
 
   const copy = async (text: string, what: 'url' | 'template') => {
@@ -290,6 +317,79 @@ export default function Automation() {
             Save limits
           </button>
         )}
+      </section>
+
+      {/* ---------- symbol risk rules ---------- */}
+      <section className="rounded-lg border border-line bg-card p-5 space-y-4">
+        <h2 className="desk-label">Symbol Risk Rules</h2>
+        <p className="text-sm text-ink-soft">
+          For any alert that doesn't send its own stop/target, MirrorFleet fills these in.
+          An alert that already sends its own is always used as-is.
+        </p>
+        <table className="w-full text-sm">
+          <thead>
+            <tr>
+              <th className="text-left">Symbol</th>
+              <th className="text-left">Stop (points)</th>
+              <th className="text-left">Target (points)</th>
+              <th className="text-left">Trailing</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {riskRules.map(rule => (
+              <tr key={rule.symbol}>
+                <td>{rule.symbol}</td>
+                <td>{rule.stop_points ?? '—'}</td>
+                <td>{rule.target_points ?? '—'}</td>
+                <td>{rule.trailing_enabled ? 'On' : 'Off'}</td>
+                <td>
+                  <button aria-label={`remove ${rule.symbol.toLowerCase()}`}
+                          onClick={() => removeRiskRule(rule.symbol)}>
+                    Remove
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div className="flex gap-2 items-end flex-wrap">
+          <label>
+            Symbol
+            <input aria-label="symbol" value={newRule.symbol}
+                   onChange={e => setNewRule({ ...newRule, symbol: e.target.value })} />
+          </label>
+          <label>
+            Stop (points)
+            <input aria-label="stop (points)" value={newRule.stop_points}
+                   onChange={e => setNewRule({ ...newRule, stop_points: e.target.value })} />
+          </label>
+          <label>
+            Target (points)
+            <input aria-label="target (points)" value={newRule.target_points}
+                   onChange={e => setNewRule({ ...newRule, target_points: e.target.value })} />
+          </label>
+          <label>
+            <input type="checkbox" checked={newRule.trailing_enabled}
+                   onChange={e => setNewRule({ ...newRule, trailing_enabled: e.target.checked })} />
+            Trailing
+          </label>
+          {newRule.trailing_enabled && (
+            <>
+              <label>
+                Start after (points)
+                <input aria-label="start after (points)" value={newRule.trail_start_points}
+                       onChange={e => setNewRule({ ...newRule, trail_start_points: e.target.value })} />
+              </label>
+              <label>
+                Step (points)
+                <input aria-label="step (points)" value={newRule.trail_step_points}
+                       onChange={e => setNewRule({ ...newRule, trail_step_points: e.target.value })} />
+              </label>
+            </>
+          )}
+          <button onClick={addRiskRule}>Add rule</button>
+        </div>
       </section>
 
       {/* ---------- entry timeframes ---------- */}
