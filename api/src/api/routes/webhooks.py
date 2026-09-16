@@ -279,6 +279,21 @@ async def _copier(client: httpx.AsyncClient, method: str, url: str,
     return payload if isinstance(payload, dict) else {}
 
 
+def _master_broker_name(conn: psycopg.Connection, master: int, symbol: str) -> Optional[str]:
+    """The master ACCOUNT's broker name for a canonical symbol, if aliased.
+
+    An MT5 master's position book (and pending orders) carry the broker's
+    own names ("XAUUSDm"); alerts carry canonical ones ("XAUUSD"). Every
+    comparison against the book must accept both, or a close finds nothing
+    and the opposite-position guard goes blind -- which is exactly how a
+    live hedging account ended up holding a buy AND a sell at once.
+    """
+    row = conn.execute(
+        "SELECT broker_name FROM symbol_aliases WHERE account_id = %s AND canonical = %s",
+        (master, symbol)).fetchone()
+    return row[0] if row else None
+
+
 def _master_of(conn: psycopg.Connection, org_id: int) -> Optional[int]:
     row = conn.execute(
         "SELECT ctid_trader_account_id FROM accounts "

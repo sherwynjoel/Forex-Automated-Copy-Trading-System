@@ -176,7 +176,8 @@ def parse_alert(body: object, max_lots: float) -> Alert:
     return Alert(action, symbol, lots, stop_loss, take_profit, alert_id)
 
 
-def find_master_positions(state: object, symbol: str) -> list[dict]:
+def find_master_positions(state: object, symbol: str,
+                          broker_name: str | None = None) -> list[dict]:
     """The master's open positions on `symbol`, from the copier's /state.
 
     A "close" alert closes what the master holds on that symbol -- all of
@@ -184,16 +185,23 @@ def find_master_positions(state: object, symbol: str) -> list[dict]:
     nothing to close, which the caller reports as success-with-nothing-done
     rather than an error: a strategy that fires "close" on every exit
     signal must not be told it is broken because the position already went.
+
+    `broker_name`: an MT5 master's book carries the BROKER's symbol names
+    ("XAUUSDm") while the alert carries the canonical one ("XAUUSD") -- a
+    live close silently found nothing until both names matched. The caller
+    passes the master account's alias for the symbol, when one exists.
     """
     if not isinstance(state, dict):
         return []
     positions = state.get("master_positions") or []
-    wanted = symbol.upper()
+    wanted = {symbol.upper()}
+    if broker_name:
+        wanted.add(broker_name.upper())
     out = []
     for pos in positions:
         if not isinstance(pos, dict):
             continue
         name = pos.get("symbol")
-        if isinstance(name, str) and name.upper() == wanted and pos.get("position_id") is not None:
+        if isinstance(name, str) and name.upper() in wanted and pos.get("position_id") is not None:
             out.append(pos)
     return out
