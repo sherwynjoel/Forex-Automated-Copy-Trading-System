@@ -1,0 +1,31 @@
+//@version=6
+indicator("FVG Candle Highlighter", overlay=true)
+
+// A = i-2, B = i-1, C = i
+
+wSecret = input.string("", "MirrorFleet secret", tooltip="Paste the secret from your Automation page here.")
+wSym    = input.string("", "Broker symbol override")
+wLots   = input.float(0.01, "Lots sent to broker", minval=0.01, step=0.01)
+
+brokerSym = wSym == "" ? syminfo.ticker : wSym
+
+f_order(string action) =>
+    '{"secret":"' + wSecret + '","id":"' + str.tostring(time) + '","action":"' + action + '","symbol":"' + brokerSym + '","lots":' + str.tostring(wLots) + '}'
+
+// Detect bullish FVG (gap between A and C)
+isBullFVG = low > high[2]
+// Detect bearish FVG
+isBearFVG = high < low[2]
+
+// Color candle B (the one that CAUSED the gap)
+colorBull = isBullFVG[0]
+colorBear = isBearFVG[0]
+
+// Apply color to bar i-1 (the middle candle)
+barcolor(colorBull ? color.new(color.lime, 70) : colorBear ? color.new(color.red, 70) : na, offset=-1)
+
+if barstate.isconfirmed
+    if colorBull
+        alert(f_order("buy"), alert.freq_once_per_bar)
+    else if colorBear
+        alert(f_order("sell"), alert.freq_once_per_bar)
