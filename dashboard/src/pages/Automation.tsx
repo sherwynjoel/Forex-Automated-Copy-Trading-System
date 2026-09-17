@@ -31,6 +31,7 @@ export default function Automation() {
   const [busy, setBusy] = useState(false)
   const [reveal, setReveal] = useState<WebhookSecret | null>(null)
   const [copied, setCopied] = useState<'url' | 'template' | null>(null)
+  const [templateKind, setTemplateKind] = useState<'indicator' | 'strategy'>('indicator')
   const [confirmRotate, setConfirmRotate] = useState(false)
   const [draft, setDraft] = useState({ max_lots: '', max_per_minute: '', max_open_positions: '' })
   const [tfDraft, setTfDraft] = useState<string[] | null>(null)
@@ -160,6 +161,13 @@ export default function Automation() {
       setBusy(false)
     }
   }
+
+  // Strategy alerts get their action/id filled in by TradingView itself at
+  // fire time -- placeholders a plain indicator has no equivalent for.
+  const strategyTemplate = (secret: string) => JSON.stringify({
+    secret, action: '{{strategy.order.action}}', symbol: '{{ticker}}',
+    lots: 0.01, id: '{{strategy.order.id}}',
+  }, null, 2)
 
   const copy = async (text: string, what: 'url' | 'template') => {
     try {
@@ -548,11 +556,38 @@ export default function Automation() {
               Copy the template below into your TradingView alert's Message box now. When you close
               this, the secret is gone from this screen and cannot be shown again.
             </p>
+            <div className="flex gap-2" role="group" aria-label="Alert template">
+              <button onClick={() => setTemplateKind('indicator')}
+                      aria-pressed={templateKind === 'indicator'}
+                      className={`px-3 py-1 text-xs font-semibold rounded border ${
+                        templateKind === 'indicator'
+                          ? 'bg-brand text-on-accent border-brand'
+                          : 'border-line-strong text-ink hover:bg-paper'}`}>
+                Indicator
+              </button>
+              <button onClick={() => setTemplateKind('strategy')}
+                      aria-pressed={templateKind === 'strategy'}
+                      className={`px-3 py-1 text-xs font-semibold rounded border ${
+                        templateKind === 'strategy'
+                          ? 'bg-brand text-on-accent border-brand'
+                          : 'border-line-strong text-ink hover:bg-paper'}`}>
+                Strategy
+              </button>
+            </div>
+            {templateKind === 'strategy' && (
+              <p className="text-xs text-ink-soft">
+                Set the alert's condition to <strong className="text-ink">Order fills</strong>, not a
+                specific buy/sell condition — TradingView fills in <code>action</code> and{' '}
+                <code>id</code> per fill, so one alert covers every entry and exit.
+              </p>
+            )}
             <pre className="text-xs bg-paper border border-line rounded px-3 py-3 overflow-x-auto text-ink whitespace-pre">
-{reveal.template}
+{templateKind === 'strategy' ? strategyTemplate(reveal.secret) : reveal.template}
             </pre>
             <div className="flex gap-3 flex-wrap">
-              <button onClick={() => copy(reveal.template, 'template')}
+              <button onClick={() => copy(
+                        templateKind === 'strategy' ? strategyTemplate(reveal.secret) : reveal.template,
+                        'template')}
                       className="px-4 py-2 text-sm font-semibold rounded bg-brand text-on-accent hover:bg-brand-deep">
                 {copied === 'template' ? 'Copied' : 'Copy template'}
               </button>

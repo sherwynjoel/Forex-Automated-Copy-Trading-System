@@ -118,6 +118,34 @@ test('the recent list says it is live, not on a timer', async () => {
   expect(await screen.findByText(/updates the moment an alert lands/i)).toBeInTheDocument()
 })
 
+test('the reveal dialog can switch between indicator and strategy alert templates', async () => {
+  const revealed = {
+    secret: 'tvw_abc123', hook_id: 'hookabc',
+    url: 'https://mirrorfleet.test/api/webhooks/tradingview/hookabc',
+    template: JSON.stringify(
+      { secret: 'tvw_abc123', action: 'buy', symbol: '{{ticker}}', lots: 0.01, id: '{{timenow}}' },
+      null, 2),
+  }
+  mockRoutes({ 'POST /webhook/secret': () => jsonResponse(revealed) })
+  render(<MemoryRouter><Automation /></MemoryRouter>)
+  await screen.findByText(/automation is on/i)
+
+  await userEvent.click(await screen.findByRole('button', { name: 'Generate new secret' }))
+  const confirmButtons = await screen.findAllByRole('button', { name: 'Generate new secret' })
+  await userEvent.click(confirmButtons[confirmButtons.length - 1])
+
+  await screen.findByText(/shown once/i)
+  expect(screen.getByText(/"action": "buy"/)).toBeInTheDocument()
+
+  await userEvent.click(screen.getByRole('button', { name: 'Strategy' }))
+  expect(screen.getByText(/strategy\.order\.action/)).toBeInTheDocument()
+  expect(screen.queryByText(/"action": "buy"/)).not.toBeInTheDocument()
+
+  await userEvent.click(screen.getByRole('button', { name: 'Indicator' }))
+  expect(screen.getByText(/"action": "buy"/)).toBeInTheDocument()
+  expect(screen.queryByText(/strategy\.order\.action/)).not.toBeInTheDocument()
+})
+
 test('entry timeframes shows what is currently allowed and lets an admin change it', async () => {
   const fetchMock = mockWebhookRoute()
   render(<MemoryRouter><Automation /></MemoryRouter>)
