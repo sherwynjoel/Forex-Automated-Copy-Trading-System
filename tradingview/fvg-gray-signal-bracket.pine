@@ -14,15 +14,17 @@ wLots   = input.float(0.01, "Lots sent to broker", minval=0.01, step=0.01)
 
 brokerSym = wSym == "" ? syminfo.ticker : wSym
 
-// No stop_loss/take_profit sent here on purpose: computing them from this
-// candle and shipping them with the order meant they were stale by the time
-// the order actually reached the broker, and MT5 kept rejecting it (invalid
-// stops). MirrorFleet's Risk Engine now sets the real stop-loss/take-profit
-// itself right after the fill confirms, off the real fill price -- configure
-// the XAUUSD distances on the Automation page's Symbol Risk Rules section.
-f_order(string action) =>
+// Stop-loss still ships with the order -- it's the signal candle's own
+// high/low, always correctly signed and normally has real width, so it
+// was not the source of the "invalid stops" rejections. No take_profit
+// is sent: that was a small, fixed distance computed too early, and MT5
+// rejects the WHOLE order if either level is invalid. MirrorFleet's Risk
+// Engine now sets the real take-profit itself right after the fill
+// confirms, off the real fill price -- set a target-only distance (leave
+// stop blank) for XAUUSD on the Automation page's Symbol Risk Rules.
+f_order(string action, float sl) =>
     '{"secret":"' + wSecret + '","id":"' + str.tostring(time) + '","action":"' + action + '","symbol":"' + brokerSym +
-     '","lots":' + str.tostring(wLots) + '}'
+     '","lots":' + str.tostring(wLots) + ',"stop_loss":' + str.tostring(sl, format.mintick) + '}'
 
 conf = barstate.isconfirmed
 
@@ -46,10 +48,10 @@ if conf and (isBullFVG or isBearFVG)
     armed := true
 
 if armed and high >= aHi
-    alert(f_order("buy"), alert.freq_once_per_bar)
+    alert(f_order("buy", aLo), alert.freq_once_per_bar)
     armed := false
 else if armed and low <= aLo
-    alert(f_order("sell"), alert.freq_once_per_bar)
+    alert(f_order("sell", aHi), alert.freq_once_per_bar)
     armed := false
 
 if armed
