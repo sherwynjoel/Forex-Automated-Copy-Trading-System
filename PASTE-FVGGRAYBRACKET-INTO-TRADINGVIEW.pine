@@ -9,12 +9,15 @@ isBullFVG = low > high[2]
 wSecret = input.string("", "MirrorFleet secret", tooltip="Paste the secret from your Automation page here.")
 wSym    = input.string("", "Broker symbol override")
 wLots   = input.float(0.01, "Lots sent to broker", minval=0.01, step=0.01)
+tpValue = input.float(2.0, "Take profit distance", minval=0.01, step=0.1,
+     tooltip="Price units beyond entry. 2.0 on gold means entry 4300.00 -> target 4302.00 (buy) or 4298.00 (sell).")
 
 brokerSym = wSym == "" ? syminfo.ticker : wSym
 
-f_order(string action, float sl) =>
+f_order(string action, float sl, float tp) =>
     '{"secret":"' + wSecret + '","id":"' + str.tostring(time) + '","action":"' + action + '","symbol":"' + brokerSym +
-     '","lots":' + str.tostring(wLots) + ',"stop_loss":' + str.tostring(sl, format.mintick) + '}'
+     '","lots":' + str.tostring(wLots) + ',"stop_loss":' + str.tostring(sl, format.mintick) +
+     ',"take_profit":' + str.tostring(tp, format.mintick) + '}'
 
 conf = barstate.isconfirmed
 
@@ -37,10 +40,10 @@ if conf and isBullFVG
     armed := true
 
 if armed and high >= aHi
-    alert(f_order("buy", aLo), alert.freq_once_per_bar)
+    alert(f_order("buy", aLo, aHi + tpValue), alert.freq_once_per_bar)
     armed := false
 else if armed and low <= aLo
-    alert(f_order("sell", aHi), alert.freq_once_per_bar)
+    alert(f_order("sell", aHi, aLo - tpValue), alert.freq_once_per_bar)
     armed := false
 
 if armed
