@@ -1,0 +1,408 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════════
+//  FVG DIRECTIONAL — Pine v6   (market-order build, wired for MirrorFleet)
+//
+//  One colour, one order. Lime candle prints -> arm above its high. Red candle
+//  prints -> arm below its low. Never both. The trigger level is unchanged from
+//  the original: candle B's extreme, plus a small offset.
+//
+//  ─── ORDER TYPE: MARKET, NOT PENDING ──────────────────────────────────────────
+//  The original build sent a broker-held pending stop order and let the broker
+//  own the fill. This build keeps the same arming/trigger logic but fires the
+//  order itself, as a MARKET order, the instant price touches the trigger level
+//  intrabar -- MirrorFleet places it immediately rather than the broker holding
+//  a resting order. SL/TP are computed when the bracket arms and sent with the
+//  order, unchanged.
+//
+//  ─── UNITS. READ THIS ONCE. ───────────────────────────────────────────────────
+//  Everything that matters is in PRICE UNITS -- the number you read off the
+//  chart. On XAUUSD that is dollars.
+//
+//      TP 2.0  =  entry 4300.00 -> target 4302.00
+//      SL 2.0  =  entry 4300.00 -> stop   4298.00
+//
+//  A "tick" below means one minimum price move: $0.01 on 2-digit gold. It is
+//  used only for the entry offset, where a whole dollar would be absurd.
+//  The table prints what one tick is worth on whatever symbol you load.
+//
+//  ─── ONE OUTBOUND ALERT ───────────────────────────────────────────────────────
+//      PLACE   secret / id / action(buy|sell) / symbol / lots / stop_loss /
+//              take_profit
+//  strategy.* calls exist only to drive the backtest and the drawings. They
+//  send nothing. Set the TradingView alert to "alert() function calls only".
+//  There is no CANCEL alert in this build: nothing reaches the broker until
+//  the trigger level is actually touched, so a signal that gets invalidated
+//  or expires while still armed never sent anything that needs pulling back.
+//
+//  ─── ARM-ONLY TRIGGERS (nothing sent to the broker yet) ──────────────────────
+//   1. INVALIDATED — price reaches the opposite extreme of candle B before the
+//      trigger level is touched. The setup is dead; drop it silently.
+//   2. EXPIRED — N bars pass with no touch. Drop it silently.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+strategy(
+     title                   = "FVG Directional (Market)",
+     shorttitle              = "FVG Dir Mkt",
+     overlay                 = true,
+     calc_on_every_tick      = true,
+     process_orders_on_close = false,
+     initial_capital         = 10000,
+     default_qty_type        = strategy.fixed,
+     default_qty_value       = 1,
+     pyramiding              = 0,
+     commission_type         = strategy.commission.percent,
+     commission_value        = 0.0,
+     slippage                = 2,
+     max_lines_count         = 500,
+     max_boxes_count         = 500)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  INPUTS
+// ═══════════════════════════════════════════════════════════════════════════════
+g1 = "① Entry"
+g2 = "② Stop / target   (price units — dollars on gold)"
+g3 = "③ Candle filters   (all OFF by default)"
+g4 = "④ Signal rules"
+g5 = "⑤ Broker limits"
+g6 = "⑥ Backtest sizing"
+g7 = "⑦ Visuals"
+g8 = "⑧ Webhook payload"
+
+entryOffTk = input.int(1, "Entry offset beyond the extreme (ticks)", minval=1, group=g1,
+     tooltip="In TICKS, not dollars — 1 tick is $0.01 on gold. This only lifts the trigger just clear of the candle's extreme. Minimum 1, because at 0 the level can land exactly on the current price.")
+expiryBars = input.int(3, "Drop unfilled signal after (bars)", minval=1, group=g1)
+
+tpValue = input.float(2.0, "Take profit distance", minval=0.01, step=0.1, group=g2,
+     tooltip="Price units. 2.0 on gold means entry 4300.00 -> target 4302.00.")
+
+slMode  = input.string("Fixed distance", "Stop loss from",
+     options=["Fixed distance", "Opposite extreme of candle B"], group=g2,
+     tooltip="Fixed = a set distance from the entry. Opposite extreme = the far side of the signal candle, which varies with candle size.")
+slValue = input.float(2.0, "Stop loss distance (fixed mode)", minval=0.01, step=0.1, group=g2,
+     tooltip="Price units. 2.0 on gold means entry 4300.00 -> stop 4298.00.")
+slBuf   = input.float(0.0, "Extra buffer beyond the extreme (extreme mode)", minval=0.0, step=0.1, group=g2)
+minStop = input.float(0.10, "Minimum stop distance", minval=0.01, step=0.01, group=g2,
+     tooltip="Price units. Only ever WIDENS a stop that would otherwise be too tight to be sane.")
+
+useBody  = input.bool(false, "Filter by body (open → close)", group=g3,
+     tooltip="OFF. Turn on once you are happy with the signal count.")
+bodyMin  = input.float(0.0, "Min body", minval=0.0, step=0.1, group=g3)
+bodyMax  = input.float(1.5, "Max body", minval=0.0, step=0.1, group=g3)
+
+useRange = input.bool(false, "Filter by full length (high → low)", group=g3,
+     tooltip="OFF. Turn on once you are happy with the signal count.")
+rangeMin = input.float(0.0, "Min length", minval=0.0, step=0.1, group=g3)
+rangeMax = input.float(3.0, "Max length", minval=0.0, step=0.1, group=g3)
+
+runMode = input.string("First candle of run only", "Consecutive same-colour candles",
+     options=["First candle of run only", "First eligible candle in run", "Off — every candle"], group=g4,
+     tooltip="Off is there so you can see the raw signal rate with nothing suppressed.")
+skipIfPassed = input.bool(true, "Skip if price has already passed the level", group=g4,
+     tooltip="Keep this ON. A trigger level sent behind price would fire immediately at a stale price instead of waiting for the real touch.")
+onOpposite = input.string("Drop and arm new", "New signal while one is already armed",
+     options=["Drop and arm new", "Ignore until resolved"], group=g4)
+
+stopsLevel = input.float(0.0, "Broker minimum stop distance", minval=0.0, step=0.1, group=g5,
+     tooltip="Price units. MT5 SYMBOL_TRADE_STOPS_LEVEL converted to dollars. 0 disables the check.")
+
+sizeMode = input.string("Fixed qty", "Sizing", options=["Fixed qty", "Percent risk"], group=g6)
+fixedQty = input.float(1.0, "Fixed qty", minval=0.01, step=0.01, group=g6)
+riskPct  = input.float(1.0, "Risk per trade (% of equity)", minval=0.01, step=0.1, group=g6)
+
+showLv    = input.bool(true, "Draw the bracket", group=g7)
+paintMid  = input.bool(true, "Paint the signal candle", group=g7)
+showTable = input.bool(true, "Show the diagnostic table", group=g7)
+tblPos    = input.string("Bottom right", "Table position",
+     options=["Bottom right", "Middle right", "Bottom left", "Top left"], group=g7,
+     tooltip="Not top-right — TradingView's own status line sits there and covers the first rows.")
+
+wSecret = input.string("", "MirrorFleet secret", group=g8,
+     tooltip="Paste the secret from your Automation page here. Required for MirrorFleet to accept the alert -- without it every alert is refused with 'secret mismatch'.")
+wSym   = input.string("",  "Broker symbol override", group=g8)
+wLots  = input.float(0.01, "Lots sent to broker", minval=0.01, step=0.01, group=g8)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  PAYLOAD
+// ═══════════════════════════════════════════════════════════════════════════════
+brokerSym = wSym == "" ? syminfo.ticker : wSym
+
+f_place(string action, float sl, float tp) =>
+    string alertId = str.tostring(time)
+    '{"secret":"' + wSecret + '","id":"' + alertId + '","action":"' + action + '","symbol":"' + brokerSym +
+     '","lots":' + str.tostring(wLots) + ',"stop_loss":' + str.tostring(sl, format.mintick) +
+     ',"take_profit":' + str.tostring(tp, format.mintick) + '}'
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  SIGNAL — detection logic untouched
+// ═══════════════════════════════════════════════════════════════════════════════
+tick = syminfo.mintick
+conf = barstate.isconfirmed
+
+rawBull = low  > high[2]
+rawBear = high < low[2]
+sigDir  = rawBull ? 1 : rawBear ? -1 : 0
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  CANDLE B — the painted candle. Every level and every filter reads from it.
+// ═══════════════════════════════════════════════════════════════════════════════
+bHi   = high[1]
+bLo   = low[1]
+bOpen = open[1]
+bCls  = close[1]
+
+bodyPrice  = math.abs(bCls - bOpen)
+rangePrice = bHi - bLo
+
+bodyOK = not useBody  or (bodyPrice  >= bodyMin  and bodyPrice  <= bodyMax)
+rngOK  = not useRange or (rangePrice >= rangeMin and rangePrice <= rangeMax)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  RUN TRACKING — explicit state, no history-indexed booleans
+// ═══════════════════════════════════════════════════════════════════════════════
+var int prevPaint  = 0         // colour of the previous bar's signal: 1 / -1 / 0
+var int runId      = 0
+var int armedRunId = -1
+
+isFirstOfRun = sigDir != 0 and sigDir != prevPaint
+
+if conf and isFirstOfRun
+    runId += 1
+
+elig = switch runMode
+    "First candle of run only"     => isFirstOfRun
+    "First eligible candle in run" => sigDir != 0 and armedRunId != runId
+    => sigDir != 0
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  LEVELS — all distances in price units
+// ═══════════════════════════════════════════════════════════════════════════════
+off   = entryOffTk * tick
+fixed = slMode == "Fixed distance"
+
+buyEntry = bHi + off
+selEntry = bLo - off
+
+buySL0 = fixed ? buyEntry - slValue : bLo - slBuf
+selSL0 = fixed ? selEntry + slValue : bHi + slBuf
+
+buySL = math.min(buySL0, buyEntry - minStop)     // only ever widens
+selSL = math.max(selSL0, selEntry + minStop)
+
+buyTP = buyEntry + tpValue
+selTP = selEntry - tpValue
+
+buyInval = bLo                                    // setup dead if price gets here first
+selInval = bHi
+
+// Rule 1 — the level must sit strictly beyond the current price, or a market
+// order fired "on touch" would really be firing immediately at a stale level.
+isStop = sigDir == 1  ? (not skipIfPassed or buyEntry > close) :
+         sigDir == -1 ? (not skipIfPassed or selEntry < close) : false
+
+sEntry = sigDir == 1 ? buyEntry : selEntry
+sSL    = sigDir == 1 ? buySL    : selSL
+sTP    = sigDir == 1 ? buyTP    : selTP
+sInval = sigDir == 1 ? buyInval : selInval
+
+brokerOK = stopsLevel <= 0 or (math.abs(sEntry - close) >= stopsLevel and math.abs(sEntry - sSL) >= stopsLevel and math.abs(sEntry - sTP) >= stopsLevel)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  ARMED SIGNAL STATE — waiting for price to touch its trigger level
+// ═══════════════════════════════════════════════════════════════════════════════
+var int    pDir   = 0          //  1 buy armed, -1 sell armed, 0 nothing
+var float  pEntry = na
+var float  pSL    = na
+var float  pTP    = na
+var float  pInval = na
+var int    pBar   = 0
+
+var float  xSL = na            // levels of the position currently open (backtest)
+var float  xTP = na
+var int    placedDir = 0       // direction of the order just placed this tick
+
+var int nBull      = 0
+var int nBear      = 0
+var int nSig       = 0
+var int nRejRun    = 0
+var int nRejBody   = 0
+var int nRejRange  = 0
+var int nRejPassed = 0
+var int nRejBroker = 0
+var int nRejBusy   = 0
+var int nArmed     = 0
+var int nPlaced    = 0
+var int nDropInval = 0
+var int nDropExpiry = 0
+
+var float lastBody = na
+var float lastRng  = na
+
+calcQty(float riskUnit) =>
+    float q = fixedQty
+    if sizeMode == "Percent risk" and riskUnit > 0
+        pv = nz(syminfo.pointvalue, 1.0) <= 0 ? 1.0 : nz(syminfo.pointvalue, 1.0)
+        q := (strategy.equity * riskPct / 100.0) / (riskUnit * pv)
+    math.max(q, 0.0)
+
+flat = strategy.position_size == 0
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  TOUCH / DROP — runs on every tick so a same-bar drop can beat the touch
+// ═══════════════════════════════════════════════════════════════════════════════
+touched = (pDir == 1 and high >= pEntry) or (pDir == -1 and low <= pEntry)
+
+// A touch takes priority over an invalidation inside the same bar. Once price
+// is through the trigger the order fires; there is nothing left to invalidate.
+invalidated = not touched and ((pDir == 1 and low <= pInval) or (pDir == -1 and high >= pInval))
+expired     = not touched and pDir != 0 and conf and (bar_index - pBar) >= expiryBars
+
+bool droppedNow = false
+bool armNow     = false
+bool placeNow   = false
+
+if pDir != 0
+    if touched
+        alert(f_place(pDir == 1 ? "buy" : "sell", pSL, pTP), alert.freq_once_per_bar)
+        nPlaced += 1
+        placeNow := true
+        placedDir := pDir
+        pDir := 0
+    else if invalidated
+        nDropInval += 1
+        droppedNow := true
+        pDir := 0
+    else if expired
+        nDropExpiry += 1
+        droppedNow := true
+        pDir := 0
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  ARMING — bar-close confirmed, so entries never repaint
+// ═══════════════════════════════════════════════════════════════════════════════
+busy = (pDir != 0 and onOpposite == "Ignore until resolved") or not flat
+
+if conf and sigDir != 0
+    nSig += 1
+    if sigDir == 1
+        nBull += 1
+    else
+        nBear += 1
+    lastBody := bodyPrice
+    lastRng  := rangePrice
+
+    // Independent counters — a signal failing three checks increments all three.
+    if not elig
+        nRejRun += 1
+    if not bodyOK
+        nRejBody += 1
+    if not rngOK
+        nRejRange += 1
+    if not isStop
+        nRejPassed += 1
+    if not brokerOK
+        nRejBroker += 1
+    if busy
+        nRejBusy += 1
+
+    if elig and bodyOK and rngOK and isStop and brokerOK and not busy
+        if pDir != 0                    // drop-and-replace, nothing was ever sent
+            droppedNow := true
+
+        pBar   := bar_index
+        pDir   := sigDir
+        pEntry := sEntry
+        pSL    := sSL
+        pTP    := sTP
+        pInval := sInval
+        xSL    := sSL
+        xTP    := sTP
+        armedRunId := runId
+
+        nArmed += 1
+        armNow := true
+
+// Remember this bar's colour AFTER the decision, so isFirstOfRun compares
+// against the previous bar and not against itself.
+if conf
+    prevPaint := sigDir
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  BACKTEST MIRROR — sends nothing, exists for the equity curve only
+// ═══════════════════════════════════════════════════════════════════════════════
+if placeNow
+    strategy.cancel_all()
+    if placedDir == 1
+        strategy.entry("LONG",  strategy.long,  qty = calcQty(math.abs(close - xSL)), comment = "FVG buy")
+    else
+        strategy.entry("SHORT", strategy.short, qty = calcQty(math.abs(close - xSL)), comment = "FVG sell")
+
+if strategy.position_size > 0
+    strategy.exit("X-L", from_entry = "LONG",  stop = xSL, limit = xTP, comment_loss = "SL", comment_profit = "TP")
+if strategy.position_size < 0
+    strategy.exit("X-S", from_entry = "SHORT", stop = xSL, limit = xTP, comment_loss = "SL", comment_profit = "TP")
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  VISUALS
+// ═══════════════════════════════════════════════════════════════════════════════
+midColor = rawBull ? color.new(color.lime, 30) : rawBear ? color.new(color.red, 30) : na
+barcolor(paintMid ? midColor : na, offset = -1, title = "FVG signal candle")
+
+if showLv and armNow and conf
+    col = pDir == 1 ? color.lime : color.red
+    line.new(bar_index, pEntry, bar_index + expiryBars, pEntry, color = col, width = 2)
+    line.new(bar_index, pSL,    bar_index + expiryBars, pSL,    color = color.new(color.orange, 20), style = line.style_dashed)
+    line.new(bar_index, pTP,    bar_index + expiryBars, pTP,    color = color.new(color.teal, 20),   style = line.style_dashed)
+
+plotshape(armNow and pDir ==  1, title = "Buy armed",  style = shape.triangleup,   location = location.belowbar, color = color.lime, size = size.tiny)
+plotshape(armNow and pDir == -1, title = "Sell armed", style = shape.triangledown, location = location.abovebar, color = color.red,  size = size.tiny)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  DIAGNOSTICS
+// ═══════════════════════════════════════════════════════════════════════════════
+tblPosition = switch tblPos
+    "Middle right" => position.middle_right
+    "Bottom left"  => position.bottom_left
+    "Top left"     => position.top_left
+    => position.bottom_right
+
+var table tb = table.new(tblPosition, 2, 19, border_width = 1)
+
+f_row(int r, string k, string v, color bg) =>
+    table.cell(tb, 0, r, k, bgcolor = color.new(color.gray, 80), text_size = size.tiny, text_halign = text.align_left)
+    table.cell(tb, 1, r, v, bgcolor = bg, text_size = size.tiny, text_halign = text.align_right)
+
+if showTable and barstate.islastconfirmedhistory
+    grey  = color.new(color.gray, 90)
+    blue  = color.new(color.blue, 80)
+    slD   = na(pEntry) or na(pSL) ? 0.0 : math.abs(pEntry - pSL)
+    beWin = slD + tpValue > 0 ? slD / (slD + tpValue) * 100 : 0
+    wr    = strategy.closedtrades > 0 ? strategy.wintrades / strategy.closedtrades * 100 : 0
+    fillP = nArmed > 0 ? nPlaced / nArmed * 100 : 0
+
+    f_row(0,  "1 tick =",       str.tostring(tick, format.mintick), blue)
+    f_row(1,  "TP distance",    str.tostring(tpValue, format.mintick), blue)
+    f_row(2,  "SL distance",    (fixed ? "fixed " : "extreme ") + str.tostring(slD, format.mintick), blue)
+
+    f_row(3,  "Bull signals",   str.tostring(nBull), grey)
+    f_row(4,  "Bear signals",   str.tostring(nBear), grey)
+    f_row(5,  "Signals seen",   str.tostring(nSig),  grey)
+
+    f_row(6,  "rej: consecutive",   str.tostring(nRejRun),    grey)
+    f_row(7,  "rej: body",          str.tostring(nRejBody),   useBody  ? grey : color.new(color.gray, 95))
+    f_row(8,  "rej: length",        str.tostring(nRejRange),  useRange ? grey : color.new(color.gray, 95))
+    f_row(9,  "rej: level passed",  str.tostring(nRejPassed), grey)
+    f_row(10, "rej: broker dist",   str.tostring(nRejBroker), grey)
+    f_row(11, "rej: signal busy",   str.tostring(nRejBusy),   grey)
+    f_row(12, "Armed (waiting for touch)", str.tostring(nArmed), grey)
+    f_row(13, "ORDERS PLACED", str.tostring(nPlaced) + "  (" + str.tostring(fillP, "#.#") + "% of armed)",
+              nPlaced == 0 ? color.new(color.red, 40) : color.new(color.green, 65))
+
+    f_row(14, "Dropped: invalidated", str.tostring(nDropInval),  grey)
+    f_row(15, "Dropped: expired",     str.tostring(nDropExpiry), grey)
+
+    f_row(16, "Last candle body",   na(lastBody) ? "—" : str.tostring(lastBody, format.mintick), blue)
+    f_row(17, "Last candle length", na(lastRng)  ? "—" : str.tostring(lastRng,  format.mintick), blue)
+
+    f_row(18, "Breakeven / actual win %",
+              str.tostring(beWin, "#.#") + "  /  " + str.tostring(wr, "#.#"),
+              wr > beWin ? color.new(color.green, 65) : color.new(color.red, 55))
