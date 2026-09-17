@@ -1,0 +1,250 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════════
+//  FVG STRADDLE — Pine v6
+//  Every colour-change candle. No filters. Buy above, sell below. First fill
+//  cancels the other. Fixed take-profit. Stop at the opposite extreme.
+//
+//  EXIT OWNERSHIP: broker-side now. Entry alerts carry the real stop_loss and
+//  take_profit MirrorFleet expects, computed from the same bracket geometry
+//  the strategy already draws -- the position is protected at the broker the
+//  instant it fills, not just tracked inside TradingView's own simulation.
+//  strategy.exit() still fires a matching close alert when either level is
+//  hit, so MirrorFleet's own book stays in sync with what TradingView sees.
+//
+//  TRIGGER: any FVG at all — bull or bear, it does not matter which, because
+//  both a buy stop and a sell stop are placed. The FVG is only a "something
+//  happened here" flag.
+//      bull  low[0]  > high[2]
+//      bear  high[0] < low[2]
+//
+//  BRACKET (default = painted candle B):
+//      BUY  STOP  at  high + offset     SL = low  - buffer
+//      SELL STOP  at  low  - offset     SL = high + buffer
+//      TP = a fixed distance, set in ticks / pips / price units
+//
+//  PENDING ORDERS LIVE ON TRADINGVIEW, NOT AT THE BROKER. The straddle is armed
+//  inside Pine; nothing is sent until a side actually fills. Expiry cancels are
+//  therefore silent — the bridge never knew about the pending orders.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+strategy(
+     title                   = "FVG Straddle",
+     shorttitle              = "FVG Strad",
+     overlay                 = true,
+     calc_on_every_tick      = false,
+     process_orders_on_close = false,
+     initial_capital         = 10000,
+     default_qty_type        = strategy.fixed,
+     default_qty_value       = 1,
+     pyramiding              = 0,
+     commission_type         = strategy.commission.percent,
+     commission_value        = 0.0,
+     slippage                = 2,
+     max_lines_count         = 500,
+     max_boxes_count         = 500)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  INPUTS
+// ═══════════════════════════════════════════════════════════════════════════════
+gB = "① Bracket"
+gT = "② Take profit / stop"
+gS = "③ Size"
+gV = "④ Visuals"
+gW = "⑤ Webhook / MirrorFleet"
+
+bracketBar = input.string("Painted candle (B)", "Bracket around", options=["Painted candle (B)", "Completion candle (C)", "Widest of B and C"], group=gB, tooltip="B is the candle that actually gets painted lime/red — entry at ITS low/high, stop at ITS opposite extreme. Note price has already left B's range about half the time; see the 'already past the level' note in the notes file.")
+entryOffTk = input.int(0,   "Entry offset beyond the extreme (ticks)", minval=0, group=gB, tooltip="0 = exactly at the painted candle's high/low. Raise it if a single-tick wick keeps triggering you.")
+expiryBars = input.int(3,   "Cancel unfilled orders after (bars)", minval=1, group=gB)
+
+tpUnit  = input.string("Price units", "TP unit", options=["Price units", "Ticks (points)", "Pips"], group=gT, tooltip="Price units = the quote currency. On XAUUSD, 0.5 means $0.50. 'Ticks' is MT5's POINT: on 2-digit gold 0.5 ticks would be half a cent and cannot fill.")
+tpValue = input.float(0.5,  "TP distance", minval=0.0, step=0.1, group=gT)
+pipTicks= input.int(10,     "Ticks per pip (10 for 5/3-digit FX, else 1)", minval=1, group=gT)
+slBufTk = input.int(0,      "Extra stop buffer beyond the extreme (ticks)", minval=0, group=gT)
+minStopTk= input.int(10,    "Minimum stop distance (ticks)", minval=1, group=gT)
+
+sizeMode= input.string("Fixed qty", "Sizing", options=["Fixed qty", "Percent risk"], group=gS)
+fixedQty= input.float(1.0,  "Fixed qty / lots", minval=0.0, step=0.01, group=gS)
+riskPct = input.float(1.0,  "Risk per trade (% of equity)", minval=0.01, step=0.1, group=gS)
+
+showLv  = input.bool(true,  "Draw the bracket", group=gV)
+paintMid= input.bool(true,  "Paint the middle candle (original behaviour)", group=gV)
+
+wFmt   = input.string("Comma (key=value)", "Payload format", options=["Comma (key=value)", "JSON", "Plain text"], group=gW)
+wId    = input.string("",   "License / account ID", group=gW, tooltip="MirrorFleet licence or account id, if it wants one as the first field. Leave blank to omit it entirely.")
+wSym   = input.string("",   "Broker symbol override", group=gW, tooltip="Blank = chart ticker. Set to XAUUSD.r / XAUUSDm / XAUUSD.pro etc. if your broker suffixes it.")
+wLots  = input.float(0.01,  "Lots sent to broker", minval=0.0, step=0.01, group=gW, tooltip="This is what the bridge trades. It is INDEPENDENT of the backtest sizing above.")
+wClose = input.string("close", "Close command style", options=["close", "closelong / closeshort", "opposite market order"], group=gW, tooltip="Whatever verb MirrorFleet accepts for flattening a position.")
+wSecret= input.string("",   "MirrorFleet secret", group=gW, tooltip="Paste the secret from your Automation page here. Required for MirrorFleet to accept the alert -- without it every alert is refused with 'secret mismatch'.")
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  PAYLOAD BUILDERS
+// ═══════════════════════════════════════════════════════════════════════════════
+brokerSym = wSym == "" ? syminfo.ticker : wSym
+idPrefix  = wId == "" ? "" : wId + ","
+// A real, unique-per-alert id -- str.tostring(time) is this bar's own
+// timestamp, never the same value twice. MirrorFleet REQUIRES a unique id
+// on every alert to tell a genuine repeat signal from a fresh one; the old
+// version sent whatever static text sat in the "License / account ID" box,
+// so every single alert this script ever fired carried the identical id.
+alertId = str.tostring(time)
+
+// sl/tp are only meaningful on an entry, and only in MirrorFleet's own JSON
+// contract -- the Comma/Plain-text formats are a different bridge's shape
+// and are left exactly as they were.
+f_open(string action, float sl, float tp) =>
+    string m = switch wFmt
+        "JSON" => '{"secret":"' + wSecret + '","id":"' + alertId + '","action":"' + action + '","symbol":"' + brokerSym + '","lots":' + str.tostring(wLots) + ',"stop_loss":' + str.tostring(sl, format.mintick) + ',"take_profit":' + str.tostring(tp, format.mintick) + '}'
+        "Comma (key=value)" => idPrefix + action + "," + brokerSym + ",risk=" + str.tostring(wLots)
+        => action + " " + brokerSym + " " + str.tostring(wLots)
+    m
+
+f_flat(string action) =>
+    string m = switch wFmt
+        "JSON" => '{"secret":"' + wSecret + '","id":"' + alertId + '","action":"' + action + '","symbol":"' + brokerSym + '"}'
+        "Comma (key=value)" => idPrefix + action + "," + brokerSym
+        => action + " " + brokerSym
+    m
+
+closeLong  = wClose == "close" ? "close" : wClose == "closelong / closeshort" ? "closelong"  : "sell"
+closeShort = wClose == "close" ? "close" : wClose == "closelong / closeshort" ? "closeshort" : "buy"
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  TRIGGER — every FVG, no filters whatsoever
+// ═══════════════════════════════════════════════════════════════════════════════
+rawBull = low  > high[2]
+rawBear = high < low[2]
+sig     = rawBull or rawBear
+
+tick = syminfo.mintick
+tpDist = switch tpUnit
+    "Ticks (points)" => tpValue * tick
+    "Pips"           => tpValue * tick * pipTicks
+    => tpValue
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  BRACKET GEOMETRY
+// ═══════════════════════════════════════════════════════════════════════════════
+bHi = switch bracketBar
+    "Painted candle (B)"    => high[1]
+    "Completion candle (C)" => high
+    => math.max(high, high[1])
+
+bLo = switch bracketBar
+    "Painted candle (B)"    => low[1]
+    "Completion candle (C)" => low
+    => math.min(low, low[1])
+
+priceOutside = close > bHi or close < bLo
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  STATE
+// ═══════════════════════════════════════════════════════════════════════════════
+var float buyE = na
+var float buyS = na
+var float buyT = na
+var float selE = na
+var float selS = na
+var float selT = na
+var int   armBar = 0
+var bool  armed  = false
+
+calcQty(float riskUnit) =>
+    float q = fixedQty
+    if sizeMode == "Percent risk" and riskUnit > 0
+        pv = nz(syminfo.pointvalue, 1.0) <= 0 ? 1.0 : nz(syminfo.pointvalue, 1.0)
+        q := (strategy.equity * riskPct / 100.0) / (riskUnit * pv)
+    q
+
+flat = strategy.position_size == 0
+
+if sig and flat
+    off   = entryOffTk * tick
+    sbuf  = slBufTk * tick
+    minD  = minStopTk * tick
+
+    bE = bHi + off
+    bS = bLo - sbuf
+    bS := math.min(bS, bE - minD)
+
+    sE = bLo - off
+    sS = bHi + sbuf
+    sS := math.max(sS, sE + minD)
+
+    buyE := bE
+    buyS := bS
+    buyT := bE + tpDist
+    selE := sE
+    selS := sS
+    selT := sE - tpDist
+
+    oca = "STR" + str.tostring(bar_index)
+
+    // sl/tp passed straight through to the alert now -- computed fresh each
+    // time the bracket arms, so the alert always carries THIS bracket's
+    // levels, never a stale value from an earlier signal.
+    strategy.entry("BUY",  strategy.long,  qty = calcQty(bE - bS), stop = bE, oca_name = oca, oca_type = strategy.oca.cancel, comment = "Strad buy",  alert_message = f_open("buy", buyS, buyT))
+    strategy.entry("SELL", strategy.short, qty = calcQty(sS - sE), stop = sE, oca_name = oca, oca_type = strategy.oca.cancel, comment = "Strad sell", alert_message = f_open("sell", selS, selT))
+
+    armBar := bar_index
+    armed  := true
+
+// expiry while unfilled — silent, the bridge never saw these
+if armed and flat and (bar_index - armBar) >= expiryBars and not (sig and flat)
+    strategy.cancel("BUY")
+    strategy.cancel("SELL")
+    armed := false
+
+if not flat
+    armed := false
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  EXITS — broker-side stop/target now do the real protecting; these close
+//  alerts keep MirrorFleet's own book in sync the moment TradingView also
+//  sees the level hit (e.g. a gap that blows through the broker-side stop).
+// ═══════════════════════════════════════════════════════════════════════════════
+strategy.exit("X-BUY",  from_entry = "BUY",  stop = buyS, limit = buyT, comment_loss = "SL", comment_profit = "TP", alert_message = f_flat(closeLong))
+strategy.exit("X-SELL", from_entry = "SELL", stop = selS, limit = selT, comment_loss = "SL", comment_profit = "TP", alert_message = f_flat(closeShort))
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  VISUALS
+// ═══════════════════════════════════════════════════════════════════════════════
+midColor = rawBull ? color.new(color.lime, 30) : rawBear ? color.new(color.red, 30) : na
+barcolor(paintMid ? midColor : na, offset = -1, title = "FVG middle candle")
+
+if showLv and sig and flat
+    line.new(bar_index, buyE, bar_index + expiryBars, buyE, color = color.lime,  width = 2)
+    line.new(bar_index, selE, bar_index + expiryBars, selE, color = color.red,   width = 2)
+    line.new(bar_index, buyT, bar_index + expiryBars, buyT, color = color.new(color.teal, 40), style = line.style_dashed)
+    line.new(bar_index, selT, bar_index + expiryBars, selT, color = color.new(color.teal, 40), style = line.style_dashed)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  SANITY READOUT
+// ═══════════════════════════════════════════════════════════════════════════════
+var int nSig = 0
+var int nOut = 0
+if sig
+    nSig += 1
+    if priceOutside
+        nOut += 1
+
+var table tb = table.new(position.top_right, 2, 7, border_width = 1)
+if barstate.islastconfirmedhistory
+    slTicks = math.abs(buyE - buyS) / tick
+    tpTicks = tpDist / tick
+    beWin   = slTicks + tpTicks > 0 ? slTicks / (slTicks + tpTicks) * 100 : 0
+    outPct  = nSig > 0 ? nOut / nSig * 100 : 0
+    table.cell(tb, 0, 0, "TP ticks",          bgcolor = color.new(color.gray, 80))
+    table.cell(tb, 1, 0, str.tostring(tpTicks, "#.#"))
+    table.cell(tb, 0, 1, "Last SL ticks",     bgcolor = color.new(color.gray, 80))
+    table.cell(tb, 1, 1, str.tostring(slTicks, "#.#"))
+    table.cell(tb, 0, 2, "Breakeven win %",   bgcolor = color.new(color.gray, 80))
+    table.cell(tb, 1, 2, str.tostring(beWin, "#.#"), bgcolor = beWin > 90 ? color.new(color.red, 60) : color.new(color.green, 70))
+    table.cell(tb, 0, 3, "Actual win %",      bgcolor = color.new(color.gray, 80))
+    wr = strategy.closedtrades > 0 ? strategy.wintrades / strategy.closedtrades * 100 : 0
+    table.cell(tb, 1, 3, str.tostring(wr, "#.#"))
+    table.cell(tb, 0, 4, "Trades",            bgcolor = color.new(color.gray, 80))
+    table.cell(tb, 1, 4, str.tostring(strategy.closedtrades))
+    table.cell(tb, 0, 5, "Price outside %",   bgcolor = color.new(color.gray, 80))
+    table.cell(tb, 1, 5, str.tostring(outPct, "#.#"), bgcolor = outPct > 40 ? color.new(color.orange, 60) : color.new(color.green, 70))
+    table.cell(tb, 0, 6, "Entry payload",     bgcolor = color.new(color.gray, 80))
+    table.cell(tb, 1, 6, f_open("buy", buyS, buyT), text_size = size.tiny)
