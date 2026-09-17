@@ -2,9 +2,11 @@
 indicator("FVG Gray Signal Bracket", overlay=true)
 
 // A = i-2, B = i-1, C = i
-// Detect bullish FVG (gap between A and C) -- this is what paints candle B
-// gray (pale lime at 70% transparency). That gray candle is the signal.
-isBullFVG = low > high[2]
+// Detect an FVG (gap between A and C), either direction -- this is what
+// paints candle B: lime for bullish, red for bearish. Both are "signal
+// candles" -- every one of them gets a straddle, regardless of direction.
+isBullFVG = low  > high[2]
+isBearFVG = high < low[2]
 
 wSecret = input.string("", "MirrorFleet secret", tooltip="Paste the secret from your Automation page here.")
 wSym    = input.string("", "Broker symbol override")
@@ -21,21 +23,21 @@ f_order(string action, float sl, float tp) =>
 
 conf = barstate.isconfirmed
 
-// Candle A -- the gap's origin candle. Candle B (high[1]/low[1]) is still
-// the one painted gray as the visual signal; the order levels come from A.
-bHi = high[2]
-bLo = low[2]
+// Candle B -- the signal candle itself. The straddle's levels come from
+// its own high and low, not from any other candle.
+bHi = high[1]
+bLo = low[1]
 
-barcolor(isBullFVG ? color.new(color.lime, 70) : na, offset=-1)
+barcolor(isBullFVG ? color.new(color.lime, 70) : isBearFVG ? color.new(color.red, 70) : na, offset=-1)
 
-// Bracket armed on the gray candle: buy triggers at its high, sell at its
-// low. A fresh gray candle always replaces whatever was still armed --
+// Bracket armed on the signal candle: buy triggers at its high, sell at its
+// low. A fresh signal candle always replaces whatever was still armed --
 // nothing has been sent to the broker yet, so there is nothing to undo.
 var float aHi = na
 var float aLo = na
 var bool  armed = false
 
-if conf and isBullFVG
+if conf and (isBullFVG or isBearFVG)
     aHi := bHi
     aLo := bLo
     armed := true
