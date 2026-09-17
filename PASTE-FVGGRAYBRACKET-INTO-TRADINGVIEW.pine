@@ -1,0 +1,48 @@
+//@version=6
+indicator("FVG Gray Signal Bracket", overlay=true)
+
+// A = i-2, B = i-1, C = i
+// Detect bullish FVG (gap between A and C) -- this is what paints candle B
+// gray (pale lime at 70% transparency). That gray candle is the signal.
+isBullFVG = low > high[2]
+
+wSecret = input.string("", "MirrorFleet secret", tooltip="Paste the secret from your Automation page here.")
+wSym    = input.string("", "Broker symbol override")
+wLots   = input.float(0.01, "Lots sent to broker", minval=0.01, step=0.01)
+
+brokerSym = wSym == "" ? syminfo.ticker : wSym
+
+f_order(string action, float sl) =>
+    '{"secret":"' + wSecret + '","id":"' + str.tostring(time) + '","action":"' + action + '","symbol":"' + brokerSym +
+     '","lots":' + str.tostring(wLots) + ',"stop_loss":' + str.tostring(sl, format.mintick) + '}'
+
+conf = barstate.isconfirmed
+
+// Candle B -- the gray signal candle
+bHi = high[1]
+bLo = low[1]
+
+barcolor(isBullFVG ? color.new(color.lime, 70) : na, offset=-1)
+
+// Bracket armed on the gray candle: buy triggers at its high, sell at its
+// low. A fresh gray candle always replaces whatever was still armed --
+// nothing has been sent to the broker yet, so there is nothing to undo.
+var float aHi = na
+var float aLo = na
+var bool  armed = false
+
+if conf and isBullFVG
+    aHi := bHi
+    aLo := bLo
+    armed := true
+
+if armed and high >= aHi
+    alert(f_order("buy", aLo), alert.freq_once_per_bar)
+    armed := false
+else if armed and low <= aLo
+    alert(f_order("sell", aHi), alert.freq_once_per_bar)
+    armed := false
+
+if armed
+    line.new(bar_index, aHi, bar_index + 1, aHi, color = color.new(color.lime, 20), style = line.style_dashed)
+    line.new(bar_index, aLo, bar_index + 1, aLo, color = color.new(color.orange, 20), style = line.style_dashed)
