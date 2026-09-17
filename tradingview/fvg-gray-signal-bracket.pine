@@ -21,9 +21,10 @@ f_order(string action, float sl, float tp) =>
 
 conf = barstate.isconfirmed
 
-// Candle B -- the gray signal candle
-bHi = high[1]
-bLo = low[1]
+// Candle A -- the gap's origin candle. Candle B (high[1]/low[1]) is still
+// the one painted gray as the visual signal; the order levels come from A.
+bHi = high[2]
+bLo = low[2]
 
 barcolor(isBullFVG ? color.new(color.lime, 70) : na, offset=-1)
 
