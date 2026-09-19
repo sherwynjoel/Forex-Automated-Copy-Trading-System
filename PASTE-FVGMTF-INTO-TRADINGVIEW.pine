@@ -1,0 +1,97 @@
+//@version=6
+indicator("FVG MTF Confluence Bracket", overlay=true)
+
+// ─── HOW TO SET THIS UP ───────────────────────────────────────────────────────
+// Put the chart on your ENTRY timeframe (e.g. 1 min). The entry candle is
+// always this chart's own candle -- that is a Pine limitation, not a choice:
+// a script cannot watch a lower timeframe bar-by-bar from a higher chart.
+// The confirmation timeframes below should be HIGHER than the chart (3, 5,
+// 15...) and are pulled by the script itself via request.security, so you
+// never have to switch charts to see them.
+//
+// A = i-2, B = i-1, C = i. Same FVG detection everywhere:
+//     bull  low > high[2]      bear  high < low[2]
+// A colored candle on the entry chart means a fresh signal confirmed here --
+// lime for bullish, red for bearish. Confirmation timeframes use the same
+// rule on their own LAST CLOSED bar, so they never repaint.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+g1 = "① Confirmation timeframes (all enabled ones must agree in direction)"
+g2 = "② Webhook payload"
+
+useTf1 = input.bool(true, "Use", group = g1, inline = "tf1")
+tf1    = input.timeframe("3",  "", group = g1, inline = "tf1")
+useTf2 = input.bool(true, "Use", group = g1, inline = "tf2")
+tf2    = input.timeframe("5",  "", group = g1, inline = "tf2")
+useTf3 = input.bool(true, "Use", group = g1, inline = "tf3")
+tf3    = input.timeframe("15", "", group = g1, inline = "tf3")
+
+wSecret = input.string("", "MirrorFleet secret", group = g2, tooltip="Paste the secret from your Automation page here.")
+wSym    = input.string("", "Broker symbol override", group = g2)
+wLots   = input.float(0.01, "Lots sent to broker", minval=0.01, step=0.01, group = g2)
+
+brokerSym = wSym == "" ? syminfo.ticker : wSym
+
+// Stop-loss ships with the order (the entry candle's opposite extreme); no
+// take_profit -- MirrorFleet's Risk Engine sets that post-fill from the real
+// price. Same reasoning as the single-timeframe script.
+f_order(string action, float sl) =>
+    '{"secret":"' + wSecret + '","id":"' + str.tostring(time) + '","action":"' + action + '","symbol":"' + brokerSym +
+     '","lots":' + str.tostring(wLots) + ',"stop_loss":' + str.tostring(sl, format.mintick) + '}'
+
+// The signal as of a timeframe's LAST CLOSED bar: the [1]-shifted form of the
+// same gap rule, with lookahead_on so the value lands the moment that bar
+// closes and never changes afterwards. Called unconditionally for every slot
+// (request.security must not run conditionally); disabled slots are simply
+// ignored in the confluence check below.
+f_fvg(simple string tf) =>
+    request.security(syminfo.tickerid, tf, [low[1] > high[3], high[1] < low[3]], lookahead = barmerge.lookahead_on)
+
+[bull1, bear1] = f_fvg(tf1)
+[bull2, bear2] = f_fvg(tf2)
+[bull3, bear3] = f_fvg(tf3)
+
+bullConfluence = (not useTf1 or bull1) and (not useTf2 or bull2) and (not useTf3 or bull3)
+bearConfluence = (not useTf1 or bear1) and (not useTf2 or bear2) and (not useTf3 or bear3)
+
+// The entry chart's own signal, evaluated directly on this chart's candles.
+isBullFVG = low  > high[2]
+isBearFVG = high < low[2]
+
+// An entry is only allowed when the entry candle's own signal points the
+// same way every enabled confirmation timeframe agrees on.
+allowBull = isBullFVG and bullConfluence
+allowBear = isBearFVG and bearConfluence
+
+conf = barstate.isconfirmed
+
+// Candle B on the entry chart -- the one actually traded.
+bHi = high[1]
+bLo = low[1]
+
+barcolor(isBullFVG ? color.new(color.lime, 70) : isBearFVG ? color.new(color.red, 70) : na, offset=-1)
+plotshape(conf and allowBull, title="Confluence buy",  style=shape.triangleup,   location=location.belowbar, color=color.lime, size=size.small)
+plotshape(conf and allowBear, title="Confluence sell", style=shape.triangledown, location=location.abovebar, color=color.red,  size=size.small)
+
+// Bracket armed on the entry candle, but only when the confirmation
+// timeframes agree. A fresh qualifying candle always replaces whatever was
+// still armed -- nothing has been sent to the broker yet, nothing to undo.
+var float aHi = na
+var float aLo = na
+var bool  armed = false
+
+if conf and (allowBull or allowBear)
+    aHi := bHi
+    aLo := bLo
+    armed := true
+
+if armed and high >= aHi
+    alert(f_order("buy", aLo), alert.freq_once_per_bar)
+    armed := false
+else if armed and low <= aLo
+    alert(f_order("sell", aHi), alert.freq_once_per_bar)
+    armed := false
+
+if armed
+    line.new(bar_index, aHi, bar_index + 1, aHi, color = color.new(color.lime, 20), style = line.style_dashed)
+    line.new(bar_index, aLo, bar_index + 1, aLo, color = color.new(color.orange, 20), style = line.style_dashed)
