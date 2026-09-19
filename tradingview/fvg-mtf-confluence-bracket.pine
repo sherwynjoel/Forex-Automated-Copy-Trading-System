@@ -27,15 +27,22 @@ indicator("FVG MTF Confluence Bracket", overlay=true)
 //                              one fills (price touches its level) the script
 //                              sends a cancel that pulls the other leg. A
 //                              fresh signal candle cancels the old pair before
-//                              placing the new one. A leg whose level the
-//                              current bar has already traded through is not
-//                              placed: a stop resting behind the market is
-//                              refused by the broker as an invalid price.
+//                              placing the new one.
+//
+// ─── FILTERS AND SIGNAL RULES ─────────────────────────────────────────────────
+// Candle filters measure the signal candle itself (body and full length, in
+// price units) and are OFF by default. Signal rules decide which colored
+// candles may arm: the first of a run of same-colour candles, the first that
+// passes the filters, or every one; whether a leg whose level price has
+// already passed is dropped rather than chased; and whether a new signal
+// replaces a bracket that is still waiting or is ignored until it resolves.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 g1 = "① Confirmation timeframes (all enabled ones must agree in direction)"
 g2 = "② Order, stop / target   (price units — dollars on gold)"
-g3 = "③ Webhook payload"
+g3 = "③ Candle filters   (all OFF by default)"
+g4 = "④ Signal rules"
+g5 = "⑤ Webhook payload"
 
 useTf1 = input.bool(true, "Use", group = g1, inline = "tf1")
 tf1    = input.timeframe("3",  "", group = g1, inline = "tf1")
@@ -54,9 +61,27 @@ slValue = input.float(2.0, "Stop loss distance (fixed mode)", minval=0.01, step=
 tpValue = input.float(2.0, "Take profit distance", minval=0.0, step=0.1, group = g2,
      tooltip="Price units beyond entry. 2.0 on gold means entry 4300.00 -> target 4302.00 (buy) or 4298.00 (sell). Set 0 to send no target and let MirrorFleet's Risk Engine set it after the fill instead.")
 
-wSecret = input.string("", "MirrorFleet secret", group = g3, tooltip="Paste the secret from your Automation page here.")
-wSym    = input.string("", "Broker symbol override", group = g3)
-wLots   = input.float(0.01, "Lots sent to broker", minval=0.01, step=0.01, group = g3)
+useBody  = input.bool(false, "Filter by body (open → close)", group = g3,
+     tooltip="OFF. Turn on once you are happy with the signal count. Measures the signal candle's body in price units.")
+bodyMin  = input.float(0.0, "Min body", minval=0.0, step=0.1, group = g3)
+bodyMax  = input.float(1.5, "Max body", minval=0.0, step=0.1, group = g3)
+useRange = input.bool(false, "Filter by full length (high → low)", group = g3,
+     tooltip="OFF. Turn on once you are happy with the signal count. Measures the signal candle's full high-to-low length in price units.")
+rangeMin = input.float(0.0, "Min length", minval=0.0, step=0.1, group = g3)
+rangeMax = input.float(3.0, "Max length", minval=0.0, step=0.1, group = g3)
+
+runMode = input.string("First candle of run only", "Consecutive same-colour candles",
+     options=["First candle of run only", "First eligible candle in run", "Off — every candle"], group = g4,
+     tooltip="What to do when several same-colour candles print in a row. Off is there so you can see the raw signal rate with nothing suppressed.")
+skipIfPassed = input.bool(true, "Skip if price has already passed the level", group = g4,
+     tooltip="Keep this ON. Per leg: if the bar already closed above the signal candle's high the buy side is dropped, below its low the sell side is dropped. OFF chases -- a market order fires on the next touch, and a stop order resting behind the market is refused by the broker.")
+onOpposite = input.string("Drop and arm new", "New signal while one is already armed",
+     options=["Drop and arm new", "Ignore until resolved"], group = g4,
+     tooltip="Drop and arm new: a fresh signal candle replaces the bracket still waiting (in stop mode its resting orders are cancelled first). Ignore until resolved: nothing changes until the waiting bracket fires or is dropped.")
+
+wSecret = input.string("", "MirrorFleet secret", group = g5, tooltip="Paste the secret from your Automation page here.")
+wSym    = input.string("", "Broker symbol override", group = g5)
+wLots   = input.float(0.01, "Lots sent to broker", minval=0.01, step=0.01, group = g5)
 
 brokerSym = wSym == "" ? syminfo.ticker : wSym
 stopMode  = orderMode == "Stop order (rest at broker)"
@@ -99,76 +124,105 @@ bearConfluence = (not useTf1 or bear1) and (not useTf2 or bear2) and (not useTf3
 // The entry chart's own signal, evaluated directly on this chart's candles.
 isBullFVG = low  > high[2]
 isBearFVG = high < low[2]
-
-// An entry is only allowed when the entry candle's own signal points the
-// same way every enabled confirmation timeframe agrees on.
-allowBull = isBullFVG and bullConfluence
-allowBear = isBearFVG and bearConfluence
+sigDir    = isBullFVG ? 1 : isBearFVG ? -1 : 0
 
 conf = barstate.isconfirmed
 
-// Candle B on the entry chart -- the one actually traded.
-bHi = high[1]
-bLo = low[1]
+// ─── Candle B on the entry chart -- the one actually traded ───────────────────
+bHi   = high[1]
+bLo   = low[1]
+bOpen = open[1]
+bCls  = close[1]
+
+bodyPrice  = math.abs(bCls - bOpen)
+rangePrice = bHi - bLo
+
+bodyOK = not useBody  or (bodyPrice  >= bodyMin  and bodyPrice  <= bodyMax)
+rngOK  = not useRange or (rangePrice >= rangeMin and rangePrice <= rangeMax)
+
+// ─── Run tracking: explicit state, no history-indexed booleans ────────────────
+var int prevPaint  = 0         // colour of the previous bar's signal: 1 / -1 / 0
+var int runId      = 0
+var int armedRunId = -1
+
+isFirstOfRun = sigDir != 0 and sigDir != prevPaint
+
+if conf and isFirstOfRun
+    runId += 1
+
+elig = switch runMode
+    "First candle of run only"     => isFirstOfRun
+    "First eligible candle in run" => sigDir != 0 and armedRunId != runId
+    => sigDir != 0
+
+// An entry is only allowed when the entry candle's own signal points the
+// same way every enabled confirmation timeframe agrees on, and the candle
+// passes the filters and the run rule.
+allowBull = isBullFVG and bullConfluence and bodyOK and rngOK and elig
+allowBear = isBearFVG and bearConfluence and bodyOK and rngOK and elig
 
 barcolor(isBullFVG ? color.new(color.lime, 70) : isBearFVG ? color.new(color.red, 70) : na, offset=-1)
 plotshape(conf and allowBull, title="Confluence buy",  style=shape.triangleup,   location=location.belowbar, color=color.lime, size=size.small)
 plotshape(conf and allowBear, title="Confluence sell", style=shape.triangledown, location=location.abovebar, color=color.red,  size=size.small)
 
-// Bracket armed on the entry candle, but only when the confirmation
-// timeframes agree. A fresh qualifying candle always replaces whatever was
-// still armed. In market mode nothing has reached the broker yet, so there
-// is nothing to undo; in stop mode the old pair is cancelled first.
+// ─── Bracket state ────────────────────────────────────────────────────────────
+// Each leg is tracked on its own: a leg whose level price already passed may
+// be skipped while the other still arms. In stop mode a live leg is an order
+// resting at the broker; in market mode it is a level the script watches.
 var float aHi = na
 var float aLo = na
-var bool  armed = false
-var bool  buyResting  = false     // stop mode: which legs are at the broker
-var bool  sellResting = false
-var int   armBar = -1
+var bool  buyLive  = false
+var bool  sellLive = false
+var int   armBar   = -1
+
+armed = buyLive or sellLive
+busy  = armed and onOpposite == "Ignore until resolved"
 
 buySl(float hi, float lo)  => fixedSl ? hi - slValue : lo
 sellSl(float hi, float lo) => fixedSl ? lo + slValue : hi
 
-if conf and (allowBull or allowBear)
-    if stopMode and (buyResting or sellResting)
-        alert(f_cancel(), alert.freq_all)
+if conf and (allowBull or allowBear) and not busy
+    if stopMode and armed
+        alert(f_cancel(), alert.freq_all)          // drop the pair still resting
     aHi := bHi
     aLo := bLo
-    armed := true
     armBar := bar_index
-    buyResting  := false
-    sellResting := false
+    armedRunId := runId
+    // Skip a leg the bar already traded through: chasing it means a market
+    // order at a worse price, or a stop the broker refuses as invalid.
+    buyLive  := not skipIfPassed or close < aHi
+    sellLive := not skipIfPassed or close > aLo
     if stopMode
-        // Only a leg still ahead of price can rest; one the bar already
-        // traded through would be refused as an invalid price.
-        if close < aHi
+        if buyLive
             alert(f_stop("buy", aHi, buySl(aHi, aLo), aHi + tpValue), alert.freq_all)
-            buyResting := true
-        if close > aLo
+        if sellLive
             alert(f_stop("sell", aLo, sellSl(aHi, aLo), aLo - tpValue), alert.freq_all)
-            sellResting := true
+
+// Remember this bar's colour AFTER the decision, so isFirstOfRun compares
+// against the previous bar and not against itself.
+if conf
+    prevPaint := sigDir
 
 // Touch detection runs only on bars AFTER the arming bar: on the arming bar
 // itself the level was set from the previous candle and the current one may
 // already have traded through it before the pair even existed.
-if armed and bar_index > armBar
-    if high >= aHi and (not stopMode or buyResting)
+if (buyLive or sellLive) and bar_index > armBar
+    if buyLive and high >= aHi
         if stopMode
             alert(f_cancel(), alert.freq_all)     // buy stop filled; pull the sell leg
         else
             alert(f_market("buy", buySl(aHi, aLo), aHi + tpValue), alert.freq_once_per_bar)
-        armed := false
-        buyResting  := false
-        sellResting := false
-    else if low <= aLo and (not stopMode or sellResting)
+        buyLive  := false
+        sellLive := false
+    else if sellLive and low <= aLo
         if stopMode
             alert(f_cancel(), alert.freq_all)     // sell stop filled; pull the buy leg
         else
             alert(f_market("sell", sellSl(aHi, aLo), aLo - tpValue), alert.freq_once_per_bar)
-        armed := false
-        buyResting  := false
-        sellResting := false
+        buyLive  := false
+        sellLive := false
 
-if armed
+if buyLive
     line.new(bar_index, aHi, bar_index + 1, aHi, color = color.new(color.lime, 20), style = line.style_dashed)
+if sellLive
     line.new(bar_index, aLo, bar_index + 1, aLo, color = color.new(color.orange, 20), style = line.style_dashed)
