@@ -231,8 +231,12 @@ def _fingerprint(org_id: int, alert: Alert) -> str:
     a resend through as a "new" alert. Two alerts with the same trading
     intent inside the window are one alert, whatever their id says.
     """
+    # A cancel is idempotent -- a second one finds nothing and says so -- and
+    # a bracket script sends one at arm time and another when a leg fills,
+    # often inside the window. Its id keeps those apart; nothing else's does.
     parts = (org_id, alert.action, alert.symbol, alert.lots,
-             alert.stop_loss, alert.take_profit)
+             alert.stop_loss, alert.take_profit, alert.order_type, alert.price,
+             alert.alert_id if alert.action == "cancel" else None)
     return hashlib.sha256(json.dumps(parts).encode()).hexdigest()
 
 
@@ -409,7 +413,8 @@ def create_webhooks_router(rate_limiter: LoginRateLimiter) -> APIRouter:
                 raise WebhookRejected(422, str(exc))
             if isinstance(aliases, dict) and alert.symbol in aliases:
                 alert = Alert(alert.action, normalise_ticker(aliases[alert.symbol]),
-                              alert.lots, alert.stop_loss, alert.take_profit, alert.alert_id)
+                              alert.lots, alert.stop_loss, alert.take_profit, alert.alert_id,
+                              alert.order_type, alert.price)
         except WebhookRejected as exc:
             return _record(conn, org_id, ip, t0, redacted, None, exc)
 
@@ -462,6 +467,16 @@ def create_webhooks_router(rate_limiter: LoginRateLimiter) -> APIRouter:
                                           "action": "close", "symbol": alert.symbol,
                                           **result})
 
+            if alert.action == "cancel":
+                result = await _cancel(client, base, master, org_id, alert, remaining)
+                outcome = "accepted" if result["orders_cancelled"] else "nothing_to_cancel"
+                _finish(conn, receipt_id, outcome,
+                        None if result["orders_cancelled"] else "no order resting on that symbol")
+                _audit(conn, org_id, master, alert, outcome, None, ip, t0, receipt_id)
+                return _json(200, {"status": outcome, "receipt_id": receipt_id,
+                                          "action": "cancel", "symbol": alert.symbol,
+                                          **result})
+
             state = await _copier(client, "GET", f"{base}/state?org_id={org_id}", None, remaining())
             held = find_master_positions(state, alert.symbol)
             opposite = "SELL" if alert.action == "buy" else "BUY"
@@ -469,16 +484,23 @@ def create_webhooks_router(rate_limiter: LoginRateLimiter) -> APIRouter:
                 raise WebhookRejected(
                     422, f"master holds an opposite position on {alert.symbol}; "
                          f"reverse-on-signal is not supported -- send close first")
-            if len(state.get("master_positions") or []) >= max_open:
+            # Resting orders count too: a bracket is two of them, and a stop
+            # that fills later is a position this limit meant to bound.
+            if (len(state.get("master_positions") or []) +
+                    len(state.get("pending_orders") or [])) >= max_open:
                 raise WebhookRejected(
-                    422, f"master already holds {max_open} open positions; "
+                    422, f"master already holds {max_open} open positions or pending orders; "
                          f"raise the limit in Automation if this is intended")
 
             order: Dict[str, Any] = {
                 "account_id": master, "symbol": alert.symbol,
-                "side": alert.action.upper(), "order_type": "MARKET",
+                "side": alert.action.upper(), "order_type": alert.order_type.upper(),
                 "volume_lots": alert.lots, "actor_email": "tradingview",
             }
+            if alert.order_type == "stop":
+                order["stop_price"] = alert.price
+            elif alert.order_type == "limit":
+                order["limit_price"] = alert.price
             if alert.stop_loss is not None:
                 order["stop_loss"] = alert.stop_loss
             if alert.take_profit is not None:
@@ -729,6 +751,29 @@ def create_webhooks_router(rate_limiter: LoginRateLimiter) -> APIRouter:
             closed.append(pos["position_id"])
         return {"positions_closed": closed}
 
+    async def _cancel(client, base, master, org_id, alert, remaining):
+        """Pull every order the master has resting on `alert.symbol`.
+
+        Finding nothing is success-with-nothing-done, as with close: a
+        script cancelling the other leg of a bracket after one side filled
+        must not be told it is broken because the broker already consumed
+        both. The book is read fresh from /state; a resync is not forced
+        here because a pending order the reconciler has not seen yet is
+        one placed within the last second, which no cancel targets.
+        """
+        state = await _copier(client, "GET", f"{base}/state?org_id={org_id}", None, remaining())
+        wanted = alert.symbol.upper()
+        resting = [o for o in (state.get("pending_orders") or [])
+                   if str(o.get("symbol") or "").upper() == wanted]
+        cancelled = []
+        for order in resting:
+            remaining()
+            await _copier(client, "POST", f"{base}/orders/cancel",
+                          {"account_id": master, "order_id": order["order_id"],
+                           "actor_email": "tradingview"}, remaining())
+            cancelled.append(order["order_id"])
+        return {"orders_cancelled": cancelled}
+
     # ------------------------------------------------------ recording
 
     def _insert(conn, org_id, ip, t0, redacted, alert, outcome, reason, fp) -> int:
@@ -768,6 +813,7 @@ def create_webhooks_router(rate_limiter: LoginRateLimiter) -> APIRouter:
 
     def _audit(conn, org_id, master, alert, outcome, detail, ip, t0, receipt_id):
         severity = {"accepted": "info", "duplicate": "info", "nothing_to_close": "warning",
+                    "nothing_to_cancel": "warning",
                     "rejected": "warning", "failed": "warning", "unknown": "error"}[outcome]
         conn.execute(
             "INSERT INTO events (org_id, account_id, category, severity, latency_ms, "

@@ -214,7 +214,7 @@ export interface Settings {
 export interface WebhookReceipt {
   id: number
   received_at: string
-  outcome: 'accepted' | 'duplicate' | 'unknown' | 'rejected' | 'failed' | 'nothing_to_close' | string
+  outcome: 'accepted' | 'duplicate' | 'unknown' | 'rejected' | 'failed' | 'nothing_to_close' | 'nothing_to_cancel' | string
   reason: string | null
   action: string | null
   symbol: string | null

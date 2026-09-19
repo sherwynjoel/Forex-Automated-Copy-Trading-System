@@ -498,6 +498,89 @@ def test_max_open_positions_bounds_a_leaked_secret(org_client, db):
     assert not any("/order" in u for u, _ in calls)
 
 
+# ============================================================ resting orders
+
+
+def test_a_stop_order_reaches_the_copier_with_its_trigger_price(org_client, db):
+    """The bracket scripts rest a buy stop above the signal candle and a sell
+    stop below it; the broker holds both and fills whichever price reaches."""
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+    calls = _copier(client)
+
+    r = _post(client, _alert(order_type="stop", price=4370.25, stop_loss=4365.0))
+
+    assert r.status_code == 200 and r.json()["status"] == "accepted"
+    _, sent = next((u, b) for u, b in calls if "/order" in u)
+    assert sent == {"account_id": MASTER, "symbol": "XAUUSD", "side": "BUY",
+                    "order_type": "STOP", "stop_price": 4370.25, "volume_lots": 0.01,
+                    "stop_loss": 4365.0, "actor_email": "tradingview"}
+
+
+def test_the_two_legs_of_a_bracket_are_not_duplicates_of_each_other(org_client, db):
+    """Same symbol, same size, same window -- only the trigger price differs
+    between one bracket's buy stop and the next one's. The fingerprint must
+    see that, or the second bracket is swallowed as a resend."""
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+    calls = _copier(client)
+    _post(client, _alert(id="a", order_type="stop", price=4370.25))
+    _post(client, _alert(id="b", order_type="stop", price=4372.10))
+    assert sum(u.endswith("/order") for u, _ in calls) == 2
+
+
+def test_resting_orders_count_toward_the_open_limit(org_client, db):
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id, max_open=2)
+    calls = _copier(client, state={
+        "master_positions": [{"position_id": 1, "symbol": "EURUSD", "side": "BUY", "volume": 1}],
+        "pending_orders": [{"order_id": 7, "symbol": "XAUUSD", "side": "SELL", "volume": 1}]})
+    r = _post(client, _alert())
+    assert r.status_code == 422 and "pending orders" in r.json()["reason"]
+    assert not any(u.endswith("/order") for u, _ in calls)
+
+
+def test_cancel_pulls_every_resting_order_on_the_symbol_and_nothing_else(org_client, db):
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+    calls = _copier(client, state={"master_positions": [], "pending_orders": [
+        {"order_id": 11, "symbol": "XAUUSD", "side": "BUY", "volume": 1},
+        {"order_id": 12, "symbol": "XAUUSD", "side": "SELL", "volume": 1},
+        {"order_id": 13, "symbol": "EURUSD", "side": "BUY", "volume": 1}]})
+
+    r = _post(client, _alert(action="cancel"))
+
+    assert r.status_code == 200 and r.json()["status"] == "accepted"
+    assert r.json()["orders_cancelled"] == [11, 12]
+    sent = [b for u, b in calls if "/orders/cancel" in u]
+    assert [b["order_id"] for b in sent] == [11, 12]
+    assert all(b["account_id"] == MASTER and b["actor_email"] == "tradingview" for b in sent)
+
+
+def test_cancel_with_nothing_resting_is_not_an_error(org_client, db):
+    """After one leg fills the broker has already consumed it; the script's
+    cancel for the other leg must not read as a failure."""
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+    calls = _copier(client)
+    r = _post(client, _alert(action="cancel"))
+    assert r.status_code == 200 and r.json()["status"] == "nothing_to_cancel"
+    assert not any("/orders/cancel" in u for u, _ in calls)
+
+
+def test_a_second_cancel_inside_the_window_is_not_a_duplicate(org_client, db):
+    """A bracket script cancels at arm time and again when a leg fills, often
+    seconds apart. Both must reach the copier; a cancel is harmless twice."""
+    client, org_id, seed = org_client
+    seed(MASTER, role="master"); _arm(db, org_id)
+    calls = _copier(client, state={"master_positions": [], "pending_orders": [
+        {"order_id": 11, "symbol": "XAUUSD", "side": "BUY", "volume": 1}]})
+    first = _post(client, _alert(action="cancel", id="a"))
+    second = _post(client, _alert(action="cancel", id="b"))
+    assert first.json()["status"] == "accepted" and second.json()["status"] == "accepted"
+    assert sum("/orders/cancel" in u for u, _ in calls) == 2
+
+
 # ============================================================ close
 
 

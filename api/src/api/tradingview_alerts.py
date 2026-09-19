@@ -28,7 +28,8 @@ import math
 import re
 from dataclasses import dataclass
 
-ACTIONS = ("buy", "sell", "close")
+ACTIONS = ("buy", "sell", "close", "cancel")
+ORDER_TYPES = ("market", "stop", "limit")
 
 # Exchange prefix and the decorations TradingView appends to some tickers:
 # a continuous-contract "1!" / "2!", a perpetual ".P", or a settlement
@@ -57,6 +58,10 @@ class Alert:
     # Whatever the alert carried as its own id, for the audit trail and for
     # duplicate suppression. Never trusted for anything else.
     alert_id: str | None
+    # market (the default) fills now; stop and limit rest at `price` until
+    # the broker fills them. A market order carries no price.
+    order_type: str = "market"
+    price: float | None = None
 
 
 def normalise_ticker(raw: object) -> str:
@@ -153,6 +158,12 @@ def parse_alert(body: object, max_lots: float) -> Alert:
         # rejected, so a shared template can carry a lots field harmlessly.
         return Alert(action, symbol, None, None, None, alert_id)
 
+    if action == "cancel":
+        # Pulls every order the master has resting on the symbol -- the
+        # other leg of a bracket once one side fills, or a stale pair
+        # before a fresh one is placed. Needs nothing beyond the symbol.
+        return Alert(action, symbol, None, None, None, alert_id)
+
     raw_lots = body.get("lots")
     if raw_lots is None or raw_lots == "":
         raise AlertError("lots is required for buy and sell, e.g. \"lots\": 0.01")
@@ -173,7 +184,19 @@ def parse_alert(body: object, max_lots: float) -> Alert:
     stop_loss = _price(body, "stop_loss")
     take_profit = _price(body, "take_profit")
 
-    return Alert(action, symbol, lots, stop_loss, take_profit, alert_id)
+    order_type = str(body.get("order_type") or "market").strip().lower()
+    if order_type not in ORDER_TYPES:
+        raise AlertError(
+            f"order_type must be one of {', '.join(ORDER_TYPES)}; got {body.get('order_type')!r}")
+    price = _price(body, "price")
+    if order_type != "market" and price is None:
+        raise AlertError(
+            f'price is required for a {order_type} order, e.g. "price": 4370.25')
+    if order_type == "market":
+        # A shared template may carry one; a market order fills where it fills.
+        price = None
+
+    return Alert(action, symbol, lots, stop_loss, take_profit, alert_id, order_type, price)
 
 
 def find_master_positions(state: object, symbol: str,

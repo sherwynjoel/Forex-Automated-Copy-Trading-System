@@ -54,6 +54,33 @@ class TestParse:
         alert = parse_alert({"action": "close", "symbol": "XAUUSD", "lots": 0.01, "id": "7"}, 1.0)
         assert alert == Alert("close", "XAUUSD", None, None, None, "7")
 
+    def test_cancel_needs_only_a_symbol(self):
+        alert = parse_alert({"action": "cancel", "symbol": "XAUUSD", "lots": 0.01, "id": "9"}, 1.0)
+        assert alert == Alert("cancel", "XAUUSD", None, None, None, "9")
+
+    def test_a_stop_order_carries_its_trigger_price(self):
+        alert = parse_alert(
+            {"action": "buy", "symbol": "XAUUSD", "lots": 0.01, "id": "1",
+             "order_type": "stop", "price": 4370.25, "stop_loss": 4365.0}, 1.0)
+        assert alert.order_type == "stop" and alert.price == 4370.25
+        assert alert.stop_loss == 4365.0 and alert.take_profit is None
+
+    def test_market_is_the_default_and_drops_any_price_it_is_given(self):
+        """A shared template may carry price; a market order fills where it fills."""
+        alert = parse_alert({"action": "sell", "symbol": "XAUUSD", "lots": 0.01, "id": "1",
+                             "price": 4370.25}, 1.0)
+        assert alert.order_type == "market" and alert.price is None
+
+    def test_a_pending_order_without_a_price_is_refused(self):
+        with pytest.raises(AlertError, match="price is required"):
+            parse_alert({"action": "buy", "symbol": "XAUUSD", "lots": 0.01, "id": "1",
+                         "order_type": "limit"}, 1.0)
+
+    def test_an_unknown_order_type_is_refused(self):
+        with pytest.raises(AlertError, match="order_type must be one of"):
+            parse_alert({"action": "buy", "symbol": "XAUUSD", "lots": 0.01, "id": "1",
+                         "order_type": "buystop", "price": 4370.25}, 1.0)
+
     def test_strings_from_placeholders_are_accepted(self):
         """TradingView substitutes placeholders as text; "0.01" must work."""
         alert = parse_alert({"action": "BUY", "symbol": "XAUUSD", "lots": "0.01", "id": "1"}, 1.0)

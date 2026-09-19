@@ -627,11 +627,12 @@ function OutcomePill({ outcome }: { outcome: string }) {
   const style =
     outcome === 'accepted' ? 'bg-profit-wash text-profit-deep'
     : outcome === 'duplicate' ? 'bg-paper text-ink-soft'
-    : outcome === 'nothing_to_close' ? 'bg-warn-wash text-warn-deep'
+    : outcome === 'nothing_to_close' || outcome === 'nothing_to_cancel' ? 'bg-warn-wash text-warn-deep'
     : outcome === 'unknown' ? 'bg-loss-wash text-loss-deep'
     : outcome === 'failed' ? 'bg-warn-wash text-warn-deep'
     : 'bg-loss-wash text-loss-deep'
   const label = outcome === 'nothing_to_close' ? 'nothing to close'
+    : outcome === 'nothing_to_cancel' ? 'nothing to cancel'
     : outcome === 'unknown' ? 'UNCONFIRMED' : outcome
   return <span className={`desk-label px-2 py-0.5 rounded ${style}`}>{label}</span>
 }
