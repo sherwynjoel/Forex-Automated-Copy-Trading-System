@@ -17,7 +17,8 @@ indicator("FVG MTF Confluence Bracket", overlay=true)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 g1 = "① Confirmation timeframes (all enabled ones must agree in direction)"
-g2 = "② Webhook payload"
+g2 = "② Stop / target   (price units — dollars on gold)"
+g3 = "③ Webhook payload"
 
 useTf1 = input.bool(true, "Use", group = g1, inline = "tf1")
 tf1    = input.timeframe("3",  "", group = g1, inline = "tf1")
@@ -26,18 +27,26 @@ tf2    = input.timeframe("5",  "", group = g1, inline = "tf2")
 useTf3 = input.bool(true, "Use", group = g1, inline = "tf3")
 tf3    = input.timeframe("15", "", group = g1, inline = "tf3")
 
-wSecret = input.string("", "MirrorFleet secret", group = g2, tooltip="Paste the secret from your Automation page here.")
-wSym    = input.string("", "Broker symbol override", group = g2)
-wLots   = input.float(0.01, "Lots sent to broker", minval=0.01, step=0.01, group = g2)
+slMode  = input.string("Candle high/low", "Stop loss from", options=["Candle high/low", "Fixed distance"], group = g2,
+     tooltip="Candle high/low = the entry candle's opposite extreme (buy stops at its low, sell stops at its high). Fixed distance = a set distance from the entry level.")
+slValue = input.float(2.0, "Stop loss distance (fixed mode)", minval=0.01, step=0.1, group = g2,
+     tooltip="Price units. 2.0 on gold means entry 4300.00 -> stop 4298.00 (buy) or 4302.00 (sell).")
+tpValue = input.float(2.0, "Take profit distance", minval=0.0, step=0.1, group = g2,
+     tooltip="Price units beyond entry. 2.0 on gold means entry 4300.00 -> target 4302.00 (buy) or 4298.00 (sell). Set 0 to send no target and let MirrorFleet's Risk Engine set it after the fill instead.")
+
+wSecret = input.string("", "MirrorFleet secret", group = g3, tooltip="Paste the secret from your Automation page here.")
+wSym    = input.string("", "Broker symbol override", group = g3)
+wLots   = input.float(0.01, "Lots sent to broker", minval=0.01, step=0.01, group = g3)
 
 brokerSym = wSym == "" ? syminfo.ticker : wSym
 
-// Stop-loss ships with the order (the entry candle's opposite extreme); no
-// take_profit -- MirrorFleet's Risk Engine sets that post-fill from the real
-// price. Same reasoning as the single-timeframe script.
-f_order(string action, float sl) =>
+// Stop-loss always ships with the order. take_profit ships only when the
+// target input is above 0 -- at 0 it is left out so MirrorFleet's Risk
+// Engine can set it post-fill from the real price.
+f_order(string action, float sl, float tp) =>
+    string tpField = tpValue > 0 ? ',"take_profit":' + str.tostring(tp, format.mintick) : ""
     '{"secret":"' + wSecret + '","id":"' + str.tostring(time) + '","action":"' + action + '","symbol":"' + brokerSym +
-     '","lots":' + str.tostring(wLots) + ',"stop_loss":' + str.tostring(sl, format.mintick) + '}'
+     '","lots":' + str.tostring(wLots) + ',"stop_loss":' + str.tostring(sl, format.mintick) + tpField + '}'
 
 // The signal as of a timeframe's LAST CLOSED bar: the [1]-shifted form of the
 // same gap rule, with lookahead_on so the value lands the moment that bar
@@ -85,11 +94,13 @@ if conf and (allowBull or allowBear)
     aLo := bLo
     armed := true
 
+fixedSl = slMode == "Fixed distance"
+
 if armed and high >= aHi
-    alert(f_order("buy", aLo), alert.freq_once_per_bar)
+    alert(f_order("buy", fixedSl ? aHi - slValue : aLo, aHi + tpValue), alert.freq_once_per_bar)
     armed := false
 else if armed and low <= aLo
-    alert(f_order("sell", aHi), alert.freq_once_per_bar)
+    alert(f_order("sell", fixedSl ? aLo + slValue : aHi, aLo - tpValue), alert.freq_once_per_bar)
     armed := false
 
 if armed
