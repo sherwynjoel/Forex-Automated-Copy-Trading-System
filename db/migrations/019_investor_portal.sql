@@ -54,6 +54,13 @@ CREATE TABLE investor_deposits (
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX investor_deposits_queue ON investor_deposits (org_id, status, created_at);
+-- One live notice per transaction id. Two pending rows quoting the same
+-- chain transaction are the same money twice, and an admin working the
+-- queue would confirm both. Rejected rows are excluded so a genuine
+-- mistake (wrong amount, wrong coin) can be rejected and re-filed with
+-- the same txid.
+CREATE UNIQUE INDEX investor_deposits_one_live_txid
+    ON investor_deposits (org_id, txid) WHERE status <> 'rejected';
 
 -- A cash-out request. approved means "admin will pay"; paid means the
 -- crypto left the admin's wallet and txid says where. An account with

@@ -341,6 +341,36 @@ def test_notices_are_refused_while_no_wallet_is_configured(org_client, make_user
     assert r.status_code == 409 and "not open" in r.json()["detail"]
 
 
+def test_the_same_transaction_id_cannot_be_filed_twice(org_client, make_user, login_as, db):
+    """R16: two notices quoting one chain transaction are the same money
+    twice, and an admin working the queue would confirm both. After a
+    rejection the id is free again -- a wrong amount must be re-filable."""
+    client, org_id, investor = _investor_with_wallet(org_client, make_user, login_as, db)
+    first = client.post(f"/api/orgs/{org_id}/investor/deposits", json={
+        "amount": "5000", "coin": "USDT", "txid": "chain-tx-1"}, headers=_csrf(client))
+    assert first.status_code == 201
+    r = client.post(f"/api/orgs/{org_id}/investor/deposits", json={
+        "amount": "5000", "coin": "USDT", "txid": " chain-tx-1 "}, headers=_csrf(client))
+    assert r.status_code == 409 and "transaction id" in r.json()["detail"]
+
+    # Another investor cannot shadow-file it either.
+    other = make_user(email="other@example.com")
+    _member(db, org_id, other, "investor")
+    login_as(client, other)
+    r = client.post(f"/api/orgs/{org_id}/investor/deposits", json={
+        "amount": "5000", "coin": "USDT", "txid": "chain-tx-1"}, headers=_csrf(client))
+    assert r.status_code == 409
+
+    login_as(client, {"email": "admin@example.com", "password": "a-solid-password"})
+    r = client.post(f"/api/orgs/{org_id}/investor-deposits/{first.json()['id']}/decision",
+                    json={"status": "rejected", "note": "wrong amount"}, headers=_csrf(client))
+    assert r.status_code == 200
+    login_as(client, investor)
+    r = client.post(f"/api/orgs/{org_id}/investor/deposits", json={
+        "amount": "4000", "coin": "USDT", "txid": "chain-tx-1"}, headers=_csrf(client))
+    assert r.status_code == 201 and r.json()["amount"] == 4000.0
+
+
 def test_ten_notices_an_hour_then_429(org_client, make_user, login_as, db):
     client, org_id, investor = _investor_with_wallet(org_client, make_user, login_as, db)
     for i in range(10):

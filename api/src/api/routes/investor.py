@@ -286,10 +286,19 @@ def create_investor_router() -> APIRouter:
             raise HTTPException(
                 status_code=400,
                 detail=f"this workspace accepts {wallet['coin']} on {wallet['network']}, not {coin}")
-        row = conn.execute(
-            "INSERT INTO investor_deposits (org_id, user_id, amount, coin, txid, note) "
-            f"VALUES (%s, %s, %s, %s, %s, %s) RETURNING {_DEPOSIT_COLS}",
-            (ctx.org_id, ctx.user_id, amount, coin, txid, note)).fetchone()
+        try:
+            row = conn.execute(
+                "INSERT INTO investor_deposits (org_id, user_id, amount, coin, txid, note) "
+                f"VALUES (%s, %s, %s, %s, %s, %s) RETURNING {_DEPOSIT_COLS}",
+                (ctx.org_id, ctx.user_id, amount, coin, txid, note)).fetchone()
+        except psycopg.errors.UniqueViolation:
+            # investor_deposits_one_live_txid: the same chain transaction is
+            # already sitting in the queue (possibly another investor's, and
+            # possibly already confirmed). Two rows for one transfer is the
+            # same money counted twice. A rejected row is not in the index,
+            # so a re-file after a mistake still works.
+            raise HTTPException(
+                status_code=409, detail="A notice with this transaction id already exists")
         out = _deposit_json(row)
         _event(conn, ctx.org_id, ctx.user_email, "investor_deposit_noticed", "warning",
                {"deposit_id": out["id"], "amount": out["amount"], "coin": coin, "txid": txid,

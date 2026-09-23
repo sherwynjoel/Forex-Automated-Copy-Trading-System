@@ -74,6 +74,35 @@ def test_amounts_must_be_positive_and_statuses_are_checked(db, make_user, make_o
         assert status == "pending"
 
 
+def test_one_live_notice_per_transaction_id(db, make_user, make_org):
+    """R16: the same chain transaction cannot sit in the queue twice --
+    confirming both would count the same money twice. Rejected rows are out
+    of the index, so a mistake can be re-filed."""
+    owner = make_user()
+    investor = make_user(email="inv@example.com")
+    org_id = make_org(members=[(owner, "owner"), (investor, "investor")])
+    with psycopg.connect(db, autocommit=True) as conn:
+        (indexdef,) = conn.execute(
+            "SELECT indexdef FROM pg_indexes WHERE indexname = "
+            "'investor_deposits_one_live_txid'").fetchone()
+        assert "UNIQUE" in indexdef and "org_id" in indexdef and "txid" in indexdef
+        assert "rejected" in indexdef
+
+        conn.execute("INSERT INTO investor_deposits (org_id, user_id, amount, coin, txid) "
+                     "VALUES (%s, %s, 10, 'USDT', 'same-tx')", (org_id, investor["id"]))
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            conn.execute("INSERT INTO investor_deposits (org_id, user_id, amount, coin, txid) "
+                         "VALUES (%s, %s, 20, 'USDT', 'same-tx')", (org_id, investor["id"]))
+        # A rejected row leaves the index, so the txid is free again.
+        conn.execute("UPDATE investor_deposits SET status = 'rejected' WHERE txid = 'same-tx'")
+        conn.execute("INSERT INTO investor_deposits (org_id, user_id, amount, coin, txid) "
+                     "VALUES (%s, %s, 20, 'USDT', 'same-tx')", (org_id, investor["id"]))
+        # ...and the same txid in ANOTHER workspace was never in the way.
+        other = make_org(name="Other", members=[(owner, "owner")])
+        conn.execute("INSERT INTO investor_deposits (org_id, user_id, amount, coin, txid) "
+                     "VALUES (%s, %s, 30, 'USDT', 'same-tx')", (other, owner["id"]))
+
+
 def test_wallet_card_is_one_row_per_org(db, make_user, make_org):
     owner = make_user()
     org_id = make_org(members=[(owner, "owner")])
