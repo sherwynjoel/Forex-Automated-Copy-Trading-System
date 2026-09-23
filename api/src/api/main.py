@@ -187,6 +187,12 @@ def create_app(http_transport: Optional[httpx.BaseTransport] = None) -> FastAPI:
     insights_router = create_insights_router()
     app.include_router(insights_router)
 
+    # Investor portal: a sub-viewer role that sees only its own linked
+    # account, plus the admin queues that decide its deposits/withdrawals.
+    from .routes.investor import create_investor_admin_router, create_investor_router
+    app.include_router(create_investor_router(rate_limiter))
+    app.include_router(create_investor_admin_router())
+
     # Include events router
     events_router = create_events_router()
     app.include_router(events_router)
