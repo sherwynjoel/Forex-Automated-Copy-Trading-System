@@ -35,14 +35,23 @@ const withdrawal = { id: 21, user_id: 5, account_id: 1001, amount: 1000, destina
                      paid_by: null, paid_at: null, txid: null, created_at: '2026-09-23T10:30:00Z',
                      email: 'inv@example.com', display_name: 'Ada Investor' }
 
-function mockRoutes() {
+function mockRoutes(options: { wallets?: unknown[] } = {}) {
+  const { wallets } = options
+  let walletGetCalls = 0
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
     const method = init?.method || 'GET'
     if (url.endsWith('/investors')) return jsonResponse([investor])
     if (url.endsWith('/investor-deposits')) return jsonResponse([deposit])
     if (url.endsWith('/investor-withdrawals')) return jsonResponse([withdrawal])
-    if (url.endsWith('/investor-wallet') && method === 'GET') return jsonResponse({ detail: 'none' }, 404)
+    if (url.endsWith('/investor-wallet') && method === 'GET') {
+      if (wallets && wallets.length > 0) {
+        const idx = Math.min(walletGetCalls, wallets.length - 1)
+        walletGetCalls += 1
+        return jsonResponse(wallets[idx])
+      }
+      return jsonResponse({ detail: 'none' }, 404)
+    }
     if (url.endsWith('/investor-wallet')) return jsonResponse(JSON.parse(init!.body as string))
     if (url.endsWith('/accounts')) {
       return jsonResponse([{ ctid_trader_account_id: 1001, trader_login: 1001, is_live: false,
@@ -68,7 +77,7 @@ beforeEach(() => {
   vi.spyOn(apiModule, 'eventsSocket').mockImplementation(() => new MockWebSocket() as never)
   useOrgMock.mockReturnValue(mockUseOrg('admin'))
 })
-afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers() })
 
 test('lists investors with their figures', async () => {
   mockRoutes()
@@ -124,4 +133,16 @@ test('saves the wallet card', async () => {
     expect(JSON.parse((call![1] as RequestInit).body as string))
       .toEqual({ coin: 'USDT', network: 'TRC20', address: 'TAddr123', memo: '' })
   })
+})
+
+test('the wallet card follows the server when the form is untouched', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  mockRoutes({ wallets: [
+    { coin: 'USDT', network: 'TRC20', address: 'TFirst', memo: null },
+    { coin: 'USDT', network: 'TRC20', address: 'TSecond', memo: null },
+  ] })
+  render(<MemoryRouter><Investors /></MemoryRouter>)
+  expect(await screen.findByDisplayValue('TFirst')).toBeInTheDocument()
+  await vi.advanceTimersByTimeAsync(10000)
+  expect(await screen.findByDisplayValue('TSecond')).toBeInTheDocument()
 })

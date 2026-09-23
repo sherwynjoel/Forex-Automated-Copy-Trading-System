@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { orgApi } from '../lib/api'
 import { useOrg } from '../lib/org'
 import { can } from '../lib/roles'
@@ -31,6 +31,14 @@ export default function Investors() {
   const [deposits, setDeposits] = useState<InvestorDeposit[]>([])
   const [withdrawals, setWithdrawals] = useState<InvestorWithdrawal[]>([])
   const [wallet, setWallet] = useState({ coin: '', network: '', address: '', memo: '' })
+  // Guards the wallet card against being clobbered mid-edit by the poll /
+  // live refresh / post-action refresh -- once the admin has touched the
+  // form, refresh() leaves it alone until a save clears the flag. Read via
+  // a ref inside refresh() so that callback (memoized once per orgId) never
+  // sees a stale value.
+  const [walletDirty, setWalletDirty] = useState(false)
+  const walletDirtyRef = useRef(false)
+  walletDirtyRef.current = walletDirty
   const [tab, setTab] = useState<'deposits' | 'withdrawals'>('deposits')
   const [pending, setPending] = useState<Pending | null>(null)
   const [text, setText] = useState('')
@@ -49,7 +57,7 @@ export default function Investors() {
       setRows(r); setAccounts(a); setDeposits(d); setWithdrawals(w)
       try {
         const wl = await orgApi<InvestorWallet>(orgId, 'investor-wallet')
-        setWallet((cur) => cur.address ? cur : { ...wl, memo: wl.memo ?? '' })
+        setWallet((cur) => walletDirtyRef.current ? cur : { ...wl, memo: wl.memo ?? '' })
       } catch (err) {
         if (!(err instanceof Error && err.message.startsWith('404'))) throw err
       }
@@ -86,10 +94,16 @@ export default function Investors() {
       method: 'PUT', body: JSON.stringify({ account_id: accountId }) })
   }, accountId == null ? 'Account unlinked' : 'Account linked')
 
+  const editWallet = (patch: Partial<typeof wallet>) => {
+    setWallet((w) => ({ ...w, ...patch }))
+    setWalletDirty(true)
+  }
+
   const saveWallet = (e: React.FormEvent) => {
     e.preventDefault()
     act(async () => {
       await orgApi(orgId, 'investor-wallet', { method: 'PUT', body: JSON.stringify(wallet) })
+      setWalletDirty(false)
     }, 'Wallet saved')
   }
 
@@ -295,7 +309,7 @@ export default function Investors() {
             <label key={key} className={`block ${width}`}>
               <span className="desk-label block mb-1">{label}</span>
               <input aria-label={label.replace(' (optional)', '')} value={wallet[key]} disabled={!control}
-                     onChange={(e) => setWallet({ ...wallet, [key]: e.target.value })}
+                     onChange={(e) => editWallet({ [key]: e.target.value })}
                      className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink" />
             </label>
           ))}
