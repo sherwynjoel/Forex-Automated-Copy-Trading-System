@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, useRef } from 'react'
-import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom'
+import { Outlet, Link, Navigate, useLocation, useNavigate } from 'react-router-dom'
 import { api, orgApi } from '../lib/api'
 import { useOrg } from '../lib/org'
 import { useTheme } from '../hooks/useTheme'
@@ -23,7 +23,20 @@ const navItems = (orgId: number, role: Role) => [
   { path: `/org/${orgId}/history`, label: 'History' },
   { path: `/org/${orgId}/performance`, label: 'Performance' },
   { path: `/org/${orgId}/logs`, label: 'Logs' },
+  ...(can(role, 'control') ? [
+    { path: `/org/${orgId}/investors`, label: 'Investors' },
+  ] : []),
   { path: `/org/${orgId}/members`, label: 'Members' },
+]
+
+/** The investor portal: only their own account and their own money. No
+ *  desk strip, no kill switch, no prices -- none of it is theirs to see. */
+const investorNavItems = (orgId: number) => [
+  { path: `/org/${orgId}/invest`, label: 'Overview' },
+  { path: `/org/${orgId}/invest/deposit`, label: 'Deposit' },
+  { path: `/org/${orgId}/invest/withdraw`, label: 'Withdraw' },
+  { path: `/org/${orgId}/invest/history`, label: 'History' },
+  { path: `/org/${orgId}/invest/account`, label: 'Account' },
 ]
 
 function localISODate(): string {
@@ -399,7 +412,10 @@ export default function Layout() {
     }
   }
 
-  const items = navItems(orgId, role)
+  const investor = role === 'investor'
+  const items = investor ? investorNavItems(orgId) : navItems(orgId, role)
+  const portalRoot = `/org/${orgId}/invest`
+  const strayed = investor && !location.pathname.startsWith(portalRoot)
 
   // The drawer never outlives a navigation, and Escape dismisses it.
   useEffect(() => {
@@ -518,9 +534,9 @@ export default function Layout() {
           </button>
           <Logo size={22} textClass="text-base" />
         </div>
-        <DeskStrip onAccounts={handleAccounts} />
+        {!investor && <DeskStrip onAccounts={handleAccounts} />}
         <main className="flex-1 overflow-y-auto p-4 md:p-6">
-          <Outlet />
+          {strayed ? <Navigate to={portalRoot} replace /> : <Outlet />}
         </main>
       </div>
     </div>

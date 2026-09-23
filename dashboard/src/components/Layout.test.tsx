@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor, cleanup } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
 import { expect, test, vi, afterEach } from 'vitest'
@@ -485,4 +485,52 @@ test('a single-platform org gets a single-platform caption', async () => {
   mockRoutes({ accounts: [mt5Account] })
   renderLayout()
   expect(await screen.findByText('MT5')).toBeInTheDocument()
+})
+
+function renderShell(path: string) {
+  return render(
+    <MemoryRouter initialEntries={[path]}>
+      <Routes>
+        <Route path="/org/:orgId" element={<Layout />}>
+          <Route index element={<div>desk home</div>} />
+          <Route path="invest" element={<div>investor home</div>} />
+          <Route path="invest/deposit" element={<div>investor deposit</div>} />
+        </Route>
+      </Routes>
+    </MemoryRouter>,
+  )
+}
+
+test('an investor sees the portal nav and no desk strip', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('investor'))
+  const fetchMock = mockRoutes()
+  renderShell('/org/1/invest')
+  expect(await screen.findByText('investor home')).toBeInTheDocument()
+  for (const label of ['Overview', 'Deposit', 'Withdraw', 'History', 'Account']) {
+    expect(screen.getAllByRole('link', { name: label }).length).toBeGreaterThan(0)
+  }
+  expect(screen.queryByRole('link', { name: 'Accounts' })).not.toBeInTheDocument()
+  expect(screen.queryByText(/Close all positions/)).not.toBeInTheDocument()
+  expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/state'))).toBe(false)
+})
+
+test('an investor opening a desk path is sent to the portal', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('investor'))
+  mockRoutes()
+  renderShell('/org/1')
+  expect(await screen.findByText('investor home')).toBeInTheDocument()
+  expect(screen.queryByText('desk home')).not.toBeInTheDocument()
+})
+
+test('admins get an Investors nav item and viewers do not', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
+  mockRoutes()
+  renderShell('/org/1')
+  expect(await screen.findByText('desk home')).toBeInTheDocument()
+  expect(screen.getAllByRole('link', { name: 'Investors' }).length).toBeGreaterThan(0)
+  cleanup()
+  useOrgMock.mockReturnValue(makeOrgValue('viewer'))
+  renderShell('/org/1')
+  expect(await screen.findByText('desk home')).toBeInTheDocument()
+  expect(screen.queryByRole('link', { name: 'Investors' })).not.toBeInTheDocument()
 })
