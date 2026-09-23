@@ -7,8 +7,8 @@ import Banner from '../components/Banner'
 import type { Invite, Member } from '../lib/types'
 import ConfirmDialog from '../components/ConfirmDialog'
 
-const ASSIGNABLE: Role[] = ['viewer', 'trader', 'admin', 'owner']
-const INVITABLE: Role[] = ['viewer', 'trader', 'admin']
+const ASSIGNABLE: Role[] = ['investor', 'viewer', 'trader', 'admin', 'owner']
+const INVITABLE: Role[] = ['investor', 'viewer', 'trader', 'admin']
 
 export default function Members() {
   const { orgId, role, me, org, refreshMe } = useOrg()

@@ -1,7 +1,8 @@
-export type Role = 'viewer' | 'trader' | 'admin' | 'owner'
+export type Role = 'investor' | 'viewer' | 'trader' | 'admin' | 'owner'
 export type Action = 'trade' | 'control' | 'manage_members'
 
-const RANK: Record<Role, number> = { viewer: 0, trader: 1, admin: 2, owner: 3 }
+// investor sits below viewer: it may open only the investor portal.
+const RANK: Record<Role, number> = { investor: -1, viewer: 0, trader: 1, admin: 2, owner: 3 }
 const THRESHOLD: Record<Action, number> = {
   trade: RANK.trader,
   control: RANK.admin,
