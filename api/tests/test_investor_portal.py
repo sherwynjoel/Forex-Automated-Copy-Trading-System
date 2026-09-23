@@ -440,6 +440,44 @@ def test_a_request_with_unknown_equity_is_accepted_but_flagged(org_client, make_
     assert r.json()["equity_verified"] is False and r.json()["equity_at_request"] is None
 
 
+def test_a_last_known_equity_is_capped_against_but_never_verified(
+        org_client, make_user, login_as, db):
+    """R13: only a figure the copier answered with right now is `verified`.
+    A last-known MT5 figure may be hours old -- it still caps the request and
+    is still recorded, but the admin is told to check the terminal."""
+    client, org_id, seed = org_client
+    _wallet(db, org_id)
+    investor = make_user(email="inv@example.com")
+    _member(db, org_id, investor, "investor")
+    with psycopg.connect(db, autocommit=True) as conn:
+        (aid,) = conn.execute(
+            "INSERT INTO accounts (ctid_trader_account_id, ctid_connection_id, org_id, "
+            "platform, trader_login, is_live, role, enabled, nickname, investor_user_id) "
+            "VALUES (nextval('mt5_account_id_seq'), NULL, %s, 'mt5', 0, false, 'slave', "
+            "true, 'Inv', %s) RETURNING ctid_trader_account_id",
+            (org_id, investor["id"])).fetchone()
+        conn.execute("INSERT INTO mt5_links (account_id, key_hash, equity, balance) "
+                     "VALUES (%s, 'h', 4990.25, 4990.25)", (aid,))
+    _state(client, down=True)
+    login_as(client, investor)
+
+    # The cap still bites, using the last-known figure.
+    r = client.post(f"/api/orgs/{org_id}/investor/withdrawals", json={
+        "amount": "99999", "destination": "TDest"}, headers=_csrf(client))
+    assert r.status_code == 400 and "4990.25" in r.json()["detail"]
+
+    r = client.post(f"/api/orgs/{org_id}/investor/withdrawals", json={
+        "amount": "1000", "destination": "TDest"}, headers=_csrf(client))
+    assert r.status_code == 201
+    body = r.json()
+    assert body["equity_at_request"] == 4990.25 and body["equity_verified"] is False
+
+    login_as(client, {"email": "admin@example.com", "password": "a-solid-password"})
+    queue = client.get(f"/api/orgs/{org_id}/investor-withdrawals").json()
+    assert [(w["id"], w["equity_at_request"], w["equity_verified"]) for w in queue] == \
+        [(body["id"], 4990.25, False)]
+
+
 def test_no_account_no_withdrawal(org_client, make_user, login_as, db):
     client, org_id, investor = _investor_with_wallet(org_client, make_user, login_as, db)
     r = client.post(f"/api/orgs/{org_id}/investor/withdrawals", json={

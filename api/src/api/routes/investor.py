@@ -322,19 +322,26 @@ def create_investor_router() -> APIRouter:
         if hourly.is_limited(f"investor-withdrawal:{ctx.org_id}:{ctx.user_id}"):
             raise HTTPException(status_code=429, detail="too many withdrawal requests; try again later")
         deposits, withdrawals = _ledger_rows(conn, ctx.org_id, ctx.user_id)
-        equity, _source, _positions = await _equity_for(
+        equity, source, _positions = await _equity_for(
             http_request.app.state.http, cfg, conn, ctx.org_id, account_id)
         available = summarise(deposits, withdrawals, equity).available
         if available is not None and amount > available:
             raise HTTPException(
                 status_code=400,
                 detail=f"amount exceeds what is available to withdraw ({available:.2f})")
+        # "Verified" means the copier answered with this account's equity
+        # while the request was being made. A `last known` figure is the
+        # last number an MT5 terminal reported -- possibly hours old, and
+        # the trade that emptied the account may have happened since. It is
+        # still worth capping against and still worth recording, but the
+        # admin must check the terminal before paying, and that is exactly
+        # what this flag tells them.
         row = conn.execute(
             "INSERT INTO investor_withdrawals (org_id, user_id, account_id, amount, destination, "
             "equity_at_request, equity_verified) VALUES (%s, %s, %s, %s, %s, %s, %s) "
             f"RETURNING {_WITHDRAWAL_COLS}",
             (ctx.org_id, ctx.user_id, account_id, amount, destination, equity,
-             equity is not None)).fetchone()
+             source == "live")).fetchone()
         out = _withdrawal_json(row)
         _event(conn, ctx.org_id, ctx.user_email, "investor_withdrawal_requested", "warning",
                {"withdrawal_id": out["id"], "amount": out["amount"], "destination": destination,
