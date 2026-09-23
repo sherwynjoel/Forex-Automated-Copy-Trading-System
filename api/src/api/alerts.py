@@ -38,6 +38,11 @@ ALERT_RULES: dict[tuple[str, str, str], str] = {
     # investor (payload.user_id), not per account -- see consider().
     ("control", "warning", "investor_deposit_noticed"): "Investor deposit notice",
     ("control", "warning", "investor_withdrawal_requested"): "Investor withdrawal request",
+    # Where every investor is told to send money. Changed by an admin --
+    # or by whoever stole an admin's session. The payload carries the new
+    # and the previous address. No payload.user_id: this is about the
+    # workspace, not one investor, so it cools down per action.
+    ("control", "warning", "investor_wallet_set"): "Investor deposit wallet changed",
 }
 
 

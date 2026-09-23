@@ -79,6 +79,20 @@ def test_all_critical_rules_match():
     assert len(recorded) == 5
 
 
+def test_a_changed_deposit_wallet_alerts_with_both_addresses():
+    """R14: the address investors are told to send money to changed. One
+    email, carrying the new address and the one it replaced."""
+    recorded = []
+    alerter = _make_alerter(recorded)
+
+    event = _event("control", "warning", "investor_wallet_set", account_id=None,
+                   coin="USDT", network="TRC20", address="TNew",
+                   previous_address="TOld")
+    assert _run(alerter.consider(event)) is True
+    body = json.loads(recorded[0].content)
+    assert "TNew" in body["text"] and "TOld" in body["text"]
+
+
 def test_uninteresting_events_send_nothing():
     recorded = []
     alerter = _make_alerter(recorded)

@@ -161,6 +161,26 @@ def test_wallet_is_404_until_an_admin_sets_it(org_client, make_user, login_as, d
         "coin": "X", "network": "Y", "address": "Z"}, headers=_csrf(client)).status_code == 403
 
 
+def test_setting_the_wallet_audits_the_address_it_replaced(org_client, db):
+    """R14: the address is where every investor's money goes, so the audit
+    row has to say what it became AND what it was -- an `info` naming only
+    the coin could not tell a swap from a first setup."""
+    client, org_id, seed = org_client
+    for address in ("TFirst", "TSecond"):
+        assert client.put(f"/api/orgs/{org_id}/investor-wallet", json={
+            "coin": "USDT", "network": "TRC20", "address": address, "memo": "m"},
+            headers=_csrf(client)).status_code == 200
+    with psycopg.connect(db, autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT severity, payload FROM events WHERE org_id = %s "
+            "AND payload->>'action' = 'investor_wallet_set' ORDER BY id", (org_id,)).fetchall()
+    assert [r[0] for r in rows] == ["warning", "warning"]
+    first, second = rows[0][1], rows[1][1]
+    assert first["address"] == "TFirst" and first["previous_address"] is None
+    assert second["address"] == "TSecond" and second["previous_address"] == "TFirst"
+    assert second["coin"] == "USDT" and second["network"] == "TRC20" and second["memo"] == "m"
+
+
 def test_wallet_with_no_row_is_404_for_investors(org_client, make_user, login_as, db):
     client, org_id, seed = org_client
     investor = make_user(email="inv@example.com")

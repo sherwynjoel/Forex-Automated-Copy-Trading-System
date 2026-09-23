@@ -128,6 +128,24 @@ def test_telegram_api_rejection_returns_false():
     assert _run(notifier.consider(_reminder_event())) is False
 
 
+def test_a_changed_deposit_wallet_notifies():
+    """R14: the workspace's receiving address changed -- the summary line
+    names the new address and who set it."""
+    recorded = []
+    notifier = _make_notifier(recorded)
+
+    event = {"id": 9, "ts": "2026-09-24T10:00:00+00:00", "account_id": None,
+             "category": "control", "severity": "warning", "latency_ms": None,
+             "payload": {"action": "investor_wallet_set", "coin": "USDT",
+                         "network": "TRC20", "address": "TNew",
+                         "previous_address": "TOld",
+                         "summary": "Deposit wallet set to TNew (USDT on TRC20) "
+                                    "by admin@example.com"},
+             "org_id": 1}
+    assert _run(notifier.consider(event)) is True
+    assert "TNew" in json.loads(recorded[0].content)["text"]
+
+
 def test_lifespan_wires_telegram_to_broadcaster(app_client_with_lifespan, monkeypatch):
     """create_app's lifespan hands the broadcaster a TelegramNotifier built
     from the environment, alongside the EmailAlerter (wiring is

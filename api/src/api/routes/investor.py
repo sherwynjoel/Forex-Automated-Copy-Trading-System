@@ -435,6 +435,12 @@ def create_investor_admin_router() -> APIRouter:
             memo = clean_text(body.memo, "memo", required=False)
         except LedgerError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+        # Read the outgoing address BEFORE overwriting it: this is the one
+        # field that decides where every investor's money goes, so the audit
+        # row must show what it was as well as what it became. A warning,
+        # not an info: an attacker with an admin session would change
+        # exactly this, and both alerters are wired to warnings.
+        previous = _wallet(conn, ctx.org_id)
         conn.execute(
             "INSERT INTO org_investor_wallets (org_id, coin, network, address, memo, "
             "updated_by, updated_at) VALUES (%s, %s, %s, %s, %s, %s, now()) "
@@ -442,8 +448,11 @@ def create_investor_admin_router() -> APIRouter:
             "network = EXCLUDED.network, address = EXCLUDED.address, memo = EXCLUDED.memo, "
             "updated_by = EXCLUDED.updated_by, updated_at = now()",
             (ctx.org_id, coin, network, address, memo, ctx.user_id))
-        _event(conn, ctx.org_id, ctx.user_email, "investor_wallet_set", "info",
-               {"coin": coin, "network": network})
+        _event(conn, ctx.org_id, ctx.user_email, "investor_wallet_set", "warning",
+               {"coin": coin, "network": network, "address": address, "memo": memo,
+                "previous_address": previous["address"] if previous else None,
+                "summary": f"Deposit wallet set to {address} ({coin} on {network}) "
+                           f"by {ctx.user_email}"})
         return {"coin": coin, "network": network, "address": address, "memo": memo}
 
     @router.get("/investors", response_model=List[Dict[str, Any]])
