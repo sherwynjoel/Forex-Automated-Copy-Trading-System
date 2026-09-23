@@ -75,7 +75,7 @@ const RISK_NOTICE =
   'Trading leveraged products such as forex, metals and CFDs carries a high level of risk and may not be suitable for everyone. Past results do not predict future results. Nothing on this page is investment advice.'
 
 function Ctas({ large = false }: { large?: boolean }) {
-  const pad = large ? 'px-6 py-3 text-base' : 'px-4 py-2 text-sm'
+  const pad = large ? 'px-6 py-3 text-base' : 'px-3 py-1.5 text-xs sm:px-4 sm:py-2 sm:text-sm'
   return (
     <div className="flex flex-wrap items-center gap-3">
       <Link to="/register"
@@ -104,7 +104,7 @@ export default function Landing() {
   return (
     <div className="min-h-screen bg-paper text-ink">
       <header className="sticky top-0 z-10 bg-card/95 backdrop-blur border-b border-line">
-        <div className="max-w-6xl mx-auto px-4 md:px-6 h-16 flex items-center justify-between gap-6">
+        <div className="max-w-6xl mx-auto px-4 md:px-6 min-h-16 py-2 flex items-center justify-between gap-6">
           <Logo size={30} textClass="text-xl" />
           <nav aria-label="Sections" className="hidden md:flex items-center gap-6 text-sm text-ink-soft">
             <a href="#platform" className="hover:text-ink">Platform</a>
