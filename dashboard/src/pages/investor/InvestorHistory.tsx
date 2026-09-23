@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { orgApi } from '../../lib/api'
 import { useOrg } from '../../lib/org'
 import { errorText, formatWhen, money } from '../../lib/format'
@@ -14,13 +14,23 @@ function netOf(d: Deal): number | null {
 
 export default function InvestorHistory() {
   const { orgId } = useOrg()
-  const [windowEnd, setWindowEnd] = useState(() => Date.now())
+  // Fixed once at mount: this page has no "refresh" action, so "now" for
+  // paging purposes is "when the page was opened", not a moving target.
+  // Reading Date.now() again inside goLater (instead of against this
+  // anchor) loses the race against real elapsed time -- by the time a
+  // click handler runs, the live clock has already moved past whatever
+  // "now" was captured when windowEnd was last set, so an exact
+  // Earlier-then-Later round trip could never land back on "at now".
+  const nowAnchorRef = useRef(Date.now())
+  const [windowEnd, setWindowEnd] = useState(() => nowAnchorRef.current)
+  const [atNow, setAtNow] = useState(true)
   const [deals, setDeals] = useState<Deal[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true); setError(null)
+    setDeals([])
     try {
       const r = await orgApi<{ deals: Deal[]; has_more: boolean }>(
         orgId, `investor/history/deals?from=${windowEnd - WEEK_MS}&to=${windowEnd}`)
@@ -36,6 +46,13 @@ export default function InvestorHistory() {
 
   const total = deals.reduce((sum, d) => sum + (netOf(d) ?? 0), 0)
 
+  const goEarlier = () => { setWindowEnd((t) => t - WEEK_MS); setAtNow(false) }
+  const goLater = () => {
+    const now = nowAnchorRef.current
+    const next = windowEnd + WEEK_MS
+    if (next >= now) { setWindowEnd(now); setAtNow(true) } else { setWindowEnd(next) }
+  }
+
   return (
     <div className="space-y-6 max-w-6xl">
       <header className="flex flex-wrap items-end justify-between gap-3">
@@ -46,15 +63,15 @@ export default function InvestorHistory() {
           </p>
         </div>
         <div className="flex items-center gap-2 text-sm">
-          <button onClick={() => setWindowEnd((t) => t - WEEK_MS)}
+          <button onClick={goEarlier}
                   className="px-3 py-1.5 text-xs font-semibold rounded border border-line-strong text-ink-soft hover:text-ink">
             Earlier
           </button>
           <span className="num text-ink-soft">
             {formatWhen(windowEnd - WEEK_MS)} – {formatWhen(windowEnd)}
           </span>
-          <button onClick={() => setWindowEnd((t) => Math.min(Date.now(), t + WEEK_MS))}
-                  disabled={windowEnd >= Date.now()}
+          <button onClick={goLater}
+                  disabled={atNow}
                   className="px-3 py-1.5 text-xs font-semibold rounded border border-line-strong text-ink-soft hover:text-ink disabled:opacity-50">
             Later
           </button>

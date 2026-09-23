@@ -42,3 +42,15 @@ test('lists closed deals for the last week and pages earlier', async () => {
   const toOf = (u: string) => Number(new URL(u, 'http://x').searchParams.get('to'))
   expect(toOf(first) - toOf(second)).toBe(7 * 24 * 3600 * 1000)
 })
+
+test('Later is disabled at the current week and comes back after paging earlier', async () => {
+  render(<MemoryRouter><InvestorHistory /></MemoryRouter>)
+  await screen.findByText('XAUUSD')
+  const later = screen.getByRole('button', { name: 'Later' })
+  expect(later).toBeDisabled()
+  await userEvent.click(screen.getByRole('button', { name: 'Earlier' }))
+  expect(later).toBeEnabled()
+  await userEvent.click(later)
+  expect(later).toBeDisabled()
+  await screen.findByText('XAUUSD')
+})
