@@ -17,7 +17,7 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 import psycopg
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel
 
@@ -30,7 +30,7 @@ from ..investor_ledger import (
 from ..rbac import OrgContext, require_org_role
 from ..ws import broadcaster
 from .mt5 import MT5_OFFLINE_AFTER_S
-from .settings_control import _proxy_to_copier
+from .settings_control import COPIER_SLOW_COMMAND_TIMEOUT_S, _proxy_to_copier
 
 logger = logging.getLogger(__name__)
 
@@ -326,6 +326,52 @@ def create_investor_router() -> APIRouter:
                 "summary": f"Withdrawal request: {amount:.2f} from {ctx.user_email}"},
                account_id=account_id)
         return out
+
+    def _require_linked(conn: psycopg.Connection, ctx: OrgContext) -> int:
+        account_id = _linked_account(conn, ctx.org_id, ctx.user_id)
+        if account_id is None:
+            raise HTTPException(status_code=409, detail="no account linked yet")
+        return account_id
+
+    @router.get("/investor/positions", response_model=Dict[str, Any])
+    async def my_positions(http_request: Request,
+                           ctx: OrgContext = Depends(require_org_role("investor")),
+                           conn: psycopg.Connection = Depends(get_conn),
+                           cfg: ApiConfig = Depends(ApiConfig.from_env)) -> Dict[str, Any]:
+        account_id = _require_linked(conn, ctx)
+        _equity, source, positions = await _equity_for(
+            http_request.app.state.http, cfg, conn, ctx.org_id, account_id)
+        keys = ("position_id", "symbol", "side", "volume", "entry_price", "current_price",
+                "stop_loss", "take_profit", "pnl_quote")
+        return {"equity_source": source,
+                "positions": [{k: p.get(k) for k in keys} for p in positions if isinstance(p, dict)]}
+
+    @router.get("/investor/analytics", response_model=Dict[str, Any])
+    async def my_analytics(http_request: Request, weeks: int = 4,
+                           ctx: OrgContext = Depends(require_org_role("investor")),
+                           conn: psycopg.Connection = Depends(get_conn),
+                           cfg: ApiConfig = Depends(ApiConfig.from_env)) -> Dict[str, Any]:
+        account_id = _require_linked(conn, ctx)
+        weeks = max(1, min(weeks, 12))
+        return await _proxy_to_copier(
+            http_request.app.state.http,
+            f"{cfg.copier_control_url}/analytics?account_id={account_id}&weeks={weeks}",
+            method="GET", timeout=COPIER_SLOW_COMMAND_TIMEOUT_S)
+
+    @router.get("/investor/history/{kind}", response_model=Dict[str, Any])
+    async def my_history(kind: str, http_request: Request,
+                         from_ms: int = Query(..., alias="from"),
+                         to_ms: int = Query(..., alias="to"),
+                         ctx: OrgContext = Depends(require_org_role("investor")),
+                         conn: psycopg.Connection = Depends(get_conn),
+                         cfg: ApiConfig = Depends(ApiConfig.from_env)) -> Dict[str, Any]:
+        if kind not in ("deals", "orders", "cashflow"):
+            raise HTTPException(status_code=400, detail="kind must be deals, orders or cashflow")
+        account_id = _require_linked(conn, ctx)
+        return await _proxy_to_copier(
+            http_request.app.state.http,
+            f"{cfg.copier_control_url}/history/{kind}"
+            f"?account_id={account_id}&from={from_ms}&to={to_ms}", method="GET")
 
     return router
 

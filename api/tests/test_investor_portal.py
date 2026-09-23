@@ -510,3 +510,67 @@ def test_ten_withdrawal_requests_an_hour_then_429(org_client, make_user, login_a
     r = client.post(f"/api/orgs/{org_id}/investor/withdrawals", json={
         "amount": "1", "destination": "TDest"}, headers=_csrf(client))
     assert r.status_code == 429
+
+
+# ------------------------------------------------------------ read-throughs
+
+
+def _recording_copier(client, accounts=None):
+    """Answer the copier's read endpoints and remember every URL asked."""
+    seen = []
+    def callback(request):
+        url = str(request.url)
+        if "copier.test" not in url:
+            return default_mock_callback(request)
+        seen.append(url)
+        if "/state" in url:
+            return httpx.Response(200, json={
+                "status": "ok", "accounts": {str(k): v for k, v in (accounts or {}).items()},
+                "master_positions": [], "pending_orders": [], "drift": []})
+        if "/analytics" in url:
+            return httpx.Response(200, json={"closed_trades": 3, "wins": 2, "losses": 1,
+                                             "net_pnl": 120.5, "weeks": 4})
+        if "/history/" in url:
+            return httpx.Response(200, json={"deals": [], "has_more": False})
+        return default_mock_callback(request)
+    client.app.state.mock_transport.set_callback(callback)
+    return seen
+
+
+def test_read_throughs_need_a_linked_account(org_client, make_user, login_as, db):
+    client, org_id, investor = _investor_with_wallet(org_client, make_user, login_as, db)
+    for tail in ("investor/positions", "investor/analytics",
+                 "investor/history/deals?from=0&to=1"):
+        r = client.get(f"/api/orgs/{org_id}/{tail}")
+        assert r.status_code == 409 and "no account linked" in r.json()["detail"], tail
+
+
+def test_positions_come_from_the_linked_accounts_state(org_client, make_user, login_as, db):
+    client, org_id, investor = _investor_with_wallet(org_client, make_user, login_as, db,
+                                                     link_to=1001)
+    _recording_copier(client, {1001: {"balance": 5000.0, "equity": 5010.0, "open_pnl": 10.0,
+        "positions": [{"position_id": 7, "symbol_id": 41, "symbol": "XAUUSD", "side": "BUY",
+                       "volume": 1, "stop_loss": 4300.0, "take_profit": 4400.0,
+                       "entry_price": 4350.0, "pnl_quote": 10.0, "current_price": 4360.0}]},
+        1002: {"balance": 1.0, "equity": 1.0, "open_pnl": 0.0,
+               "positions": [{"position_id": 8, "symbol_id": 41, "symbol": "XAUUSD",
+                              "side": "SELL", "volume": 1, "entry_price": 1.0}]}})
+    body = client.get(f"/api/orgs/{org_id}/investor/positions").json()
+    assert body["equity_source"] == "live"
+    assert body["positions"] == [{"position_id": 7, "symbol": "XAUUSD", "side": "BUY",
+                                  "volume": 1, "entry_price": 4350.0, "current_price": 4360.0,
+                                  "stop_loss": 4300.0, "take_profit": 4400.0, "pnl_quote": 10.0}]
+
+
+def test_analytics_and_history_are_asked_for_the_linked_account_only(
+        org_client, make_user, login_as, db):
+    client, org_id, investor = _investor_with_wallet(org_client, make_user, login_as, db,
+                                                     link_to=1001)
+    seen = _recording_copier(client)
+    r = client.get(f"/api/orgs/{org_id}/investor/analytics?weeks=99")
+    assert r.status_code == 200 and r.json()["net_pnl"] == 120.5
+    assert any(u.endswith("/analytics?account_id=1001&weeks=12") for u in seen)
+    r = client.get(f"/api/orgs/{org_id}/investor/history/deals?from=5&to=9")
+    assert r.status_code == 200 and r.json() == {"deals": [], "has_more": False}
+    assert any(u.endswith("/history/deals?account_id=1001&from=5&to=9") for u in seen)
+    assert client.get(f"/api/orgs/{org_id}/investor/history/trades?from=0&to=1").status_code == 400
