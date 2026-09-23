@@ -381,3 +381,132 @@ def test_investors_only_see_their_own_notices_and_cannot_decide(
                     json={"status": "confirmed"}, headers=_csrf(client))
     assert r.status_code == 403
     assert client.get(f"/api/orgs/{org_id}/investor-deposits").status_code == 403
+
+
+# ------------------------------------------------------------- withdrawals
+
+
+def _funded_investor(org_client, make_user, login_as, db, equity=5120.5):
+    client, org_id, investor = _investor_with_wallet(org_client, make_user, login_as, db,
+                                                     link_to=1001)
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute("INSERT INTO investor_deposits (org_id, user_id, account_id, amount, coin, "
+                     "txid, status) VALUES (%s, %s, 1001, 5000, 'USDT', 't', 'confirmed')",
+                     (org_id, investor["id"]))
+    if equity is None:
+        _state(client, down=True)
+    else:
+        _state(client, {1001: {"balance": 5000.0, "equity": equity, "open_pnl": equity - 5000,
+                               "positions": []}})
+    return client, org_id, investor
+
+
+def test_an_investor_requests_a_withdrawal_within_available(org_client, make_user, login_as, db):
+    client, org_id, investor = _funded_investor(org_client, make_user, login_as, db)
+    r = client.post(f"/api/orgs/{org_id}/investor/withdrawals", json={
+        "amount": "1000", "destination": " TDest999 "}, headers=_csrf(client))
+    assert r.status_code == 201
+    body = r.json()
+    assert body["status"] == "requested" and body["destination"] == "TDest999"
+    assert body["equity_at_request"] == 5120.5 and body["equity_verified"] is True
+    assert body["account_id"] == 1001
+    summary = client.get(f"/api/orgs/{org_id}/investor/summary").json()
+    assert summary["pending_withdrawn"] == 1000.0 and summary["available"] == 4120.5
+    with psycopg.connect(db, autocommit=True) as conn:
+        (severity, payload) = conn.execute(
+            "SELECT severity, payload FROM events WHERE org_id = %s ORDER BY id DESC LIMIT 1",
+            (org_id,)).fetchone()
+    assert severity == "warning" and payload["action"] == "investor_withdrawal_requested"
+    assert payload["summary"] == "Withdrawal request: 1000.00 from inv@example.com"
+
+
+def test_a_request_above_available_is_refused_with_the_figure(org_client, make_user, login_as, db):
+    client, org_id, investor = _funded_investor(org_client, make_user, login_as, db)
+    client.post(f"/api/orgs/{org_id}/investor/withdrawals", json={
+        "amount": "4000", "destination": "TDest"}, headers=_csrf(client))
+    r = client.post(f"/api/orgs/{org_id}/investor/withdrawals", json={
+        "amount": "2000", "destination": "TDest"}, headers=_csrf(client))
+    assert r.status_code == 400 and "1120.50" in r.json()["detail"]
+
+
+def test_a_request_with_unknown_equity_is_accepted_but_flagged(org_client, make_user, login_as, db):
+    client, org_id, investor = _funded_investor(org_client, make_user, login_as, db, equity=None)
+    r = client.post(f"/api/orgs/{org_id}/investor/withdrawals", json={
+        "amount": "99999", "destination": "TDest"}, headers=_csrf(client))
+    assert r.status_code == 201
+    assert r.json()["equity_verified"] is False and r.json()["equity_at_request"] is None
+
+
+def test_no_account_no_withdrawal(org_client, make_user, login_as, db):
+    client, org_id, investor = _investor_with_wallet(org_client, make_user, login_as, db)
+    r = client.post(f"/api/orgs/{org_id}/investor/withdrawals", json={
+        "amount": "5", "destination": "TDest"}, headers=_csrf(client))
+    assert r.status_code == 409 and "no account linked" in r.json()["detail"]
+
+
+def test_approve_then_paid_and_the_ledger_moves(org_client, make_user, login_as, db):
+    client, org_id, investor = _funded_investor(org_client, make_user, login_as, db)
+    wd = client.post(f"/api/orgs/{org_id}/investor/withdrawals", json={
+        "amount": "1000", "destination": "TDest"}, headers=_csrf(client)).json()
+    admin = {"email": "admin@example.com", "password": "a-solid-password"}
+    login_as(client, admin)
+    queue = client.get(f"/api/orgs/{org_id}/investor-withdrawals?status=requested").json()
+    assert [w["id"] for w in queue] == [wd["id"]] and queue[0]["email"] == "inv@example.com"
+
+    r = client.post(f"/api/orgs/{org_id}/investor-withdrawals/{wd['id']}/paid",
+                    json={"txid": "x"}, headers=_csrf(client))
+    assert r.status_code == 409 and "requested" in r.json()["detail"]
+
+    r = client.post(f"/api/orgs/{org_id}/investor-withdrawals/{wd['id']}/decision",
+                    json={"status": "approved"}, headers=_csrf(client))
+    assert r.status_code == 200 and r.json()["status"] == "approved"
+
+    r = client.post(f"/api/orgs/{org_id}/investor-withdrawals/{wd['id']}/paid",
+                    json={"txid": "  "}, headers=_csrf(client))
+    assert r.status_code == 400 and "txid" in r.json()["detail"]
+    r = client.post(f"/api/orgs/{org_id}/investor-withdrawals/{wd['id']}/paid",
+                    json={"txid": "chain-tx-1"}, headers=_csrf(client))
+    assert r.status_code == 200
+    assert r.json()["status"] == "paid" and r.json()["txid"] == "chain-tx-1"
+    assert r.json()["paid_at"] is not None
+
+    r = client.post(f"/api/orgs/{org_id}/investor-withdrawals/{wd['id']}/decision",
+                    json={"status": "rejected", "note": "too late"}, headers=_csrf(client))
+    assert r.status_code == 409
+
+    login_as(client, investor)
+    summary = client.get(f"/api/orgs/{org_id}/investor/summary").json()
+    assert summary["total_withdrawn"] == 1000.0 and summary["net_deposits"] == 4000.0
+    assert summary["pending_withdrawn"] == 0.0
+    with psycopg.connect(db, autocommit=True) as conn:
+        actions = [r[0] for r in conn.execute(
+            "SELECT payload->>'action' FROM events WHERE org_id = %s ORDER BY id",
+            (org_id,)).fetchall()]
+    assert actions[-3:] == ["investor_withdrawal_requested", "investor_withdrawal_decided",
+                            "investor_withdrawal_paid"]
+
+
+def test_an_approved_request_can_still_be_rejected_with_a_note(org_client, make_user, login_as, db):
+    client, org_id, investor = _funded_investor(org_client, make_user, login_as, db)
+    wd = client.post(f"/api/orgs/{org_id}/investor/withdrawals", json={
+        "amount": "10", "destination": "TDest"}, headers=_csrf(client)).json()
+    login_as(client, {"email": "admin@example.com", "password": "a-solid-password"})
+    client.post(f"/api/orgs/{org_id}/investor-withdrawals/{wd['id']}/decision",
+                json={"status": "approved"}, headers=_csrf(client))
+    r = client.post(f"/api/orgs/{org_id}/investor-withdrawals/{wd['id']}/decision",
+                    json={"status": "rejected"}, headers=_csrf(client))
+    assert r.status_code == 400 and "note" in r.json()["detail"]
+    r = client.post(f"/api/orgs/{org_id}/investor-withdrawals/{wd['id']}/decision",
+                    json={"status": "rejected", "note": "address did not match"},
+                    headers=_csrf(client))
+    assert r.status_code == 200 and r.json()["status"] == "rejected"
+
+
+def test_ten_withdrawal_requests_an_hour_then_429(org_client, make_user, login_as, db):
+    client, org_id, investor = _funded_investor(org_client, make_user, login_as, db)
+    for _ in range(10):
+        assert client.post(f"/api/orgs/{org_id}/investor/withdrawals", json={
+            "amount": "1", "destination": "TDest"}, headers=_csrf(client)).status_code == 201
+    r = client.post(f"/api/orgs/{org_id}/investor/withdrawals", json={
+        "amount": "1", "destination": "TDest"}, headers=_csrf(client))
+    assert r.status_code == 429

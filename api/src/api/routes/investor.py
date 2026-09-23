@@ -155,6 +155,26 @@ _DEPOSIT_COLS = ("id, user_id, account_id, amount, coin, txid, note, status, dec
                  "decided_at, decision_note, created_at")
 
 
+_WITHDRAWAL_COLS = ("id, user_id, account_id, amount, destination, status, equity_at_request, "
+                    "equity_verified, decided_by, decided_at, decision_note, paid_by, paid_at, "
+                    "txid, created_at")
+
+
+def _withdrawal_json(row) -> Dict[str, Any]:
+    (wd_id, user_id, account_id, amount, destination, status, eq_req, verified, decided_by,
+     decided_at, decision_note, paid_by, paid_at, txid, created_at) = row[:15]
+    out = {"id": wd_id, "user_id": user_id, "account_id": int(account_id),
+           "amount": float(amount), "destination": destination, "status": status,
+           "equity_at_request": float(eq_req) if eq_req is not None else None,
+           "equity_verified": bool(verified), "decided_by": decided_by,
+           "decided_at": _iso(decided_at), "decision_note": decision_note,
+           "paid_by": paid_by, "paid_at": _iso(paid_at), "txid": txid,
+           "created_at": _iso(created_at)}
+    if len(row) > 15:
+        out["email"], out["display_name"] = row[15], row[16]
+    return out
+
+
 class DepositNotice(BaseModel):
     amount: Any
     coin: str
@@ -165,6 +185,15 @@ class DepositNotice(BaseModel):
 class Decision(BaseModel):
     status: str
     note: Optional[str] = None
+
+
+class WithdrawalRequest(BaseModel):
+    amount: Any
+    destination: str
+
+
+class PaidBody(BaseModel):
+    txid: str
 
 
 # ------------------------------------------------------------ investor
@@ -250,6 +279,52 @@ def create_investor_router() -> APIRouter:
                {"deposit_id": out["id"], "amount": out["amount"], "coin": coin, "txid": txid,
                 "user_id": ctx.user_id,
                 "summary": f"Deposit notice: {amount:.2f} {coin} from {ctx.user_email}"})
+        return out
+
+    @router.get("/investor/withdrawals", response_model=List[Dict[str, Any]])
+    async def my_withdrawals(ctx: OrgContext = Depends(require_org_role("investor")),
+                             conn: psycopg.Connection = Depends(get_conn)) -> List[Dict[str, Any]]:
+        rows = conn.execute(
+            f"SELECT {_WITHDRAWAL_COLS} FROM investor_withdrawals "
+            "WHERE org_id = %s AND user_id = %s ORDER BY created_at DESC, id DESC",
+            (ctx.org_id, ctx.user_id)).fetchall()
+        return [_withdrawal_json(r) for r in rows]
+
+    @router.post("/investor/withdrawals", status_code=201, response_model=Dict[str, Any])
+    async def request_withdrawal(body: WithdrawalRequest, http_request: Request,
+                                 ctx: OrgContext = Depends(require_org_role("investor")),
+                                 conn: psycopg.Connection = Depends(get_conn),
+                                 cfg: ApiConfig = Depends(ApiConfig.from_env)) -> Dict[str, Any]:
+        account_id = _linked_account(conn, ctx.org_id, ctx.user_id)
+        if account_id is None:
+            raise HTTPException(status_code=409, detail="no account linked yet")
+        try:
+            amount = parse_amount(body.amount)
+            destination = clean_text(body.destination, "destination")
+        except LedgerError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        deposits, withdrawals = _ledger_rows(conn, ctx.org_id, ctx.user_id)
+        equity, _source, _positions = await _equity_for(
+            http_request.app.state.http, cfg, conn, ctx.org_id, account_id)
+        available = summarise(deposits, withdrawals, equity).available
+        if available is not None and amount > available:
+            raise HTTPException(
+                status_code=400,
+                detail=f"amount exceeds what is available to withdraw ({available:.2f})")
+        if hourly.is_limited(f"investor-withdrawal:{ctx.org_id}:{ctx.user_id}"):
+            raise HTTPException(status_code=429, detail="too many withdrawal requests; try again later")
+        row = conn.execute(
+            "INSERT INTO investor_withdrawals (org_id, user_id, account_id, amount, destination, "
+            "equity_at_request, equity_verified) VALUES (%s, %s, %s, %s, %s, %s, %s) "
+            f"RETURNING {_WITHDRAWAL_COLS}",
+            (ctx.org_id, ctx.user_id, account_id, amount, destination, equity,
+             equity is not None)).fetchone()
+        out = _withdrawal_json(row)
+        _event(conn, ctx.org_id, ctx.user_email, "investor_withdrawal_requested", "warning",
+               {"withdrawal_id": out["id"], "amount": out["amount"], "destination": destination,
+                "user_id": ctx.user_id, "equity_verified": out["equity_verified"],
+                "summary": f"Withdrawal request: {amount:.2f} from {ctx.user_email}"},
+               account_id=account_id)
         return out
 
     return router
@@ -410,6 +485,80 @@ def create_investor_admin_router() -> APIRouter:
                {"deposit_id": deposit_id, "status": new_status, "note": note,
                 "user_id": current[1], "amount": out["amount"], "coin": out["coin"]},
                account_id=out["account_id"])
+        return out
+
+    @router.get("/investor-withdrawals", response_model=List[Dict[str, Any]])
+    async def withdrawal_queue(status: Optional[str] = None,
+                               ctx: OrgContext = Depends(require_org_role("admin")),
+                               conn: psycopg.Connection = Depends(get_conn)) -> List[Dict[str, Any]]:
+        where = "w.org_id = %s" + (" AND w.status = %s" if status else "")
+        params = (ctx.org_id, status) if status else (ctx.org_id,)
+        rows = conn.execute(
+            "SELECT w.id, w.user_id, w.account_id, w.amount, w.destination, w.status, "
+            "w.equity_at_request, w.equity_verified, w.decided_by, w.decided_at, "
+            "w.decision_note, w.paid_by, w.paid_at, w.txid, w.created_at, u.email, u.display_name "
+            "FROM investor_withdrawals w JOIN users u ON u.id = w.user_id "
+            f"WHERE {where} ORDER BY (w.status IN ('requested', 'approved')) DESC, "
+            "w.created_at DESC, w.id DESC", params).fetchall()
+        return [_withdrawal_json(r) for r in rows]
+
+    @router.post("/investor-withdrawals/{withdrawal_id}/decision", response_model=Dict[str, Any])
+    async def decide_withdrawal(withdrawal_id: int, body: Decision,
+                                ctx: OrgContext = Depends(require_org_role("admin")),
+                                conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
+        new_status = body.status.strip().lower()
+        if new_status not in ("approved", "rejected"):
+            raise HTTPException(status_code=400, detail="status must be approved or rejected")
+        try:
+            note = clean_text(body.note, "note", max_len=500, required=(new_status == "rejected"))
+        except LedgerError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        current = conn.execute(
+            "SELECT status, user_id FROM investor_withdrawals WHERE id = %s AND org_id = %s",
+            (withdrawal_id, ctx.org_id)).fetchone()
+        if not current:
+            raise HTTPException(status_code=404, detail="Withdrawal not found")
+        if not can_transition(WITHDRAWAL_TRANSITIONS, current[0], new_status):
+            raise HTTPException(status_code=409, detail=f"withdrawal is already {current[0]}")
+        row = conn.execute(
+            "UPDATE investor_withdrawals SET status = %s, decided_by = %s, decided_at = now(), "
+            "decision_note = %s WHERE id = %s AND org_id = %s AND status = %s "
+            f"RETURNING {_WITHDRAWAL_COLS}",
+            (new_status, ctx.user_id, note, withdrawal_id, ctx.org_id, current[0])).fetchone()
+        if not row:
+            raise HTTPException(status_code=409, detail="withdrawal was decided by someone else")
+        out = _withdrawal_json(row)
+        _event(conn, ctx.org_id, ctx.user_email, "investor_withdrawal_decided", "info",
+               {"withdrawal_id": withdrawal_id, "status": new_status, "note": note,
+                "user_id": current[1], "amount": out["amount"]}, account_id=out["account_id"])
+        return out
+
+    @router.post("/investor-withdrawals/{withdrawal_id}/paid", response_model=Dict[str, Any])
+    async def mark_paid(withdrawal_id: int, body: PaidBody,
+                        ctx: OrgContext = Depends(require_org_role("admin")),
+                        conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
+        try:
+            txid = clean_text(body.txid, "txid")
+        except LedgerError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        current = conn.execute(
+            "SELECT status, user_id FROM investor_withdrawals WHERE id = %s AND org_id = %s",
+            (withdrawal_id, ctx.org_id)).fetchone()
+        if not current:
+            raise HTTPException(status_code=404, detail="Withdrawal not found")
+        if not can_transition(WITHDRAWAL_TRANSITIONS, current[0], "paid"):
+            raise HTTPException(status_code=409, detail=f"withdrawal is {current[0]}, not approved")
+        row = conn.execute(
+            "UPDATE investor_withdrawals SET status = 'paid', paid_by = %s, paid_at = now(), "
+            "txid = %s WHERE id = %s AND org_id = %s AND status = 'approved' "
+            f"RETURNING {_WITHDRAWAL_COLS}",
+            (ctx.user_id, txid, withdrawal_id, ctx.org_id)).fetchone()
+        if not row:
+            raise HTTPException(status_code=409, detail="withdrawal was changed by someone else")
+        out = _withdrawal_json(row)
+        _event(conn, ctx.org_id, ctx.user_email, "investor_withdrawal_paid", "info",
+               {"withdrawal_id": withdrawal_id, "txid": txid, "user_id": current[1],
+                "amount": out["amount"]}, account_id=out["account_id"])
         return out
 
     return router
