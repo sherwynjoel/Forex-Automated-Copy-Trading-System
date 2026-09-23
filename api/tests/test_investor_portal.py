@@ -69,6 +69,9 @@ def test_an_investor_invite_can_be_created_and_joined(org_client, make_user, log
 
 
 def test_an_investor_is_refused_by_every_desk_endpoint(org_client, make_user, login_as, db):
+    """The desk's HTTP surface. The org-wide WebSocket feed (/api/ws) refuses
+    investors too -- that one needs a live server, so it is covered by
+    test_events_ws.py::test_ws_refuses_investors_but_still_serves_viewers."""
     client, org_id, seed = org_client
     seed(100, role="master")
     investor = make_user(email="inv@example.com")

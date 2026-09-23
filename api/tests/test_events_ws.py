@@ -393,6 +393,52 @@ def test_ws_closes_when_membership_revoked(live_server, db, make_org):
             assert e.rcvd.code == 4404
 
 
+def test_ws_refuses_investors_but_still_serves_viewers(live_server, db, make_org):
+    """R12: an `investor` member is a member, but this feed is the whole org
+    -- every account's events, including other investors' deposit notices and
+    withdrawal requests (amount, txid, destination, email). Their socket is
+    accepted so the code survives as a close frame, then closed with 4403 and
+    never registered with the broadcaster. A viewer on the SAME org is
+    untouched and still receives the org's events."""
+    from websockets.sync.client import connect as ws_connect
+    from websockets.exceptions import ConnectionClosed
+
+    from api.ws import broadcaster
+
+    base_url, ws_url = live_server
+    investor = _register_client(base_url, "investor-ws@example.com")
+    viewer = _register_client(base_url, "viewer-ws@example.com")
+
+    with psycopg.connect(db, autocommit=True) as conn:
+        (investor_id,) = conn.execute(
+            "SELECT id FROM users WHERE email = 'investor-ws@example.com'").fetchone()
+        (viewer_id,) = conn.execute(
+            "SELECT id FROM users WHERE email = 'viewer-ws@example.com'").fetchone()
+    org_id = make_org(name="InvestorFeed", members=[
+        ({"id": investor_id}, "investor"), ({"id": viewer_id}, "viewer")])
+
+    try:
+        with ws_connect(
+            f"{ws_url}?org_id={org_id}",
+            additional_headers={"Cookie": f"session={investor.cookies.get('session')}"},
+        ) as ws:
+            ws.recv(timeout=5)
+            raise AssertionError("an investor's socket should have been closed")
+    except ConnectionClosed as e:
+        assert e.rcvd.code == 4403
+    # Never registered: the endpoint returns before broadcaster.connect().
+    assert broadcaster.connections.get(org_id, {}) == {}
+
+    with ws_connect(
+        f"{ws_url}?org_id={org_id}",
+        additional_headers={"Cookie": f"session={viewer.cookies.get('session')}"},
+    ) as ws:
+        _insert_event(db, org_id, payload={"message": "viewers still see this"})
+        data = json.loads(ws.recv(timeout=5))
+        assert data["payload"]["message"] == "viewers still see this"
+        assert data["org_id"] == org_id
+
+
 def test_ws_closes_when_org_deleted(live_server, db, make_org):
     """F1: deleting the org closes every socket currently streaming it."""
     from websockets.sync.client import connect as ws_connect

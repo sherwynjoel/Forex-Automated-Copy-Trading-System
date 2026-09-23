@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { orgApi } from '../../lib/api'
 import { useOrg } from '../../lib/org'
-import { useLiveRefresh } from '../../hooks/useLiveRefresh'
 import { errorText, formatWhen, money, signed } from '../../lib/format'
 import { moneyOrDash, pillClass, statusLabel } from '../../lib/investor'
 import Banner from '../../components/Banner'
@@ -59,7 +58,6 @@ export default function InvestorOverview() {
     const id = window.setInterval(refresh, POLL_MS)
     return () => window.clearInterval(id)
   }, [refresh])
-  useLiveRefresh(refresh, orgId)
 
   if (!summary && !error) return <div className="text-center py-12 text-ink-faint">Loading...</div>
 

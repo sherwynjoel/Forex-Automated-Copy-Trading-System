@@ -331,7 +331,8 @@ def create_ws_router() -> APIRouter:
     @router.websocket("/api/ws")
     async def websocket_endpoint(ws: WebSocket):
         """Org-scoped event stream. Auth: session cookie; membership in the
-        org_id query parameter is required.
+        org_id query parameter is required, and the member's role must be
+        `viewer` or above -- an `investor` is refused with 4403.
         """
         cfg = ApiConfig.from_env()
         # Cross-site WebSocket hijacking guard. SameSite=Lax already
@@ -363,7 +364,7 @@ def create_ws_router() -> APIRouter:
                 await ws.close(code=4401, reason="Unauthorized")
                 return
             member = conn.execute(
-                "SELECT 1 FROM org_memberships WHERE org_id = %s AND user_id = %s",
+                "SELECT role FROM org_memberships WHERE org_id = %s AND user_id = %s",
                 (org_id, user_id),
             ).fetchone()
 
@@ -378,6 +379,18 @@ def create_ws_router() -> APIRouter:
         if not member:
             await ws.accept()
             await ws.close(code=4404, reason="Not found")
+            return
+
+        # An investor is a member, but this feed is the WHOLE org: every
+        # account's events and quotes, including other investors'
+        # investor_deposit_noticed / investor_withdrawal_requested payloads
+        # (amount, txid, destination, email). The portal polls instead, so
+        # the socket is refused outright rather than filtered. Accepted
+        # first for the same reason the membership branch above is: the
+        # close code must survive as a WS close frame.
+        if member[0] == "investor":
+            await ws.accept()
+            await ws.close(code=4403, reason="Forbidden")
             return
 
         await broadcaster.connect(ws, org_id, user_id)
