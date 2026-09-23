@@ -34,6 +34,10 @@ ALERT_RULES: dict[tuple[str, str, str], str] = {
     # Refusals: a wrong secret, a stopped kill switch, a capped size. One
     # email per cooldown, not one per retry.
     ("control", "warning", "webhook_alert"): "TradingView alert refused",
+    # An investor asked for something an admin must act on. Cooled down per
+    # investor (payload.user_id), not per account -- see consider().
+    ("control", "warning", "investor_deposit_noticed"): "Investor deposit notice",
+    ("control", "warning", "investor_withdrawal_requested"): "Investor withdrawal request",
 }
 
 
@@ -84,7 +88,9 @@ class EmailAlerter:
         if subject_prefix is None:
             return False
 
-        cooldown_key = (action, event.get("account_id"))
+        payload = event.get("payload") or {}
+        scope = payload.get("user_id") if action.startswith("investor_") else event.get("account_id")
+        cooldown_key = (action, scope)
         now = self._clock()
         last = self._last_sent.get(cooldown_key)
         if last is not None and (now - last) < COOLDOWN_S:
@@ -119,4 +125,26 @@ class EmailAlerter:
 
         self._last_sent[cooldown_key] = now
         logger.info("Alert email sent: %s", subject)
+        return True
+
+    async def send_to(self, to_addr: str, subject: str, text: str) -> bool:
+        """One plain email to one address -- the investor's own -- for a
+        decision made about their money. Needs only the API key: the admin
+        recipient list is irrelevant here. Never raises."""
+        if not self._api_key or not to_addr:
+            return False
+        try:
+            response = await self._http.post(
+                RESEND_URL,
+                headers={"Authorization": f"Bearer {self._api_key}"},
+                json={"from": self._from, "to": [to_addr],
+                      "subject": subject, "text": text},
+            )
+            if response.status_code >= 400:
+                logger.error("Resend rejected investor email (%s): %s",
+                             response.status_code, response.text[:500])
+                return False
+        except Exception as e:
+            logger.error("Failed to send investor email: %s", e)
+            return False
         return True

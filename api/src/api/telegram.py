@@ -26,6 +26,8 @@ TELEGRAM_RULES: set[tuple[str, str, str]] = {
     ("reminder", "warning", "cutoff_approaching"),
     ("control", "error", "webhook_alert"),
     ("control", "warning", "webhook_alert"),
+    ("control", "warning", "investor_deposit_noticed"),
+    ("control", "warning", "investor_withdrawal_requested"),
 }
 
 
@@ -72,22 +74,26 @@ class TelegramNotifier:
         if (event.get("category"), event.get("severity"), action) not in TELEGRAM_RULES:
             return False
 
-        cooldown_key = (action, event.get("account_id"))
+        scope = payload.get("user_id") if action.startswith("investor_") else event.get("account_id")
+        cooldown_key = (action, scope)
         now = self._clock()
         last = self._last_sent.get(cooldown_key)
         if last is not None and (now - last) < COOLDOWN_S:
             return False
 
-        name = payload.get("nickname") or f"account {event.get('account_id')}"
-        login = payload.get("trader_login")
-        login_part = f" (login {login})" if login is not None else ""
-        days = payload.get("days_left")
-        days_part = (
-            f" — {days} day{'' if days == 1 else 's'} left" if days is not None else "")
-        text = (
-            f"⏰ Copy Desk: {name}{login_part} reaches its cutoff on "
-            f"{payload.get('cutoff_date')}{days_part}."
-        )
+        if action.startswith("investor_"):
+            text = f"💰 Copy Desk: {payload.get('summary') or action}"
+        else:
+            name = payload.get("nickname") or f"account {event.get('account_id')}"
+            login = payload.get("trader_login")
+            login_part = f" (login {login})" if login is not None else ""
+            days = payload.get("days_left")
+            days_part = (
+                f" — {days} day{'' if days == 1 else 's'} left" if days is not None else "")
+            text = (
+                f"⏰ Copy Desk: {name}{login_part} reaches its cutoff on "
+                f"{payload.get('cutoff_date')}{days_part}."
+            )
 
         try:
             response = await self._http.post(

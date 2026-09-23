@@ -512,6 +512,21 @@ def test_ten_withdrawal_requests_an_hour_then_429(org_client, make_user, login_a
     assert r.status_code == 429
 
 
+def test_investors_only_see_their_own_withdrawals_and_cannot_decide(
+        org_client, make_user, login_as, db):
+    client, org_id, investor = _funded_investor(org_client, make_user, login_as, db)
+    wd = client.post(f"/api/orgs/{org_id}/investor/withdrawals", json={
+        "amount": "10", "destination": "TDest"}, headers=_csrf(client)).json()
+    other = make_user(email="other@example.com")
+    _member(db, org_id, other, "investor")
+    login_as(client, other)
+    assert client.get(f"/api/orgs/{org_id}/investor/withdrawals").json() == []
+    r = client.post(f"/api/orgs/{org_id}/investor-withdrawals/{wd['id']}/decision",
+                    json={"status": "approved"}, headers=_csrf(client))
+    assert r.status_code == 403
+    assert client.get(f"/api/orgs/{org_id}/investor-withdrawals").status_code == 403
+
+
 # ------------------------------------------------------------ read-throughs
 
 
@@ -574,3 +589,91 @@ def test_analytics_and_history_are_asked_for_the_linked_account_only(
     assert r.status_code == 200 and r.json() == {"deals": [], "has_more": False}
     assert any(u.endswith("/history/deals?account_id=1001&from=5&to=9") for u in seen)
     assert client.get(f"/api/orgs/{org_id}/investor/history/trades?from=0&to=1").status_code == 400
+
+
+# ------------------------------------------------------------ notifications
+import asyncio
+
+from api.alerts import ALERT_RULES, EmailAlerter
+from api.telegram import TELEGRAM_RULES, TelegramNotifier
+from api import ws as ws_module
+
+
+def test_the_two_request_actions_reach_both_alerters():
+    for rules in (ALERT_RULES, TELEGRAM_RULES):
+        assert ("control", "warning", "investor_deposit_noticed") in rules
+        assert ("control", "warning", "investor_withdrawal_requested") in rules
+
+
+def _posted(callback_holder):
+    posts = []
+    def cb(request):
+        posts.append(json.loads(request.content.decode()))
+        return httpx.Response(200, json={"ok": True})
+    callback_holder.append(cb)
+    return posts
+
+
+def test_telegram_text_for_investor_actions_is_the_summary_line():
+    holder = []
+    posts = _posted(holder)
+    notifier = TelegramNotifier(http=httpx.AsyncClient(transport=httpx.MockTransport(holder[0])),
+                                bot_token="t", chat_id="c")
+    event = {"category": "control", "severity": "warning", "account_id": None,
+             "payload": {"action": "investor_deposit_noticed", "user_id": 5,
+                         "summary": "Deposit notice: 5000.00 USDT from inv@example.com"}}
+    other = dict(event, payload={**event["payload"], "user_id": 6})
+
+    async def scenario():
+        # One event loop for all three calls: an httpx AsyncClient must not
+        # be used across separate asyncio.run() loops.
+        first = await notifier.consider(event)
+        second = await notifier.consider(other)
+        third = await notifier.consider(event)
+        return first, second, third
+
+    first, second, third = asyncio.run(scenario())
+    assert first is True
+    assert posts[0]["text"] == "💰 Copy Desk: Deposit notice: 5000.00 USDT from inv@example.com"
+    assert second is True, "another investor is not cooled down"
+    assert third is False, "same investor is cooled down"
+
+
+def test_email_send_to_posts_to_the_given_address():
+    holder = []
+    posts = _posted(holder)
+    alerter = EmailAlerter(http=httpx.AsyncClient(transport=httpx.MockTransport(holder[0])),
+                           api_key="k", from_addr="Desk <d@example.com>", to_addr="")
+    assert asyncio.run(alerter.send_to("inv@example.com", "Deposit confirmed", "hello")) is True
+    assert posts[-1]["to"] == ["inv@example.com"] and posts[-1]["subject"] == "Deposit confirmed"
+
+
+class _FakeAlerter:
+    def __init__(self, fail=False):
+        self.sent = []
+        self.fail = fail
+    async def send_to(self, to_addr, subject, text):
+        if self.fail:
+            raise RuntimeError("resend down")
+        self.sent.append((to_addr, subject))
+        return True
+
+
+def test_a_decision_emails_the_investor_and_a_failed_email_never_fails_the_request(
+        org_client, make_user, login_as, db, monkeypatch):
+    client, org_id, investor = _investor_with_wallet(org_client, make_user, login_as, db)
+    dep = client.post(f"/api/orgs/{org_id}/investor/deposits", json={
+        "amount": "5", "coin": "USDT", "txid": "t"}, headers=_csrf(client)).json()
+    dep2 = client.post(f"/api/orgs/{org_id}/investor/deposits", json={
+        "amount": "6", "coin": "USDT", "txid": "t2"}, headers=_csrf(client)).json()
+    login_as(client, {"email": "admin@example.com", "password": "a-solid-password"})
+    fake = _FakeAlerter()
+    monkeypatch.setattr(ws_module.broadcaster, "alerter", fake, raising=False)
+    r = client.post(f"/api/orgs/{org_id}/investor-deposits/{dep['id']}/decision",
+                    json={"status": "confirmed"}, headers=_csrf(client))
+    assert r.status_code == 200
+    assert fake.sent == [("inv@example.com", "Your deposit of 5.00 USDT was confirmed")]
+    monkeypatch.setattr(ws_module.broadcaster, "alerter", _FakeAlerter(fail=True), raising=False)
+    r = client.post(f"/api/orgs/{org_id}/investor-deposits/{dep2['id']}/decision",
+                    json={"status": "rejected", "note": "no"}, headers=_csrf(client))
+    assert r.status_code == 200 and r.json()["status"] == "rejected"

@@ -50,6 +50,13 @@ MATRIX = [
     ("GET",    "invites",                        None,                           "admin"),
     ("PATCH",  "",                               {"name": "Renamed"},            "owner"),
     ("DELETE", "",                               None,                           "owner"),
+    ("GET",    "investor/summary",                None,                          "investor"),
+    ("GET",    "investor/deposits",               None,                          "investor"),
+    ("GET",    "investor/withdrawals",            None,                          "investor"),
+    ("GET",    "investor-wallet",                 None,                          "admin"),
+    ("GET",    "investors",                       None,                          "admin"),
+    ("GET",    "investor-deposits",               None,                          "admin"),
+    ("GET",    "investor-withdrawals",            None,                          "admin"),
 ]
 
 RANK = {"investor": -1, "viewer": 0, "trader": 1, "admin": 2, "owner": 3}
@@ -72,6 +79,9 @@ def matrix_org(app_client, make_user, make_org, db, login_as):
                    org_id, trader_login, is_live, role)
                VALUES (100, %s, %s, 100, false, 'master')""",
             (connection_id, org_id))
+        conn.execute(
+            "INSERT INTO org_investor_wallets (org_id, coin, network, address) "
+            "VALUES (%s, 'USDT', 'TRC20', 'TAddr123')", (org_id,))
     return app_client, org_id, users, outsider
 
 

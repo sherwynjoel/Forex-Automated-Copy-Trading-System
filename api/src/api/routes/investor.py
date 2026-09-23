@@ -138,6 +138,22 @@ def _iso(value) -> Optional[str]:
     return value.isoformat() if value is not None else None
 
 
+async def _notify_investor(conn: psycopg.Connection, user_id: int, subject: str, text: str) -> None:
+    """Best-effort email to the investor's own address. The alerter lives on
+    the event broadcaster (main.py wires it); with none configured this is
+    a no-op, and a failing send never fails the admin's request."""
+    alerter = getattr(broadcaster, "alerter", None)
+    if alerter is None:
+        return
+    row = conn.execute("SELECT email FROM users WHERE id = %s", (user_id,)).fetchone()
+    if not row:
+        return
+    try:
+        await alerter.send_to(row[0], subject, text)
+    except Exception:
+        logger.exception("investor email failed for user %s", user_id)
+
+
 def _deposit_json(row) -> Dict[str, Any]:
     (dep_id, user_id, account_id, amount, coin, txid, note, status, decided_by,
      decided_at, decision_note, created_at) = row[:12]
@@ -264,12 +280,12 @@ def create_investor_router() -> APIRouter:
             note = clean_text(body.note, "note", max_len=500, required=False)
         except LedgerError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+        if hourly.is_limited(f"investor-deposit:{ctx.org_id}:{ctx.user_id}"):
+            raise HTTPException(status_code=429, detail="too many deposit notices; try again later")
         if coin != wallet["coin"].upper():
             raise HTTPException(
                 status_code=400,
                 detail=f"this workspace accepts {wallet['coin']} on {wallet['network']}, not {coin}")
-        if hourly.is_limited(f"investor-deposit:{ctx.org_id}:{ctx.user_id}"):
-            raise HTTPException(status_code=429, detail="too many deposit notices; try again later")
         row = conn.execute(
             "INSERT INTO investor_deposits (org_id, user_id, amount, coin, txid, note) "
             f"VALUES (%s, %s, %s, %s, %s, %s) RETURNING {_DEPOSIT_COLS}",
@@ -303,6 +319,8 @@ def create_investor_router() -> APIRouter:
             destination = clean_text(body.destination, "destination")
         except LedgerError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+        if hourly.is_limited(f"investor-withdrawal:{ctx.org_id}:{ctx.user_id}"):
+            raise HTTPException(status_code=429, detail="too many withdrawal requests; try again later")
         deposits, withdrawals = _ledger_rows(conn, ctx.org_id, ctx.user_id)
         equity, _source, _positions = await _equity_for(
             http_request.app.state.http, cfg, conn, ctx.org_id, account_id)
@@ -311,8 +329,6 @@ def create_investor_router() -> APIRouter:
             raise HTTPException(
                 status_code=400,
                 detail=f"amount exceeds what is available to withdraw ({available:.2f})")
-        if hourly.is_limited(f"investor-withdrawal:{ctx.org_id}:{ctx.user_id}"):
-            raise HTTPException(status_code=429, detail="too many withdrawal requests; try again later")
         row = conn.execute(
             "INSERT INTO investor_withdrawals (org_id, user_id, account_id, amount, destination, "
             "equity_at_request, equity_verified) VALUES (%s, %s, %s, %s, %s, %s, %s) "
@@ -531,6 +547,11 @@ def create_investor_admin_router() -> APIRouter:
                {"deposit_id": deposit_id, "status": new_status, "note": note,
                 "user_id": current[1], "amount": out["amount"], "coin": out["coin"]},
                account_id=out["account_id"])
+        await _notify_investor(
+            conn, current[1],
+            f"Your deposit of {out['amount']:.2f} {out['coin']} was {new_status}",
+            f"Status: {new_status}\nAmount: {out['amount']:.2f} {out['coin']}\n"
+            f"Note: {note or '—'}\n\nOpen the portal for details.")
         return out
 
     @router.get("/investor-withdrawals", response_model=List[Dict[str, Any]])
@@ -577,6 +598,11 @@ def create_investor_admin_router() -> APIRouter:
         _event(conn, ctx.org_id, ctx.user_email, "investor_withdrawal_decided", "info",
                {"withdrawal_id": withdrawal_id, "status": new_status, "note": note,
                 "user_id": current[1], "amount": out["amount"]}, account_id=out["account_id"])
+        await _notify_investor(
+            conn, current[1],
+            f"Your withdrawal of {out['amount']:.2f} was {new_status}",
+            f"Status: {new_status}\nAmount: {out['amount']:.2f}\n"
+            f"Destination: {out['destination']}\nNote: {note or '—'}\n\nOpen the portal for details.")
         return out
 
     @router.post("/investor-withdrawals/{withdrawal_id}/paid", response_model=Dict[str, Any])
@@ -605,6 +631,11 @@ def create_investor_admin_router() -> APIRouter:
         _event(conn, ctx.org_id, ctx.user_email, "investor_withdrawal_paid", "info",
                {"withdrawal_id": withdrawal_id, "txid": txid, "user_id": current[1],
                 "amount": out["amount"]}, account_id=out["account_id"])
+        await _notify_investor(
+            conn, current[1],
+            f"Your withdrawal of {out['amount']:.2f} was paid",
+            f"Amount: {out['amount']:.2f}\nDestination: {out['destination']}\n"
+            f"Transaction: {txid}\n\nOpen the portal for details.")
         return out
 
     return router
