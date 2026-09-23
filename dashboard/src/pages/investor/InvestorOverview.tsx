@@ -44,6 +44,9 @@ export default function InvestorOverview() {
           orgApi<Analytics>(orgId, 'investor/analytics?weeks=4'),
         ])
         setPositions(p); setAnalytics(a)
+      } else {
+        setPositions(null)
+        setAnalytics(null)
       }
       setError(null)
     } catch (err) {

@@ -32,10 +32,13 @@ const linked = {
 const unlinked = { ...linked, link_state: 'unlinked', account: null, equity_source: 'unknown',
                    equity: null, profit: null, available: null, net_deposits: 0, total_deposited: 0 }
 
-function mockRoutes(summary: unknown) {
+function mockRoutes(summaries: unknown | unknown[]) {
+  const queue = Array.isArray(summaries) ? [...summaries] : [summaries]
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input)
-    if (url.endsWith('/investor/summary')) return jsonResponse(summary)
+    if (url.endsWith('/investor/summary')) {
+      return jsonResponse(queue.length > 1 ? queue.shift() : queue[0])
+    }
     if (url.endsWith('/investor/positions')) {
       return jsonResponse({ equity_source: 'live', positions: [
         { position_id: 7, symbol: 'XAUUSD', side: 'BUY', volume: 1, entry_price: 4350,
@@ -57,7 +60,7 @@ beforeEach(() => {
   vi.spyOn(apiModule, 'eventsSocket').mockImplementation(() => new MockWebSocket() as never)
   useOrgMock.mockReturnValue(mockUseOrg('investor'))
 })
-afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers() })
 
 test('unlinked investors see the setup notice and no figures', async () => {
   mockRoutes(unlinked)
@@ -74,4 +77,15 @@ test('linked investors see equity, profit, positions and the snapshot', async ()
   expect(await screen.findByText('XAUUSD')).toBeInTheDocument()
   expect(await screen.findByText(/66\.7%/)).toBeInTheDocument()
   expect(screen.getAllByText(/live/i).length).toBeGreaterThan(0)
+})
+
+test('positions and the snapshot go away when the account is unlinked later', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  mockRoutes([linked, unlinked])
+  render(<MemoryRouter><InvestorOverview /></MemoryRouter>)
+  expect(await screen.findByText('XAUUSD')).toBeInTheDocument()
+  await vi.advanceTimersByTimeAsync(10000)
+  expect(await screen.findByText(/your account is being set up/i)).toBeInTheDocument()
+  expect(screen.queryByText('XAUUSD')).not.toBeInTheDocument()
+  expect(screen.queryByText(/66\.7%/)).not.toBeInTheDocument()
 })
