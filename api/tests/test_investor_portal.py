@@ -260,3 +260,124 @@ def test_the_investor_list_asks_the_copier_once(org_client, make_user, db):
     assert len(rows) == 2
     assert all(r["equity"] == 100.0 for r in rows)
     assert calls["state"] == 1
+
+
+# ---------------------------------------------------------------- deposits
+
+
+def _investor_with_wallet(org_client, make_user, login_as, db, link_to=None):
+    client, org_id, seed = org_client
+    _wallet(db, org_id)
+    investor = make_user(email="inv@example.com")
+    _member(db, org_id, investor, "investor")
+    if link_to is not None:
+        seed(link_to, role="slave")
+        _link(db, link_to, investor)
+    login_as(client, investor)
+    return client, org_id, investor
+
+
+def test_an_investor_files_a_deposit_notice(org_client, make_user, login_as, db):
+    client, org_id, investor = _investor_with_wallet(org_client, make_user, login_as, db)
+    r = client.post(f"/api/orgs/{org_id}/investor/deposits", json={
+        "amount": "5000", "coin": "usdt", "txid": " abc123 ", "note": "sent from Binance"},
+        headers=_csrf(client))
+    assert r.status_code == 201
+    body = r.json()
+    assert body["amount"] == 5000.0 and body["coin"] == "USDT" and body["txid"] == "abc123"
+    assert body["status"] == "pending" and body["account_id"] is None
+    assert client.get(f"/api/orgs/{org_id}/investor/deposits").json() == [body]
+    with psycopg.connect(db, autocommit=True) as conn:
+        (severity, payload, actor) = conn.execute(
+            "SELECT severity, payload, actor_email FROM events WHERE org_id = %s "
+            "ORDER BY id DESC LIMIT 1", (org_id,)).fetchone()
+    assert severity == "warning" and payload["action"] == "investor_deposit_noticed"
+    assert payload["summary"] == "Deposit notice: 5000.00 USDT from inv@example.com"
+    assert actor == "inv@example.com"
+
+
+@pytest.mark.parametrize("body, needle", [
+    ({"amount": "-5", "coin": "USDT", "txid": "t"}, "amount"),
+    ({"amount": "5.001", "coin": "USDT", "txid": "t"}, "decimals"),
+    ({"amount": "5", "coin": "USDT", "txid": "  "}, "txid"),
+    ({"amount": "5", "coin": "BTC", "txid": "t"}, "USDT"),
+])
+def test_a_bad_notice_is_refused_with_the_reason(org_client, make_user, login_as, db, body, needle):
+    client, org_id, investor = _investor_with_wallet(org_client, make_user, login_as, db)
+    r = client.post(f"/api/orgs/{org_id}/investor/deposits", json=body, headers=_csrf(client))
+    assert r.status_code == 400 and needle in r.json()["detail"]
+
+
+def test_notices_are_refused_while_no_wallet_is_configured(org_client, make_user, login_as, db):
+    client, org_id, seed = org_client
+    investor = make_user(email="inv@example.com")
+    _member(db, org_id, investor, "investor")
+    login_as(client, investor)
+    r = client.post(f"/api/orgs/{org_id}/investor/deposits", json={
+        "amount": "5", "coin": "USDT", "txid": "t"}, headers=_csrf(client))
+    assert r.status_code == 409 and "not open" in r.json()["detail"]
+
+
+def test_ten_notices_an_hour_then_429(org_client, make_user, login_as, db):
+    client, org_id, investor = _investor_with_wallet(org_client, make_user, login_as, db)
+    for i in range(10):
+        r = client.post(f"/api/orgs/{org_id}/investor/deposits", json={
+            "amount": "1", "coin": "USDT", "txid": f"t{i}"}, headers=_csrf(client))
+        assert r.status_code == 201
+    r = client.post(f"/api/orgs/{org_id}/investor/deposits", json={
+        "amount": "1", "coin": "USDT", "txid": "t10"}, headers=_csrf(client))
+    assert r.status_code == 429
+
+
+def test_admin_confirms_a_notice_once_and_it_counts(org_client, make_user, login_as, db):
+    client, org_id, investor = _investor_with_wallet(org_client, make_user, login_as, db,
+                                                     link_to=1001)
+    dep = client.post(f"/api/orgs/{org_id}/investor/deposits", json={
+        "amount": "5000", "coin": "USDT", "txid": "t"}, headers=_csrf(client)).json()
+    admin = {"email": "admin@example.com", "password": "a-solid-password"}
+    login_as(client, admin)
+    queue = client.get(f"/api/orgs/{org_id}/investor-deposits?status=pending").json()
+    assert [d["id"] for d in queue] == [dep["id"]] and queue[0]["email"] == "inv@example.com"
+
+    r = client.post(f"/api/orgs/{org_id}/investor-deposits/{dep['id']}/decision",
+                    json={"status": "confirmed", "note": "seen on chain"}, headers=_csrf(client))
+    assert r.status_code == 200
+    assert r.json()["status"] == "confirmed" and r.json()["account_id"] == 1001
+    assert r.json()["decision_note"] == "seen on chain"
+
+    r = client.post(f"/api/orgs/{org_id}/investor-deposits/{dep['id']}/decision",
+                    json={"status": "rejected", "note": "changed my mind"}, headers=_csrf(client))
+    assert r.status_code == 409 and "confirmed" in r.json()["detail"]
+
+    _state(client, {1001: {"balance": 5000.0, "equity": 5000.0, "open_pnl": 0.0, "positions": []}})
+    login_as(client, investor)
+    assert client.get(f"/api/orgs/{org_id}/investor/summary").json()["total_deposited"] == 5000.0
+
+
+def test_a_rejection_needs_a_note(org_client, make_user, login_as, db):
+    client, org_id, investor = _investor_with_wallet(org_client, make_user, login_as, db)
+    dep = client.post(f"/api/orgs/{org_id}/investor/deposits", json={
+        "amount": "5", "coin": "USDT", "txid": "t"}, headers=_csrf(client)).json()
+    login_as(client, {"email": "admin@example.com", "password": "a-solid-password"})
+    r = client.post(f"/api/orgs/{org_id}/investor-deposits/{dep['id']}/decision",
+                    json={"status": "rejected"}, headers=_csrf(client))
+    assert r.status_code == 400 and "note" in r.json()["detail"]
+    r = client.post(f"/api/orgs/{org_id}/investor-deposits/{dep['id']}/decision",
+                    json={"status": "rejected", "note": "no such transaction"},
+                    headers=_csrf(client))
+    assert r.status_code == 200 and r.json()["status"] == "rejected"
+
+
+def test_investors_only_see_their_own_notices_and_cannot_decide(
+        org_client, make_user, login_as, db):
+    client, org_id, investor = _investor_with_wallet(org_client, make_user, login_as, db)
+    dep = client.post(f"/api/orgs/{org_id}/investor/deposits", json={
+        "amount": "5", "coin": "USDT", "txid": "t"}, headers=_csrf(client)).json()
+    other = make_user(email="other@example.com")
+    _member(db, org_id, other, "investor")
+    login_as(client, other)
+    assert client.get(f"/api/orgs/{org_id}/investor/deposits").json() == []
+    r = client.post(f"/api/orgs/{org_id}/investor-deposits/{dep['id']}/decision",
+                    json={"status": "confirmed"}, headers=_csrf(client))
+    assert r.status_code == 403
+    assert client.get(f"/api/orgs/{org_id}/investor-deposits").status_code == 403

@@ -138,11 +138,43 @@ def _iso(value) -> Optional[str]:
     return value.isoformat() if value is not None else None
 
 
+def _deposit_json(row) -> Dict[str, Any]:
+    (dep_id, user_id, account_id, amount, coin, txid, note, status, decided_by,
+     decided_at, decision_note, created_at) = row[:12]
+    out = {"id": dep_id, "user_id": user_id,
+           "account_id": int(account_id) if account_id is not None else None,
+           "amount": float(amount), "coin": coin, "txid": txid, "note": note,
+           "status": status, "decided_by": decided_by, "decided_at": _iso(decided_at),
+           "decision_note": decision_note, "created_at": _iso(created_at)}
+    if len(row) > 12:
+        out["email"], out["display_name"] = row[12], row[13]
+    return out
+
+
+_DEPOSIT_COLS = ("id, user_id, account_id, amount, coin, txid, note, status, decided_by, "
+                 "decided_at, decision_note, created_at")
+
+
+class DepositNotice(BaseModel):
+    amount: Any
+    coin: str
+    txid: str
+    note: Optional[str] = None
+
+
+class Decision(BaseModel):
+    status: str
+    note: Optional[str] = None
+
+
 # ------------------------------------------------------------ investor
 
 
-def create_investor_router(rate_limiter: LoginRateLimiter) -> APIRouter:
+def create_investor_router() -> APIRouter:
     router = APIRouter(prefix="/api/orgs/{org_id}", tags=["investor"])
+    # Ten notices/requests per investor per hour. A separate instance
+    # because the shared login limiter's window is one minute.
+    hourly = LoginRateLimiter(max_attempts=REQUESTS_PER_HOUR, window_s=3600)
 
     @router.get("/investor/summary", response_model=Dict[str, Any])
     async def investor_summary(
@@ -179,6 +211,46 @@ def create_investor_router(rate_limiter: LoginRateLimiter) -> APIRouter:
         if wallet is None:
             raise HTTPException(status_code=404, detail="Deposits are not open yet")
         return wallet
+
+    @router.get("/investor/deposits", response_model=List[Dict[str, Any]])
+    async def my_deposits(ctx: OrgContext = Depends(require_org_role("investor")),
+                          conn: psycopg.Connection = Depends(get_conn)) -> List[Dict[str, Any]]:
+        rows = conn.execute(
+            f"SELECT {_DEPOSIT_COLS} FROM investor_deposits "
+            "WHERE org_id = %s AND user_id = %s ORDER BY created_at DESC, id DESC",
+            (ctx.org_id, ctx.user_id)).fetchall()
+        return [_deposit_json(r) for r in rows]
+
+    @router.post("/investor/deposits", status_code=201, response_model=Dict[str, Any])
+    async def file_deposit(body: DepositNotice,
+                           ctx: OrgContext = Depends(require_org_role("investor")),
+                           conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
+        wallet = _wallet(conn, ctx.org_id)
+        if wallet is None:
+            raise HTTPException(status_code=409, detail="Deposits are not open yet")
+        try:
+            amount = parse_amount(body.amount)
+            coin = clean_text(body.coin, "coin", max_len=16).upper()
+            txid = clean_text(body.txid, "txid")
+            note = clean_text(body.note, "note", max_len=500, required=False)
+        except LedgerError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        if coin != wallet["coin"].upper():
+            raise HTTPException(
+                status_code=400,
+                detail=f"this workspace accepts {wallet['coin']} on {wallet['network']}, not {coin}")
+        if hourly.is_limited(f"investor-deposit:{ctx.org_id}:{ctx.user_id}"):
+            raise HTTPException(status_code=429, detail="too many deposit notices; try again later")
+        row = conn.execute(
+            "INSERT INTO investor_deposits (org_id, user_id, amount, coin, txid, note) "
+            f"VALUES (%s, %s, %s, %s, %s, %s) RETURNING {_DEPOSIT_COLS}",
+            (ctx.org_id, ctx.user_id, amount, coin, txid, note)).fetchone()
+        out = _deposit_json(row)
+        _event(conn, ctx.org_id, ctx.user_email, "investor_deposit_noticed", "warning",
+               {"deposit_id": out["id"], "amount": out["amount"], "coin": coin, "txid": txid,
+                "user_id": ctx.user_id,
+                "summary": f"Deposit notice: {amount:.2f} {coin} from {ctx.user_email}"})
+        return out
 
     return router
 
@@ -291,5 +363,53 @@ def create_investor_admin_router() -> APIRouter:
         _event(conn, ctx.org_id, ctx.user_email, "investor_account_linked", "info",
                {"user_id": user_id, "account_id": body.account_id}, account_id=body.account_id)
         return {"user_id": user_id, "account_id": body.account_id}
+
+    @router.get("/investor-deposits", response_model=List[Dict[str, Any]])
+    async def deposit_queue(status: Optional[str] = None,
+                            ctx: OrgContext = Depends(require_org_role("admin")),
+                            conn: psycopg.Connection = Depends(get_conn)) -> List[Dict[str, Any]]:
+        where = "d.org_id = %s" + (" AND d.status = %s" if status else "")
+        params = (ctx.org_id, status) if status else (ctx.org_id,)
+        rows = conn.execute(
+            "SELECT d.id, d.user_id, d.account_id, d.amount, d.coin, d.txid, d.note, d.status, "
+            "d.decided_by, d.decided_at, d.decision_note, d.created_at, u.email, u.display_name "
+            "FROM investor_deposits d JOIN users u ON u.id = d.user_id "
+            f"WHERE {where} ORDER BY (d.status = 'pending') DESC, d.created_at DESC, d.id DESC",
+            params).fetchall()
+        return [_deposit_json(r) for r in rows]
+
+    @router.post("/investor-deposits/{deposit_id}/decision", response_model=Dict[str, Any])
+    async def decide_deposit(deposit_id: int, body: Decision,
+                             ctx: OrgContext = Depends(require_org_role("admin")),
+                             conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
+        new_status = body.status.strip().lower()
+        if not can_transition(DEPOSIT_TRANSITIONS, "pending", new_status):
+            raise HTTPException(status_code=400, detail="status must be confirmed or rejected")
+        try:
+            note = clean_text(body.note, "note", max_len=500, required=(new_status == "rejected"))
+        except LedgerError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        current = conn.execute(
+            "SELECT status, user_id FROM investor_deposits WHERE id = %s AND org_id = %s",
+            (deposit_id, ctx.org_id)).fetchone()
+        if not current:
+            raise HTTPException(status_code=404, detail="Deposit not found")
+        linked = _linked_account(conn, ctx.org_id, current[1]) if new_status == "confirmed" else None
+        row = conn.execute(
+            "UPDATE investor_deposits SET status = %s, decided_by = %s, decided_at = now(), "
+            "decision_note = %s, account_id = COALESCE(%s, account_id) "
+            "WHERE id = %s AND org_id = %s AND status = 'pending' "
+            f"RETURNING {_DEPOSIT_COLS}",
+            (new_status, ctx.user_id, note, linked, deposit_id, ctx.org_id)).fetchone()
+        if not row:
+            (status_now,) = conn.execute(
+                "SELECT status FROM investor_deposits WHERE id = %s", (deposit_id,)).fetchone()
+            raise HTTPException(status_code=409, detail=f"deposit is already {status_now}")
+        out = _deposit_json(row)
+        _event(conn, ctx.org_id, ctx.user_email, "investor_deposit_decided", "info",
+               {"deposit_id": deposit_id, "status": new_status, "note": note,
+                "user_id": current[1], "amount": out["amount"], "coin": out["coin"]},
+               account_id=out["account_id"])
+        return out
 
     return router
