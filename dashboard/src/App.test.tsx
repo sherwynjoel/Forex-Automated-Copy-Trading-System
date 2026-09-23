@@ -97,3 +97,20 @@ test('an /org/:orgId route redirects to /welcome when the user is not a member o
     expect(window.location.pathname).toBe('/welcome')
   })
 })
+
+test('/ shows the public front page when nobody is signed in', async () => {
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+    const url = String(input)
+    if (url === '/api/me') {
+      return Promise.resolve(new Response(JSON.stringify({ detail: 'Unauthorized' }),
+        { status: 401, headers: { 'content-type': 'application/json' } }))
+    }
+    throw new Error(`Unexpected fetch: ${url}`)
+  }))
+
+  render(<App />)
+
+  expect(await screen.findByRole('heading', { level: 1 })).toHaveTextContent(/trade once/i)
+  expect(window.location.pathname).toBe('/')
+  expect(screen.getAllByRole('link', { name: 'Sign in' })[0]).toHaveAttribute('href', '/login')
+})

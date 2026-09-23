@@ -17,6 +17,7 @@ import Automation from './pages/Automation'
 import History from './pages/History'
 import Performance from './pages/Performance'
 import Logs from './pages/Logs'
+import Landing from './pages/Landing'
 import Investors from './pages/Investors'
 import InvestorOverview from './pages/investor/InvestorOverview'
 import InvestorDeposit from './pages/investor/InvestorDeposit'
@@ -24,19 +25,20 @@ import InvestorWithdraw from './pages/investor/InvestorWithdraw'
 import InvestorHistory from './pages/investor/InvestorHistory'
 import InvestorAccount from './pages/investor/InvestorAccount'
 
-/** `/` → the last-used org, else the first org, else /welcome. */
+/** `/` → the last-used org, else the first org, else /welcome; signed-out
+ *  visitors get the public front page instead of the login screen. */
 function RootRedirect() {
   const [target, setTarget] = useState<string | null>(null)
 
   useEffect(() => {
     const resolve = async () => {
       try {
-        const me = await api<Me>('/api/me')
+        const me = await api<Me>('/api/me', undefined, { redirectOn401: false })
         const last = Number(localStorage.getItem(LAST_ORG_KEY))
         const org = me.orgs.find((o) => o.id === last) ?? me.orgs[0]
         setTarget(org ? `/org/${org.id}` : '/welcome')
       } catch {
-        setTarget('/login')
+        setTarget('landing')
       }
     }
     resolve()
@@ -45,6 +47,7 @@ function RootRedirect() {
   if (!target) {
     return <div className="flex items-center justify-center h-screen">Loading...</div>
   }
+  if (target === 'landing') return <Landing />
   return <Navigate to={target} replace />
 }
 
