@@ -7,7 +7,10 @@ from fastapi import Depends, HTTPException
 from .auth import require_user
 from .db import get_conn
 
-ROLE_RANK = {"viewer": 0, "trader": 1, "admin": 2, "owner": 3}
+# 'investor' sits BELOW viewer on purpose: every existing endpoint asks for
+# viewer or higher, so an investor is refused everywhere except the
+# investor router, which resolves the caller's own linked account itself.
+ROLE_RANK = {"investor": -1, "viewer": 0, "trader": 1, "admin": 2, "owner": 3}
 
 
 @dataclass(frozen=True)

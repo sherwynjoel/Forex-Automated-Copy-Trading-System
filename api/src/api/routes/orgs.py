@@ -225,9 +225,9 @@ def create_orgs_router() -> APIRouter:
         ctx: OrgContext = Depends(require_org_role("admin")),
         conn: psycopg.Connection = Depends(get_conn),
     ):
-        if body.role not in ("admin", "trader", "viewer"):
+        if body.role not in ("admin", "trader", "viewer", "investor"):
             raise HTTPException(
-                status_code=400, detail="Invites can grant admin, trader, or viewer")
+                status_code=400, detail="Invites can grant admin, trader, viewer, or investor")
         token = secrets.token_urlsafe(32)
         row = conn.execute(
             """INSERT INTO org_invites (org_id, role, token_hash, created_by, expires_at)

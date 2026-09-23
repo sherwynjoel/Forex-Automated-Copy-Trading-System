@@ -9,7 +9,7 @@ under test. Endpoints listed with a seeded account id 100 where needed.
 import psycopg
 import pytest
 
-ROLES = ["viewer", "trader", "admin", "owner"]
+ROLES = ["investor", "viewer", "trader", "admin", "owner"]
 
 # (method, path_tail, body, min_role)
 MATRIX = [
@@ -52,7 +52,7 @@ MATRIX = [
     ("DELETE", "",                               None,                           "owner"),
 ]
 
-RANK = {"viewer": 0, "trader": 1, "admin": 2, "owner": 3}
+RANK = {"investor": -1, "viewer": 0, "trader": 1, "admin": 2, "owner": 3}
 
 
 @pytest.fixture
