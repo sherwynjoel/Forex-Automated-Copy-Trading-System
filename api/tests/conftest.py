@@ -44,7 +44,8 @@ def database():
 def db(database):
     with psycopg.connect(database, autocommit=True) as conn:
         conn.execute(
-            "TRUNCATE events, portfolio_snapshots, mappings, symbol_cache, "
+            "TRUNCATE investor_withdrawals, investor_deposits, org_investor_wallets, "
+            "events, portfolio_snapshots, mappings, symbol_cache, "
             "executions, positions, deals, deal_backfill_state, balance_samples, "
             "accounts, ctid_connections, "
             "oauth_states, org_invites, org_memberships, orgs, users "
