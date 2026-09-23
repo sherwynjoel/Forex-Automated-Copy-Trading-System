@@ -227,3 +227,36 @@ def test_linking_refuses_an_account_from_another_workspace_or_a_non_investor(
     r = client.put(f"/api/orgs/{org_id}/investors/{viewer['id']}/account",
                    json={"account_id": 1001}, headers=_csrf(client))
     assert r.status_code == 404
+
+
+def test_the_investor_list_asks_the_copier_once(org_client, make_user, db):
+    client, org_id, seed = org_client
+    seed(1001, role="slave")
+    seed(1002, role="slave")
+    inv1 = make_user(email="inv1@example.com")
+    inv2 = make_user(email="inv2@example.com")
+    _member(db, org_id, inv1, "investor")
+    _member(db, org_id, inv2, "investor")
+    _link(db, 1001, inv1)
+    _link(db, 1002, inv2)
+
+    calls = {"state": 0}
+
+    def callback(request):
+        url = str(request.url)
+        if "copier.test" in url and "/state" in url:
+            calls["state"] += 1
+            return httpx.Response(200, json={
+                "status": "ok",
+                "accounts": {"1001": {"balance": 100.0, "equity": 100.0, "open_pnl": 0.0,
+                                      "positions": []},
+                             "1002": {"balance": 100.0, "equity": 100.0, "open_pnl": 0.0,
+                                      "positions": []}},
+                "master_positions": [], "pending_orders": [], "drift": []})
+        return default_mock_callback(request)
+    client.app.state.mock_transport.set_callback(callback)
+
+    rows = client.get(f"/api/orgs/{org_id}/investors").json()
+    assert len(rows) == 2
+    assert all(r["equity"] == 100.0 for r in rows)
+    assert calls["state"] == 1

@@ -87,17 +87,22 @@ def _account_card(conn: psycopg.Connection, org_id: int, account_id: int) -> Dic
             "status": row[2], "last_error": row[3], "connected": connected}
 
 
-async def _equity_for(client, cfg: ApiConfig, conn: psycopg.Connection, org_id: int,
-                       account_id: int) -> tuple[Optional[Decimal], str, list]:
-    """Live equity from the copier's state snapshot, else the last equity
-    the MT5 terminal reported, else unknown. Never raises: an unreachable
-    copier makes the figure 'last known', not the page an error."""
-    state: Any = None
+async def _org_state(client, cfg: ApiConfig, org_id: int) -> Optional[dict]:
+    """One /state round trip for the whole org. None when the copier is
+    down or answers with something that isn't a JSON object -- callers then
+    fall back to last-known-equity for every account, not just one."""
     try:
         state = await _proxy_to_copier(
             client, f"{cfg.copier_control_url}/state?org_id={org_id}", method="GET")
     except HTTPException:
-        state = None
+        return None
+    return state if isinstance(state, dict) else None
+
+
+def _equity_from(state: Optional[dict], conn: psycopg.Connection,
+                  account_id: int) -> tuple[Optional[Decimal], str, list]:
+    """Live equity from an already-fetched /state snapshot, else the last
+    equity the MT5 terminal reported, else unknown."""
     accounts = state.get("accounts") if isinstance(state, dict) else None
     entry = accounts.get(str(account_id)) if isinstance(accounts, dict) else None
     if isinstance(entry, dict) and entry.get("equity") is not None:
@@ -107,6 +112,16 @@ async def _equity_for(client, cfg: ApiConfig, conn: psycopg.Connection, org_id: 
     if row and row[0] is not None:
         return Decimal(str(row[0])), "last known", []
     return None, "unknown", []
+
+
+async def _equity_for(client, cfg: ApiConfig, conn: psycopg.Connection, org_id: int,
+                       account_id: int) -> tuple[Optional[Decimal], str, list]:
+    """Single-account convenience wrapper over `_org_state` + `_equity_from`,
+    for callers that only ever need one account's equity (the investor's own
+    summary; positions and withdrawals in later tasks). Never raises: an
+    unreachable copier makes the figure 'last known', not the page an
+    error."""
+    return _equity_from(await _org_state(client, cfg, org_id), conn, account_id)
 
 
 def _ledger_rows(conn: psycopg.Connection, org_id: int, user_id: int):
@@ -234,13 +249,16 @@ def create_investor_admin_router() -> APIRouter:
                LEFT JOIN accounts a ON a.org_id = m.org_id AND a.investor_user_id = u.id
                WHERE m.org_id = %s AND m.role = 'investor'
                ORDER BY u.display_name, u.id""", (ctx.org_id,)).fetchall()
+        # One /state round trip for the whole list, not one per investor:
+        # the copier already returns every account's equity in a single
+        # response keyed by account id.
+        state = await _org_state(http_request.app.state.http, cfg, ctx.org_id)
         out = []
         for user_id, email, name, account_id, nickname, pend_dep, pend_wd in rows:
             deposits, withdrawals = _ledger_rows(conn, ctx.org_id, user_id)
             equity = None
             if account_id is not None:
-                equity, _src, _pos = await _equity_for(
-                    http_request.app.state.http, cfg, conn, ctx.org_id, int(account_id))
+                equity, _src, _pos = _equity_from(state, conn, int(account_id))
             s = summary_json(summarise(deposits, withdrawals, equity))
             out.append({"user_id": user_id, "email": email, "display_name": name,
                         "account_id": int(account_id) if account_id is not None else None,
