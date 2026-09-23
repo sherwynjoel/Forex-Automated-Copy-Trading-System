@@ -252,6 +252,28 @@ def test_linking_refuses_an_account_from_another_workspace_or_a_non_investor(
     assert r.status_code == 404
 
 
+def test_the_master_account_cannot_be_linked_to_an_investor(org_client, make_user, db):
+    """R17: the master is the desk's own account. Linked to an investor it
+    would show them the desk's equity as their balance and let them request
+    a withdrawal against it. The refusal leaves the existing link alone."""
+    client, org_id, seed = org_client
+    seed(100, role="master")
+    seed(1001, role="slave")
+    investor = make_user(email="inv@example.com")
+    _member(db, org_id, investor, "investor")
+    assert client.put(f"/api/orgs/{org_id}/investors/{investor['id']}/account",
+                      json={"account_id": 1001}, headers=_csrf(client)).status_code == 200
+
+    r = client.put(f"/api/orgs/{org_id}/investors/{investor['id']}/account",
+                   json={"account_id": 100}, headers=_csrf(client))
+    assert r.status_code == 400 and "master" in r.json()["detail"]
+    with psycopg.connect(db, autocommit=True) as conn:
+        links = dict(conn.execute(
+            "SELECT ctid_trader_account_id, investor_user_id FROM accounts WHERE org_id = %s",
+            (org_id,)).fetchall())
+    assert links == {100: None, 1001: investor["id"]}
+
+
 def test_the_investor_list_asks_the_copier_once(org_client, make_user, db):
     client, org_id, seed = org_client
     seed(1001, role="slave")

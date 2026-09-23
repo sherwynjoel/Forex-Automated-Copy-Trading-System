@@ -514,6 +514,18 @@ def create_investor_admin_router() -> APIRouter:
             conn.execute("UPDATE accounts SET investor_user_id = NULL "
                          "WHERE org_id = %s AND investor_user_id = %s", (ctx.org_id, user_id))
             if body.account_id is not None:
+                # The master is the desk's own account, the strategy every
+                # slave copies. Linked to an investor it would show them the
+                # desk's equity as their balance and let them request a
+                # withdrawal against it. Checked inside the transaction, so
+                # the unlink above rolls back and nothing moves.
+                role_row = conn.execute(
+                    "SELECT role FROM accounts WHERE ctid_trader_account_id = %s AND org_id = %s",
+                    (body.account_id, ctx.org_id)).fetchone()
+                if role_row and role_row[0] == "master":
+                    raise HTTPException(
+                        status_code=400,
+                        detail="The master account cannot be linked to an investor")
                 updated = conn.execute(
                     "UPDATE accounts SET investor_user_id = %s "
                     "WHERE ctid_trader_account_id = %s AND org_id = %s "
