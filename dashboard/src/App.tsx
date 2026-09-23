@@ -17,6 +17,12 @@ import Automation from './pages/Automation'
 import History from './pages/History'
 import Performance from './pages/Performance'
 import Logs from './pages/Logs'
+import Investors from './pages/Investors'
+import InvestorOverview from './pages/investor/InvestorOverview'
+import InvestorDeposit from './pages/investor/InvestorDeposit'
+import InvestorWithdraw from './pages/investor/InvestorWithdraw'
+import InvestorHistory from './pages/investor/InvestorHistory'
+import InvestorAccount from './pages/investor/InvestorAccount'
 
 /** `/` → the last-used org, else the first org, else /welcome. */
 function RootRedirect() {
@@ -67,6 +73,12 @@ export default function App() {
           <Route path="performance" element={<Performance />} />
           <Route path="logs" element={<Logs />} />
           <Route path="members" element={<Members />} />
+          <Route path="investors" element={<Investors />} />
+          <Route path="invest" element={<InvestorOverview />} />
+          <Route path="invest/deposit" element={<InvestorDeposit />} />
+          <Route path="invest/withdraw" element={<InvestorWithdraw />} />
+          <Route path="invest/history" element={<InvestorHistory />} />
+          <Route path="invest/account" element={<InvestorAccount />} />
         </Route>
         <Route path="/" element={<RootRedirect />} />
       </Routes>
