@@ -415,7 +415,9 @@ export default function Layout() {
   const investor = role === 'investor'
   const items = investor ? investorNavItems(orgId) : navItems(orgId, role)
   const portalRoot = `/org/${orgId}/invest`
-  const strayed = investor && !location.pathname.startsWith(portalRoot)
+  const strayed = investor
+    && location.pathname !== portalRoot
+    && !location.pathname.startsWith(portalRoot + '/')
 
   // The drawer never outlives a navigation, and Escape dismisses it.
   useEffect(() => {

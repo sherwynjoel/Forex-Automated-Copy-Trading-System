@@ -495,6 +495,7 @@ function renderShell(path: string) {
           <Route index element={<div>desk home</div>} />
           <Route path="invest" element={<div>investor home</div>} />
           <Route path="invest/deposit" element={<div>investor deposit</div>} />
+          <Route path="investors" element={<div>admin investors</div>} />
         </Route>
       </Routes>
     </MemoryRouter>,
@@ -533,4 +534,12 @@ test('admins get an Investors nav item and viewers do not', async () => {
   renderShell('/org/1')
   expect(await screen.findByText('desk home')).toBeInTheDocument()
   expect(screen.queryByRole('link', { name: 'Investors' })).not.toBeInTheDocument()
+})
+
+test('an investor opening the admin Investors path is sent to the portal', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('investor'))
+  mockRoutes()
+  renderShell('/org/1/investors')
+  expect(await screen.findByText('investor home')).toBeInTheDocument()
+  expect(screen.queryByText('admin investors')).not.toBeInTheDocument()
 })
