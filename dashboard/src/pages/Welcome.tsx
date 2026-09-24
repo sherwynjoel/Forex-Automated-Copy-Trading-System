@@ -4,6 +4,7 @@ import { api } from '../lib/api'
 import { errorText } from '../lib/format'
 import Banner from '../components/Banner'
 import Logo from '../components/Logo'
+import { roleLabel } from '../lib/roles'
 
 interface MyOrg { id: number; name: string; role: string }
 
@@ -68,7 +69,7 @@ export default function Welcome() {
                     className="flex items-center justify-between gap-3 rounded border border-line-strong px-3 py-2.5 text-sm text-ink hover:border-brand hover:bg-brand-wash transition-colors"
                   >
                     <span className="font-medium">{o.name}</span>
-                    <span className="desk-label">{o.role}</span>
+                    <span className="desk-label">{roleLabel(o.role)}</span>
                   </Link>
                 </li>
               ))}

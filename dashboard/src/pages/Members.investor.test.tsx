@@ -19,7 +19,7 @@ beforeEach(() => {
     const url = String(input)
     if (url.includes('/members')) {
       return jsonResponse([{ user_id: 1, email: 'user@example.com', display_name: 'Test User',
-                             role: 'owner', joined_at: '2026-09-01T00:00:00Z' }])
+                             role: 'viewer', joined_at: '2026-09-01T00:00:00Z' }])
     }
     if (url.includes('/invites')) return jsonResponse([])
     return jsonResponse({})

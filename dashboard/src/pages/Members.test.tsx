@@ -90,7 +90,9 @@ test('lists members with roles', async () => {
   })
   expect(screen.getByText('trader@x.com')).toBeInTheDocument()
   expect(screen.getByText('viewer@x.com')).toBeInTheDocument()
-  expect(screen.getByLabelText('Role for owner@x.com')).toHaveValue('owner')
+  // The single admin's own row is fixed: no select, just the label.
+  expect(screen.queryByLabelText('Role for owner@x.com')).not.toBeInTheDocument()
+  expect(screen.getByText('Admin')).toBeInTheDocument()
   expect(screen.getByLabelText('Role for trader@x.com')).toHaveValue('trader')
 })
 
@@ -100,12 +102,12 @@ test('owner can change a role via the role select', async () => {
   renderMembers()
 
   const select = await screen.findByLabelText('Role for trader@x.com')
-  await userEvent.selectOptions(select, 'admin')
+  await userEvent.selectOptions(select, 'viewer')
 
   await waitFor(() => {
     expect(fetchMock).toHaveBeenCalledWith(
       '/api/orgs/1/members/2',
-      expect.objectContaining({ method: 'PATCH', body: JSON.stringify({ role: 'admin' }) })
+      expect.objectContaining({ method: 'PATCH', body: JSON.stringify({ role: 'viewer' }) })
     )
   })
 })
@@ -137,7 +139,7 @@ test('non-owner sees read-only roles and no invite form', async () => {
     expect(screen.getByText('Owner O')).toBeInTheDocument()
   })
   expect(screen.queryByLabelText(/^Role for /)).not.toBeInTheDocument()
-  expect(screen.getByText('owner')).toBeInTheDocument()
+  expect(screen.getByText('Admin')).toBeInTheDocument()
   expect(screen.queryByText('Invites')).not.toBeInTheDocument()
   expect(screen.queryByLabelText('Invite role')).not.toBeInTheDocument()
   expect(screen.queryByText('Organization')).not.toBeInTheDocument()

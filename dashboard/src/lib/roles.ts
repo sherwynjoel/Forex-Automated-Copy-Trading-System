@@ -15,3 +15,21 @@ export function can(role: Role | null | undefined, action: Action): boolean {
   if (!role || !(role in RANK)) return false
   return RANK[role] >= THRESHOLD[action]
 }
+
+/** What the UI calls each role. One person runs the desk, so the owner reads
+ *  as "Admin". The deputy roles are no longer offered but keep a name for
+ *  anyone who already holds one. */
+const ROLE_LABEL: Record<Role, string> = {
+  owner: 'Admin',
+  admin: 'Admin (deputy)',
+  trader: 'Trader',
+  viewer: 'Viewer',
+  investor: 'Investor',
+}
+
+export function roleLabel(role: string): string {
+  return (ROLE_LABEL as Record<string, string>)[role] ?? role
+}
+
+/** The only roles an admin hands out: read-only staff and investors. */
+export const OFFERED_ROLES: Role[] = ['investor', 'viewer']

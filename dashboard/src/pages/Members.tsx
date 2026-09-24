@@ -1,22 +1,29 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api, orgApi } from '../lib/api'
-import { can, type Role } from '../lib/roles'
+import { can, roleLabel, OFFERED_ROLES, type Role } from '../lib/roles'
 import { useOrg } from '../lib/org'
 import Banner from '../components/Banner'
 import type { Invite, Member } from '../lib/types'
 import ConfirmDialog from '../components/ConfirmDialog'
 import AccountSecurity from '../components/AccountSecurity'
 
-const ASSIGNABLE: Role[] = ['investor', 'viewer', 'trader', 'admin', 'owner']
-const INVITABLE: Role[] = ['investor', 'viewer', 'trader', 'admin']
+// The desk has one admin (the owner); everyone else is read-only staff or an
+// investor. A member who already holds a retired role keeps it in the list so
+// the admin can still move them to one of the offered roles.
+const ASSIGNABLE: Role[] = OFFERED_ROLES
+const INVITABLE: Role[] = OFFERED_ROLES
+
+function optionsFor(current: string): Role[] {
+  return ASSIGNABLE.includes(current as Role) ? ASSIGNABLE : [current as Role, ...ASSIGNABLE]
+}
 
 export default function Members() {
   const { orgId, role, me, org, refreshMe } = useOrg()
   const navigate = useNavigate()
   const [members, setMembers] = useState<Member[]>([])
   const [invites, setInvites] = useState<Invite[]>([])
-  const [inviteRole, setInviteRole] = useState<Role>('viewer')
+  const [inviteRole, setInviteRole] = useState<Role>('investor')
   const [newInviteLink, setNewInviteLink] = useState<string | null>(null)
   const [linkCopied, setLinkCopied] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -103,17 +110,19 @@ export default function Members() {
               <td data-label="Name" className="py-2 text-ink">{m.display_name}</td>
               <td data-label="Email" className="text-ink-soft">{m.email}</td>
               <td data-label="Role">
-                {can(role, 'manage_members') ? (
+                {can(role, 'manage_members') && m.role !== 'owner' ? (
                   <select
                     aria-label={`Role for ${m.email}`}
                     value={m.role}
                     onChange={(e) => changeRole(m.user_id, e.target.value)}
                     className="border border-line-strong rounded bg-card px-2 py-1"
                   >
-                    {ASSIGNABLE.map((r) => <option key={r} value={r}>{r}</option>)}
+                    {optionsFor(m.role).map((r) => (
+                      <option key={r} value={r}>{roleLabel(r)}</option>
+                    ))}
                   </select>
                 ) : (
-                  <span className="text-ink">{m.role}</span>
+                  <span className="text-ink">{roleLabel(m.role)}</span>
                 )}
               </td>
               <td className="text-right">
@@ -141,7 +150,7 @@ export default function Members() {
               onChange={(e) => setInviteRole(e.target.value as Role)}
               className="border border-line-strong rounded bg-card px-2 py-1 text-sm"
             >
-              {INVITABLE.map((r) => <option key={r} value={r}>{r}</option>)}
+              {INVITABLE.map((r) => <option key={r} value={r}>{roleLabel(r)}</option>)}
             </select>
             <button
               type="submit"
@@ -168,7 +177,7 @@ export default function Members() {
           <ul className="text-sm text-ink-soft space-y-1">
             {invites.map((inv) => (
               <li key={inv.id} className="flex items-center gap-3">
-                <span>{inv.role}</span>
+                <span>{roleLabel(inv.role)}</span>
                 <span>{inv.consumed ? 'used' : `expires ${new Date(inv.expires_at).toLocaleDateString()}`}</span>
                 {!inv.consumed && (
                   <button
