@@ -819,15 +819,6 @@ test('viewer sees no Add MT5 account button', async () => {
   expect(screen.queryByRole('button', { name: /add mt5 account/i })).not.toBeInTheDocument()
 })
 
-test('a viewer sees no Add MT5 account button', async () => {
-  setRole('viewer')
-  mockRoutes()
-  renderAccounts()
-
-  await screen.findByText('12345')
-  expect(screen.queryByRole('button', { name: /add mt5 account/i })).not.toBeInTheDocument()
-})
-
 // ---------- Rotate key ----------
 
 test('Rotate key confirms, POSTs the rotation, and shows the new key once', async () => {

@@ -853,28 +853,6 @@ test('kill switch is hidden for a viewer (below control)', async () => {
   expect(screen.queryByTestId('dry-run-toggle')).not.toBeInTheDocument()
 })
 
-test('kill switch is hidden for a viewer (below control)', async () => {
-  setRole('viewer')
-  stubApi({
-    '/api/orgs/1/accounts': mockAccounts,
-    '/api/orgs/1/settings': mockSettings,
-    '/api/orgs/1/state': mockState,
-  })
-
-  render(
-    <MemoryRouter>
-      <Overview />
-    </MemoryRouter>
-  )
-
-  await waitFor(() => {
-    expect(screen.getByText('Copying Status')).toBeInTheDocument()
-  })
-
-  expect(screen.queryByRole('button', { name: /stop copying|resume copying/i })).not.toBeInTheDocument()
-  expect(screen.queryByTestId('dry-run-toggle')).not.toBeInTheDocument()
-})
-
 test('kill switch is visible for an admin (control)', async () => {
   setRole('admin')
   stubApi({
