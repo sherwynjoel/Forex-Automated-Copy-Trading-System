@@ -418,7 +418,7 @@ export default function Accounts() {
     setAliasDrafts({})
     setNewAlias({ canonical: '', broker_name: '' })
     // The mapping lives in the api's database, so it loads even when the
-    // copier is down; reading it needs the trader role.
+    // copier is down; reading it needs the admin role.
     if (isMt5(account) && can(role, 'trade')) loadAliases(account.ctid_trader_account_id)
     try {
       setDetails(await orgApi<AccountDetails>(
@@ -1033,7 +1033,7 @@ export default function Accounts() {
                   <section>
                     <h3 className="desk-label mb-2">Symbol mapping</h3>
                     {!can(role, 'trade') ? (
-                      <p className="text-sm text-ink-faint">Traders and admins can see the mapping.</p>
+                      <p className="text-sm text-ink-faint">Only an admin can see the mapping.</p>
                     ) : aliasesError ? (
                       <p className="text-sm text-loss-deep">{aliasesError}</p>
                     ) : !aliases ? (

@@ -82,7 +82,7 @@ export default function KillSwitch({ settings, onUpdate }: KillSwitchProps) {
   const buttonText = settings.copying_enabled ? 'STOP COPYING' : 'RESUME COPYING'
   const buttonColor = settings.copying_enabled ? 'bg-loss hover:bg-loss-deep' : 'bg-profit hover:bg-profit-deep'
 
-  // Kill switches are a control-level action; viewers/traders never see them.
+  // Kill switches are a control-level action; viewers never see them.
   if (!can(role, 'control')) return null
 
   return (

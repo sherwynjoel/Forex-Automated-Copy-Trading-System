@@ -358,7 +358,7 @@ test('pending orders describe themselves like the Trade page does', async () => 
   expect(partial.querySelector('td[data-label="Price"]')!.textContent).toBe('—')
 })
 
-test('a trader can set stop loss and take profit on a master position', async () => {
+test('an admin can set stop loss and take profit on a master position', async () => {
   setRole('admin')
   const stateWithProtection: ApiState = {
     ...mockApiState,

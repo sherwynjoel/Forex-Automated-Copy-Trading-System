@@ -911,6 +911,17 @@ test("an MT5 account's details show a Terminal section instead of the OAuth gran
   expect(await screen.findByRole('dialog', { name: /rotate the key for vps desk/i })).toBeInTheDocument()
 })
 
+test('a viewer opening an MT5 details drawer sees the admin-only notice, not the mapping', async () => {
+  setRole('viewer')
+  mockMt5Routes({
+    '/accounts/1000000000001/details': () => jsonResponse(mt5Details),
+  })
+  renderAccounts()
+  await openMt5Details()
+
+  expect(await screen.findByText('Only an admin can see the mapping.')).toBeInTheDocument()
+})
+
 test('editing a broker symbol PUTs that one alias on blur and reloads the mapping', async () => {
   setRole('admin')
   const fetchMock = mockMt5Routes({

@@ -473,7 +473,7 @@ test('viewer (below trade) sees a notice instead of the order ticket', async () 
   expect(screen.queryByText(/margin required/i)).not.toBeInTheDocument()
 })
 
-test('trader (trade+) sees the full order ticket', async () => {
+test('admin (trade+) sees the full order ticket', async () => {
   setRole('admin')
   mockRoutes()
   renderTrade()
