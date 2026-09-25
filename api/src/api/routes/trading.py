@@ -47,7 +47,7 @@ def create_trading_router() -> APIRouter:
     async def place_order(
         body: Dict[str, Any],
         http_request: Request,
-        ctx: OrgContext = Depends(require_org_role("trader")),
+        ctx: OrgContext = Depends(require_org_role("admin")),
         conn: psycopg.Connection = Depends(get_conn),
         cfg: ApiConfig = Depends(ApiConfig.from_env),
     ) -> Dict[str, Any]:
@@ -62,7 +62,7 @@ def create_trading_router() -> APIRouter:
     async def close_position(
         body: Dict[str, Any],
         http_request: Request,
-        ctx: OrgContext = Depends(require_org_role("trader")),
+        ctx: OrgContext = Depends(require_org_role("admin")),
         conn: psycopg.Connection = Depends(get_conn),
         cfg: ApiConfig = Depends(ApiConfig.from_env),
     ) -> Dict[str, Any]:
@@ -77,7 +77,7 @@ def create_trading_router() -> APIRouter:
     async def amend_position(
         body: Dict[str, Any],
         http_request: Request,
-        ctx: OrgContext = Depends(require_org_role("trader")),
+        ctx: OrgContext = Depends(require_org_role("admin")),
         conn: psycopg.Connection = Depends(get_conn),
         cfg: ApiConfig = Depends(ApiConfig.from_env),
     ) -> Dict[str, Any]:
@@ -94,7 +94,7 @@ def create_trading_router() -> APIRouter:
     async def cancel_order(
         body: Dict[str, Any],
         http_request: Request,
-        ctx: OrgContext = Depends(require_org_role("trader")),
+        ctx: OrgContext = Depends(require_org_role("admin")),
         conn: psycopg.Connection = Depends(get_conn),
         cfg: ApiConfig = Depends(ApiConfig.from_env),
     ) -> Dict[str, Any]:

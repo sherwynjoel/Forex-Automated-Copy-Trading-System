@@ -177,7 +177,7 @@ def test_order_for_foreign_account_is_404_and_never_proxied(
     client, org_id, seed = org_client
     seed(100, role="master")
     other = make_user(email="b@example.com")
-    other_org = make_org(name="B", members=[(other, "owner")])
+    other_org = make_org(name="B", members=[(other, "admin")])
     with psycopg.connect(db, autocommit=True) as conn:
         (other_conn,) = conn.execute(
             """INSERT INTO ctid_connections
@@ -229,20 +229,17 @@ def test_close_all_forwards_org_id(org_client):
     assert captured["body"] == {"org_id": org_id, "actor_email": "admin@example.com"}
 
 
-def test_trader_can_order_but_not_close_all(org_client, make_user, login_as, db):
+def test_viewer_cannot_order(org_client, make_user, login_as, db):
     client, org_id, seed = org_client
     seed(100, role="master")
-    trader = make_user(email="t@example.com")
+    viewer = make_user(email="v@example.com")
     with psycopg.connect(db, autocommit=True) as conn:
         conn.execute(
-            "INSERT INTO org_memberships (org_id, user_id, role) VALUES (%s, %s, 'trader')",
-            (org_id, trader["id"]))
-    login_as(client, trader)
+            "INSERT INTO org_memberships (org_id, user_id, role) VALUES (%s, %s, 'viewer')",
+            (org_id, viewer["id"]))
+    login_as(client, viewer)
     r = client.post(f"/api/orgs/{org_id}/orders",
                     json={"account_id": 100, "symbol": "EURUSD", "side": "BUY",
                           "order_type": "MARKET", "volume_lots": 0.01},
-                    headers=_csrf(client))
-    assert r.status_code == 200  # mock copier answers 200
-    r = client.post(f"/api/orgs/{org_id}/control/close-all", json={},
                     headers=_csrf(client))
     assert r.status_code == 403

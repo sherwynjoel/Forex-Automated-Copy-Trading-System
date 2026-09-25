@@ -587,7 +587,7 @@ def test_accounts_listing_is_org_scoped(org_client, make_user, make_org, login_a
 
     # A second org with its own account
     other_owner = make_user(email="other@example.com")
-    other_org = make_org(name="Other", members=[(other_owner, "owner")])
+    other_org = make_org(name="Other", members=[(other_owner, "admin")])
     with psycopg.connect(db, autocommit=True) as conn:
         (other_conn,) = conn.execute(
             """INSERT INTO ctid_connections

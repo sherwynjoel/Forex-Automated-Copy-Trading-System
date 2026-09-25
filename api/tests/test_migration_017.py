@@ -17,7 +17,7 @@ def test_migration_017_is_recorded_right_after_016(db):
 
 def test_vt_htf_snapshots_has_one_row_per_org_and_symbol(db, make_user, make_org):
     owner = make_user()
-    org_id = make_org(members=[(owner, "owner")])
+    org_id = make_org(members=[(owner, "admin")])
     with psycopg.connect(db, autocommit=True) as conn:
         conn.execute(
             "INSERT INTO vt_htf_snapshots (org_id, symbol, bias, entry, stop, target, price, tf) "
@@ -31,7 +31,7 @@ def test_vt_htf_snapshots_has_one_row_per_org_and_symbol(db, make_user, make_org
 
 def test_vt_htf_snapshots_bias_is_checked(db, make_user, make_org):
     owner = make_user()
-    org_id = make_org(members=[(owner, "owner")])
+    org_id = make_org(members=[(owner, "admin")])
     with psycopg.connect(db, autocommit=True) as conn:
         with pytest.raises(psycopg.errors.CheckViolation):
             conn.execute(
@@ -41,7 +41,7 @@ def test_vt_htf_snapshots_bias_is_checked(db, make_user, make_org):
 
 def test_org_webhooks_vt_ltf_timeframes_defaults_to_empty(db, make_user, make_org):
     owner = make_user()
-    org_id = make_org(members=[(owner, "owner")])
+    org_id = make_org(members=[(owner, "admin")])
     with psycopg.connect(db, autocommit=True) as conn:
         conn.execute(
             "INSERT INTO org_webhooks (org_id, hook_id, secret_hash, secret_created_at) "

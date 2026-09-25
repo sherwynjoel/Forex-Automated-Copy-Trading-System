@@ -17,7 +17,7 @@ def test_migration_019_is_recorded_right_after_018(db):
 def test_investor_is_a_valid_membership_and_invite_role(db, make_user, make_org):
     owner = make_user()
     investor = make_user(email="inv@example.com")
-    org_id = make_org(members=[(owner, "owner"), (investor, "investor")])
+    org_id = make_org(members=[(owner, "admin"), (investor, "investor")])
     with psycopg.connect(db, autocommit=True) as conn:
         (role,) = conn.execute(
             "SELECT role FROM org_memberships WHERE org_id = %s AND user_id = %s",
@@ -36,7 +36,7 @@ def test_investor_is_a_valid_membership_and_invite_role(db, make_user, make_org)
 def test_one_account_per_investor_per_org(db, make_user, make_org):
     owner = make_user()
     investor = make_user(email="inv@example.com")
-    org_id = make_org(members=[(owner, "owner"), (investor, "investor")])
+    org_id = make_org(members=[(owner, "admin"), (investor, "investor")])
     with psycopg.connect(db, autocommit=True) as conn:
         (cid,) = conn.execute(
             "INSERT INTO ctid_connections (org_id, access_token_enc, refresh_token_enc, "
@@ -57,7 +57,7 @@ def test_one_account_per_investor_per_org(db, make_user, make_org):
 def test_amounts_must_be_positive_and_statuses_are_checked(db, make_user, make_org):
     owner = make_user()
     investor = make_user(email="inv@example.com")
-    org_id = make_org(members=[(owner, "owner"), (investor, "investor")])
+    org_id = make_org(members=[(owner, "admin"), (investor, "investor")])
     with psycopg.connect(db, autocommit=True) as conn:
         with pytest.raises(psycopg.errors.CheckViolation):
             conn.execute(
@@ -80,7 +80,7 @@ def test_one_live_notice_per_transaction_id(db, make_user, make_org):
     of the index, so a mistake can be re-filed."""
     owner = make_user()
     investor = make_user(email="inv@example.com")
-    org_id = make_org(members=[(owner, "owner"), (investor, "investor")])
+    org_id = make_org(members=[(owner, "admin"), (investor, "investor")])
     with psycopg.connect(db, autocommit=True) as conn:
         (indexdef,) = conn.execute(
             "SELECT indexdef FROM pg_indexes WHERE indexname = "
@@ -98,14 +98,14 @@ def test_one_live_notice_per_transaction_id(db, make_user, make_org):
         conn.execute("INSERT INTO investor_deposits (org_id, user_id, amount, coin, txid) "
                      "VALUES (%s, %s, 20, 'USDT', 'same-tx')", (org_id, investor["id"]))
         # ...and the same txid in ANOTHER workspace was never in the way.
-        other = make_org(name="Other", members=[(owner, "owner")])
+        other = make_org(name="Other", members=[(owner, "admin")])
         conn.execute("INSERT INTO investor_deposits (org_id, user_id, amount, coin, txid) "
                      "VALUES (%s, %s, 30, 'USDT', 'same-tx')", (other, owner["id"]))
 
 
 def test_wallet_card_is_one_row_per_org(db, make_user, make_org):
     owner = make_user()
-    org_id = make_org(members=[(owner, "owner")])
+    org_id = make_org(members=[(owner, "admin")])
     with psycopg.connect(db, autocommit=True) as conn:
         conn.execute(
             "INSERT INTO org_investor_wallets (org_id, coin, network, address) "

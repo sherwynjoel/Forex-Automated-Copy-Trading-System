@@ -7,10 +7,12 @@ from fastapi import Depends, HTTPException
 from .auth import require_user
 from .db import get_conn
 
-# 'investor' sits BELOW viewer on purpose: every existing endpoint asks for
+# 'investor' sits BELOW viewer on purpose: every desk endpoint asks for
 # viewer or higher, so an investor is refused everywhere except the
 # investor router, which resolves the caller's own linked account itself.
-ROLE_RANK = {"investor": -1, "viewer": 0, "trader": 1, "admin": 2, "owner": 3}
+# 'admin' is the one desk-running role: what used to be owner, admin and
+# trader (docs/superpowers/specs/2026-09-25-single-admin-role-design.md).
+ROLE_RANK = {"investor": -1, "viewer": 0, "admin": 1}
 
 
 @dataclass(frozen=True)

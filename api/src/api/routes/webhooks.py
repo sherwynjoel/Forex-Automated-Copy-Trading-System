@@ -875,7 +875,7 @@ def create_webhook_settings_router() -> APIRouter:
     router = APIRouter(prefix="/api/orgs/{org_id}", tags=["webhooks"])
 
     @router.get("/webhook", response_model=Dict[str, Any])
-    async def get_webhook(ctx: OrgContext = Depends(require_org_role("trader")),
+    async def get_webhook(ctx: OrgContext = Depends(require_org_role("admin")),
                           conn: psycopg.Connection = Depends(get_conn),
                           cfg: ApiConfig = Depends(ApiConfig.from_env)):
         row = conn.execute(

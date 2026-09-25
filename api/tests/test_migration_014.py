@@ -20,7 +20,7 @@ def test_an_mt5_account_has_no_grant_and_a_ctrader_account_must(db, make_user, m
     """The platform decides whether ctid_connection_id may be NULL: an MT5
     account never has a cTrader grant; a cTrader account always does."""
     owner = make_user()
-    org_id = make_org(members=[(owner, "owner")])
+    org_id = make_org(members=[(owner, "admin")])
     with psycopg.connect(db, autocommit=True) as conn:
         (account_id,) = conn.execute(
             "INSERT INTO accounts (ctid_trader_account_id, ctid_connection_id, org_id, "

@@ -388,7 +388,7 @@ def create_mt5_operator_router() -> APIRouter:
 
     @router.get("/accounts/{account_id}/symbol-aliases", response_model=Dict[str, Any])
     async def get_symbol_aliases(account_id: int,
-                                 ctx: OrgContext = Depends(require_org_role("trader")),
+                                 ctx: OrgContext = Depends(require_org_role("admin")),
                                  conn: psycopg.Connection = Depends(get_conn)):
         require_account_in_org(conn, ctx.org_id, account_id)
         return _aliases_payload(conn, account_id)

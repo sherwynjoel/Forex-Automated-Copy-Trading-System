@@ -85,7 +85,7 @@ def test_bootstrap_user_claims_default_org(db):
             """SELECT u.email, m.role, o.name FROM org_memberships m
                JOIN users u ON u.id = m.user_id JOIN orgs o ON o.id = m.org_id"""
         ).fetchall()
-    assert rows == [("root@example.com", "owner", "Default")]
+    assert rows == [("root@example.com", "admin", "Default")]
 
 
 def test_bootstrap_user_without_default_org_creates_only_user(db):

@@ -53,10 +53,10 @@ def create_orgs_router() -> APIRouter:
             ).fetchone()
             conn.execute(
                 "INSERT INTO org_memberships (org_id, user_id, role) "
-                "VALUES (%s, %s, 'owner')",
+                "VALUES (%s, %s, 'admin')",
                 (org_id, user_id),
             )
-        return {"id": org_id, "name": name, "role": "owner"}
+        return {"id": org_id, "name": name, "role": "admin"}
 
     @router.post("/join")
     async def join_org(
@@ -102,7 +102,7 @@ def create_orgs_router() -> APIRouter:
     @router.patch("/{org_id}")
     async def patch_org(
         body: PatchOrgRequest,
-        ctx: OrgContext = Depends(require_org_role("owner")),
+        ctx: OrgContext = Depends(require_org_role("admin")),
         conn: psycopg.Connection = Depends(get_conn),
     ):
         if body.name is not None:
@@ -116,7 +116,7 @@ def create_orgs_router() -> APIRouter:
 
     @router.delete("/{org_id}", status_code=204)
     async def delete_org(
-        ctx: OrgContext = Depends(require_org_role("owner")),
+        ctx: OrgContext = Depends(require_org_role("admin")),
         conn: psycopg.Connection = Depends(get_conn),
     ):
         # Cascades memberships, invites, connections, accounts, mappings.
@@ -145,23 +145,23 @@ def create_orgs_router() -> APIRouter:
     async def patch_member(
         member_user_id: int,
         body: PatchMemberRequest,
-        ctx: OrgContext = Depends(require_org_role("owner")),
+        ctx: OrgContext = Depends(require_org_role("admin")),
         conn: psycopg.Connection = Depends(get_conn),
     ):
         if body.role not in ROLE_RANK:
             raise HTTPException(status_code=400, detail="Unknown role")
         with conn.transaction():
-            # Lock the whole owner set (not just the target row) so two
-            # concurrent demotions of two different owners can't both see
-            # count=2 and both proceed to zero owners. Under READ COMMITTED
+            # Lock the whole admin set (not just the target row) so two
+            # concurrent demotions of two different admins can't both see
+            # count=2 and both proceed to zero admins. Under READ COMMITTED
             # the second transaction blocks here until the first commits,
-            # then re-reads and sees the reduced owner set.
-            owner_rows = conn.execute(
+            # then re-reads and sees the reduced admin set.
+            admin_rows = conn.execute(
                 "SELECT user_id FROM org_memberships "
-                "WHERE org_id = %s AND role = 'owner' FOR UPDATE",
+                "WHERE org_id = %s AND role = 'admin' FOR UPDATE",
                 (ctx.org_id,),
             ).fetchall()
-            owner_ids = {r[0] for r in owner_rows}
+            admin_ids = {r[0] for r in admin_rows}
             row = conn.execute(
                 "SELECT role FROM org_memberships WHERE org_id = %s AND user_id = %s "
                 "FOR UPDATE",
@@ -169,9 +169,9 @@ def create_orgs_router() -> APIRouter:
             ).fetchone()
             if not row:
                 raise HTTPException(status_code=404, detail="Member not found")
-            if row[0] == "owner" and body.role != "owner" and len(owner_ids) == 1:
+            if row[0] == "admin" and body.role != "admin" and len(admin_ids) == 1:
                 raise HTTPException(
-                    status_code=409, detail="An org must keep at least one owner")
+                    status_code=409, detail="An org must keep at least one admin")
             conn.execute(
                 "UPDATE org_memberships SET role = %s WHERE org_id = %s AND user_id = %s",
                 (body.role, ctx.org_id, member_user_id),
@@ -184,21 +184,21 @@ def create_orgs_router() -> APIRouter:
         ctx: OrgContext = Depends(require_org_role("viewer")),
         conn: psycopg.Connection = Depends(get_conn),
     ):
-        # Owners may remove anyone; anyone may remove THEMSELVES (leave).
-        if ctx.role != "owner" and member_user_id != ctx.user_id:
+        # Admins may remove anyone; anyone may remove THEMSELVES (leave).
+        if ctx.role != "admin" and member_user_id != ctx.user_id:
             raise HTTPException(status_code=403, detail="Insufficient role")
         with conn.transaction():
-            # Lock the whole owner set (not just the target row) so two
-            # concurrent removals of two different owners can't both see
-            # count=2 and both proceed to zero owners. Under READ COMMITTED
+            # Lock the whole admin set (not just the target row) so two
+            # concurrent removals of two different admins can't both see
+            # count=2 and both proceed to zero admins. Under READ COMMITTED
             # the second transaction blocks here until the first commits,
-            # then re-reads and sees the reduced owner set.
-            owner_rows = conn.execute(
+            # then re-reads and sees the reduced admin set.
+            admin_rows = conn.execute(
                 "SELECT user_id FROM org_memberships "
-                "WHERE org_id = %s AND role = 'owner' FOR UPDATE",
+                "WHERE org_id = %s AND role = 'admin' FOR UPDATE",
                 (ctx.org_id,),
             ).fetchall()
-            owner_ids = {r[0] for r in owner_rows}
+            admin_ids = {r[0] for r in admin_rows}
             row = conn.execute(
                 "SELECT role FROM org_memberships WHERE org_id = %s AND user_id = %s "
                 "FOR UPDATE",
@@ -206,14 +206,14 @@ def create_orgs_router() -> APIRouter:
             ).fetchone()
             if not row:
                 raise HTTPException(status_code=404, detail="Member not found")
-            if row[0] == "owner" and len(owner_ids) == 1:
+            if row[0] == "admin" and len(admin_ids) == 1:
                 raise HTTPException(
-                    status_code=409, detail="An org must keep at least one owner")
+                    status_code=409, detail="An org must keep at least one admin")
             conn.execute(
                 "DELETE FROM org_memberships WHERE org_id = %s AND user_id = %s",
                 (ctx.org_id, member_user_id),
             )
-        # Covers both an owner removing someone else AND a member leaving on
+        # Covers both an admin removing someone else AND a member leaving on
         # their own -- either way membership is gone, so any open socket of
         # theirs on this org must stop streaming its live events now rather
         # than whenever their tab happens to close.
@@ -225,9 +225,9 @@ def create_orgs_router() -> APIRouter:
         ctx: OrgContext = Depends(require_org_role("admin")),
         conn: psycopg.Connection = Depends(get_conn),
     ):
-        if body.role not in ("admin", "trader", "viewer", "investor"):
+        if body.role not in ("admin", "viewer", "investor"):
             raise HTTPException(
-                status_code=400, detail="Invites can grant admin, trader, viewer, or investor")
+                status_code=400, detail="Invites can grant admin, viewer, or investor")
         token = secrets.token_urlsafe(32)
         row = conn.execute(
             """INSERT INTO org_invites (org_id, role, token_hash, created_by, expires_at)

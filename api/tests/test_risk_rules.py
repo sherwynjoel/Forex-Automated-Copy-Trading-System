@@ -80,8 +80,8 @@ def test_delete_with_a_malformed_symbol_is_400_not_500(org_client):
 def test_viewer_role_cannot_write(org_client, make_user, login_as, db):
     """org_client's own user is already an org "admin" (make_org seeds it that
     way); to exercise a lower role we add a second user as "viewer" directly,
-    the same way test_webhooks.py's test_a_trader_can_read_but_not_rotate_or_enable
-    does for "trader"."""
+    the same way test_webhooks.py's test_a_viewer_can_neither_read_nor_change_the_webhook
+    does."""
     client, org_id, seed = org_client
     viewer = make_user(email="viewer@example.com")
     with psycopg.connect(db, autocommit=True) as conn:

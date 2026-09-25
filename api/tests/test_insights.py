@@ -29,7 +29,7 @@ def other_org(make_user, make_org, db):
     """A second org with its own connection and account 999; returns
     (org_id, account_id)."""
     owner = make_user(email="other-owner@example.com")
-    org_id = make_org(name="Other Desk", members=[(owner, "owner")])
+    org_id = make_org(name="Other Desk", members=[(owner, "admin")])
     with psycopg.connect(db, autocommit=True) as conn:
         (connection_id,) = conn.execute(
             """INSERT INTO ctid_connections

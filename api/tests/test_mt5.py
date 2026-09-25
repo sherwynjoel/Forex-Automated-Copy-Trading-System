@@ -446,7 +446,7 @@ def test_rotation_on_a_ctrader_account_is_400(org_client):
 def test_another_orgs_mt5_account_is_404_here(org_client, make_user, make_org, db):
     client, org_id, seed = org_client
     other_owner = make_user(email="other@example.com")
-    other_org = make_org(name="Other", members=[(other_owner, "owner")])
+    other_org = make_org(name="Other", members=[(other_owner, "admin")])
     theirs = seed_mt5(db, other_org, WRONG)
 
     assert client.post(f"/api/orgs/{org_id}/mt5/accounts/{theirs}/key",
@@ -455,14 +455,14 @@ def test_another_orgs_mt5_account_is_404_here(org_client, make_user, make_org, d
                        headers=_csrf(client)).status_code == 404
 
 
-def test_a_trader_can_neither_add_nor_rotate(org_client, make_user, login_as, db):
+def test_a_viewer_can_neither_add_nor_rotate(org_client, make_user, login_as, db):
     client, org_id, seed = org_client
     mine = seed_mt5(db, org_id, KEY)
-    trader = make_user(email="trader@example.com")
+    viewer = make_user(email="viewer@example.com")
     with psycopg.connect(db, autocommit=True) as conn:
-        conn.execute("INSERT INTO org_memberships (org_id, user_id, role) VALUES (%s, %s, 'trader')",
-                     (org_id, trader["id"]))
-    login_as(client, trader)
+        conn.execute("INSERT INTO org_memberships (org_id, user_id, role) VALUES (%s, %s, 'viewer')",
+                     (org_id, viewer["id"]))
+    login_as(client, viewer)
 
     assert _create(client, org_id).status_code == 403
     assert client.post(f"/api/orgs/{org_id}/mt5/accounts/{mine}/key",
@@ -529,14 +529,14 @@ def test_removing_an_unknown_or_foreign_account_is_404(org_client, make_user, ma
                          headers=_csrf(client)).status_code == 404
 
 
-def test_a_trader_cannot_remove(org_client, make_user, login_as, db):
+def test_a_viewer_cannot_remove(org_client, make_user, login_as, db):
     client, org_id, seed = org_client
     mine = seed_mt5(db, org_id, KEY)
-    trader = make_user(email="trader2@example.com")
+    viewer = make_user(email="viewer2@example.com")
     with psycopg.connect(db, autocommit=True) as conn:
-        conn.execute("INSERT INTO org_memberships (org_id, user_id, role) VALUES (%s, %s, 'trader')",
-                     (org_id, trader["id"]))
-    login_as(client, trader)
+        conn.execute("INSERT INTO org_memberships (org_id, user_id, role) VALUES (%s, %s, 'viewer')",
+                     (org_id, viewer["id"]))
+    login_as(client, viewer)
 
     assert client.delete(f"/api/orgs/{org_id}/mt5/accounts/{mine}",
                          headers=_csrf(client)).status_code == 403
@@ -631,7 +631,7 @@ def test_an_empty_canonical_name_is_400_and_nothing_is_written(org_client, db):
 def test_aliases_of_another_orgs_account_are_404(org_client, make_user, make_org, db):
     client, org_id, seed = org_client
     other_owner = make_user(email="other@example.com")
-    other_org = make_org(name="Other", members=[(other_owner, "owner")])
+    other_org = make_org(name="Other", members=[(other_owner, "admin")])
     theirs = seed_mt5(db, other_org, WRONG)
     assert client.get(f"/api/orgs/{org_id}/accounts/{theirs}/symbol-aliases").status_code == 404
     assert client.put(f"/api/orgs/{org_id}/accounts/{theirs}/symbol-aliases",
@@ -639,22 +639,23 @@ def test_aliases_of_another_orgs_account_are_404(org_client, make_user, make_org
                       headers=_csrf(client)).status_code == 404
 
 
-def test_a_trader_reads_aliases_but_only_an_admin_writes_them(org_client, make_user, login_as, db):
+def test_only_an_admin_reads_or_writes_aliases(org_client, make_user, login_as, db):
     client, org_id, seed = org_client
     account_id = seed_mt5(db, org_id, KEY)
     viewer = make_user(email="viewer@example.com")
-    trader = make_user(email="trader@example.com")
     with psycopg.connect(db, autocommit=True) as conn:
         conn.execute("INSERT INTO org_memberships (org_id, user_id, role) VALUES (%s, %s, 'viewer')",
                      (org_id, viewer["id"]))
-        conn.execute("INSERT INTO org_memberships (org_id, user_id, role) VALUES (%s, %s, 'trader')",
-                     (org_id, trader["id"]))
     path = f"/api/orgs/{org_id}/accounts/{account_id}/symbol-aliases"
 
+    # org_client is signed in as the org's admin: both directions pass the
+    # role check (the PUT may still be a 400 for an unknown broker name --
+    # that is validation, after authorization).
+    assert client.get(path).status_code == 200
+    assert client.put(path, json={"aliases": {"XAUUSD": "GOLD.r"}},
+                      headers=_csrf(client)).status_code not in (401, 403, 404)
     login_as(client, viewer)
     assert client.get(path).status_code == 403
-    login_as(client, trader)
-    assert client.get(path).status_code == 200
     assert client.put(path, json={"aliases": {"XAUUSD": "GOLD.r"}},
                       headers=_csrf(client)).status_code == 403
 

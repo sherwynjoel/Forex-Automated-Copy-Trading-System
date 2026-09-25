@@ -230,7 +230,7 @@ def test_linking_refuses_an_account_from_another_workspace_or_a_non_investor(
         org_client, make_user, make_org, db):
     client, org_id, seed = org_client
     other_owner = make_user(email="o@example.com")
-    other_org = make_org(name="Other", members=[(other_owner, "owner")])
+    other_org = make_org(name="Other", members=[(other_owner, "admin")])
     with psycopg.connect(db, autocommit=True) as conn:
         (cid,) = conn.execute(
             "INSERT INTO ctid_connections (org_id, access_token_enc, refresh_token_enc, "

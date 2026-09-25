@@ -54,7 +54,7 @@ MIN_PASSWORD_LEN = 10
 
 def ensure_bootstrap_user(dsn: str, email: str, password: str) -> None:
     """Idempotently create the bootstrap user; if a 'Default' org exists with
-    zero memberships (the legacy-migration case), make them its Owner. This is
+    zero memberships (the legacy-migration case), make them its Admin. This is
     the only way to claim a migrated legacy org (spec §3)."""
     if len(password) < MIN_PASSWORD_LEN:
         raise ValueError(
@@ -87,7 +87,7 @@ def ensure_bootstrap_user(dsn: str, email: str, password: str) -> None:
         if org:
             conn.execute(
                 "INSERT INTO org_memberships (org_id, user_id, role) "
-                "VALUES (%s, %s, 'owner') ON CONFLICT DO NOTHING",
+                "VALUES (%s, %s, 'admin') ON CONFLICT DO NOTHING",
                 (org[0], user_id),
             )
 

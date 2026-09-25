@@ -778,14 +778,14 @@ def test_caps_are_validated_and_audited(org_client, db):
     assert row[0]["max_lots"]["to"] == 0.5
 
 
-def test_a_trader_can_read_but_not_rotate_or_enable(org_client, make_user, login_as, db):
+def test_a_viewer_can_neither_read_nor_change_the_webhook(org_client, make_user, login_as, db):
     client, org_id, seed = org_client
-    trader = make_user(email="trader@example.com")
+    viewer = make_user(email="viewer@example.com")
     with psycopg.connect(db, autocommit=True) as conn:
-        conn.execute("INSERT INTO org_memberships (org_id, user_id, role) VALUES (%s, %s, 'trader')",
-                     (org_id, trader.id if hasattr(trader, "id") else trader["id"]))
-    login_as(client, trader)
-    assert client.get(f"/api/orgs/{org_id}/webhook").status_code == 200
+        conn.execute("INSERT INTO org_memberships (org_id, user_id, role) VALUES (%s, %s, 'viewer')",
+                     (org_id, viewer["id"]))
+    login_as(client, viewer)
+    assert client.get(f"/api/orgs/{org_id}/webhook").status_code == 403
     assert client.post(f"/api/orgs/{org_id}/webhook/secret", headers=_csrf(client)).status_code == 403
     assert client.put(f"/api/orgs/{org_id}/webhook", json={"enabled": True},
                       headers=_csrf(client)).status_code == 403

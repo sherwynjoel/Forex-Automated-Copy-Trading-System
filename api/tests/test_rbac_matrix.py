@@ -18,7 +18,7 @@ member's user id, substituted per test.
 import psycopg
 import pytest
 
-ROLES = ["investor", "viewer", "trader", "admin", "owner"]
+ROLES = ["investor", "viewer", "admin"]
 
 # (method, path_tail, body, min_role)
 MATRIX = [
@@ -39,9 +39,9 @@ MATRIX = [
     ("GET",    "members",                        None,                          "viewer"),
     ("POST",   "orders",                         {"account_id": 100, "symbol": "EURUSD",
                                                   "side": "BUY", "order_type": "MARKET",
-                                                  "volume_lots": 0.01},         "trader"),
-    ("POST",   "positions/close",                {"account_id": 100, "position_id": 1}, "trader"),
-    ("POST",   "orders/cancel",                  {"account_id": 100, "order_id": 1},    "trader"),
+                                                  "volume_lots": 0.01},         "admin"),
+    ("POST",   "positions/close",                {"account_id": 100, "position_id": 1}, "admin"),
+    ("POST",   "orders/cancel",                  {"account_id": 100, "order_id": 1},    "admin"),
     ("PUT",    "settings",                       {"copying_enabled": False},     "admin"),
     ("POST",   "control/pause",                  {},                             "admin"),
     ("POST",   "control/resume",                 {},                             "admin"),
@@ -50,15 +50,15 @@ MATRIX = [
     ("POST",   "drift/dismiss",                  {"id": "abc"},                  "admin"),
     ("PATCH",  "accounts/100",                   {"enabled": True},              "admin"),
     ("DELETE", "accounts/100/connection",        None,                           "admin"),
-    ("GET",    "accounts/100/symbol-aliases",    None,                           "trader"),
+    ("GET",    "accounts/100/symbol-aliases",    None,                           "admin"),
     ("PUT",    "accounts/100/symbol-aliases",    {"aliases": {}},                "admin"),
     ("POST",   "mt5/accounts",                   {"nickname": "VPS"},            "admin"),
     ("POST",   "mt5/accounts/100/key",           None,                           "admin"),
     ("GET",    "oauth/connect",                  None,                           "admin"),
     ("POST",   "invites",                        {"role": "viewer"},             "admin"),
     ("GET",    "invites",                        None,                           "admin"),
-    ("PATCH",  "",                               {"name": "Renamed"},            "owner"),
-    ("DELETE", "",                               None,                           "owner"),
+    ("PATCH",  "",                               {"name": "Renamed"},            "admin"),
+    ("DELETE", "",                               None,                           "admin"),
     ("GET",    "investor/summary",                None,                          "investor"),
     ("GET",    "investor/deposits",               None,                          "investor"),
     ("GET",    "investor/withdrawals",            None,                          "investor"),
@@ -80,7 +80,7 @@ MATRIX = [
     ("POST",   "investor-withdrawals/1/paid",     {"txid": "matrix"},             "admin"),
 ]
 
-RANK = {"investor": -1, "viewer": 0, "trader": 1, "admin": 2, "owner": 3}
+RANK = {"investor": -1, "viewer": 0, "admin": 1}
 
 
 @pytest.fixture
@@ -179,6 +179,5 @@ def test_destructive_rows_allowed(matrix_org, login_as):
     login_as(client, users["admin"])
     r = _call(client, "DELETE", org_id, "accounts/100/connection", None)
     assert r.status_code == 200
-    login_as(client, users["owner"])
     r = _call(client, "DELETE", org_id, "", None)
     assert r.status_code == 204

@@ -376,7 +376,7 @@ def test_ws_closes_when_membership_revoked(live_server, db, make_org):
             "SELECT id FROM users WHERE email = 'member-revoke@example.com'"
         ).fetchone()
     org_id = make_org(name="RevokeMember", members=[
-        ({"id": owner_id}, "owner"), ({"id": member_id}, "viewer")])
+        ({"id": owner_id}, "admin"), ({"id": member_id}, "viewer")])
 
     with ws_connect(
         f"{ws_url}?org_id={org_id}",
@@ -456,7 +456,7 @@ def test_ws_closes_when_org_deleted(live_server, db, make_org):
             "SELECT id FROM users WHERE email = 'member-delete-org@example.com'"
         ).fetchone()
     org_id = make_org(name="RevokeOrg", members=[
-        ({"id": owner_id}, "owner"), ({"id": member_id}, "viewer")])
+        ({"id": owner_id}, "admin"), ({"id": member_id}, "viewer")])
 
     with ws_connect(
         f"{ws_url}?org_id={org_id}",
