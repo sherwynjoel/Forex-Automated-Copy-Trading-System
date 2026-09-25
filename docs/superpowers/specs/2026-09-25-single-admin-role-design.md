@@ -47,7 +47,7 @@ Rules:
 - Any Admin may promote a Viewer or Investor to Admin, demote another Admin
   to Viewer or Investor, remove any other member, and create invites for
   any of the three roles.
-- Any member may leave on their own, except a last Admin.
+- Any desk member (Viewer or Admin) may leave on their own, except a last Admin.
 - Changing a member away from `investor` still does not unlink their
   account (unchanged from the investor portal spec).
 
@@ -187,11 +187,17 @@ Compose e2e: `e2e/test_full_stack.py` seeds `'admin'` and asserts
 ## 10. Rollout
 
 1. Merge to `main`, push.
-2. On the host: `docker compose build migrate api && docker compose run
-   --rm migrate && docker compose up -d api`. The migrate image bakes in
-   `db/migrations/`, so building only `api` would skip 020 (standing
-   rule).
+2. On the host: `docker compose build migrate api && docker compose stop
+   api && docker compose run --rm migrate && docker compose up -d api`.
+   The migrate image bakes in `db/migrations/`, so building only `api`
+   would skip 020 (standing rule). Stop `api` before running migrate: in
+   the seconds between migrate and the new api starting, the old api
+   would still write `owner` on org creation (a 500 from the CHECK) and
+   its owner-only routes would 403 the desk owner.
 3. Verify: `SELECT role, count(*) FROM org_memberships GROUP BY role`
    shows only `admin`, `viewer`, `investor`; the Members page lists the
    desk owner as Admin with a working role picker on other rows.
-4. No copier restart needed.
+4. After `up -d api`, hard-reload the dashboard in any open tab: a tab
+   holding the pre-deploy bundle keeps the old rank table and labels
+   until reloaded.
+5. No session invalidation and no copier restart needed.

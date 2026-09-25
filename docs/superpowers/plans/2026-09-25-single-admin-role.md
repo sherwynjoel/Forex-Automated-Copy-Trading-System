@@ -1189,6 +1189,7 @@ The migrate image bakes in `db/migrations/`, so building only `api` silently ski
 ```bash
 cd ~/mirrorfleet && git pull
 sudo docker compose build migrate api
+sudo docker compose stop api
 sudo docker compose run --rm migrate          # prints: applied: ['020_single_admin.sql']
 sudo docker compose up -d api
 sudo docker compose exec postgres psql -U copytrader -d copytrader \
@@ -1196,3 +1197,6 @@ sudo docker compose exec postgres psql -U copytrader -d copytrader \
 ```
 
 Expected: only `admin`, `viewer`, `investor` rows. No copier restart is needed. Then open the Members page: the desk owner reads Admin, their own row has no picker, every other row does.
+
+- Stop the api before running migrate (`docker compose stop api` first, as above): during the seconds between migrate and the new api starting, the old api would still write `owner` on org creation (a 500 from the CHECK) and its owner-only routes would 403 the desk owner.
+- After `up -d api`, hard-reload the dashboard: a browser tab holding the pre-deploy bundle keeps the old rank table and labels until reloaded. No session invalidation and no copier restart are needed.

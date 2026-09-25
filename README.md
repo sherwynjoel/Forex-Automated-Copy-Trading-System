@@ -54,7 +54,8 @@ earlier versions split into Owner, Admin and Trader):
 | Create / revoke invites, change member roles, remove members, rename org, delete org | | | ✓ |
 
 An org always has at least one Admin: demoting or removing the last one is
-rejected. Any member may leave an org themselves, except a last Admin.
+rejected. Any desk member (Viewer or Admin) may leave an org themselves,
+except a last Admin.
 
 ```mermaid
 flowchart LR
