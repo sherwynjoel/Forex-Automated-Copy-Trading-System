@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-25
 **Status:** approved in discussion (Option A of three), awaiting review of this document
-**Supersedes:** the role ladder in `2026-08-18-multi-org-rbac-design.md` §3. That
+**Supersedes:** the role ladder in `2026-08-18-multi-org-rbac-design.md` §4. That
 spec stays as the record of how orgs, memberships and invites work; only the
 set of roles changes here.
 

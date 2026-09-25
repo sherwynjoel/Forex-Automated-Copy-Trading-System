@@ -4,7 +4,7 @@
 **Status:** Approved (brainstorm 2026-08-18)
 **Branch:** `worktree-multi-org`
 
-**Superseded in part (2026-09-25):** the four-role ladder in §3 was
+**Superseded in part (2026-09-25):** the four-role ladder in §4 was
 collapsed to `investor < viewer < admin`; see
 `2026-09-25-single-admin-role-design.md`. Orgs, memberships, invites and the
 404-not-403 rule are unchanged.

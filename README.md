@@ -50,7 +50,7 @@ earlier versions split into Owner, Admin and Trader):
 | Manual orders, close position, cancel order, amend SL/TP | | | ✓ |
 | Pause / resume / resync, copying toggle, dry-run, **close-all** | | | ✓ |
 | Account role / multiplier / enable / nickname, OAuth connect & disconnect, drift remedies, MT5 accounts, symbol aliases | | | ✓ |
-| Webhook settings, risk rules, investor wallet, deposit and withdrawal decisions | | | ✓ |
+| Webhook settings, risk-rule changes, investor wallet, deposit and withdrawal decisions | | | ✓ |
 | Create / revoke invites, change member roles, remove members, rename org, delete org | | | ✓ |
 
 An org always has at least one Admin: demoting or removing the last one is
