@@ -177,7 +177,7 @@ test('empty analytics shows a helpful empty state', async () => {
 })
 
 test('the analytics cards moved here from Overview render for the selected account', async () => {
-  useOrgMock.mockReturnValue(mockUseOrg('owner'))
+  useOrgMock.mockReturnValue(mockUseOrg('admin'))
   mockRoutes()
 
   const { container } = render(
@@ -198,7 +198,7 @@ test('the analytics cards moved here from Overview render for the selected accou
 })
 
 test('activity windows appear as tiles without repeating Net P&L', async () => {
-  useOrgMock.mockReturnValue(mockUseOrg('owner'))
+  useOrgMock.mockReturnValue(mockUseOrg('admin'))
   mockRoutes()
 
   render(

@@ -1,23 +1,32 @@
 import { describe, expect, it } from 'vitest'
-import { can } from './roles'
+import { can, roleLabel, OFFERED_ROLES } from './roles'
 
 describe('can', () => {
-  it('gates trade at trader', () => {
-    expect(can('viewer', 'trade')).toBe(false)
-    expect(can('trader', 'trade')).toBe(true)
-    expect(can('admin', 'trade')).toBe(true)
-    expect(can('owner', 'trade')).toBe(true)
+  it('gates trade, control and member management at admin', () => {
+    for (const action of ['trade', 'control', 'manage_members'] as const) {
+      expect(can('investor', action)).toBe(false)
+      expect(can('viewer', action)).toBe(false)
+      expect(can('admin', action)).toBe(true)
+    }
   })
-  it('gates control at admin', () => {
-    expect(can('trader', 'control')).toBe(false)
-    expect(can('admin', 'control')).toBe(true)
-  })
-  it('gates member management at owner', () => {
-    expect(can('admin', 'manage_members')).toBe(false)
-    expect(can('owner', 'manage_members')).toBe(true)
-  })
-  it('denies for missing role', () => {
+  it('denies for missing or unknown roles', () => {
     expect(can(null, 'trade')).toBe(false)
     expect(can(undefined, 'control')).toBe(false)
+    expect(can('owner' as never, 'control')).toBe(false)
+  })
+})
+
+describe('roleLabel', () => {
+  it('names the three roles and passes anything else through', () => {
+    expect(roleLabel('admin')).toBe('Admin')
+    expect(roleLabel('viewer')).toBe('Viewer')
+    expect(roleLabel('investor')).toBe('Investor')
+    expect(roleLabel('owner')).toBe('owner')
+  })
+})
+
+describe('OFFERED_ROLES', () => {
+  it('offers exactly admin, viewer and investor', () => {
+    expect(OFFERED_ROLES).toEqual(['admin', 'viewer', 'investor'])
   })
 })

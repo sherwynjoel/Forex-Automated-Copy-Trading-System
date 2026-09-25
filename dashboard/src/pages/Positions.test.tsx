@@ -83,7 +83,7 @@ const mockApiState: ApiState = {
 }
 
 test('renders master positions with lots and pnl', async () => {
-  setRole('owner')
+  setRole('admin')
   vi.spyOn(apiModule, 'orgApi').mockResolvedValue(mockApiState)
 
   render(
@@ -104,7 +104,7 @@ test('renders master positions with lots and pnl', async () => {
 })
 
 test('per-slave copy status is always visible', async () => {
-  setRole('owner')
+  setRole('admin')
   vi.spyOn(apiModule, 'orgApi').mockResolvedValue(mockApiState)
 
   render(
@@ -129,7 +129,7 @@ test('per-slave copy status is always visible', async () => {
 })
 
 test('failed copy shows error text', async () => {
-  setRole('owner')
+  setRole('admin')
   vi.spyOn(apiModule, 'orgApi').mockResolvedValue(mockApiState)
 
   render(
@@ -149,7 +149,7 @@ test('failed copy shows error text', async () => {
 })
 
 test('drift item close-orphan confirms then POSTs', async () => {
-  setRole('trader')
+  setRole('admin')
   const apiSpy = vi.spyOn(apiModule, 'orgApi').mockResolvedValue(mockApiState)
   const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
 
@@ -234,25 +234,6 @@ test('viewer sees no close-orphan, adopt, or dismiss buttons', async () => {
   expect(screen.queryByRole('button', { name: /dismiss/i })).not.toBeInTheDocument()
 })
 
-test('trader sees close-orphan (trade) but not adopt/dismiss (control)', async () => {
-  setRole('trader')
-  vi.spyOn(apiModule, 'orgApi').mockResolvedValue(mockApiState)
-
-  render(
-    <MemoryRouter>
-      <Positions />
-    </MemoryRouter>
-  )
-
-  await waitFor(() => {
-    expect(screen.getByText(/Slave position 5003/)).toBeInTheDocument()
-  })
-
-  expect(screen.getAllByRole('button', { name: /close orphan/i }).length).toBeGreaterThan(0)
-  expect(screen.queryByRole('button', { name: /adopt/i })).not.toBeInTheDocument()
-  expect(screen.queryByRole('button', { name: /dismiss/i })).not.toBeInTheDocument()
-})
-
 test('admin sees close-orphan, adopt, and dismiss buttons', async () => {
   setRole('admin')
   vi.spyOn(apiModule, 'orgApi').mockResolvedValue(mockApiState)
@@ -273,7 +254,7 @@ test('admin sees close-orphan, adopt, and dismiss buttons', async () => {
 })
 
 test('slave copy rows show their own live P&L from the state snapshot', async () => {
-  setRole('owner')
+  setRole('admin')
   const stateWithSlaveBooks: ApiState = {
     ...mockApiState,
     accounts: {
@@ -303,7 +284,7 @@ test('slave copy rows show their own live P&L from the state snapshot', async ()
 })
 
 test('master rows and copy rows show the live current price', async () => {
-  setRole('owner')
+  setRole('admin')
   const stateWithPrices: ApiState = {
     ...mockApiState,
     accounts: {
@@ -342,7 +323,7 @@ test('master rows and copy rows show the live current price', async () => {
 })
 
 test('pending orders describe themselves like the Trade page does', async () => {
-  setRole('owner')
+  setRole('admin')
   const stateWithOrder: ApiState = {
     ...mockApiState,
     pending_orders: [
@@ -378,7 +359,7 @@ test('pending orders describe themselves like the Trade page does', async () => 
 })
 
 test('a trader can set stop loss and take profit on a master position', async () => {
-  setRole('trader')
+  setRole('admin')
   const stateWithProtection: ApiState = {
     ...mockApiState,
     master_positions: mockApiState.master_positions.map((p) => ({
@@ -456,7 +437,7 @@ test('a wrong-side protection is caught before the broker refuses it', () => {
 })
 
 test('the dialog blocks a wrong-side target instead of sending it', async () => {
-  setRole('trader')
+  setRole('admin')
   const stateWithProtection: ApiState = {
     ...mockApiState,
     master_positions: mockApiState.master_positions.map((p) => ({
@@ -490,7 +471,7 @@ test('amount mode amends a position with a converted price, not the money figure
   // Same confusion as the order ticket: "get me out a dollar down" is the
   // intent; the price is only arithmetic. Typing the amount into a price
   // field is exactly what the broker refuses.
-  setRole('trader')
+  setRole('admin')
   const positioned: ApiState = {
     ...mockApiState,
     master_positions: mockApiState.master_positions.map((p) => ({
@@ -528,7 +509,7 @@ test('amount mode amends a position with a converted price, not the money figure
 test('the amend dialog reopens in price mode so prefilled prices are not misread', async () => {
   // The values pre-filled from the position ARE prices. Showing them under
   // an "amount" heading would misstate them by orders of magnitude.
-  setRole('trader')
+  setRole('admin')
   const positioned: ApiState = {
     ...mockApiState,
     master_positions: mockApiState.master_positions.map((p) => ({
@@ -550,7 +531,7 @@ test('the amend dialog reopens in price mode so prefilled prices are not misread
 test('a position with no protection yet opens the dialog in amount mode', async () => {
   // Nothing pre-fills, so there is nothing to misread -- default to how an
   // operator actually thinks about it, same as the order ticket.
-  setRole('trader')
+  setRole('admin')
   const unprotected: ApiState = {
     ...mockApiState,
     master_positions: mockApiState.master_positions.map((p) => ({

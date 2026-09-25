@@ -8,16 +8,6 @@ import type { Invite, Member } from '../lib/types'
 import ConfirmDialog from '../components/ConfirmDialog'
 import AccountSecurity from '../components/AccountSecurity'
 
-// The desk has one admin (the owner); everyone else is read-only staff or an
-// investor. A member who already holds a retired role keeps it in the list so
-// the admin can still move them to one of the offered roles.
-const ASSIGNABLE: Role[] = OFFERED_ROLES
-const INVITABLE: Role[] = OFFERED_ROLES
-
-function optionsFor(current: string): Role[] {
-  return ASSIGNABLE.includes(current as Role) ? ASSIGNABLE : [current as Role, ...ASSIGNABLE]
-}
-
 export default function Members() {
   const { orgId, role, me, org, refreshMe } = useOrg()
   const navigate = useNavigate()
@@ -53,7 +43,7 @@ export default function Members() {
       await refresh()
     } catch (err) {
       setError(err instanceof Error && err.message.includes('409')
-        ? 'An organization must keep at least one owner.'
+        ? 'An organization must keep at least one admin.'
         : 'Could not change role')
     }
   }
@@ -73,7 +63,7 @@ export default function Members() {
       }
     } catch (err) {
       setError(err instanceof Error && err.message.includes('409')
-        ? 'An organization must keep at least one owner.'
+        ? 'An organization must keep at least one admin.'
         : 'Could not remove member')
     }
   }
@@ -110,14 +100,16 @@ export default function Members() {
               <td data-label="Name" className="py-2 text-ink">{m.display_name}</td>
               <td data-label="Email" className="text-ink-soft">{m.email}</td>
               <td data-label="Role">
-                {can(role, 'manage_members') && m.role !== 'owner' ? (
+                {/* Your own role is changed by another admin, never from here;
+                    the server refuses to leave an org without one. */}
+                {can(role, 'manage_members') && m.user_id !== me.user.id ? (
                   <select
                     aria-label={`Role for ${m.email}`}
                     value={m.role}
                     onChange={(e) => changeRole(m.user_id, e.target.value)}
                     className="border border-line-strong rounded bg-card px-2 py-1"
                   >
-                    {optionsFor(m.role).map((r) => (
+                    {OFFERED_ROLES.map((r) => (
                       <option key={r} value={r}>{roleLabel(r)}</option>
                     ))}
                   </select>
@@ -150,7 +142,7 @@ export default function Members() {
               onChange={(e) => setInviteRole(e.target.value as Role)}
               className="border border-line-strong rounded bg-card px-2 py-1 text-sm"
             >
-              {INVITABLE.map((r) => <option key={r} value={r}>{roleLabel(r)}</option>)}
+              {OFFERED_ROLES.map((r) => <option key={r} value={r}>{roleLabel(r)}</option>)}
             </select>
             <button
               type="submit"

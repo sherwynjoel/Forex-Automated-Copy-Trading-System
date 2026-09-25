@@ -1,12 +1,16 @@
-export type Role = 'investor' | 'viewer' | 'trader' | 'admin' | 'owner'
+export type Role = 'investor' | 'viewer' | 'admin'
 export type Action = 'trade' | 'control' | 'manage_members'
 
 // investor sits below viewer: it may open only the investor portal.
-const RANK: Record<Role, number> = { investor: -1, viewer: 0, trader: 1, admin: 2, owner: 3 }
+const RANK: Record<Role, number> = { investor: -1, viewer: 0, admin: 1 }
+
+// One person runs the desk. Everything that used to need Trader, Admin or
+// Owner needs the single Admin role; the action names stay so each call
+// site still reads as what it gates.
 const THRESHOLD: Record<Action, number> = {
-  trade: RANK.trader,
+  trade: RANK.admin,
   control: RANK.admin,
-  manage_members: RANK.owner,
+  manage_members: RANK.admin,
 }
 
 /** UI-side mirror of the server's role matrix — hides controls the server
@@ -16,13 +20,8 @@ export function can(role: Role | null | undefined, action: Action): boolean {
   return RANK[role] >= THRESHOLD[action]
 }
 
-/** What the UI calls each role. One person runs the desk, so the owner reads
- *  as "Admin". The deputy roles are no longer offered but keep a name for
- *  anyone who already holds one. */
 const ROLE_LABEL: Record<Role, string> = {
-  owner: 'Admin',
-  admin: 'Admin (deputy)',
-  trader: 'Trader',
+  admin: 'Admin',
   viewer: 'Viewer',
   investor: 'Investor',
 }
@@ -31,5 +30,5 @@ export function roleLabel(role: string): string {
   return (ROLE_LABEL as Record<string, string>)[role] ?? role
 }
 
-/** The only roles an admin hands out: read-only staff and investors. */
-export const OFFERED_ROLES: Role[] = ['investor', 'viewer']
+/** Every role an admin can hand out, in the order the pickers show them. */
+export const OFFERED_ROLES: Role[] = ['admin', 'viewer', 'investor']

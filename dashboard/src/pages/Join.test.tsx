@@ -57,7 +57,7 @@ function stubFetch(overrides: { me?: Response; join?: Response }) {
 
 test('posts the route token to /api/orgs/join and navigates to the org on success', async () => {
   const fetchMock = stubFetch({
-    join: new Response(JSON.stringify({ org_id: 42, role: 'trader' }), {
+    join: new Response(JSON.stringify({ org_id: 42, role: 'viewer' }), {
       status: 200,
       headers: { 'content-type': 'application/json' },
     }),

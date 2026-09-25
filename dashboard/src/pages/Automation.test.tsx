@@ -79,9 +79,9 @@ function mockRoutes(overrides: Record<string, (init?: RequestInit) => Response> 
 beforeEach(() => {
   vi.spyOn(apiModule, 'eventsSocket').mockImplementation(() => new MockWebSocket() as never)
   useOrgMock.mockReturnValue({
-    orgId: 1, role: 'owner', org: { id: 1, name: 'Desk', role: 'owner' },
+    orgId: 1, role: 'admin', org: { id: 1, name: 'Desk', role: 'admin' },
     me: { user: { id: 1, email: 'ada@example.com', display_name: 'Ada' },
-          orgs: [{ id: 1, name: 'Desk', role: 'owner' }] },
+          orgs: [{ id: 1, name: 'Desk', role: 'admin' }] },
     refreshMe: vi.fn(),
   })
 })

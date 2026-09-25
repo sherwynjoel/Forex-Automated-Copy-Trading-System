@@ -140,7 +140,7 @@ afterEach(() => {
 })
 
 test('renders master card with equity/balance/pnl', async () => {
-  setRole('owner')
+  setRole('admin')
   stubApi({
     '/api/orgs/1/accounts': mockAccounts,
     '/api/orgs/1/settings': mockSettings,
@@ -165,7 +165,7 @@ test('renders master card with equity/balance/pnl', async () => {
 })
 
 test('master card renders equity/balance/P&L read from the nested accounts block', async () => {
-  setRole('owner')
+  setRole('admin')
   // Regression guard for the shape bug: /api/orgs/1/state returns
   // {accounts, master_positions, pending_orders, drift}, and the per-account
   // numbers live under `accounts`. Overview used to index the envelope
@@ -225,7 +225,7 @@ test('master card renders equity/balance/P&L read from the nested accounts block
 })
 
 test('renders no account stats when the accounts block is empty, without crashing', async () => {
-  setRole('owner')
+  setRole('admin')
   // The honest empty case: the copier returns `accounts: {}` before the state
   // tracker has any data (e.g. no master configured). The screen must degrade
   // to "no stats" rather than throwing on an undefined lookup.
@@ -252,7 +252,7 @@ test('renders no account stats when the accounts block is empty, without crashin
 })
 
 test('renders slave tiles with status icons', async () => {
-  setRole('owner')
+  setRole('admin')
   stubApi({
     '/api/orgs/1/accounts': mockAccounts,
     '/api/orgs/1/settings': mockSettings,
@@ -280,7 +280,7 @@ test('renders slave tiles with status icons', async () => {
 })
 
 test('kill switch confirms then PUTs copying_enabled false', async () => {
-  setRole('owner')
+  setRole('admin')
   const fetchMock = stubApi({
     '/api/orgs/1/accounts': mockAccounts,
     '/api/orgs/1/settings': mockSettings,
@@ -320,7 +320,7 @@ test('kill switch confirms then PUTs copying_enabled false', async () => {
 })
 
 test('kill switch does not PUT if confirm is rejected', async () => {
-  setRole('owner')
+  setRole('admin')
   const fetchMock = stubApi({
     '/api/orgs/1/accounts': mockAccounts,
     '/api/orgs/1/settings': mockSettings,
@@ -353,7 +353,7 @@ test('kill switch does not PUT if confirm is rejected', async () => {
 })
 
 test('per-slave pause posts to /api/orgs/1/control/pause with account_id', async () => {
-  setRole('owner')
+  setRole('admin')
   const routes: Record<string, unknown> = {
     '/api/orgs/1/accounts': mockAccounts,
     '/api/orgs/1/settings': mockSettings,
@@ -406,7 +406,7 @@ test('per-slave pause posts to /api/orgs/1/control/pause with account_id', async
 })
 
 test('shows dry-run badge when dry_run enabled', async () => {
-  setRole('owner')
+  setRole('admin')
   const dryRunSettings: Settings = {
     copying_enabled: true,
     dry_run: true,
@@ -430,7 +430,7 @@ test('shows dry-run badge when dry_run enabled', async () => {
 })
 
 test('does not show refresh-failed banner when all connections are active', async () => {
-  setRole('owner')
+  setRole('admin')
   const accounts: Account[] = [
     { ...mockAccounts[0], connection_status: 'active' },
     { ...mockAccounts[1], connection_status: 'active' },
@@ -457,7 +457,7 @@ test('does not show refresh-failed banner when all connections are active', asyn
 })
 
 test('shows prominent refresh-failed banner naming the affected account', async () => {
-  setRole('owner')
+  setRole('admin')
   const accounts: Account[] = [
     { ...mockAccounts[0], connection_status: 'active' },
     { ...mockAccounts[1], connection_status: 'refresh_failed' },
@@ -491,7 +491,7 @@ test('shows prominent refresh-failed banner naming the affected account', async 
 })
 
 test('shows refresh-failed banner above the master card when the master itself has a failed refresh', async () => {
-  setRole('owner')
+  setRole('admin')
   const accounts: Account[] = [
     { ...mockAccounts[0], connection_status: 'refresh_failed' },
     { ...mockAccounts[1], connection_status: 'active' },
@@ -524,7 +524,7 @@ test('shows refresh-failed banner above the master card when the master itself h
 })
 
 test('slave tile shows Degraded status from account.status, not connection_status', async () => {
-  setRole('owner')
+  setRole('admin')
   const accounts: Account[] = [
     { ...mockAccounts[0], connection_status: 'active' },
     { ...mockAccounts[1], status: 'degraded', connection_status: 'active' },
@@ -553,7 +553,7 @@ test('slave tile shows Degraded status from account.status, not connection_statu
 })
 
 test('degraded slave tile shows the last_error reason', async () => {
-  setRole('owner')
+  setRole('admin')
   const accounts: Account[] = [
     { ...mockAccounts[0], connection_status: 'active' },
     {
@@ -587,7 +587,7 @@ test('degraded slave tile shows the last_error reason', async () => {
 })
 
 test('non-degraded slave tile never shows a last_error message', async () => {
-  setRole('owner')
+  setRole('admin')
   const accounts: Account[] = [
     { ...mockAccounts[0], connection_status: 'active' },
     {
@@ -619,7 +619,7 @@ test('non-degraded slave tile never shows a last_error message', async () => {
 })
 
 test('slave tile shows a refresh-failed marker distinct from degraded styling', async () => {
-  setRole('owner')
+  setRole('admin')
   const accounts: Account[] = [
     { ...mockAccounts[0], connection_status: 'active' },
     { ...mockAccounts[1], connection_status: 'refresh_failed' },
@@ -649,7 +649,7 @@ test('slave tile shows a refresh-failed marker distinct from degraded styling', 
 test(
   'polls /api/orgs/1/state every 5 seconds',
   async () => {
-    setRole('owner')
+    setRole('admin')
     // Spy on setInterval to verify it's called with 5000ms
     const setIntervalSpy = vi.spyOn(global, 'setInterval')
 
@@ -687,7 +687,7 @@ test(
 // ---------- N1: the dry-run toggle ----------
 
 test('dry-run toggle PUTs dry_run: true when enabling', async () => {
-  setRole('owner')
+  setRole('admin')
   const fetchMock = stubApi({
     '/api/orgs/1/accounts': mockAccounts,
     '/api/orgs/1/settings': mockSettings, // dry_run: false
@@ -721,7 +721,7 @@ test('dry-run toggle PUTs dry_run: true when enabling', async () => {
 })
 
 test('enabling dry-run needs no confirmation (it is the safe direction)', async () => {
-  setRole('owner')
+  setRole('admin')
   const fetchMock = stubApi({
     '/api/orgs/1/accounts': mockAccounts,
     '/api/orgs/1/settings': mockSettings,
@@ -749,7 +749,7 @@ test('enabling dry-run needs no confirmation (it is the safe direction)', async 
 })
 
 test('disabling dry-run confirms first, then PUTs dry_run: false', async () => {
-  setRole('owner')
+  setRole('admin')
   const dryRunSettings: Settings = { copying_enabled: true, dry_run: true }
   const fetchMock = stubApi({
     '/api/orgs/1/accounts': mockAccounts,
@@ -781,7 +781,7 @@ test('disabling dry-run confirms first, then PUTs dry_run: false', async () => {
 })
 
 test('disabling dry-run does not PUT if confirm is rejected', async () => {
-  setRole('owner')
+  setRole('admin')
   const dryRunSettings: Settings = { copying_enabled: true, dry_run: true }
   const fetchMock = stubApi({
     '/api/orgs/1/accounts': mockAccounts,
@@ -806,7 +806,7 @@ test('disabling dry-run does not PUT if confirm is rejected', async () => {
 })
 
 test('the dry-run badge reflects the toggled state without a reload', async () => {
-  setRole('owner')
+  setRole('admin')
   stubApi({
     '/api/orgs/1/accounts': mockAccounts,
     '/api/orgs/1/settings': mockSettings, // dry_run: false -> no badge initially
@@ -853,8 +853,8 @@ test('kill switch is hidden for a viewer (below control)', async () => {
   expect(screen.queryByTestId('dry-run-toggle')).not.toBeInTheDocument()
 })
 
-test('kill switch is hidden for a trader (below control)', async () => {
-  setRole('trader')
+test('kill switch is hidden for a viewer (below control)', async () => {
+  setRole('viewer')
   stubApi({
     '/api/orgs/1/accounts': mockAccounts,
     '/api/orgs/1/settings': mockSettings,
@@ -955,7 +955,7 @@ function statsRoutes(state: unknown = mockState) {
 }
 
 test('portfolio row aggregates equity and compares to yesterday', async () => {
-  setRole('owner')
+  setRole('admin')
   stubApi(statsRoutes(stateWithMasterPosition))
 
   render(
@@ -978,7 +978,7 @@ test('portfolio row aggregates equity and compares to yesterday', async () => {
 })
 
 test('the Portfolio Value tile expands a per-account breakdown in place', async () => {
-  setRole('owner')
+  setRole('admin')
   stubApi(statsRoutes())
   const { within } = await import('@testing-library/react')
 
@@ -1000,7 +1000,7 @@ test('the Portfolio Value tile expands a per-account breakdown in place', async 
 })
 
 test('the Accounts Connected tile expands a fleet status list, accordion-style', async () => {
-  setRole('owner')
+  setRole('admin')
   stubApi(statsRoutes())
   const { within } = await import('@testing-library/react')
 
@@ -1024,7 +1024,7 @@ test('the Accounts Connected tile expands a fleet status list, accordion-style',
 })
 
 test('each open contract row can be closed through a confirm dialog', async () => {
-  setRole('owner')
+  setRole('admin')
   const routes = statsRoutes()
   routes['/api/orgs/1/positions/close'] = { status: 'submitted' }
   const fetchMock = stubApi(routes)
@@ -1056,7 +1056,7 @@ test('each open contract row can be closed through a confirm dialog', async () =
 })
 
 test('the panel close-all button closes every listed contract after confirm', async () => {
-  setRole('owner')
+  setRole('admin')
   const routes = statsRoutes()
   routes['/api/orgs/1/positions/close'] = { status: 'submitted' }
   const fetchMock = stubApi(routes)
@@ -1091,7 +1091,7 @@ test("the Total P&L tile expands the list of today's copy fills", async () => {
   // Renamed from "Copied today": the tile now leads with the fleet's P&L,
   // but it still opens the same fills panel -- that behaviour is what this
   // test protects, not the label.
-  setRole('owner')
+  setRole('admin')
   // Pinned inside today regardless of the wall clock (an hour-ago stamp
   // crosses midnight when the suite runs just after 00:00).
   const todayStamp = new Date(); todayStamp.setHours(0, 5, 0, 0)
@@ -1132,7 +1132,7 @@ test("the Total P&L tile expands the list of today's copy fills", async () => {
 })
 
 test('the Open P&L tile expands a live open-contracts panel in place', async () => {
-  setRole('owner')
+  setRole('admin')
   stubApi(statsRoutes())
 
   render(
@@ -1162,7 +1162,7 @@ test('the Open P&L tile expands a live open-contracts panel in place', async () 
 })
 
 test('copy log lists copies with estimated P&L and failure reasons', async () => {
-  setRole('owner')
+  setRole('admin')
   stubApi(statsRoutes(stateWithMasterPosition))
 
   render(
@@ -1183,7 +1183,7 @@ test('the new stats reads are org-scoped', async () => {
   // The overview stats block must go through THIS org's prefix -- an
   // unscoped read would put another desk's fleet size and copy volume on
   // this desk's front page.
-  setRole('owner')
+  setRole('admin')
   const fetchMock = stubApi(statsRoutes())
 
   render(
@@ -1201,7 +1201,7 @@ test('the new stats reads are org-scoped', async () => {
 
 
 test('closing a contract acknowledges instantly and keeps refreshing', async () => {
-  setRole('owner')
+  setRole('admin')
   const routes = statsRoutes(stateWithMasterPosition)
   routes['/api/orgs/1/positions/close'] = { status: 'submitted' }
   const fetchMock = stubApi(routes)
@@ -1233,7 +1233,7 @@ test('closing a contract acknowledges instantly and keeps refreshing', async () 
 })
 
 test('the copier-performance analytics live on Performance, not Overview', async () => {
-  setRole('owner')
+  setRole('admin')
   const fetchMock = stubApi(statsRoutes())
 
   const { container } = render(
@@ -1259,7 +1259,7 @@ test('the copier-performance analytics live on Performance, not Overview', async
 test('Total P&L replaces the copy counter and sums every account', async () => {
   // Operators wanted one number for the whole fleet -- master and slaves --
   // instead of a fill count that said nothing about money.
-  setRole('owner')
+  setRole('admin')
   stubApi(statsRoutes())
 
   render(<MemoryRouter><Overview /></MemoryRouter>)
@@ -1272,7 +1272,7 @@ test('Total P&L replaces the copy counter and sums every account', async () => {
 test('Total P&L shows a dash, not zero, before there is a yesterday', async () => {
   // A desk with no prior snapshot has no P&L to report. Rendering 0.00
   // would claim it broke even, which is a different and false statement.
-  setRole('owner')
+  setRole('admin')
   stubApi({ ...statsRoutes(), '/api/orgs/1/overview': { ...overviewStats, yesterday: null } })
 
   render(<MemoryRouter><Overview /></MemoryRouter>)
@@ -1285,7 +1285,7 @@ test('a degraded account still warns after the copy-counter tile was replaced', 
   // This warning used to live on "Copied today". A degraded account has
   // silently stopped copying, so losing the signal with the old tile would
   // have been a real regression.
-  setRole('owner')
+  setRole('admin')
   stubApi({ ...statsRoutes(), '/api/orgs/1/overview': { ...overviewStats, degraded: 2 } })
 
   render(<MemoryRouter><Overview /></MemoryRouter>)
@@ -1300,7 +1300,7 @@ test('Total P&L ignores accounts that were not here yesterday', async () => {
   // disabled them and they were reconnected -- it reported -275,112.83 of
   // "P&L" with no trade behind any of it. Only accounts present on both
   // days can be compared.
-  setRole('owner')
+  setRole('admin')
   stubApi({
     ...statsRoutes(),
     '/api/orgs/1/overview': {
@@ -1327,7 +1327,7 @@ test('Total P&L ignores accounts that were not here yesterday', async () => {
 test('Total P&L reports a dash when nothing is comparable', async () => {
   // Every account is new since yesterday. That is "cannot say", not
   // "broke even" -- reporting 0.00 would be a claim we cannot support.
-  setRole('owner')
+  setRole('admin')
   stubApi({
     ...statsRoutes(),
     '/api/orgs/1/overview': {
@@ -1350,7 +1350,7 @@ test('Total P&L reports a dash when nothing is comparable', async () => {
 test('the live contracts table shows the protection on each position itself', async () => {
   // Reading protection off the master alone hides the case that matters:
   // a copy whose stop never arrived is the one holding unguarded risk.
-  setRole('owner')
+  setRole('admin')
   const withProtection = {
     ...mockState,
     accounts: {
@@ -1396,7 +1396,7 @@ test('the live contracts table shows the protection on each position itself', as
 })
 
 test('an MT5 slave whose terminal is offline gets the warn marker, like a failed token refresh', async () => {
-  setRole('owner')
+  setRole('admin')
   const accounts: Account[] = [
     mockAccounts[0],
     { ...mt5Account, connection_status: 'offline', mt5: { ...mt5Account.mt5!, connected: false } },

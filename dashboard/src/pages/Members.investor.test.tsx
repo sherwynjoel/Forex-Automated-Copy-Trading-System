@@ -14,11 +14,11 @@ function jsonResponse(payload: unknown, status = 200) {
 }
 
 beforeEach(() => {
-  useOrgMock.mockReturnValue(mockUseOrg('owner'))
+  useOrgMock.mockReturnValue(mockUseOrg('admin'))
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input)
     if (url.includes('/members')) {
-      return jsonResponse([{ user_id: 1, email: 'user@example.com', display_name: 'Test User',
+      return jsonResponse([{ user_id: 2, email: 'user@example.com', display_name: 'Test User',
                              role: 'viewer', joined_at: '2026-09-01T00:00:00Z' }])
     }
     if (url.includes('/invites')) return jsonResponse([])

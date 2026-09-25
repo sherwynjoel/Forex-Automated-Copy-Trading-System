@@ -634,22 +634,6 @@ test('viewer (below control) gets read-only rows: no editors, no disconnect, no 
   expect(screen.queryByRole('button', { name: /re-grant access/i })).not.toBeInTheDocument()
 })
 
-test('trader (below control) also gets read-only rows and no connect link', async () => {
-  setRole('trader')
-  mockRoutes()
-  renderAccounts()
-
-  await waitFor(() => {
-    expect(screen.getByText('12345')).toBeInTheDocument()
-  })
-
-  expect(screen.queryByLabelText(/role for account/i)).not.toBeInTheDocument()
-  expect(screen.queryByRole('button', { name: /disconnect/i })).not.toBeInTheDocument()
-  expect(screen.queryByRole('button', { name: /connect ctrader id/i })).not.toBeInTheDocument()
-  expect(screen.queryByRole('button', { name: /^flatten$/i })).not.toBeInTheDocument()
-  expect(screen.queryByRole('button', { name: /re-grant access/i })).not.toBeInTheDocument()
-})
-
 test('admin (control) sees editors, disconnect, the connect link, flatten, and re-grant access', async () => {
   setRole('admin')
   mockRoutes()
@@ -835,8 +819,8 @@ test('viewer sees no Add MT5 account button', async () => {
   expect(screen.queryByRole('button', { name: /add mt5 account/i })).not.toBeInTheDocument()
 })
 
-test('trader sees no Add MT5 account button', async () => {
-  setRole('trader')
+test('a viewer sees no Add MT5 account button', async () => {
+  setRole('viewer')
   mockRoutes()
   renderAccounts()
 
@@ -875,7 +859,7 @@ test('Rotate key confirms, POSTs the rotation, and shows the new key once', asyn
 })
 
 test('below control, an MT5 row shows no Rotate key', async () => {
-  setRole('trader')
+  setRole('viewer')
   mockMt5Routes()
   renderAccounts()
 

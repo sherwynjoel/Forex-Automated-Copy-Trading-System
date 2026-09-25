@@ -22,7 +22,7 @@ test('Layout renders sidebar navigation', async () => {
   const fetchMock = vi.fn((input: RequestInfo | URL) => {
     const url = String(input)
     if (url === '/api/me') {
-      return Promise.resolve(meResponse([{ id: 1, name: 'Acme', role: 'owner' }]))
+      return Promise.resolve(meResponse([{ id: 1, name: 'Acme', role: 'admin' }]))
     }
     const json = (payload: unknown) =>
       Promise.resolve(new Response(JSON.stringify(payload), {

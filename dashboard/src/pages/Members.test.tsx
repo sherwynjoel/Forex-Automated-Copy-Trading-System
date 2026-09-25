@@ -23,8 +23,8 @@ afterEach(() => {
 })
 
 const baseMembers = [
-  { user_id: 1, email: 'owner@x.com', display_name: 'Owner O', role: 'owner', joined_at: '2026-01-01T00:00:00Z' },
-  { user_id: 2, email: 'trader@x.com', display_name: 'Trader T', role: 'trader', joined_at: '2026-01-02T00:00:00Z' },
+  { user_id: 1, email: 'owner@x.com', display_name: 'Owner O', role: 'admin', joined_at: '2026-01-01T00:00:00Z' },
+  { user_id: 2, email: 'second@x.com', display_name: 'Second S', role: 'admin', joined_at: '2026-01-02T00:00:00Z' },
   { user_id: 3, email: 'viewer@x.com', display_name: 'Viewer V', role: 'viewer', joined_at: '2026-01-03T00:00:00Z' },
 ]
 
@@ -81,27 +81,42 @@ function renderMembers() {
 }
 
 test('lists members with roles', async () => {
-  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
   mockRoutes()
   renderMembers()
 
   await waitFor(() => {
     expect(screen.getByText('Owner O')).toBeInTheDocument()
   })
-  expect(screen.getByText('trader@x.com')).toBeInTheDocument()
+  expect(screen.getByText('second@x.com')).toBeInTheDocument()
   expect(screen.getByText('viewer@x.com')).toBeInTheDocument()
-  // The single admin's own row is fixed: no select, just the label.
+  // Your own row is fixed: no select, just the label. Every other row,
+  // including another admin's, gets the picker.
   expect(screen.queryByLabelText('Role for owner@x.com')).not.toBeInTheDocument()
-  expect(screen.getByText('Admin')).toBeInTheDocument()
-  expect(screen.getByLabelText('Role for trader@x.com')).toHaveValue('trader')
+  expect(screen.getAllByText('Admin').length).toBeGreaterThan(0)
+  expect(screen.getByLabelText('Role for second@x.com')).toHaveValue('admin')
+  expect(screen.getByLabelText('Role for viewer@x.com')).toHaveValue('viewer')
 })
 
-test('owner can change a role via the role select', async () => {
-  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+test('the pickers offer admin, viewer and investor', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
+  mockRoutes()
+  renderMembers()
+
+  const assign = await screen.findByLabelText('Role for viewer@x.com')
+  expect(Array.from((assign as HTMLSelectElement).options).map((o) => o.value))
+    .toEqual(['admin', 'viewer', 'investor'])
+  const invite = screen.getByLabelText('Invite role')
+  expect(Array.from((invite as HTMLSelectElement).options).map((o) => o.value))
+    .toEqual(['admin', 'viewer', 'investor'])
+})
+
+test('an admin can change another admin via the role select', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
   const fetchMock = mockRoutes()
   renderMembers()
 
-  const select = await screen.findByLabelText('Role for trader@x.com')
+  const select = await screen.findByLabelText('Role for second@x.com')
   await userEvent.selectOptions(select, 'viewer')
 
   await waitFor(() => {
@@ -113,7 +128,7 @@ test('owner can change a role via the role select', async () => {
 })
 
 test('self-leave DELETEs the own membership and navigates away without an error banner', async () => {
-  useOrgMock.mockReturnValue(makeOrgValue('trader', 2))
+  useOrgMock.mockReturnValue(makeOrgValue('viewer', 3))
   const fetchMock = mockRoutes()
   renderMembers()
 
@@ -122,7 +137,7 @@ test('self-leave DELETEs the own membership and navigates away without an error 
 
   await waitFor(() => {
     expect(fetchMock).toHaveBeenCalledWith(
-      '/api/orgs/1/members/2',
+      '/api/orgs/1/members/3',
       expect.objectContaining({ method: 'DELETE' })
     )
     expect(navigateMock).toHaveBeenCalledWith('/welcome')
@@ -130,7 +145,7 @@ test('self-leave DELETEs the own membership and navigates away without an error 
   expect(screen.queryByText(/could not remove member/i)).not.toBeInTheDocument()
 })
 
-test('non-owner sees read-only roles and no invite form', async () => {
+test('a viewer sees read-only roles and no invite form', async () => {
   useOrgMock.mockReturnValue(makeOrgValue('viewer', 3))
   mockRoutes()
   renderMembers()
@@ -139,7 +154,7 @@ test('non-owner sees read-only roles and no invite form', async () => {
     expect(screen.getByText('Owner O')).toBeInTheDocument()
   })
   expect(screen.queryByLabelText(/^Role for /)).not.toBeInTheDocument()
-  expect(screen.getByText('Admin')).toBeInTheDocument()
+  expect(screen.getAllByText('Admin').length).toBe(2)
   expect(screen.queryByText('Invites')).not.toBeInTheDocument()
   expect(screen.queryByLabelText('Invite role')).not.toBeInTheDocument()
   expect(screen.queryByText('Organization')).not.toBeInTheDocument()
@@ -167,24 +182,24 @@ test('admin can create an invite and sees the link once', async () => {
   expect(screen.getByRole('button', { name: /copy/i })).toBeInTheDocument()
 })
 
-test('shows the last-owner error from the server', async () => {
-  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+test('shows the last-admin error from the server', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
   mockRoutes({
     'PATCH /api/orgs/1/members/2': () =>
-      jsonResponse({ detail: 'An org must keep at least one owner' }, 409),
+      jsonResponse({ detail: 'An org must keep at least one admin' }, 409),
   })
   renderMembers()
 
-  const select = await screen.findByLabelText('Role for trader@x.com')
+  const select = await screen.findByLabelText('Role for second@x.com')
   await userEvent.selectOptions(select, 'viewer')
 
   await waitFor(() => {
-    expect(screen.getByText(/must keep at least one owner/i)).toBeInTheDocument()
+    expect(screen.getByText(/must keep at least one admin/i)).toBeInTheDocument()
   })
 })
 
-test('owner can rename the org', async () => {
-  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+test('an admin can rename the org', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
   const fetchMock = mockRoutes()
   renderMembers()
 
@@ -202,7 +217,7 @@ test('owner can rename the org', async () => {
 })
 
 test('rename failure shows an error banner', async () => {
-  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
   mockRoutes({
     'PATCH /api/orgs/1': () => new Response('Server error', { status: 500 }),
   })
@@ -218,8 +233,8 @@ test('rename failure shows an error banner', async () => {
   })
 })
 
-test('owner sees delete-org with type-to-confirm; others do not', async () => {
-  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+test('an admin sees delete-org with type-to-confirm; a viewer does not', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
   mockRoutes()
   const { unmount } = renderMembers()
 
@@ -239,7 +254,7 @@ test('owner sees delete-org with type-to-confirm; others do not', async () => {
   })
   unmount()
 
-  useOrgMock.mockReturnValue(makeOrgValue('admin', 4))
+  useOrgMock.mockReturnValue(makeOrgValue('viewer', 3))
   mockRoutes()
   renderMembers()
 

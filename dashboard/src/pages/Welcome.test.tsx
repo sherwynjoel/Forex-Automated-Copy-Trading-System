@@ -31,7 +31,7 @@ test('creates an organization and navigates to it', async () => {
       ? new Response(JSON.stringify({
           user: { id: 1, email: 'a@example.com', display_name: 'A' }, orgs: [],
         }), { status: 200, headers: { 'content-type': 'application/json' } })
-      : new Response(JSON.stringify({ id: 7, name: 'Acme', role: 'owner' }), {
+      : new Response(JSON.stringify({ id: 7, name: 'Acme', role: 'admin' }), {
           status: 201, headers: { 'content-type': 'application/json' },
         }))
   vi.stubGlobal('fetch', fetchMock)
@@ -83,7 +83,7 @@ test('an existing member is shown a way back into their workspaces', async () =>
     if (String(input) === '/api/me') {
       return new Response(JSON.stringify({
         user: { id: 1, email: 'a@example.com', display_name: 'A' },
-        orgs: [{ id: 7, name: 'TheArkTech', role: 'owner' }],
+        orgs: [{ id: 7, name: 'TheArkTech', role: 'admin' }],
       }), { status: 200, headers: { 'content-type': 'application/json' } })
     }
     return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } })

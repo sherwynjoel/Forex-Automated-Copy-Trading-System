@@ -134,7 +134,7 @@ function renderTrade() {
 }
 
 test('defaults to the master account and loads its symbols', async () => {
-  setRole('trader')
+  setRole('admin')
   mockRoutes()
   renderTrade()
 
@@ -178,7 +178,7 @@ test('shows the margin estimate for the ticket', async () => {
 })
 
 test('the margin and candle reads are org-scoped', async () => {
-  setRole('trader')
+  setRole('admin')
   const fetchMock = mockRoutes()
   renderTrade()
 
@@ -203,7 +203,7 @@ test('the trade page carries no chart', async () => {
 })
 
 test('a closed market still shows the last close as a reference price', async () => {
-  setRole('trader')
+  setRole('admin')
   // No live quote: exactly the weekend case the reference exists for.
   mockRoutes({ quote: { bid: null, ask: null } })
   renderTrade()
@@ -216,7 +216,7 @@ test('a closed market still shows the last close as a reference price', async ()
 })
 
 test('placing a market order POSTs /api/orgs/1/orders in one click, no dialog', async () => {
-  setRole('trader')
+  setRole('admin')
   const fetchMock = mockRoutes()
   renderTrade()
 
@@ -255,7 +255,7 @@ test('placing a market order POSTs /api/orgs/1/orders in one click, no dialog', 
 })
 
 test('limit order includes the limit price', async () => {
-  setRole('trader')
+  setRole('admin')
   const fetchMock = mockRoutes()
   renderTrade()
 
@@ -279,7 +279,7 @@ test('limit order includes the limit price', async () => {
 })
 
 test('live bid/ask lands on the Sell/Buy buttons and in the order summary', async () => {
-  setRole('trader')
+  setRole('admin')
   mockRoutes()
   renderTrade()
 
@@ -295,7 +295,7 @@ test('live bid/ask lands on the Sell/Buy buttons and in the order summary', asyn
 })
 
 test('without a live tick yet, the last close is shown as indicative', async () => {
-  setRole('trader')
+  setRole('admin')
   mockRoutes({ '/quote': { symbol: 'EURUSD', bid: null, ask: null } })
   renderTrade()
 
@@ -306,7 +306,7 @@ test('without a live tick yet, the last close is shown as indicative', async () 
 })
 
 test('symbol picker is fully keyboard operable', async () => {
-  setRole('trader')
+  setRole('admin')
   mockRoutes()
   renderTrade()
 
@@ -323,7 +323,7 @@ test('symbol picker is fully keyboard operable', async () => {
 test('order failure survives background refreshes and clears only on dismiss', async () => {
   vi.useFakeTimers({ shouldAdvanceTime: true })
   try {
-    setRole('trader')
+    setRole('admin')
     mockRoutes()
     // Overrides cannot see the HTTP method, so wrap the stub for the POST:
     const base = global.fetch
@@ -360,7 +360,7 @@ test('order failure survives background refreshes and clears only on dismiss', a
 test('account data re-polls every 5 seconds as a websocket fallback', async () => {
   vi.useFakeTimers({ shouldAdvanceTime: true })
   try {
-    setRole('trader')
+    setRole('admin')
     const fetchMock = mockRoutes()
     renderTrade()
 
@@ -380,7 +380,7 @@ test('account data re-polls every 5 seconds as a websocket fallback', async () =
 })
 
 test('zero connected accounts turns the ticket into a teaching empty state', async () => {
-  setRole('trader')
+  setRole('admin')
   mockRoutes({ '/api/orgs/1/accounts': [] })
   renderTrade()
 
@@ -391,7 +391,7 @@ test('zero connected accounts turns the ticket into a teaching empty state', asy
 })
 
 test('an account with no symbols yet says so instead of "no matches"', async () => {
-  setRole('trader')
+  setRole('admin')
   mockRoutes({ '/symbols': [] })
   renderTrade()
 
@@ -401,7 +401,7 @@ test('an account with no symbols yet says so instead of "no matches"', async () 
 })
 
 test('shows a not-copied note when a slave account is selected', async () => {
-  setRole('trader')
+  setRole('admin')
   mockRoutes()
   renderTrade()
 
@@ -417,7 +417,7 @@ test('shows a not-copied note when a slave account is selected', async () => {
 })
 
 test('lists the account open positions and closes one on confirm', async () => {
-  setRole('trader')
+  setRole('admin')
   const fetchMock = mockRoutes()
   renderTrade()
 
@@ -438,7 +438,7 @@ test('lists the account open positions and closes one on confirm', async () => {
 })
 
 test('cancels a working order', async () => {
-  setRole('trader')
+  setRole('admin')
   const fetchMock = mockRoutes()
   renderTrade()
 
@@ -474,7 +474,7 @@ test('viewer (below trade) sees a notice instead of the order ticket', async () 
 })
 
 test('trader (trade+) sees the full order ticket', async () => {
-  setRole('trader')
+  setRole('admin')
   mockRoutes()
   renderTrade()
 
@@ -486,7 +486,7 @@ test('trader (trade+) sees the full order ticket', async () => {
 test('placing an order refreshes the book fast, not after a fixed 1.5s', async () => {
   vi.useFakeTimers({ shouldAdvanceTime: true })
   try {
-    setRole('trader')
+    setRole('admin')
     const fetchMock = mockRoutes()
     renderTrade()
     await waitFor(() => {
@@ -509,7 +509,7 @@ test('placing an order refreshes the book fast, not after a fixed 1.5s', async (
 })
 
 test('closing a position marks its row instantly', async () => {
-  setRole('trader')
+  setRole('admin')
   mockRoutes()
   renderTrade()
   await waitFor(() => {
@@ -526,7 +526,7 @@ test('closing a position marks its row instantly', async () => {
 })
 
 test('a broker order rejection streams into the order-error banner', async () => {
-  setRole('trader')
+  setRole('admin')
   mockRoutes()
   renderTrade()
   await screen.findByLabelText(/symbol/i)
@@ -546,7 +546,7 @@ test('a broker order rejection streams into the order-error banner', async () =>
 })
 
 test('a quotes tick moves the ticket prices and position marks in place', async () => {
-  setRole('trader')
+  setRole('admin')
   const fetchMock = mockRoutes()
   renderTrade()
   await screen.findByLabelText(/symbol/i)
@@ -582,7 +582,7 @@ test('a quotes tick moves the ticket prices and position marks in place', async 
 
 test('a pinned default symbol wins over the first cached symbol', async () => {
   localStorage.setItem('mf.defaultSymbol.1.100', 'GBPUSD')
-  setRole('trader')
+  setRole('admin')
   mockRoutes()
   renderTrade()
 
@@ -593,7 +593,7 @@ test('a pinned default symbol wins over the first cached symbol', async () => {
 })
 
 test('set as default pins the current symbol; unpin clears it', async () => {
-  setRole('trader')
+  setRole('admin')
   mockRoutes()
   renderTrade()
 
@@ -613,7 +613,7 @@ test('set as default pins the current symbol; unpin clears it', async () => {
 })
 
 test('open positions on the Trade page carry live P&L', async () => {
-  setRole('trader')
+  setRole('admin')
   mockRoutes()
   renderTrade()
 
@@ -633,7 +633,7 @@ test('amount mode sends a converted PRICE, never the raw money figure', async ()
   // The bug this exists for: a trader typed 1.5 meaning "a dollar fifty"
   // into a field that wanted a price, on an instrument trading at 4652.
   // The broker rightly refused it. Amount mode does that arithmetic.
-  setRole('trader')
+  setRole('admin')
   const fetchMock = mockRoutes()
   renderTrade()
 
@@ -661,7 +661,7 @@ test('amount mode sends a converted PRICE, never the raw money figure', async ()
 })
 
 test('amount mode shows the price it will exit at, rather than converting silently', async () => {
-  setRole('trader')
+  setRole('admin')
   mockRoutes()
   renderTrade()
 
@@ -680,7 +680,7 @@ test('amount mode shows the price it will exit at, rather than converting silent
 })
 
 test('price mode: what you type is what is sent', async () => {
-  setRole('trader')
+  setRole('admin')
   const fetchMock = mockRoutes()
   renderTrade()
 
@@ -703,7 +703,7 @@ test('price mode: what you type is what is sent', async () => {
 })
 
 test('an MT5 account is labelled by its MT5 login in the account picker', async () => {
-  setRole('trader')
+  setRole('admin')
   const base = mockRoutes()
   const json = (payload: unknown) =>
     new Response(JSON.stringify(payload), {

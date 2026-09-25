@@ -105,7 +105,7 @@ function renderLayout() {
 }
 
 test('desk strip shows copying state and master numbers', async () => {
-  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
   mockRoutes()
   renderLayout()
 
@@ -118,7 +118,7 @@ test('desk strip shows copying state and master numbers', async () => {
 })
 
 test('desk strip shows paused state when copying is disabled', async () => {
-  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
   mockRoutes({ settings: { copying_enabled: false, dry_run: false, shards: 1 } })
   renderLayout()
 
@@ -128,7 +128,7 @@ test('desk strip shows paused state when copying is disabled', async () => {
 })
 
 test('desk strip shows Automation on next to the copying state, linking to the page', async () => {
-  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
   mockRoutes({ webhook: { configured: true, enabled: true } })
   renderLayout()
 
@@ -137,7 +137,7 @@ test('desk strip shows Automation on next to the copying state, linking to the p
 })
 
 test('desk strip shows Automation off when the switch is off', async () => {
-  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
   mockRoutes({ webhook: { configured: true, enabled: false } })
   renderLayout()
 
@@ -155,7 +155,7 @@ test('viewers, who cannot open Automation, get no automation pill and no request
 })
 
 test('close-all confirms with a single click — no typed phrase required', async () => {
-  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
   const fetchMock = mockRoutes()
   renderLayout()
 
@@ -189,7 +189,7 @@ test('close-all confirms with a single click — no typed phrase required', asyn
 })
 
 test('close-all on a stopped org says copying stays stopped', async () => {
-  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
   mockRoutes({
     closeAll: { status: 'flattened', paused: true, accounts: [] },
     settings: { copying_enabled: false, dry_run: false },
@@ -207,7 +207,7 @@ test('close-all on a stopped org says copying stays stopped', async () => {
 })
 
 test('cancelling the close-all dialog sends nothing', async () => {
-  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
   const fetchMock = mockRoutes()
   renderLayout()
 
@@ -221,7 +221,7 @@ test('cancelling the close-all dialog sends nothing', async () => {
 })
 
 test('recent margin-call risk event raises a banner', async () => {
-  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
   mockRoutes({
     events: [{
       id: 9, ts: new Date().toISOString(), account_id: 12345,
@@ -237,7 +237,7 @@ test('recent margin-call risk event raises a banner', async () => {
 })
 
 test('the risk-event poll behind the banner is org-scoped', async () => {
-  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
   const fetchMock = mockRoutes()
   renderLayout()
 
@@ -263,7 +263,7 @@ function reminderEvent(cutoffDate: string, overrides: Record<string, unknown> = 
 }
 
 test('an upcoming cutoff reminder raises a banner until the date passes', async () => {
-  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
   const cutoff = isoDaysFromNow(2)
   mockRoutes({ reminderEvents: [reminderEvent(cutoff)] })
   renderLayout()
@@ -274,7 +274,7 @@ test('an upcoming cutoff reminder raises a banner until the date passes', async 
 })
 
 test('the reminder poll behind the cutoff banner is org-scoped', async () => {
-  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
   const fetchMock = mockRoutes()
   renderLayout()
 
@@ -287,7 +287,7 @@ test('the reminder poll behind the cutoff banner is org-scoped', async () => {
 })
 
 test('a reminder whose cutoff has already passed raises no banner', async () => {
-  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
   mockRoutes({ reminderEvents: [reminderEvent(isoDaysFromNow(-3))] })
   renderLayout()
 
@@ -296,7 +296,7 @@ test('a reminder whose cutoff has already passed raises no banner', async () => 
 })
 
 test('dismissing the cutoff banner hides it', async () => {
-  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
   mockRoutes({ reminderEvents: [reminderEvent(isoDaysFromNow(2))] })
   renderLayout()
 
@@ -306,7 +306,7 @@ test('dismissing the cutoff banner hides it', async () => {
 })
 
 test('no banner without recent risk events', async () => {
-  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
   mockRoutes()
   renderLayout()
 
@@ -315,7 +315,7 @@ test('no banner without recent risk events', async () => {
 })
 
 test('hides the close-all kill switch below admin', async () => {
-  useOrgMock.mockReturnValue(makeOrgValue('trader'))
+  useOrgMock.mockReturnValue(makeOrgValue('viewer'))
   mockRoutes()
   renderLayout()
 
@@ -341,8 +341,8 @@ test('hides the Trade nav item for viewers', async () => {
 })
 
 test('org switcher lists my orgs and navigates on change', async () => {
-  useOrgMock.mockReturnValue(makeOrgValue('owner', [
-    { id: 1, name: 'Acme', role: 'owner' },
+  useOrgMock.mockReturnValue(makeOrgValue('admin', [
+    { id: 1, name: 'Acme', role: 'admin' },
     { id: 2, name: 'Widgets', role: 'admin' },
   ]))
   mockRoutes()
@@ -375,7 +375,7 @@ test('the Performance nav link points at the org-scoped route', async () => {
 })
 
 test('mobile menu button opens the navigation drawer and a nav tap closes it', async () => {
-  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
   mockRoutes()
   renderLayout()
 
@@ -395,7 +395,7 @@ test('mobile menu button opens the navigation drawer and a nav tap closes it', a
 })
 
 test('Escape closes the mobile navigation drawer', async () => {
-  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
   mockRoutes()
   renderLayout()
 
@@ -421,7 +421,7 @@ afterEach(() => {
 })
 
 test('the desk strip shows each open contract with its live price', async () => {
-  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
   mockRoutes({
     state: {
       accounts: {
@@ -467,7 +467,7 @@ test('the desk strip shows each open contract with its live price', async () => 
 })
 
 test('the sidebar caption names the platforms the org has connected', async () => {
-  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
   mockRoutes({ accounts: [...accounts, mt5Account] })
   renderLayout()
 
@@ -476,7 +476,7 @@ test('the sidebar caption names the platforms the org has connected', async () =
 })
 
 test('a single-platform org gets a single-platform caption', async () => {
-  useOrgMock.mockReturnValue(makeOrgValue('owner'))
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
   mockRoutes()
   const view = renderLayout()
   expect(await screen.findByText('cTrader')).toBeInTheDocument()
