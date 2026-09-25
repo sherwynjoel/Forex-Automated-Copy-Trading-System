@@ -318,14 +318,14 @@ def _register_owner(postgres_dsn: str, org_id: int, email: str, password: str,
     with psycopg.connect(postgres_dsn, autocommit=True) as conn:
         conn.execute(
             "INSERT INTO org_memberships (org_id, user_id, role)"
-            " SELECT %s, id, 'owner' FROM users WHERE lower(email) = lower(%s)",
+            " SELECT %s, id, 'admin' FROM users WHERE lower(email) = lower(%s)",
             (org_id, email),
         )
 
     me = client.get("/api/me")
     assert me.status_code == 200, me.text
     assert me.json()["user"]["email"] == email, me.text
-    assert [(o["id"], o["role"]) for o in me.json()["orgs"]] == [(org_id, "owner")], me.text
+    assert [(o["id"], o["role"]) for o in me.json()["orgs"]] == [(org_id, "admin")], me.text
     return client
 
 

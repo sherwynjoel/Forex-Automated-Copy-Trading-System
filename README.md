@@ -21,12 +21,13 @@ start.
 
 ### Multi-user, multi-org
 
-Anyone can **register** an account on the instance; registering by itself
-grants access to **nothing**. Access is always to a specific **organization**
-(org), and it comes from a membership row: you either create an org (which
-makes you its Owner) or you join one through an **invite link** an existing
-Admin or Owner generated for you. A user can belong to any number of orgs and
-switches between them in the dashboard.
+Anyone can **register** an account on the instance (when `REGISTRATION_ENABLED`
+is on; otherwise through an invite link); registering by itself grants access
+to **nothing**. Access is always to a specific **organization** (org), and it
+comes from a membership row: you either create an org (which makes you its
+Admin) or you join one through an **invite link** an existing Admin generated
+for you. A user can belong to any number of orgs and switches between them in
+the dashboard.
 
 An org is the unit of isolation and the unit of trading: one master account,
 its slaves, its cTrader ID grants, its mappings, its audit log, its
@@ -37,20 +38,23 @@ other orgs never leaks. `e2e/test_multi_org.py` runs two orgs on one stack and
 asserts exactly that, including that one org's kill switch leaves the other's
 positions open.
 
-Within an org, four roles nest — `viewer < trader < admin < owner`:
+Within an org, three roles nest — `investor < viewer < admin`. One person
+runs the desk, so Admin is the only desk-running role (it is what
+earlier versions split into Owner, Admin and Trader):
 
-| Action | Viewer | Trader | Admin | Owner |
-|---|---|---|---|---|
-| Overview, accounts list, positions, history, events, symbols, state, live feed | ✓ | ✓ | ✓ | ✓ |
-| Members list | ✓ | ✓ | ✓ | ✓ |
-| Manual orders, close position, cancel order | | ✓ | ✓ | ✓ |
-| Pause / resume / resync, copying toggle, dry-run, **close-all** | | | ✓ | ✓ |
-| Account role / multiplier / enable / nickname, OAuth connect & disconnect, drift remedies, symbol refresh | | | ✓ | ✓ |
-| Create / revoke invites (roles ≤ admin) | | | ✓ | ✓ |
-| Change member roles, remove members, rename org, delete org | | | | ✓ |
+| Action | Investor | Viewer | Admin |
+|---|---|---|---|
+| Investor portal: own linked account, deposits, withdrawals | ✓ | | |
+| Overview, accounts list, positions, history, events, symbols, state, live feed | | ✓ | ✓ |
+| Members list | | ✓ | ✓ |
+| Manual orders, close position, cancel order, amend SL/TP | | | ✓ |
+| Pause / resume / resync, copying toggle, dry-run, **close-all** | | | ✓ |
+| Account role / multiplier / enable / nickname, OAuth connect & disconnect, drift remedies, MT5 accounts, symbol aliases | | | ✓ |
+| Webhook settings, risk rules, investor wallet, deposit and withdrawal decisions | | | ✓ |
+| Create / revoke invites, change member roles, remove members, rename org, delete org | | | ✓ |
 
-An org always has at least one Owner: demoting or removing the last one is
-rejected. Any member may leave an org themselves, except a last Owner.
+An org always has at least one Admin: demoting or removing the last one is
+rejected. Any member may leave an org themselves, except a last Admin.
 
 ```mermaid
 flowchart LR
@@ -137,7 +141,7 @@ Edit `.env` and fill in:
   a fresh install.** They exist only for upgrades: a deployment that predates
   multi-org has its accounts gathered into a member-less `Default` org by the
   migration, and setting both here creates that user on boot and makes them
-  its Owner — the only way to claim it. On a new install you register through
+  its Admin — the only way to claim it. On a new install you register through
   the UI instead.
 
 Then bring the stack up:
@@ -158,15 +162,15 @@ gives them no access to anything that already exists.
 
 Then:
 
-1. **Create an organization.** Whoever creates it is its Owner. Everything
+1. **Create an organization.** Whoever creates it is its Admin. Everything
    below happens inside that org, and you can create more later (one per
    customer, per desk, per master account — an org holds exactly one master).
 2. **Invite your team** from the org's Members screen: generate an invite
-   link for the role you want them to have (`viewer`, `trader`, or `admin` —
-   an invite can never grant Owner), and send it to them. They register (or
-   log in) and open the link to join. Roles are per org, so the same person
-   can be an Admin in one org and a Viewer in another. Change or revoke
-   anyone's role from the same screen.
+   link for the role you want them to have (`admin`, `viewer`, or
+   `investor`), and send it to them. They register (or log in) and open the
+   link to join. Roles are per org, so the same person can be an Admin in one
+   org and a Viewer in another. Change or revoke anyone's role from the same
+   screen; your own role is changed by another Admin.
 3. Go to **Accounts → Connect cTrader ID**. This opens the cTrader OAuth
    consent popup — no broker username or password is ever entered into this
    system. One OAuth grant covers **every trading account under that cTrader
@@ -535,12 +539,12 @@ real cTrader port — exactly as an operator would:
 
 - `e2e/test_full_stack.py` seeds one org, one OAuth grant and three accounts,
   tells the copier to pick them up, registers a user and makes them the org's
-  Owner, pushes master fills through the fake broker's scenario-control API,
+  Admin, pushes master fills through the fake broker's scenario-control API,
   and asserts the fan-out, the position-increase path, the drift remedies,
   dry-run, and the kill switch end to end.
 - `e2e/test_multi_org.py` seeds **two** orgs (each with its own grant, master
   and slaves), fills both masters, and asserts that every copy lands inside
-  its own org, that each owner gets a `404` for the other's org, and that one
+  its own org, that each admin gets a `404` for the other's org, and that one
   org's `close-all` leaves the other org's positions open and its copying on.
 
 ```bash
