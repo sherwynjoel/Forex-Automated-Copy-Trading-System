@@ -11,6 +11,8 @@ import ConfirmDialog from '../components/ConfirmDialog'
 import StatTile from '../components/StatTile'
 import StatusDot from '../components/StatusDot'
 import Banner from '../components/Banner'
+import Button from '../components/Button'
+import Badge from '../components/Badge'
 import { money, signed, formatWhen, errorText } from '../lib/format'
 import { actionBurst } from '../lib/refresh'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
@@ -46,6 +48,14 @@ async function loadState(
 }
 
 // Shared desk primitives: one tile, one banner, one formatter set app-wide.
+
+/** The one chip's tone for a copy's status, shared by the fills panel and the copy log. */
+function copyStatusTone(status: string): 'profit' | 'loss' | 'neutral' | 'warn' {
+  if (status === 'active') return 'profit'
+  if (status === 'failed') return 'loss'
+  if (status === 'closed') return 'neutral'
+  return 'warn'
+}
 
 export default function Overview() {
   const { orgId, role } = useOrg()
@@ -407,13 +417,9 @@ export default function Overview() {
                         {a.nickname || `Account ${a.trader_login}`}
                       </td>
                       <td data-label="Role" className="px-3 py-2.5">
-                        <span className={`text-xs font-semibold px-2 py-0.5 rounded ${
-                          a.role === 'master'
-                            ? 'bg-profit-wash text-profit-deep'
-                            : 'bg-line text-ink-soft'
-                        }`}>
+                        <Badge tone={a.role === 'master' ? 'profit' : 'neutral'}>
                           {a.role}
-                        </span>
+                        </Badge>
                       </td>
                       <td data-label="Balance" className="tnum px-3 py-2.5 text-right">{money(snap?.balance)}</td>
                       <td data-label="Equity" className="tnum px-3 py-2.5 text-right">{money(snap?.equity)}</td>
@@ -464,13 +470,9 @@ export default function Overview() {
                         {a.nickname || `Account ${a.trader_login}`}
                       </td>
                       <td data-label="Role" className="px-3 py-2.5">
-                        <span className={`text-xs font-semibold px-2 py-0.5 rounded ${
-                          a.role === 'master'
-                            ? 'bg-profit-wash text-profit-deep'
-                            : 'bg-line text-ink-soft'
-                        }`}>
+                        <Badge tone={a.role === 'master' ? 'profit' : 'neutral'}>
                           {a.role}
-                        </span>
+                        </Badge>
                       </td>
                       <td data-label="Health" className="px-3 py-2.5">
                         <span className="inline-flex items-center gap-1.5">
@@ -526,14 +528,7 @@ export default function Overview() {
                         {formatWhen(copy.updated_at)}
                       </td>
                       <td data-label="Status" className="px-3 py-2.5">
-                        <span className={`text-xs font-medium px-2 py-0.5 rounded ${
-                          copy.status === 'active' ? 'bg-profit-wash text-profit-deep'
-                          : copy.status === 'failed' ? 'bg-loss-wash text-loss-deep'
-                          : copy.status === 'closed' ? 'bg-line text-ink-soft'
-                          : 'bg-warn-wash text-warn-deep'
-                        }`}>
-                          {copy.status}
-                        </span>
+                        <Badge tone={copyStatusTone(copy.status)}>{copy.status}</Badge>
                       </td>
                       <td data-label="Slave" className="px-3 py-2.5">
                         {copy.slave_nickname || <span className="tnum">{copy.slave_login}</span>}
@@ -558,12 +553,9 @@ export default function Overview() {
             <h2 className="desk-label">Open contracts · live</h2>
             <div className="flex items-center gap-3">
               {can(role, 'trade') && openContracts.length > 0 && (
-                <button
-                  onClick={() => setClosingAll(true)}
-                  className="px-3 py-1 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-on-accent transition-colors"
-                >
+                <Button variant="secondary" tone="loss" size="sm" onClick={() => setClosingAll(true)}>
                   Close all shown
-                </button>
+                </Button>
               )}
               <Link
                 to={`/org/${orgId}/positions`}
@@ -632,12 +624,9 @@ export default function Overview() {
                               Closing…
                             </span>
                           ) : (
-                          <button
-                            onClick={() => setClosingContract(row)}
-                            className="px-3 py-1 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-on-accent transition-colors"
-                          >
+                          <Button variant="secondary" tone="loss" size="sm" onClick={() => setClosingContract(row)}>
                             Close
-                          </button>
+                          </Button>
                           )}
                         </td>
                       )}
@@ -697,14 +686,7 @@ export default function Overview() {
                     <tr key={`${copy.slave_account_id}-${copy.master_position_id}-${copy.master_order_id}-${i}`}
                         className="border-b border-line last:border-0">
                       <td data-label="Status" className="px-5 py-2.5">
-                        <span className={`text-xs font-medium px-2 py-0.5 rounded ${
-                          copy.status === 'active' ? 'bg-profit-wash text-profit-deep'
-                          : copy.status === 'failed' ? 'bg-loss-wash text-loss-deep'
-                          : copy.status === 'closed' ? 'bg-line text-ink-soft'
-                          : 'bg-warn-wash text-warn-deep'
-                        }`}>
-                          {copy.status}
-                        </span>
+                        <Badge tone={copyStatusTone(copy.status)}>{copy.status}</Badge>
                       </td>
                       <td data-label="Master" className="tnum px-3 py-2.5 text-ink-soft">
                         {copy.master_position_id ?? copy.master_order_id ?? '—'}
@@ -862,16 +844,14 @@ export default function Overview() {
                   )}
 
                   {/* Action Button */}
-                  <button
+                  <Button
+                    block
+                    variant={isPaused ? 'primary' : 'secondary'}
+                    tone={isPaused ? 'profit' : 'brand'}
                     onClick={() => handlePauseResume(slave.ctid_trader_account_id, isPaused)}
-                    className={`w-full py-2 px-4 rounded text-sm font-semibold transition-colors ${
-                      isPaused
-                        ? 'bg-profit text-on-accent hover:bg-profit-deep'
-                        : 'border border-brand text-brand hover:bg-brand-wash hover:text-brand-deep'
-                    }`}
                   >
                     {isPaused ? 'Resume' : 'Pause'}
-                  </button>
+                  </Button>
                 </div>
               )
             })}

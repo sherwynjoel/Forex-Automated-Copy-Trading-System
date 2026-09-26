@@ -7,6 +7,8 @@ import Banner from '../components/Banner'
 import { can } from '../lib/roles'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
 import ConfirmDialog from '../components/ConfirmDialog'
+import Button from '../components/Button'
+import Input from '../components/Input'
 import { actionBurst } from '../lib/refresh'
 import { mergeTicksIntoApiState, TicksPayload } from '../lib/ticks'
 
@@ -195,17 +197,25 @@ export default function Positions() {
     setState((prev) => (prev ? mergeTicksIntoApiState(prev, ticks) : prev))
   })
 
-  const handleCloseOrphan = async (driftId: string) => {
-    if (!window.confirm('Close this orphan position?')) return
+  // The pending orphan close, driven by state rather than window.confirm so
+  // the dialog can name what actually happens (closes on the follower only).
+  const [closingOrphanId, setClosingOrphanId] = useState<string | null>(null)
+  const [orphanBusy, setOrphanBusy] = useState(false)
 
+  const submitCloseOrphan = async () => {
+    if (!closingOrphanId) return
     try {
+      setOrphanBusy(true)
       await orgApi(orgId, 'drift/close-orphan', {
         method: 'POST',
-        body: JSON.stringify({ id: driftId }),
+        body: JSON.stringify({ id: closingOrphanId }),
       })
       await fetchState()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to close orphan')
+    } finally {
+      setOrphanBusy(false)
+      setClosingOrphanId(null)
     }
   }
 
@@ -397,14 +407,14 @@ export default function Positions() {
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label htmlFor="amend-sl" className="desk-label block mb-1">Stop loss</label>
-            <input
+            <Input
               id="amend-sl"
               type="number"
               step="0.00001"
+              num
               value={slDraft}
               onChange={(e) => setSlDraft(e.target.value)}
               placeholder={amendMode === 'amount' ? 'e.g. 1.50' : 'none'}
-              className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink"
             />
             {/* Show the price the money becomes. Converting out of sight
                 would only move the guesswork somewhere uncheckable. */}
@@ -418,14 +428,14 @@ export default function Positions() {
           </div>
           <div>
             <label htmlFor="amend-tp" className="desk-label block mb-1">Take profit</label>
-            <input
+            <Input
               id="amend-tp"
               type="number"
               step="0.00001"
+              num
               value={tpDraft}
               onChange={(e) => setTpDraft(e.target.value)}
               placeholder={amendMode === 'amount' ? 'e.g. 1.50' : 'none'}
-              className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink"
             />
             {amendMode === 'amount' && tpDraft.trim() !== '' && (
               <p className="mt-1 text-xs text-ink-faint">
@@ -473,7 +483,7 @@ export default function Positions() {
                 drift={drift}
                 canClose={can(role, 'trade')}
                 canRemedy={can(role, 'control')}
-                onCloseOrphan={() => handleCloseOrphan(drift.id)}
+                onCloseOrphan={() => setClosingOrphanId(drift.id)}
                 onAdopt={() => handleAdopt(drift.id, drift.detail)}
                 onDismiss={() => handleDismiss(drift.id)}
               />
@@ -481,6 +491,18 @@ export default function Positions() {
           </div>
         )}
       </section>
+
+      <ConfirmDialog
+        open={closingOrphanId != null}
+        title="Close this orphan position?"
+        confirmLabel="Close position"
+        danger
+        busy={orphanBusy}
+        onConfirm={submitCloseOrphan}
+        onCancel={() => setClosingOrphanId(null)}
+      >
+        <p>It closes at market on the follower; nothing changes on the master.</p>
+      </ConfirmDialog>
     </div>
   )
 }
@@ -522,12 +544,9 @@ function PositionRow({
         </td>
         {canTrade && (
           <td className="p-3 text-right">
-            <button
-              onClick={onEdit}
-              className="min-h-11 md:min-h-0 px-3 py-1 text-xs font-semibold rounded border border-line-strong text-ink hover:bg-line transition-colors"
-            >
+            <Button variant="secondary" size="sm" onClick={onEdit}>
               SL / TP
-            </button>
+            </Button>
           </td>
         )}
       </tr>
@@ -689,28 +708,19 @@ function DriftItemRow({
       </div>
       <div className="flex gap-2">
         {isOrphanSlave && canClose && (
-          <button
-            onClick={onCloseOrphan}
-            className="px-3 py-2 bg-loss text-on-accent rounded hover:bg-loss-deep text-sm font-medium transition-colors"
-          >
+          <Button tone="loss" onClick={onCloseOrphan}>
             Close Orphan
-          </button>
+          </Button>
         )}
         {isOrphanSlave && canRemedy && (
-          <button
-            onClick={onAdopt}
-            className="px-3 py-2 bg-brand text-on-accent rounded hover:bg-brand-deep text-sm font-medium transition-colors"
-          >
+          <Button onClick={onAdopt}>
             Adopt
-          </button>
+          </Button>
         )}
         {canRemedy && (
-          <button
-            onClick={onDismiss}
-            className="px-3 py-2 rounded border border-line-strong text-ink-soft hover:text-ink text-sm font-medium transition-colors"
-          >
+          <Button variant="secondary" onClick={onDismiss}>
             Dismiss
-          </button>
+          </Button>
         )}
       </div>
     </div>

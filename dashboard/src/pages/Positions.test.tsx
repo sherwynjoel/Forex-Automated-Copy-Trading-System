@@ -151,7 +151,6 @@ test('failed copy shows error text', async () => {
 test('drift item close-orphan confirms then POSTs', async () => {
   setRole('admin')
   const apiSpy = vi.spyOn(apiModule, 'orgApi').mockResolvedValue(mockApiState)
-  const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
 
   render(
     <MemoryRouter>
@@ -166,14 +165,43 @@ test('drift item close-orphan confirms then POSTs', async () => {
   const closeOrphanButtons = screen.getAllByRole('button', { name: /close orphan/i })
   await userEvent.click(closeOrphanButtons[0])
 
-  await waitFor(() => {
-    expect(confirmSpy).toHaveBeenCalled()
+  const dialog = await screen.findByRole('dialog')
+  expect(dialog).toHaveTextContent(/close this orphan position/i)
+  await userEvent.click(within(dialog).getByRole('button', { name: /close position/i }))
 
+  await waitFor(() => {
     const postCalls = apiSpy.mock.calls.filter(
       (call) => call[0] === 1 && call[1] === 'drift/close-orphan'
     )
     expect(postCalls.length).toBeGreaterThan(0)
   })
+})
+
+test('drift item close-orphan sends nothing if the dialog is cancelled', async () => {
+  setRole('admin')
+  const apiSpy = vi.spyOn(apiModule, 'orgApi').mockResolvedValue(mockApiState)
+
+  render(
+    <MemoryRouter>
+      <Positions />
+    </MemoryRouter>
+  )
+
+  await waitFor(() => {
+    expect(screen.getByText(/Slave position 5003/)).toBeInTheDocument()
+  })
+
+  const closeOrphanButtons = screen.getAllByRole('button', { name: /close orphan/i })
+  await userEvent.click(closeOrphanButtons[0])
+
+  const dialog = await screen.findByRole('dialog')
+  await userEvent.click(within(dialog).getByRole('button', { name: /cancel/i }))
+
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  const postCalls = apiSpy.mock.calls.filter(
+    (call) => call[0] === 1 && call[1] === 'drift/close-orphan'
+  )
+  expect(postCalls.length).toBe(0)
 })
 
 test('adopt posts master_position_id', async () => {

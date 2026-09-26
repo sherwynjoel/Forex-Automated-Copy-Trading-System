@@ -287,10 +287,6 @@ test('kill switch confirms then PUTs copying_enabled false', async () => {
     '/api/orgs/1/state': mockState,
   })
 
-  // Mock window.confirm
-  const confirmMock = vi.fn().mockReturnValue(true)
-  vi.stubGlobal('confirm', confirmMock)
-
   render(
     <MemoryRouter>
       <Overview />
@@ -305,8 +301,9 @@ test('kill switch confirms then PUTs copying_enabled false', async () => {
   const killSwitchButton = screen.getByRole('button', { name: /stop copying/i })
   await userEvent.click(killSwitchButton)
 
-  // Verify confirm was called
-  expect(confirmMock).toHaveBeenCalled()
+  const dialog = await screen.findByRole('dialog')
+  expect(dialog).toHaveTextContent(/stop copying\?/i)
+  await userEvent.click(within(dialog).getByRole('button', { name: /^stop copying$/i }))
 
   // Verify PUT request was made with copying_enabled: false
   await waitFor(() => {
@@ -319,16 +316,13 @@ test('kill switch confirms then PUTs copying_enabled false', async () => {
   })
 })
 
-test('kill switch does not PUT if confirm is rejected', async () => {
+test('kill switch does not PUT if the dialog is cancelled', async () => {
   setRole('admin')
   const fetchMock = stubApi({
     '/api/orgs/1/accounts': mockAccounts,
     '/api/orgs/1/settings': mockSettings,
     '/api/orgs/1/state': mockState,
   })
-
-  const confirmMock = vi.fn().mockReturnValue(false)
-  vi.stubGlobal('confirm', confirmMock)
 
   render(
     <MemoryRouter>
@@ -343,7 +337,10 @@ test('kill switch does not PUT if confirm is rejected', async () => {
   const killSwitchButton = screen.getByRole('button', { name: /stop copying/i })
   await userEvent.click(killSwitchButton)
 
-  expect(confirmMock).toHaveBeenCalled()
+  const dialog = await screen.findByRole('dialog')
+  await userEvent.click(within(dialog).getByRole('button', { name: /cancel/i }))
+
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
 
   // No PUT should be made
   const putCall = fetchMock.mock.calls.find(
@@ -727,8 +724,6 @@ test('enabling dry-run needs no confirmation (it is the safe direction)', async 
     '/api/orgs/1/settings': mockSettings,
     '/api/orgs/1/state': mockState,
   })
-  const confirmMock = vi.fn().mockReturnValue(false)
-  vi.stubGlobal('confirm', confirmMock)
 
   render(
     <MemoryRouter>
@@ -739,7 +734,7 @@ test('enabling dry-run needs no confirmation (it is the safe direction)', async 
   await waitFor(() => expect(screen.getByTestId('dry-run-toggle')).toBeInTheDocument())
   await userEvent.click(screen.getByTestId('dry-run-toggle'))
 
-  expect(confirmMock).not.toHaveBeenCalled()
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   await waitFor(() => {
     const putCall = fetchMock.mock.calls.find(
       (call) => call[1]?.method === 'PUT' && call[0].includes('/api/orgs/1/settings')
@@ -756,8 +751,6 @@ test('disabling dry-run confirms first, then PUTs dry_run: false', async () => {
     '/api/orgs/1/settings': dryRunSettings,
     '/api/orgs/1/state': mockState,
   })
-  const confirmMock = vi.fn().mockReturnValue(true)
-  vi.stubGlobal('confirm', confirmMock)
 
   render(
     <MemoryRouter>
@@ -770,7 +763,10 @@ test('disabling dry-run confirms first, then PUTs dry_run: false', async () => {
   expect(toggle).toHaveTextContent(/turn dry-run off/i)
   await userEvent.click(toggle)
 
-  expect(confirmMock).toHaveBeenCalled()
+  const dialog = await screen.findByRole('dialog')
+  expect(dialog).toHaveTextContent(/turn dry-run off\?/i)
+  await userEvent.click(within(dialog).getByRole('button', { name: /^turn dry-run off$/i }))
+
   await waitFor(() => {
     const putCall = fetchMock.mock.calls.find(
       (call) => call[1]?.method === 'PUT' && call[0].includes('/api/orgs/1/settings')
@@ -780,7 +776,7 @@ test('disabling dry-run confirms first, then PUTs dry_run: false', async () => {
   })
 })
 
-test('disabling dry-run does not PUT if confirm is rejected', async () => {
+test('disabling dry-run does not PUT if the dialog is cancelled', async () => {
   setRole('admin')
   const dryRunSettings: Settings = { copying_enabled: true, dry_run: true }
   const fetchMock = stubApi({
@@ -788,7 +784,6 @@ test('disabling dry-run does not PUT if confirm is rejected', async () => {
     '/api/orgs/1/settings': dryRunSettings,
     '/api/orgs/1/state': mockState,
   })
-  vi.stubGlobal('confirm', vi.fn().mockReturnValue(false))
 
   render(
     <MemoryRouter>
@@ -799,6 +794,10 @@ test('disabling dry-run does not PUT if confirm is rejected', async () => {
   await waitFor(() => expect(screen.getByTestId('dry-run-toggle')).toBeInTheDocument())
   await userEvent.click(screen.getByTestId('dry-run-toggle'))
 
+  const dialog = await screen.findByRole('dialog')
+  await userEvent.click(within(dialog).getByRole('button', { name: /cancel/i }))
+
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   const putCall = fetchMock.mock.calls.find(
     (call) => call[1]?.method === 'PUT' && call[0].includes('/api/orgs/1/settings')
   )

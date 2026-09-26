@@ -3,40 +3,30 @@ import { orgApi } from '../lib/api'
 import { useOrg } from '../lib/org'
 import { can } from '../lib/roles'
 import type { Settings } from '../lib/types'
+import Button from './Button'
+import Badge from './Badge'
+import ConfirmDialog from './ConfirmDialog'
 
 interface KillSwitchProps {
   settings: Settings
   onUpdate: (settings: Settings) => void
 }
 
+type PendingAction = 'dry-run-off' | 'stop' | 'resume' | null
+
 export default function KillSwitch({ settings, onUpdate }: KillSwitchProps) {
   const { orgId, role } = useOrg()
-  const [isLoading, setIsLoading] = useState(false)
+  const [busy, setBusy] = useState(false)
   // A failed toggle must never be silent: mid-incident, "the button did
   // nothing" has to read as "the copier did NOT stop".
   const [error, setError] = useState<string | null>(null)
+  // Names the confirmation in flight, so the dialog it opens can carry
+  // copy that states the resulting state rather than a generic "sure?".
+  const [pending, setPending] = useState<PendingAction>(null)
 
-  // N1: dry-run had a badge but no control anywhere in the dashboard, so
-  // README §4's Stage 1 ("turn dry-run mode on") was not executable from the
-  // UI at all. Same shape as the kill switch below: PUT /api/settings, then
-  // hand the new settings back to the parent.
-  const handleToggleDryRun = async () => {
-    const newState = !settings.dry_run
-    // Confirm only in the direction that starts putting REAL orders on the
-    // wire. Turning dry-run ON is always safe, so it must not be gated
-    // behind a dialog an operator reaching for the safety switch has to
-    // stop and read.
-    if (
-      !newState &&
-      !window.confirm(
-        'Turn dry-run OFF? Copied trades will be sent to the broker for real from now on.'
-      )
-    ) {
-      return
-    }
-
+  const putDryRun = async (newState: boolean) => {
     try {
-      setIsLoading(true)
+      setBusy(true)
       setError(null)
       await orgApi(orgId, 'settings', {
         method: 'PUT',
@@ -48,22 +38,29 @@ export default function KillSwitch({ settings, onUpdate }: KillSwitchProps) {
         `Dry-run is still ${settings.dry_run ? 'ON' : 'OFF'} — the change failed: ` +
         `${err instanceof Error ? err.message : 'the copier did not respond'}`)
     } finally {
-      setIsLoading(false)
+      setBusy(false)
     }
   }
 
-  const handleToggleCopying = async () => {
-    const newState = !settings.copying_enabled
-    const message = newState
-      ? 'Are you sure you want to resume copying?'
-      : 'Are you sure you want to stop copying? This will pause all active trades.'
-
-    if (!window.confirm(message)) {
+  // N1: dry-run had a badge but no control anywhere in the dashboard, so
+  // README §4's Stage 1 ("turn dry-run mode on") was not executable from the
+  // UI at all. Same shape as the kill switch below: PUT /api/settings, then
+  // hand the new settings back to the parent.
+  const handleToggleDryRun = () => {
+    // Confirm only in the direction that starts putting REAL orders on the
+    // wire. Turning dry-run ON is always safe, so it must not be gated
+    // behind a dialog an operator reaching for the safety switch has to
+    // stop and read.
+    if (settings.dry_run) {
+      setPending('dry-run-off')
       return
     }
+    putDryRun(true)
+  }
 
+  const putCopying = async (newState: boolean) => {
     try {
-      setIsLoading(true)
+      setBusy(true)
       setError(null)
       await orgApi(orgId, 'settings', {
         method: 'PUT',
@@ -75,12 +72,22 @@ export default function KillSwitch({ settings, onUpdate }: KillSwitchProps) {
         `Copying is still ${settings.copying_enabled ? 'RUNNING' : 'stopped'} — the change failed: ` +
         `${err instanceof Error ? err.message : 'the copier did not respond'}`)
     } finally {
-      setIsLoading(false)
+      setBusy(false)
     }
   }
 
+  const handleToggleCopying = () => {
+    setPending(settings.copying_enabled ? 'stop' : 'resume')
+  }
+
+  const confirmPending = async () => {
+    if (pending === 'dry-run-off') await putDryRun(false)
+    else if (pending === 'stop') await putCopying(false)
+    else if (pending === 'resume') await putCopying(true)
+    setPending(null)
+  }
+
   const buttonText = settings.copying_enabled ? 'STOP COPYING' : 'RESUME COPYING'
-  const buttonColor = settings.copying_enabled ? 'bg-loss hover:bg-loss-deep' : 'bg-profit hover:bg-profit-deep'
 
   // Kill switches are a control-level action; viewers never see them.
   if (!can(role, 'control')) return null
@@ -93,29 +100,59 @@ export default function KillSwitch({ settings, onUpdate }: KillSwitchProps) {
         </p>
       )}
       {settings.dry_run && (
-        <div className="px-3 py-1 bg-warn-wash text-warn-deep text-sm font-semibold rounded-full">
-          DRY RUN
-        </div>
+        <Badge tone="warn" pill>DRY RUN</Badge>
       )}
-      <button
+      <Button
         data-testid="dry-run-toggle"
         onClick={handleToggleDryRun}
-        disabled={isLoading}
-        className={`px-4 py-2 text-sm font-semibold rounded border transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
-          settings.dry_run
-            ? 'bg-warn text-on-accent border-warn hover:opacity-90'
-            : 'bg-card hover:bg-brand-wash text-ink border-line-strong'
-        }`}
+        disabled={busy}
+        variant={settings.dry_run ? 'primary' : 'secondary'}
+        tone={settings.dry_run ? 'warn' : undefined}
       >
         {settings.dry_run ? 'Turn dry-run off' : 'Turn dry-run on'}
-      </button>
-      <button
+      </Button>
+      <Button
         onClick={handleToggleCopying}
-        disabled={isLoading}
-        className={`px-5 py-2 text-sm text-on-accent font-bold rounded ${buttonColor} disabled:opacity-50 disabled:cursor-not-allowed transition-colors`}
+        disabled={busy}
+        tone={settings.copying_enabled ? 'loss' : 'profit'}
       >
         {buttonText}
-      </button>
+      </Button>
+
+      <ConfirmDialog
+        open={pending === 'dry-run-off'}
+        title="Turn dry-run off?"
+        confirmLabel="Turn dry-run off"
+        danger
+        busy={busy}
+        onConfirm={confirmPending}
+        onCancel={() => setPending(null)}
+      >
+        <p>Copied trades go to the broker for real from now on.</p>
+      </ConfirmDialog>
+
+      <ConfirmDialog
+        open={pending === 'stop'}
+        title="Stop copying?"
+        confirmLabel="Stop copying"
+        danger
+        busy={busy}
+        onConfirm={confirmPending}
+        onCancel={() => setPending(null)}
+      >
+        <p>Every follower stops receiving new copies until you resume. Open positions stay open at the broker.</p>
+      </ConfirmDialog>
+
+      <ConfirmDialog
+        open={pending === 'resume'}
+        title="Resume copying?"
+        confirmLabel="Resume copying"
+        busy={busy}
+        onConfirm={confirmPending}
+        onCancel={() => setPending(null)}
+      >
+        <p>Followers receive every new master fill again from now on.</p>
+      </ConfirmDialog>
     </div>
   )
 }
