@@ -342,7 +342,7 @@ function DeskStrip({ onAccounts }: { onAccounts?: (accounts: Account[]) => void 
           </span>
           <Button
             variant="ghost"
-            tone="neutral"
+            tone="inverse"
             size="sm"
             className="ml-4"
             onClick={() => setDismissedRiskId(marginCall.id)}

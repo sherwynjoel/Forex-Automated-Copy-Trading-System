@@ -55,6 +55,18 @@ test('sizes: sm is the compact table-action size, md the default, lg for hero ca
   expect(screen.getByRole('button', { name: 'Large' })).toHaveClass('text-base', 'px-6', 'py-3')
 })
 
+test('inverse tone keeps the label readable on a solid accent fill', () => {
+  render(
+    <div className="bg-loss">
+      <Button variant="ghost" tone="inverse">Dismiss</Button>
+      <Button variant="secondary" tone="inverse">Details</Button>
+    </div>
+  )
+  expect(screen.getByRole('button', { name: 'Dismiss' })).toHaveClass('text-on-accent')
+  expect(screen.getByRole('button', { name: 'Dismiss' })).not.toHaveClass('text-ink-soft')
+  expect(screen.getByRole('button', { name: 'Details' })).toHaveClass('border-on-accent', 'text-on-accent')
+})
+
 test('neutral tone is quiet chrome: ghost reads in soft ink, secondary is the plain outline', () => {
   render(
     <>

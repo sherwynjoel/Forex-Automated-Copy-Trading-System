@@ -74,7 +74,7 @@ const pairs = [
   ['profit-deep', 'profit-wash', TEXT, 'profit chip'],
   ['loss', 'card', TEXT, 'loss figures on cards'],
   ['loss', 'paper', TEXT, 'loss figures and ghost danger actions on the page ground'],
-  ['on-accent', 'loss', TEXT, 'label on Sell / Stop / danger'],
+  ['on-accent', 'loss', TEXT, 'label on Sell / Stop / danger, and Dismiss inside the margin-call banner'],
   ['on-accent', 'loss-deep', TEXT, 'label on danger, hover'],
   ['loss-deep', 'loss-wash', TEXT, 'error banner and loss chip'],
   ['warn', 'card', TEXT, 'warn text on cards'],

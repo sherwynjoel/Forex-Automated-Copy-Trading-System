@@ -2,14 +2,15 @@ import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 
 export type ButtonVariant = 'primary' | 'secondary' | 'ghost'
-export type ButtonTone = 'brand' | 'profit' | 'loss' | 'warn' | 'neutral'
+export type ButtonTone = 'brand' | 'profit' | 'loss' | 'warn' | 'neutral' | 'inverse'
 export type ButtonSize = 'sm' | 'md' | 'lg'
 
 /**
  * The desk's one button. `variant` is the shape (filled, outlined, text),
  * `tone` the meaning (brand for ordinary actions, profit for Buy/resume,
  * loss for Sell/stop/destroy, warn for dry-run, neutral for quiet chrome
- * such as Dismiss, sidebar rows and icon buttons). Every button keeps the
+ * such as Dismiss, sidebar rows and icon buttons, inverse for a control that
+ * sits ON a solid accent fill, such as Dismiss inside a red alert banner). Every button keeps the
  * 44px touch floor on phones and drops it from md up, where density wins.
  *
  * Class strings are spelled out per variant × tone so Tailwind can see them.
@@ -32,6 +33,7 @@ const PRIMARY: Record<ButtonTone, string> = {
   warn: 'bg-warn text-on-accent hover:bg-warn-deep',
   // A filled neutral is ink on paper: the rare "dark" button.
   neutral: 'bg-ink text-paper hover:bg-ink-soft',
+  inverse: 'bg-on-accent text-ink hover:bg-paper',
 }
 
 const SECONDARY: Record<ButtonTone, string> = {
@@ -41,6 +43,7 @@ const SECONDARY: Record<ButtonTone, string> = {
   loss: 'border border-loss bg-card text-loss hover:bg-loss hover:text-on-accent',
   warn: 'border border-warn bg-card text-warn-deep hover:bg-warn-wash',
   neutral: 'border border-field-line bg-card text-ink hover:bg-line',
+  inverse: 'border border-on-accent text-on-accent hover:bg-on-accent/15',
 }
 const SECONDARY_NEUTRAL = SECONDARY.neutral
 
@@ -50,6 +53,7 @@ const GHOST: Record<ButtonTone, string> = {
   loss: 'text-loss hover:text-loss-deep hover:underline',
   warn: 'text-warn-deep hover:underline',
   neutral: 'text-ink-soft hover:text-ink hover:bg-line',
+  inverse: 'text-on-accent hover:underline',
 }
 
 function recipe(variant: ButtonVariant, tone: ButtonTone | undefined, size: ButtonSize, block?: boolean, extra?: string) {
