@@ -433,6 +433,29 @@ test('details button opens the drawer with broker profile fields', async () => {
   expect(screen.getByText('OAuth grant')).toBeInTheDocument()
 })
 
+test("Escape closes the details drawer and returns focus to the row's Details button", async () => {
+  setRole('admin')
+  mockRoutes()
+  renderAccounts()
+
+  await waitFor(() => {
+    expect(screen.getByText('12345')).toBeInTheDocument()
+  })
+
+  const detailsButton = screen.getAllByRole('button', { name: /details/i })[0]
+  await userEvent.click(detailsButton)
+
+  const drawer = await screen.findByRole('dialog', { name: /account 12345/i })
+  expect(within(drawer).getByRole('button', { name: /^close$/i })).toBeInTheDocument()
+
+  await userEvent.keyboard('{Escape}')
+
+  await waitFor(() => {
+    expect(screen.queryByRole('dialog', { name: /account 12345/i })).not.toBeInTheDocument()
+  })
+  expect(detailsButton).toHaveFocus()
+})
+
 test('flatten button confirms then POSTs the per-account kill switch', async () => {
   setRole('admin')
   const fetchMock = mockRoutes({

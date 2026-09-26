@@ -7,6 +7,7 @@ import type {
   SymbolAliases,
 } from '../lib/types'
 import ConfirmDialog from '../components/ConfirmDialog'
+import Drawer from '../components/Drawer'
 import Button from '../components/Button'
 import Input from '../components/Input'
 import Select from '../components/Select'
@@ -473,9 +474,9 @@ export default function Accounts() {
         {notice && (
           <>
             <span>{notice}</span>
-            <button onClick={() => setNotice(null)} className="text-xs font-medium text-ink-soft hover:text-ink">
+            <Button variant="ghost" tone="neutral" size="sm" onClick={() => setNotice(null)}>
               Dismiss
-            </button>
+            </Button>
           </>
         )}
       </div>
@@ -892,40 +893,25 @@ export default function Accounts() {
       </ConfirmDialog>
 
       {/* Details drawer */}
-      {detailsFor && (
-        <div className="fixed inset-0 z-40 flex justify-end bg-black/60" onClick={() => setDetailsFor(null)}>
-          <aside
-            className="w-full max-w-md h-full bg-card border-l border-line overflow-y-auto"
-            onClick={(e) => e.stopPropagation()}
-            role="complementary"
-            aria-label={`Details for account ${detailsFor.trader_login}`}
-          >
-            <div className="px-6 py-5 border-b border-line flex items-start justify-between">
-              <div>
-                <h2 className="font-display text-xl text-ink">
-                  {detailsFor.nickname || `Account ${detailsFor.trader_login}`}
-                </h2>
-                <p className="num text-sm text-ink-soft mt-0.5">
-                  {isMt5(detailsFor)
-                    ? mt5Subtitle(detailsFor.mt5)
-                    : `${detailsFor.trader_login} · cTID ${detailsFor.ctid_trader_account_id}`}
-                </p>
-              </div>
-              <button
-                onClick={() => setDetailsFor(null)}
-                aria-label="Close details"
-                className="text-ink-soft hover:text-ink text-xl leading-none"
-              >
-                ×
-              </button>
-            </div>
+      <Drawer
+        open={detailsFor != null}
+        title={detailsFor ? (detailsFor.nickname || `Account ${detailsFor.trader_login}`) : ''}
+        onClose={() => setDetailsFor(null)}
+      >
+        {detailsFor && (
+          <>
+            <p className="num text-sm text-ink-soft -mt-2 mb-4">
+              {isMt5(detailsFor)
+                ? mt5Subtitle(detailsFor.mt5)
+                : `${detailsFor.trader_login} · cTID ${detailsFor.ctid_trader_account_id}`}
+            </p>
 
             {detailsError ? (
-              <p className="px-6 py-4 text-sm text-loss-deep">{detailsError}</p>
+              <p className="text-sm text-loss-deep">{detailsError}</p>
             ) : !details ? (
-              <p className="px-6 py-4 text-sm text-ink-faint">Fetching from the broker…</p>
+              <p className="text-sm text-ink-faint">Fetching from the broker…</p>
             ) : (
-              <div className="px-6 py-4 space-y-6">
+              <div className="space-y-6">
                 <section>
                   <h3 className="desk-label mb-2">Broker profile</h3>
                   <dl className="space-y-1.5 text-sm">
@@ -1126,9 +1112,9 @@ export default function Accounts() {
                 </section>
               </div>
             )}
-          </aside>
-        </div>
-      )}
+          </>
+        )}
+      </Drawer>
     </div>
   )
 }

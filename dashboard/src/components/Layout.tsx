@@ -9,6 +9,7 @@ import type { TicksPayload } from '../lib/ticks'
 import type { Account, ApiState, CloseAllResult, EventResponse, Settings, WebhookSettings } from '../lib/types'
 import Button from './Button'
 import ConfirmDialog from './ConfirmDialog'
+import Drawer from './Drawer'
 import Logo from './Logo'
 import Select from './Select'
 import { money, signed, errorText } from '../lib/format'
@@ -87,6 +88,11 @@ function DeskStrip({ onAccounts }: { onAccounts?: (accounts: Account[]) => void 
   const [masterState, setMasterState] = useState<{ equity?: number | null; open_pnl?: number } | null>(null)
   const masterIdRef = useRef<number | null>(null)
   const [contracts, setContracts] = useState<{ symbol: string; price: number | null }[]>([])
+  // Blast-radius numbers for the close-all dialog: how many enabled accounts
+  // it would flatten, and how many positions the master currently carries.
+  // Null means "not known yet" -- the dialog falls back to prose, never 0.
+  const [enabledAccountCount, setEnabledAccountCount] = useState<number | null>(null)
+  const [masterPositionCount, setMasterPositionCount] = useState<number | null>(null)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<{ kind: 'notice' | 'error'; text: string } | null>(null)
@@ -104,12 +110,14 @@ function DeskStrip({ onAccounts }: { onAccounts?: (accounts: Account[]) => void 
       ])
       setSettings(sett)
       onAccounts?.(accounts)
+      setEnabledAccountCount(accounts.filter((a) => a.enabled).length)
       const master = accounts.find((a) => a.role === 'master')
       masterIdRef.current = master?.ctid_trader_account_id ?? null
       const masterSnap = master
         ? state.accounts?.[String(master.ctid_trader_account_id)] ?? null : null
       setMasterState(masterSnap)
       setContracts(contractPrices(masterSnap?.positions))
+      setMasterPositionCount(masterSnap?.positions?.length ?? null)
     } catch {
       // The strip is a passenger; pages surface their own errors.
     }
@@ -167,6 +175,7 @@ function DeskStrip({ onAccounts }: { onAccounts?: (accounts: Account[]) => void 
     if (snap) {
       setMasterState({ equity: snap.equity, open_pnl: snap.open_pnl })
       setContracts(contractPrices(snap.positions))
+      setMasterPositionCount(snap.positions?.length ?? null)
     }
   })
 
@@ -375,14 +384,20 @@ function DeskStrip({ onAccounts }: { onAccounts?: (accounts: Account[]) => void 
           title="Close every position, everywhere"
           confirmLabel="Close every position"
           danger
+          typeToConfirm="CLOSE ALL"
           busy={busy}
           onConfirm={handleCloseAll}
           onCancel={() => setDialogOpen(false)}
         >
           <p>
-            This closes every open position and cancels every working order in
-            every enabled account in this organization at market. It cannot be
-            undone.
+            This closes every open position and cancels every working order in{' '}
+            {enabledAccountCount != null
+              ? `${enabledAccountCount} enabled account${enabledAccountCount === 1 ? '' : 's'}`
+              : 'every enabled account'} in this organization at market
+            {masterPositionCount != null
+              ? ` — the master alone currently has ${masterPositionCount} open position${masterPositionCount === 1 ? '' : 's'}`
+              : ''}
+            . It cannot be undone.
           </p>
           <p>
             {copying === false
@@ -424,19 +439,10 @@ export default function Layout() {
     && location.pathname !== portalRoot
     && !location.pathname.startsWith(portalRoot + '/')
 
-  // The drawer never outlives a navigation, and Escape dismisses it.
+  // The drawer never outlives a navigation. Escape is Drawer's job below.
   useEffect(() => {
     setMenuOpen(false)
   }, [location.pathname])
-
-  useEffect(() => {
-    if (!menuOpen) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setMenuOpen(false)
-    }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [menuOpen])
 
   const sidebarContent = (dense: boolean) => (
     <>
@@ -485,20 +491,26 @@ export default function Layout() {
       </nav>
 
       <div className="border-t border-line p-4">
-        <button
+        <Button
+          variant="ghost"
+          tone="neutral"
+          block
           onClick={toggleTheme}
           aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
-          className="w-full text-left px-2 py-2 text-sm text-ink-soft hover:text-ink transition-colors"
+          className="justify-start px-2 py-2"
         >
           <span aria-hidden="true">{theme === 'dark' ? '☀' : '☾'}</span>{' '}
           {theme === 'dark' ? 'Day mode' : 'Dark mode'}
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          tone="neutral"
+          block
           onClick={handleLogout}
-          className="w-full text-left px-2 py-2 text-sm text-ink-soft hover:text-ink transition-colors"
+          className="justify-start px-2 py-2"
         >
           Log out
-        </button>
+        </Button>
       </div>
     </>
   )
@@ -511,36 +523,27 @@ export default function Layout() {
       </div>
 
       {/* Off-canvas drawer — phone and tablet */}
-      {menuOpen && (
-        <div className="fixed inset-0 z-40 lg:hidden">
-          <div
-            className="absolute inset-0 bg-black/40"
-            onClick={() => setMenuOpen(false)}
-          />
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-label="Navigation"
-            className="relative h-full w-72 max-w-[85vw] bg-card border-r border-line flex flex-col shadow-xl"
-          >
-            {sidebarContent(false)}
-          </div>
-        </div>
-      )}
+      <div className="lg:hidden">
+        <Drawer open={menuOpen} title="Menu" onClose={() => setMenuOpen(false)}>
+          {sidebarContent(false)}
+        </Drawer>
+      </div>
 
       {/* Main content */}
       <div className="flex-1 flex flex-col overflow-hidden min-w-0">
         {/* Mobile header: menu + brand */}
         <div className="lg:hidden h-12 shrink-0 border-b border-line bg-card flex items-center gap-2 px-2">
-          <button
+          <Button
+            variant="ghost"
+            tone="neutral"
             aria-label="Open menu"
             onClick={() => setMenuOpen(true)}
-            className="h-11 w-11 flex items-center justify-center rounded text-ink-soft hover:text-ink"
+            className="h-11 w-11 p-0 md:h-11"
           >
             <svg aria-hidden="true" viewBox="0 0 20 20" className="h-5 w-5">
               <path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
             </svg>
-          </button>
+          </Button>
           <Logo size={22} textClass="text-base" />
         </div>
         {!investor && <DeskStrip onAccounts={handleAccounts} />}

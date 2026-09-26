@@ -154,7 +154,7 @@ test('viewers, who cannot open Automation, get no automation pill and no request
   expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/webhook'))).toBe(false)
 })
 
-test('close-all confirms with a single click — no typed phrase required', async () => {
+test('close-all requires the CLOSE ALL phrase before it will confirm', async () => {
   useOrgMock.mockReturnValue(makeOrgValue('admin'))
   const fetchMock = mockRoutes()
   renderLayout()
@@ -162,14 +162,16 @@ test('close-all confirms with a single click — no typed phrase required', asyn
   const openButton = await screen.findByRole('button', { name: /close all positions/i })
   await userEvent.click(openButton)
 
-  // Dialog open with its consequence copy; nothing sent yet, no input field.
+  // Dialog open with its consequence copy; nothing sent until the phrase
+  // is typed and the confirm button unlocks.
   const confirmButton = screen.getByRole('button', { name: /^close every position$/i })
-  expect(confirmButton).toBeEnabled()
-  expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
+  expect(confirmButton).toBeDisabled()
   expect(
     fetchMock.mock.calls.some(([u]) => String(u).includes('/control/close-all'))
   ).toBe(false)
 
+  await userEvent.type(screen.getByLabelText(/type close all to continue/i), 'CLOSE ALL')
+  expect(confirmButton).toBeEnabled()
   await userEvent.click(confirmButton)
 
   await waitFor(() => {
@@ -188,6 +190,23 @@ test('close-all confirms with a single click — no typed phrase required', asyn
   ).toBeInTheDocument()
 })
 
+test('the close-all confirm button stays disabled until CLOSE ALL is typed exactly', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
+  mockRoutes()
+  renderLayout()
+
+  await userEvent.click(await screen.findByRole('button', { name: /close all positions/i }))
+  const confirmButton = screen.getByRole('button', { name: /^close every position$/i })
+  const phrase = screen.getByLabelText(/type close all to continue/i)
+
+  expect(confirmButton).toBeDisabled()
+  await userEvent.type(phrase, 'close all')
+  expect(confirmButton).toBeDisabled()
+  await userEvent.clear(phrase)
+  await userEvent.type(phrase, 'CLOSE ALL')
+  expect(confirmButton).toBeEnabled()
+})
+
 test('close-all on a stopped org says copying stays stopped', async () => {
   useOrgMock.mockReturnValue(makeOrgValue('admin'))
   mockRoutes({
@@ -201,6 +220,7 @@ test('close-all on a stopped org says copying stays stopped', async () => {
   // The dialog must not promise survival it cannot deliver on a paused org.
   expect(screen.getByText(/stays stopped/i)).toBeInTheDocument()
 
+  await userEvent.type(screen.getByLabelText(/type close all to continue/i), 'CLOSE ALL')
   await userEvent.click(
     screen.getByRole('button', { name: /^close every position$/i }))
   expect(await screen.findByText(/Copying is stopped\./)).toBeInTheDocument()
@@ -374,37 +394,39 @@ test('the Performance nav link points at the org-scoped route', async () => {
   expect(link).toHaveAttribute('href', '/org/1/performance')
 })
 
-test('mobile menu button opens the navigation drawer and a nav tap closes it', async () => {
+test('mobile menu button opens the Menu drawer and a nav tap closes it', async () => {
   useOrgMock.mockReturnValue(makeOrgValue('admin'))
   mockRoutes()
   renderLayout()
 
   // Drawer is closed by default
-  expect(screen.queryByRole('dialog', { name: /navigation/i })).not.toBeInTheDocument()
+  expect(screen.queryByRole('dialog', { name: /menu/i })).not.toBeInTheDocument()
 
   await userEvent.click(screen.getByRole('button', { name: /open menu/i }))
-  const drawer = await screen.findByRole('dialog', { name: /navigation/i })
+  const drawer = await screen.findByRole('dialog', { name: /menu/i })
   expect(drawer).toBeInTheDocument()
 
   // Tapping a nav destination closes the drawer
   const { within } = await import('@testing-library/react')
   await userEvent.click(within(drawer).getByRole('link', { name: /accounts/i }))
   await waitFor(() => {
-    expect(screen.queryByRole('dialog', { name: /navigation/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: /menu/i })).not.toBeInTheDocument()
   })
 })
 
-test('Escape closes the mobile navigation drawer', async () => {
+test('Escape closes the mobile Menu drawer and returns focus to the hamburger', async () => {
   useOrgMock.mockReturnValue(makeOrgValue('admin'))
   mockRoutes()
   renderLayout()
 
-  await userEvent.click(screen.getByRole('button', { name: /open menu/i }))
-  await screen.findByRole('dialog', { name: /navigation/i })
+  const menuButton = screen.getByRole('button', { name: /open menu/i })
+  await userEvent.click(menuButton)
+  await screen.findByRole('dialog', { name: /menu/i })
   await userEvent.keyboard('{Escape}')
   await waitFor(() => {
-    expect(screen.queryByRole('dialog', { name: /navigation/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: /menu/i })).not.toBeInTheDocument()
   })
+  expect(menuButton).toHaveFocus()
 })
 
 test('the sidebar theme toggle names what it will do and flips after a click', async () => {
