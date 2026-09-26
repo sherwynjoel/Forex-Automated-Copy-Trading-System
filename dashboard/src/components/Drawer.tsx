@@ -3,11 +3,12 @@ import Button from './Button'
 import { useFocusTrap } from './useFocusTrap'
 
 /**
- * The desk's side panel: a glass layer that slides over the page for
- * details and secondary work (account details, a position's deals, the
+ * The desk's side panel for details and secondary work (account details, a position's deals, the
  * phone navigation). One keyboard contract everywhere: focus lands on
  * Close, Tab wraps, Escape and the backdrop close it, focus returns to the
- * control that opened it.
+ * control that opened it. The desk behind is frosted and the header is
+ * glass; the body is opaque, because data lives there and numbers on a
+ * translucent surface fail contrast over whatever happens to scroll beneath.
  */
 export default function Drawer({ open, title, onClose, children, headerExtra, busy = false }: {
   open: boolean
@@ -31,7 +32,7 @@ export default function Drawer({ open, title, onClose, children, headerExtra, bu
     <div className="fixed inset-0 z-40 flex justify-end">
       <div
         data-testid="drawer-backdrop"
-        className="absolute inset-0 bg-black/30 backdrop-blur-[2px]"
+        className="absolute inset-0 bg-black/30 backdrop-blur-sm"
         onClick={() => { if (!busy) onClose() }}
       />
       <div
@@ -40,14 +41,14 @@ export default function Drawer({ open, title, onClose, children, headerExtra, bu
         aria-modal="true"
         aria-labelledby={titleId}
         tabIndex={-1}
-        className="glass relative h-full w-full max-w-md flex flex-col shadow-xl outline-none"
+        className="relative h-full w-full max-w-md flex flex-col bg-card shadow-xl outline-none"
       >
-        <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-line">
+        <div className="glass flex items-center justify-between gap-3 px-5 py-4 border-b">
           <div className="flex items-center gap-2 min-w-0">
             <h2 id={titleId} className="font-display text-lg text-ink truncate">{title}</h2>
             {headerExtra}
           </div>
-          <Button ref={closeRef} variant="ghost" size="sm" aria-label="Close" onClick={onClose}>
+          <Button ref={closeRef} variant="ghost" tone="neutral" size="sm" aria-label="Close" onClick={onClose} disabled={busy}>
             <svg aria-hidden="true" viewBox="0 0 16 16" className="h-4 w-4">
               <path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
             </svg>

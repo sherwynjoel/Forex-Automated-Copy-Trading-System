@@ -54,7 +54,12 @@ const pairs = [
   ['ink-faint', 'paper', TEXT, 'faint text on the page ground (empty and loading states)'],
   ['ink-soft', 'brand-wash', TEXT, 'desk-label inside a brand wash'],
   ['ink', 'brand-wash', TEXT, 'notice banner text'],
-  ['ink', 'glass-solid', TEXT, 'ink on the glass surface, worst case (fill over ink)'],
+  ['ink', 'glass-solid', TEXT, 'ink on glass over the worst underlay'],
+  ['ink-soft', 'glass-solid', TEXT, 'secondary text on glass over the worst underlay'],
+  ['brand', 'glass-solid', TEXT, 'brand text on glass over the worst underlay (the wordmark)'],
+  ['brand-deep', 'glass-solid', TEXT, 'brand-deep text on glass over the worst underlay'],
+  // Only chrome sits on glass: ink, soft ink and brand. Faint text and every
+  // profit/loss figure live on opaque surfaces by rule, so they are not proven here.
   // brand
   ['brand', 'card', TEXT, 'links and brand text on cards'],
   ['brand', 'paper', TEXT, 'brand text on the page ground'],
@@ -87,8 +92,10 @@ const pairs = [
   ['card', 'paper', 1.05, 'cards distinguishable from the page ground'],
 ]
 
-// The glass fill is translucent; its worst legible case is the fill laid
-// over the darkest thing it can float above (ink on day, paper on night).
+// The glass fill is translucent. Text on it is at its weakest when the
+// underlay pulls the fill toward the text colour: for dark text (day) that
+// is the darkest surface, for light text (night) the LIGHTEST one. Ink is
+// the extreme in both palettes.
 function glassSolid(pal, under) {
   const m = /--color-glass:\s*rgb\((\d+)\s+(\d+)\s+(\d+)\s*\/\s*([\d.]+)\)/.exec(pal.raw)
   if (!m) throw new Error('glass token not found')
@@ -100,7 +107,7 @@ function glassSolid(pal, under) {
 light.raw = block(css, /@theme\s*\{/)
 dark.raw = block(css, /\[data-theme="dark"\]\s*\{/)
 light['glass-solid'] = glassSolid(light, light.ink)
-dark['glass-solid'] = glassSolid(dark, dark.paper)
+dark['glass-solid'] = glassSolid(dark, dark.ink)
 
 let failures = 0
 for (const [name, pal] of [['LIGHT', light], ['DARK', dark]]) {

@@ -20,12 +20,14 @@ test('renders nothing while closed', () => {
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
 })
 
-test('is a labelled modal dialog whose panel is a glass surface', () => {
+test('is a labelled modal dialog: glass header, opaque body for the data', () => {
   renderDrawer()
   const dialog = screen.getByRole('dialog', { name: 'Account 12345' })
   expect(dialog).toHaveAttribute('aria-modal', 'true')
-  expect(screen.getByRole('heading', { name: 'Account 12345' })).toBeInTheDocument()
-  expect(dialog).toHaveClass('glass')
+  expect(dialog).toHaveClass('bg-card')
+  expect(dialog).not.toHaveClass('glass')
+  const heading = screen.getByRole('heading', { name: 'Account 12345' })
+  expect(heading.closest('.glass')).not.toBeNull()
 })
 
 test('opening moves focus to the Close control', () => {
@@ -78,4 +80,44 @@ test('closing returns focus to the control that opened it', async () => {
 test('an optional header slot renders beside the title', () => {
   renderDrawer({ headerExtra: <span>MT5</span> })
   expect(screen.getByText('MT5')).toBeInTheDocument()
+})
+
+test('a ConfirmDialog stacked on a Drawer owns the keyboard: Escape closes only the dialog, Tab stays inside it', async () => {
+  const ConfirmDialog = (await import('./ConfirmDialog')).default
+  function Harness() {
+    const [drawer, setDrawer] = useState(true)
+    const [dialog, setDialog] = useState(false)
+    return (
+      <Drawer open={drawer} title="Account 7" onClose={() => setDrawer(false)}>
+        <button onClick={() => setDialog(true)}>Rotate key</button>
+        <ConfirmDialog
+          open={dialog}
+          title="Rotate the key?"
+          confirmLabel="Rotate"
+          onConfirm={() => setDialog(false)}
+          onCancel={() => setDialog(false)}
+        >
+          <p>The old key stops working.</p>
+        </ConfirmDialog>
+      </Drawer>
+    )
+  }
+  render(<Harness />)
+  await userEvent.click(screen.getByRole('button', { name: 'Rotate key' }))
+  expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus()
+  // Tab wraps inside the dialog, never back to the drawer's Close.
+  await userEvent.tab()
+  expect(screen.getByRole('button', { name: 'Rotate' })).toHaveFocus()
+  await userEvent.tab()
+  expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus()
+  // Escape closes the dialog only; the drawer is still open and focus returns to its opener.
+  await userEvent.keyboard('{Escape}')
+  expect(screen.queryByRole('dialog', { name: 'Rotate the key?' })).not.toBeInTheDocument()
+  expect(screen.getByRole('dialog', { name: 'Account 7' })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Rotate key' })).toHaveFocus()
+})
+
+test('the Close control honours busy', () => {
+  renderDrawer({ busy: true })
+  expect(screen.getByRole('button', { name: 'Close' })).toBeDisabled()
 })

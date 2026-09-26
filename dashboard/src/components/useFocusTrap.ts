@@ -1,4 +1,4 @@
-import { useEffect, type RefObject } from 'react'
+import { useEffect, useRef, type RefObject } from 'react'
 
 const FOCUSABLE = 'button, input, select, textarea, [href], [tabindex]:not([tabindex="-1"])'
 
@@ -8,8 +8,11 @@ const FOCUSABLE = 'button, input, select, textarea, [href], [tabindex]:not([tabi
  * close, Tab wraps inside the panel, Escape closes unless work is in flight.
  *
  * Document-level so the trap survives focus escaping the subtree (backdrop
- * clicks, controls disabling under a busy state).
+ * clicks, controls disabling under a busy state). Layers stack: a dialog
+ * opened from inside a drawer takes the keyboard until it closes, so Escape
+ * never closes both and Tab never leaks to the layer underneath.
  */
+const layers: object[] = []
 export function useFocusTrap({ open, panelRef, initialFocusRef, onEscape, busy = false }: {
   open: boolean
   panelRef: RefObject<HTMLElement>
@@ -18,19 +21,26 @@ export function useFocusTrap({ open, panelRef, initialFocusRef, onEscape, busy =
   onEscape: () => void
   busy?: boolean
 }) {
+  const token = useRef({}).current
+
   useEffect(() => {
     if (!open) return
+    layers.push(token)
     const restore = document.activeElement as HTMLElement | null
     const target = initialFocusRef?.current ?? panelRef.current
     target?.focus()
     return () => {
-      restore?.focus?.()
+      const i = layers.lastIndexOf(token)
+      if (i >= 0) layers.splice(i, 1)
+      // An opener that has since left the page cannot take focus back.
+      if (restore?.isConnected) restore.focus?.()
     }
-  }, [open, panelRef, initialFocusRef])
+  }, [open, panelRef, initialFocusRef, token])
 
   useEffect(() => {
     if (!open) return
     const handler = (e: KeyboardEvent) => {
+      if (layers[layers.length - 1] !== token) return
       if (e.key === 'Escape') {
         e.stopPropagation()
         if (!busy) onEscape()
@@ -63,5 +73,5 @@ export function useFocusTrap({ open, panelRef, initialFocusRef, onEscape, busy =
     }
     document.addEventListener('keydown', handler, true)
     return () => document.removeEventListener('keydown', handler, true)
-  }, [open, busy, onEscape, panelRef])
+  }, [open, busy, onEscape, panelRef, token])
 }

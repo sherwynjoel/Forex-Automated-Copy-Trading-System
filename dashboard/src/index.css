@@ -39,7 +39,7 @@
   /* Glass: the floating layers (desk strip, drawers, popovers) frost what
      scrolls beneath them. The fill stays high so ink text keeps AA over
      any underlay; data surfaces (tables, tickets, tiles) stay opaque. */
-  --color-glass: rgb(255 255 255 / 0.82);
+  --color-glass: rgb(255 255 255 / 0.95);
   --color-glass-line: rgb(43 34 51 / 0.10);
 
   --font-sans: "Rubik", "Helvetica Neue", Arial, sans-serif;
@@ -82,7 +82,7 @@
   --color-warn-deep: #e9c37c;
   --color-warn-wash: #332708;
   --color-on-accent: #17141f;
-  --color-glass: rgb(28 25 38 / 0.80);
+  --color-glass: rgb(28 25 38 / 0.90);
   --color-glass-line: rgb(238 234 244 / 0.10);
 }
 
@@ -152,12 +152,13 @@ select.bg-card {
 }
 
 /* ---------------------------------------------------------------------------
-   Glass surface.  Used only for layers that float over the desk: the sticky
-   strip and headers, drawers, the symbol popover, the modal backdrop.  The
-   fill is opaque enough (0.82 day / 0.80 night) that ink on glass stays AA
-   over any content; no data table or ticket ever sits on glass.  Falls back
-   to the solid card when blur is unsupported or the user asked for reduced
-   transparency.
+   Glass surface.  Used only for chrome that floats over the desk: the
+   landing header, drawer headers, the symbol popover.  Modal and drawer
+   scrims frost the desk with backdrop-blur instead.  The fill is opaque
+   enough that every text token stays AA over the worst underlay
+   (scripts/palette_check.mjs proves it); no data table, ticket or drawer
+   body ever sits on glass.  Falls back to the solid card when blur is
+   unsupported or the user asked for reduced transparency.
 
    Layer scale (Tailwind z-*): 10 sticky chrome and popovers, 40 drawers and
    the phone nav, 50 modals.
@@ -178,8 +179,11 @@ select.bg-card {
 @media (prefers-reduced-transparency: reduce) {
   .glass {
     background-color: var(--color-card);
-    -webkit-backdrop-filter: none;
-    backdrop-filter: none;
+  }
+  .glass,
+  [class*="backdrop-blur"] {
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
   }
 }
 
