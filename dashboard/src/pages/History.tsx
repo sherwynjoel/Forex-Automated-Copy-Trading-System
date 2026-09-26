@@ -513,13 +513,13 @@ export default function History() {
           </div>
         )}
         <div className="flex items-center gap-2 flex-wrap">
-          <div className="flex rounded border border-line-strong overflow-hidden" role="group" aria-label="Window size">
+          <div className="flex rounded border border-field-line overflow-hidden" role="group" aria-label="Window size">
             {([7, 1] as const).map((days) => (
               <button
                 key={days}
                 aria-pressed={windowDays === days}
                 onClick={() => setWindowDays(days)}
-                className={`px-3 py-2 text-sm transition-colors ${
+                className={`min-h-11 md:min-h-0 px-3 py-2 text-sm transition-colors ${
                   windowDays === days
                     ? 'bg-brand text-on-accent font-semibold'
                     : 'bg-card text-ink-soft hover:text-ink'

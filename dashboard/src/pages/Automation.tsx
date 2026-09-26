@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { orgApi } from '../lib/api'
 import { can } from '../lib/roles'
 import { useOrg } from '../lib/org'
@@ -8,6 +8,7 @@ import ConfirmDialog from '../components/ConfirmDialog'
 import Button from '../components/Button'
 import Input from '../components/Input'
 import Badge, { type BadgeTone } from '../components/Badge'
+import { useFocusTrap } from '../components/useFocusTrap'
 import type { WebhookReceipt, WebhookSettings, WebhookSecret, RiskRule } from '../lib/types'
 
 const POLL_MS = 5000
@@ -43,6 +44,8 @@ export default function Automation() {
   const [newRule, setNewRule] = useState({ symbol: '', stop_points: '', target_points: '',
                                            trailing_enabled: false, trail_start_points: '',
                                            trail_step_points: '' })
+  const revealPanelRef = useRef<HTMLDivElement>(null)
+  const revealCloseRef = useRef<HTMLButtonElement>(null)
 
   const refresh = useCallback(async () => {
     try {
@@ -192,6 +195,18 @@ export default function Automation() {
     setReveal(null)
     setCopied(null)
   }
+
+  // The one-time reveal is a plain hand-written `role="dialog"` -- it needs
+  // the same keyboard contract as Drawer/ConfirmDialog: focus in on open (to
+  // the Close button, so a stray Enter cannot re-copy anything), Tab wraps,
+  // Escape closes. Nothing here requires the secret to be copied first, so
+  // Escape is free to close it like any other dismiss.
+  useFocusTrap({
+    open: reveal != null,
+    panelRef: revealPanelRef,
+    initialFocusRef: revealCloseRef,
+    onEscape: closeReveal,
+  })
 
   if (!settings) {
     return (
@@ -553,7 +568,7 @@ export default function Automation() {
       {reveal && (
         <div role="dialog" aria-modal="true" aria-labelledby="reveal-title"
              className="fixed inset-0 z-40 flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-2xl rounded-lg border border-line bg-card p-6 space-y-4">
+          <div ref={revealPanelRef} tabIndex={-1} className="w-full max-w-2xl rounded-lg border border-line bg-card p-6 space-y-4 outline-none">
             <h2 id="reveal-title" className="text-lg font-bold text-ink">Your new secret — shown once</h2>
             <p className="text-sm text-ink-soft">
               Copy the template below into your TradingView alert's Message box now. When you close
@@ -598,7 +613,7 @@ export default function Automation() {
                   {copied === 'url' ? 'Copied' : 'Copy URL'}
                 </Button>
               )}
-              <Button variant="secondary" className="ml-auto" onClick={closeReveal}>
+              <Button ref={revealCloseRef} variant="secondary" className="ml-auto" onClick={closeReveal}>
                 I have copied it — close
               </Button>
             </div>

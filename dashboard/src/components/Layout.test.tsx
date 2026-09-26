@@ -92,6 +92,24 @@ function mockRoutes(overrides: Record<string, unknown> = {}) {
   return fetchMock
 }
 
+type MqListener = (e: { matches: boolean }) => void
+
+/** matchMedia stub for jsdom (same shape as useTheme.test.ts): captures the
+ *  `(min-width: 1024px)` change listener Layout registers so a test can
+ *  fire it without a real viewport resize. */
+function stubMatchMedia(): { fire: (matches: boolean) => void } {
+  const listeners: MqListener[] = []
+  vi.stubGlobal('matchMedia', () => ({
+    matches: false,
+    addEventListener: (_: string, cb: MqListener) => listeners.push(cb),
+    removeEventListener: (_: string, cb: MqListener) => {
+      const i = listeners.indexOf(cb)
+      if (i >= 0) listeners.splice(i, 1)
+    },
+  }))
+  return { fire: (m: boolean) => listeners.forEach((cb) => cb({ matches: m })) }
+}
+
 function renderLayout() {
   return render(
     <MemoryRouter initialEntries={['/']}>
@@ -238,6 +256,26 @@ test('cancelling the close-all dialog sends nothing', async () => {
   expect(
     fetchMock.mock.calls.some(([u]) => String(u).includes('/control/close-all'))
   ).toBe(false)
+})
+
+test('the close-all dialog only counts accounts the copier would actually flatten', async () => {
+  // The copier flattens `enabled && status !== 'paused'` -- a per-slave
+  // Pause leaves `enabled` true but sets status 'paused'. Counting `enabled`
+  // alone overstated the dialog's blast radius by every paused slave.
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
+  mockRoutes({
+    accounts: [
+      accounts[0], // master: enabled, status 'ok' -> counted
+      { ...accounts[0], ctid_trader_account_id: 2, trader_login: 22222,
+        role: 'slave', enabled: true, status: 'paused' }, // paused -> not counted
+      { ...accounts[0], ctid_trader_account_id: 3, trader_login: 33333,
+        role: 'slave', enabled: false, status: 'ok' }, // disabled -> not counted
+    ],
+  })
+  renderLayout()
+
+  await userEvent.click(await screen.findByRole('button', { name: /close all positions/i }))
+  expect(await screen.findByText(/1 enabled account/i)).toBeInTheDocument()
 })
 
 test('recent margin-call risk event raises a banner', async () => {
@@ -427,6 +465,27 @@ test('Escape closes the mobile Menu drawer and returns focus to the hamburger', 
     expect(screen.queryByRole('dialog', { name: /menu/i })).not.toBeInTheDocument()
   })
   expect(menuButton).toHaveFocus()
+})
+
+test('the phone Menu drawer closes itself when the viewport crosses into desktop width', async () => {
+  // The drawer is display:none past `lg`, but its focus trap has no way to
+  // know that on its own -- left open, Escape and Tab keep fighting over a
+  // panel nobody can see.
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
+  mockRoutes()
+  const mq = stubMatchMedia()
+  renderLayout()
+
+  await userEvent.click(screen.getByRole('button', { name: /open menu/i }))
+  await screen.findByRole('dialog', { name: /menu/i })
+
+  act(() => {
+    mq.fire(true)
+  })
+
+  await waitFor(() => {
+    expect(screen.queryByRole('dialog', { name: /menu/i })).not.toBeInTheDocument()
+  })
 })
 
 test('the sidebar theme toggle names what it will do and flips after a click', async () => {

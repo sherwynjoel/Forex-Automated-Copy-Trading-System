@@ -385,14 +385,14 @@ export default function Positions() {
         </p>
         <div className="flex items-center justify-between gap-2">
           <span className="desk-label">Set by</span>
-          <div className="flex rounded border border-line-strong overflow-hidden text-xs">
+          <div className="flex rounded border border-field-line overflow-hidden text-xs">
             {(['price', 'amount'] as const).map((mode) => (
               <button
                 key={mode}
                 type="button"
                 aria-pressed={amendMode === mode}
                 onClick={() => setAmendMode(mode)}
-                className={`px-2.5 py-1 font-medium transition-colors ${
+                className={`min-h-11 md:min-h-0 px-2.5 py-1 font-medium transition-colors ${
                   amendMode === mode
                     ? 'bg-brand text-on-accent'
                     : 'text-ink-soft hover:text-ink'

@@ -349,6 +349,77 @@ test('kill switch does not PUT if the dialog is cancelled', async () => {
   expect(putCall).toBeUndefined()
 })
 
+test('kill switch resume: confirming opens the dialog and PUTs copying_enabled true', async () => {
+  setRole('admin')
+  const stoppedSettings: Settings = { copying_enabled: false, dry_run: false }
+  const fetchMock = stubApi({
+    '/api/orgs/1/accounts': mockAccounts,
+    '/api/orgs/1/settings': stoppedSettings,
+    '/api/orgs/1/state': mockState,
+  })
+
+  render(
+    <MemoryRouter>
+      <Overview />
+    </MemoryRouter>
+  )
+
+  await waitFor(() => {
+    expect(screen.getByRole('button', { name: /resume copying/i })).toBeInTheDocument()
+  })
+
+  const killSwitchButton = screen.getByRole('button', { name: /resume copying/i })
+  await userEvent.click(killSwitchButton)
+
+  const dialog = await screen.findByRole('dialog')
+  expect(dialog).toHaveTextContent(/resume copying\?/i)
+  await userEvent.click(within(dialog).getByRole('button', { name: /^resume copying$/i }))
+
+  // Verify PUT request was made with copying_enabled: true
+  await waitFor(() => {
+    const putCall = fetchMock.mock.calls.find(
+      (call) => call[1]?.method === 'PUT' && call[0].includes('/api/orgs/1/settings')
+    )
+    expect(putCall).toBeDefined()
+    const body = JSON.parse(putCall![1]?.body as string)
+    expect(body.copying_enabled).toBe(true)
+  })
+})
+
+test('kill switch resume: cancelling the dialog sends nothing', async () => {
+  setRole('admin')
+  const stoppedSettings: Settings = { copying_enabled: false, dry_run: false }
+  const fetchMock = stubApi({
+    '/api/orgs/1/accounts': mockAccounts,
+    '/api/orgs/1/settings': stoppedSettings,
+    '/api/orgs/1/state': mockState,
+  })
+
+  render(
+    <MemoryRouter>
+      <Overview />
+    </MemoryRouter>
+  )
+
+  await waitFor(() => {
+    expect(screen.getByRole('button', { name: /resume copying/i })).toBeInTheDocument()
+  })
+
+  const killSwitchButton = screen.getByRole('button', { name: /resume copying/i })
+  await userEvent.click(killSwitchButton)
+
+  const dialog = await screen.findByRole('dialog')
+  await userEvent.click(within(dialog).getByRole('button', { name: /cancel/i }))
+
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+
+  // No PUT should be made
+  const putCall = fetchMock.mock.calls.find(
+    (call) => call[1]?.method === 'PUT' && call[0].includes('/api/orgs/1/settings')
+  )
+  expect(putCall).toBeUndefined()
+})
+
 test('per-slave pause posts to /api/orgs/1/control/pause with account_id', async () => {
   setRole('admin')
   const routes: Record<string, unknown> = {

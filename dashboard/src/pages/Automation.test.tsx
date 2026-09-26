@@ -146,6 +146,34 @@ test('the reveal dialog can switch between indicator and strategy alert template
   expect(screen.queryByText(/strategy\.order\.action/)).not.toBeInTheDocument()
 })
 
+test('the reveal dialog traps focus on its Close button and Escape closes it', async () => {
+  // The one-time reveal is a hand-written role="dialog" -- it needs the same
+  // keyboard contract as every other overlay: focus in on open, Escape out.
+  const revealed = {
+    secret: 'tvw_abc123', hook_id: 'hookabc',
+    url: 'https://mirrorfleet.test/api/webhooks/tradingview/hookabc',
+    template: JSON.stringify(
+      { secret: 'tvw_abc123', action: 'buy', symbol: '{{ticker}}', lots: 0.01, id: '{{timenow}}' },
+      null, 2),
+  }
+  mockRoutes({ 'POST /webhook/secret': () => jsonResponse(revealed) })
+  render(<MemoryRouter><Automation /></MemoryRouter>)
+  await screen.findByText(/automation is on/i)
+
+  await userEvent.click(await screen.findByRole('button', { name: 'Generate new secret' }))
+  const confirmButtons = await screen.findAllByRole('button', { name: 'Generate new secret' })
+  await userEvent.click(confirmButtons[confirmButtons.length - 1])
+
+  await screen.findByText(/shown once/i)
+  const closeButton = screen.getByRole('button', { name: /i have copied it/i })
+  await waitFor(() => expect(closeButton).toHaveFocus())
+
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => {
+    expect(screen.queryByText(/shown once/i)).not.toBeInTheDocument()
+  })
+})
+
 test('entry timeframes shows what is currently allowed and lets an admin change it', async () => {
   const fetchMock = mockWebhookRoute()
   render(<MemoryRouter><Automation /></MemoryRouter>)

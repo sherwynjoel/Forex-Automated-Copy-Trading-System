@@ -110,14 +110,23 @@ function DeskStrip({ onAccounts }: { onAccounts?: (accounts: Account[]) => void 
       ])
       setSettings(sett)
       onAccounts?.(accounts)
-      setEnabledAccountCount(accounts.filter((a) => a.enabled).length)
+      // The copier's close-all only touches an account that is both enabled
+      // AND not paused (a per-slave Pause sets status 'paused' without
+      // touching `enabled`) -- counting `enabled` alone overstated the
+      // dialog's blast radius by every paused slave.
+      setEnabledAccountCount(
+        accounts.filter((a) => a.enabled && a.status !== 'paused').length)
       const master = accounts.find((a) => a.role === 'master')
       masterIdRef.current = master?.ctid_trader_account_id ?? null
       const masterSnap = master
         ? state.accounts?.[String(master.ctid_trader_account_id)] ?? null : null
       setMasterState(masterSnap)
       setContracts(contractPrices(masterSnap?.positions))
-      setMasterPositionCount(masterSnap?.positions?.length ?? null)
+      // Same rule for the master's own position count: a disabled or paused
+      // master is not touched by close-all either, so naming its open
+      // position count would promise a flatten that will not happen.
+      const masterIncluded = master != null && master.enabled && master.status !== 'paused'
+      setMasterPositionCount(masterIncluded ? masterSnap?.positions?.length ?? null : null)
     } catch {
       // The strip is a passenger; pages surface their own errors.
     }
@@ -331,12 +340,15 @@ function DeskStrip({ onAccounts }: { onAccounts?: (accounts: Account[]) => void 
             {' — '}the broker may start force-closing positions. Reduce
             exposure or add funds now.
           </span>
-          <button
+          <Button
+            variant="ghost"
+            tone="neutral"
+            size="sm"
+            className="ml-4"
             onClick={() => setDismissedRiskId(marginCall.id)}
-            className="text-on-accent hover:underline text-xs font-medium ml-4"
           >
             Dismiss
-          </button>
+          </Button>
         </div>
       )}
 
@@ -352,12 +364,15 @@ function DeskStrip({ onAccounts }: { onAccounts?: (accounts: Account[]) => void 
             <span className="num">{reminderCutoffDate}</span>
             {cutoffDaysPhrase(reminderCutoffDate)}.
           </span>
-          <button
+          <Button
+            variant="ghost"
+            tone="neutral"
+            size="sm"
+            className="ml-4"
             onClick={() => setDismissedReminderId(cutoffReminder.id)}
-            className="text-ink-soft hover:text-ink text-xs font-medium ml-4"
           >
             Dismiss
-          </button>
+          </Button>
         </div>
       )}
 
@@ -369,12 +384,15 @@ function DeskStrip({ onAccounts }: { onAccounts?: (accounts: Account[]) => void 
           }`}
         >
           <span>{notice.text}</span>
-          <button
+          <Button
+            variant="ghost"
+            tone="neutral"
+            size="sm"
+            className="ml-4"
             onClick={() => setNotice(null)}
-            className="text-xs font-medium opacity-70 hover:opacity-100"
           >
             Dismiss
-          </button>
+          </Button>
         </div>
       )}
 
@@ -444,6 +462,20 @@ export default function Layout() {
     setMenuOpen(false)
   }, [location.pathname])
 
+  // Nor does it outlive the viewport: the phone drawer is `display:none`
+  // past `lg`, but its focus trap has no way to know that on its own --
+  // Escape and Tab would keep fighting over a panel nobody can see.
+  useEffect(() => {
+    if (!menuOpen) return
+    if (typeof window.matchMedia !== 'function') return
+    const mq = window.matchMedia('(min-width: 1024px)')
+    const onChange = (e: MediaQueryListEvent) => {
+      if (e.matches) setMenuOpen(false)
+    }
+    mq.addEventListener('change', onChange)
+    return () => mq.removeEventListener('change', onChange)
+  }, [menuOpen])
+
   const sidebarContent = (dense: boolean) => (
     <>
       <div className="px-6 pt-6 pb-5 border-b border-line">
@@ -494,10 +526,11 @@ export default function Layout() {
         <Button
           variant="ghost"
           tone="neutral"
+          size="sm"
           block
           onClick={toggleTheme}
           aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
-          className="justify-start px-2 py-2"
+          className="justify-start"
         >
           <span aria-hidden="true">{theme === 'dark' ? '☀' : '☾'}</span>{' '}
           {theme === 'dark' ? 'Day mode' : 'Dark mode'}
@@ -505,9 +538,10 @@ export default function Layout() {
         <Button
           variant="ghost"
           tone="neutral"
+          size="sm"
           block
           onClick={handleLogout}
-          className="justify-start px-2 py-2"
+          className="justify-start"
         >
           Log out
         </Button>
@@ -536,9 +570,10 @@ export default function Layout() {
           <Button
             variant="ghost"
             tone="neutral"
+            size="sm"
             aria-label="Open menu"
             onClick={() => setMenuOpen(true)}
-            className="h-11 w-11 p-0 md:h-11"
+            className="h-11 w-11 md:h-11 md:w-11 justify-center"
           >
             <svg aria-hidden="true" viewBox="0 0 20 20" className="h-5 w-5">
               <path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
