@@ -3,14 +3,17 @@ import { orgApi } from '../../lib/api'
 import { useOrg } from '../../lib/org'
 import { errorText, formatWhen, money } from '../../lib/format'
 import { moneyOrDash, pillClass, statusLabel } from '../../lib/investor'
+import Badge from '../../components/Badge'
 import Banner from '../../components/Banner'
+import Button from '../../components/Button'
+import Input from '../../components/Input'
 import type { InvestorSummary, InvestorWithdrawal } from '../../lib/types'
 
 const STEPS = ['requested', 'approved', 'paid'] as const
 
 function Timeline({ w }: { w: InvestorWithdrawal }) {
   if (w.status === 'rejected') {
-    return <span className={`desk-label px-2 py-0.5 rounded ${pillClass('rejected')}`}>Rejected</span>
+    return <Badge tone="loss">Rejected</Badge>
   }
   const reached = STEPS.indexOf(w.status as typeof STEPS[number])
   return (
@@ -98,21 +101,18 @@ export default function InvestorWithdraw() {
           <div className="flex gap-3 flex-wrap items-end">
             <label className="block w-40">
               <span className="desk-label block mb-1">Amount</span>
-              <input aria-label="Amount" value={form.amount} required
-                     onChange={(e) => setForm({ ...form, amount: e.target.value })}
-                     className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink" />
+              <Input aria-label="Amount" num value={form.amount} required
+                     onChange={(e) => setForm({ ...form, amount: e.target.value })} />
             </label>
             <label className="block flex-1 min-w-56">
               <span className="desk-label block mb-1">Destination address</span>
-              <input aria-label="Destination address" value={form.destination} required
-                     onChange={(e) => setForm({ ...form, destination: e.target.value })}
-                     className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink" />
+              <Input aria-label="Destination address" num value={form.destination} required
+                     onChange={(e) => setForm({ ...form, destination: e.target.value })} />
             </label>
           </div>
-          <button type="submit" disabled={busy}
-                  className="px-4 py-2 text-sm font-semibold rounded bg-brand text-on-accent hover:bg-brand-deep disabled:opacity-50">
+          <Button type="submit" disabled={busy}>
             Request withdrawal
-          </button>
+          </Button>
         </form>
       )}
 

@@ -1,4 +1,5 @@
 import { Link } from 'react-router-dom'
+import Button from '../components/Button'
 import Logo, { LogoMark } from '../components/Logo'
 
 /** Company facts the desk operator fills in. Empty strings are simply
@@ -75,17 +76,11 @@ const RISK_NOTICE =
   'Trading leveraged products such as forex, metals and CFDs carries a high level of risk and may not be suitable for everyone. Past results do not predict future results. Nothing on this page is investment advice.'
 
 function Ctas({ large = false }: { large?: boolean }) {
-  const pad = large ? 'px-6 py-3 text-base' : 'px-3 py-1.5 text-xs sm:px-4 sm:py-2 sm:text-sm'
+  const size = large ? 'md' : 'sm'
   return (
     <div className="flex flex-wrap items-center gap-3">
-      <Link to="/register"
-            className={`${pad} font-semibold rounded bg-brand text-on-accent hover:bg-brand-deep transition-colors`}>
-        Create account
-      </Link>
-      <Link to="/login"
-            className={`${pad} font-semibold rounded border border-line-strong text-ink hover:bg-brand-wash transition-colors`}>
-        Sign in
-      </Link>
+      <Button to="/register" size={size}>Create account</Button>
+      <Button to="/login" variant="secondary" tone="brand" size={size}>Sign in</Button>
     </div>
   )
 }

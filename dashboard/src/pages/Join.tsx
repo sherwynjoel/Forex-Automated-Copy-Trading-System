@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { api } from '../lib/api'
+import Button from '../components/Button'
 import Logo from '../components/Logo'
 
 type Outcome =
@@ -80,12 +81,7 @@ export default function Join() {
             <p className="text-sm text-ink">
               You are already a member of this organization.
             </p>
-            <Link
-              to="/welcome"
-              className="inline-block px-4 py-2 text-sm font-semibold rounded bg-brand text-on-accent hover:bg-brand-deep transition-colors"
-            >
-              Open MirrorFleet
-            </Link>
+            <Button to="/welcome">Open MirrorFleet</Button>
           </>
         )}
         {outcome.kind === 'dead' && (

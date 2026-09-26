@@ -2,7 +2,8 @@ import { useCallback, useEffect, useState } from 'react'
 import { orgApi } from '../../lib/api'
 import { useOrg } from '../../lib/org'
 import { errorText, formatWhen, money, signed } from '../../lib/format'
-import { moneyOrDash, pillClass, statusLabel } from '../../lib/investor'
+import { moneyOrDash, statusLabel, statusTone } from '../../lib/investor'
+import Badge, { type BadgeTone } from '../../components/Badge'
 import Banner from '../../components/Banner'
 import StatTile from '../../components/StatTile'
 import { EquityCurve } from '../../components/charts'
@@ -11,6 +12,11 @@ import type {
 } from '../../lib/types'
 
 const POLL_MS = 10000
+
+// statusTone's four states, mapped onto the desk's one chip.
+const BADGE_TONE: Record<ReturnType<typeof statusTone>, BadgeTone> = {
+  ok: 'profit', warn: 'warn', bad: 'loss', quiet: 'neutral',
+}
 
 type Activity = { key: string; when: string; what: string; amount: number; status: string }
 
@@ -181,7 +187,7 @@ export default function InvestorOverview() {
               <span className="num text-ink-soft w-40 shrink-0">{formatWhen(a.when)}</span>
               <span className="text-ink flex-1">{a.what}</span>
               <span className={`tnum ${a.amount < 0 ? 'text-loss' : 'text-ink'}`}>{signed(a.amount)}</span>
-              <span className={`desk-label px-2 py-0.5 rounded ${pillClass(a.status)}`}>{statusLabel(a.status)}</span>
+              <Badge tone={BADGE_TONE[statusTone(a.status)]}>{statusLabel(a.status)}</Badge>
             </li>
           ))}
         </ul>

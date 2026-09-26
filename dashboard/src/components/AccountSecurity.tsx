@@ -2,6 +2,8 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../lib/api'
 import Banner from './Banner'
+import Button from './Button'
+import Input from './Input'
 
 /**
  * Your own login, not the org's: rotate the password and cut every other
@@ -59,45 +61,35 @@ export default function AccountSecurity() {
           <label htmlFor="current-password" className="desk-label block mb-1">
             Current password
           </label>
-          <input
+          <Input
             id="current-password"
             type="password"
             autoComplete="current-password"
             value={current}
             onChange={(e) => setCurrent(e.target.value)}
-            className="rounded border border-line-strong bg-card px-3 py-2 text-sm text-ink"
           />
         </div>
         <div>
           <label htmlFor="new-password" className="desk-label block mb-1">
             New password
           </label>
-          <input
+          <Input
             id="new-password"
             type="password"
             autoComplete="new-password"
             value={next}
             onChange={(e) => setNext(e.target.value)}
-            className="rounded border border-line-strong bg-card px-3 py-2 text-sm text-ink"
           />
         </div>
-        <button
-          type="submit"
-          disabled={busy || !current || !next}
-          className="min-h-11 md:min-h-0 px-4 py-2 text-sm font-semibold rounded bg-brand text-on-accent hover:bg-brand-deep transition-colors disabled:opacity-50"
-        >
+        <Button type="submit" disabled={busy || !current || !next}>
           Change password
-        </button>
+        </Button>
       </form>
 
       <div className="flex flex-wrap items-center gap-3">
-        <button
-          onClick={signOutEverywhere}
-          disabled={busy}
-          className="min-h-11 md:min-h-0 px-4 py-2 text-sm font-semibold rounded border border-line-strong text-ink hover:bg-line transition-colors disabled:opacity-50"
-        >
+        <Button variant="secondary" onClick={signOutEverywhere} disabled={busy}>
           Sign out everywhere
-        </button>
+        </Button>
         <p className="text-sm text-ink-soft">
           Ends every session for your account, on this device and any other.
           Use it if you think a login was stolen.

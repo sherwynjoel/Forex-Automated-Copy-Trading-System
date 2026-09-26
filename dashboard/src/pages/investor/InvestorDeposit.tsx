@@ -3,9 +3,17 @@ import QRCode from 'qrcode'
 import { orgApi } from '../../lib/api'
 import { useOrg } from '../../lib/org'
 import { errorText, formatWhen, money } from '../../lib/format'
-import { pillClass, statusLabel } from '../../lib/investor'
+import { statusLabel, statusTone } from '../../lib/investor'
+import Badge, { type BadgeTone } from '../../components/Badge'
 import Banner from '../../components/Banner'
+import Button from '../../components/Button'
+import Input from '../../components/Input'
 import type { InvestorDeposit as Deposit, InvestorWallet } from '../../lib/types'
+
+// statusTone's four states, mapped onto the desk's one chip.
+const BADGE_TONE: Record<ReturnType<typeof statusTone>, BadgeTone> = {
+  ok: 'profit', warn: 'warn', bad: 'loss', quiet: 'neutral',
+}
 
 export default function InvestorDeposit() {
   const { orgId } = useOrg()
@@ -102,27 +110,23 @@ export default function InvestorDeposit() {
             <div className="flex gap-3 flex-wrap items-end">
               <label className="block w-40">
                 <span className="desk-label block mb-1">Amount</span>
-                <input aria-label="Amount" value={form.amount} required
-                       onChange={(e) => setForm({ ...form, amount: e.target.value })}
-                       className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink" />
+                <Input aria-label="Amount" num value={form.amount} required
+                       onChange={(e) => setForm({ ...form, amount: e.target.value })} />
               </label>
               <label className="block flex-1 min-w-56">
                 <span className="desk-label block mb-1">Transaction ID</span>
-                <input aria-label="Transaction ID" value={form.txid} required
-                       onChange={(e) => setForm({ ...form, txid: e.target.value })}
-                       className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink" />
+                <Input aria-label="Transaction ID" num value={form.txid} required
+                       onChange={(e) => setForm({ ...form, txid: e.target.value })} />
               </label>
             </div>
             <label className="block">
               <span className="desk-label block mb-1">Note (optional)</span>
-              <input aria-label="Note" value={form.note}
-                     onChange={(e) => setForm({ ...form, note: e.target.value })}
-                     className="w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink" />
+              <Input aria-label="Note" value={form.note}
+                     onChange={(e) => setForm({ ...form, note: e.target.value })} />
             </label>
-            <button type="submit" disabled={busy}
-                    className="px-4 py-2 text-sm font-semibold rounded bg-brand text-on-accent hover:bg-brand-deep disabled:opacity-50">
+            <Button type="submit" disabled={busy}>
               I have sent it
-            </button>
+            </Button>
           </form>
         </>
       )}
@@ -152,7 +156,7 @@ export default function InvestorDeposit() {
                   <td data-label="Amount" className="tnum px-5 py-2.5 text-right">{money(d.amount)} {d.coin}</td>
                   <td data-label="Transaction" className="num px-5 py-2.5 break-all">{d.txid}</td>
                   <td data-label="Status" className="px-5 py-2.5">
-                    <span className={`desk-label px-2 py-0.5 rounded ${pillClass(d.status)}`}>{statusLabel(d.status)}</span>
+                    <Badge tone={BADGE_TONE[statusTone(d.status)]}>{statusLabel(d.status)}</Badge>
                   </td>
                   <td data-label="Admin note" className="px-5 py-2.5 text-ink-soft">{d.decision_note ?? '—'}</td>
                 </tr>

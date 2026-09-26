@@ -3,6 +3,8 @@ import { Link, useNavigate } from 'react-router-dom'
 import { api } from '../lib/api'
 import { errorText } from '../lib/format'
 import Banner from '../components/Banner'
+import Button from '../components/Button'
+import Input from '../components/Input'
 import Logo from '../components/Logo'
 import { roleLabel } from '../lib/roles'
 
@@ -79,37 +81,28 @@ export default function Welcome() {
 
         <form onSubmit={createOrg} className="bg-card rounded-lg border border-line p-6 space-y-4">
           <h2 className="text-lg font-display font-semibold text-ink">Create an organization</h2>
-          <input
+          <Input
             value={name}
             onChange={(e) => setName(e.target.value)}
             required
             placeholder="Organization name"
             aria-label="Organization name"
-            className="w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink"
           />
-          <button
-            type="submit"
-            disabled={creating}
-            className="w-full py-2.5 rounded bg-brand text-on-accent text-sm font-semibold hover:bg-brand-deep transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-          >
+          <Button type="submit" block disabled={creating}>
             {creating ? 'Creating…' : 'Create organization'}
-          </button>
+          </Button>
         </form>
         <form onSubmit={useInvite} className="bg-card rounded-lg border border-line p-6 space-y-4">
           <h2 className="text-lg font-display font-semibold text-ink">Or join with an invite</h2>
-          <input
+          <Input
             value={invite}
             onChange={(e) => setInvite(e.target.value)}
             placeholder="Paste an invite link or code"
             aria-label="Invite link or code"
-            className="w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink"
           />
-          <button
-            type="submit"
-            className="w-full py-2.5 rounded border border-brand text-brand text-sm font-semibold hover:bg-brand-wash hover:text-brand-deep transition-colors"
-          >
+          <Button type="submit" variant="secondary" tone="brand" block>
             Join organization
-          </button>
+          </Button>
         </form>
       </div>
     </div>

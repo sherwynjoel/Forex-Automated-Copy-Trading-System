@@ -3,6 +3,7 @@ import { orgApi } from '../../lib/api'
 import { useOrg } from '../../lib/org'
 import { errorText, formatWhen, money } from '../../lib/format'
 import Banner from '../../components/Banner'
+import Button from '../../components/Button'
 import type { Deal } from '../../lib/types'
 
 const WEEK_MS = 7 * 24 * 3600 * 1000
@@ -63,18 +64,15 @@ export default function InvestorHistory() {
           </p>
         </div>
         <div className="flex items-center gap-2 text-sm">
-          <button onClick={goEarlier}
-                  className="px-3 py-1.5 text-xs font-semibold rounded border border-line-strong text-ink-soft hover:text-ink">
+          <Button variant="secondary" size="sm" onClick={goEarlier}>
             Earlier
-          </button>
+          </Button>
           <span className="num text-ink-soft">
             {formatWhen(windowEnd - WEEK_MS)} – {formatWhen(windowEnd)}
           </span>
-          <button onClick={goLater}
-                  disabled={atNow}
-                  className="px-3 py-1.5 text-xs font-semibold rounded border border-line-strong text-ink-soft hover:text-ink disabled:opacity-50">
+          <Button variant="secondary" size="sm" onClick={goLater} disabled={atNow}>
             Later
-          </button>
+          </Button>
         </div>
       </header>
       {error && <Banner kind="error" onDismiss={() => setError(null)}>{error}</Banner>}

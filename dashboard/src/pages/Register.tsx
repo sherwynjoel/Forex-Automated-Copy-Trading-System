@@ -3,6 +3,8 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { api } from '../lib/api'
 import { errorText } from '../lib/format'
 import Banner from '../components/Banner'
+import Button from '../components/Button'
+import Input from '../components/Input'
 import Logo from '../components/Logo'
 
 export default function Register() {
@@ -73,52 +75,46 @@ export default function Register() {
           {error && <Banner kind="error">{error}</Banner>}
           <div>
             <label htmlFor="displayName" className="desk-label block mb-1">Display name</label>
-            <input
+            <Input
               id="displayName"
               name="displayName"
               type="text"
               autoComplete="name"
               required
-              className="w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink"
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
             />
           </div>
           <div>
             <label htmlFor="email" className="desk-label block mb-1">Email</label>
-            <input
+            <Input
               id="email"
               name="email"
               type="email"
               autoComplete="email"
               required
-              className="w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
             />
           </div>
           <div>
             <label htmlFor="password" className="desk-label block mb-1">Password</label>
-            <input
+            <Input
               id="password"
               name="password"
               type="password"
               autoComplete="new-password"
               required
               minLength={10}
-              className="w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink"
+              aria-describedby="password-hint"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
             />
-            <p className="mt-1 text-xs text-ink-soft">At least 10 characters.</p>
+            <p id="password-hint" className="mt-1 text-xs text-ink-soft">At least 10 characters.</p>
           </div>
-          <button
-            type="submit"
-            disabled={isLoading}
-            className="w-full py-2.5 rounded bg-brand text-on-accent text-sm font-semibold hover:bg-brand-deep transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-          >
+          <Button type="submit" block disabled={isLoading}>
             {isLoading ? 'Creating account...' : 'Create account'}
-          </button>
+          </Button>
           <p className="text-center text-sm text-ink-soft">
             Already have an account?{' '}
             <Link to="/login" className="font-medium text-brand hover:text-brand-deep">

@@ -7,8 +7,10 @@ import { can, type Role } from '../lib/roles'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
 import type { TicksPayload } from '../lib/ticks'
 import type { Account, ApiState, CloseAllResult, EventResponse, Settings, WebhookSettings } from '../lib/types'
+import Button from './Button'
 import ConfirmDialog from './ConfirmDialog'
 import Logo from './Logo'
+import Select from './Select'
 import { money, signed, errorText } from '../lib/format'
 import { platformCaption } from '../lib/platform'
 
@@ -268,12 +270,15 @@ function DeskStrip({ onAccounts }: { onAccounts?: (accounts: Account[]) => void 
           </span>
         )}
         {can(role, 'control') && (
-          <button
+          <Button
+            variant="secondary"
+            tone="loss"
+            size="sm"
+            className="order-3 ml-auto md:order-5 md:ml-0"
             onClick={() => setDialogOpen(true)}
-            className="order-3 ml-auto md:order-5 md:ml-0 min-h-11 md:min-h-0 px-3 py-1.5 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-on-accent transition-colors"
           >
             Close all positions
-          </button>
+          </Button>
         )}
         <div className="order-4 w-full flex items-center justify-between gap-x-4 md:w-auto md:ml-auto md:justify-start md:gap-6">
           {contracts.slice(0, 3).map((c) => (
@@ -437,16 +442,17 @@ export default function Layout() {
     <>
       <div className="px-6 pt-6 pb-5 border-b border-line">
         <Logo size={26} />
-        <select
+        <Select
           aria-label="Organization"
           value={orgId}
           onChange={(e) => navigate(`/org/${e.target.value}`)}
-          className="mt-2 w-full text-sm border border-line-strong rounded bg-card text-ink px-2 py-1"
+          block
+          className="mt-2"
         >
           {me.orgs.map((o) => (
             <option key={o.id} value={o.id}>{o.name}</option>
           ))}
-        </select>
+        </Select>
         {caption && <p className="desk-label mt-1">{caption}</p>}
       </div>
 
@@ -481,10 +487,11 @@ export default function Layout() {
       <div className="border-t border-line p-4">
         <button
           onClick={toggleTheme}
-          aria-label={theme === 'dark' ? 'Switch to day mode' : 'Switch to dark mode'}
+          aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
           className="w-full text-left px-2 py-2 text-sm text-ink-soft hover:text-ink transition-colors"
         >
-          {theme === 'dark' ? '☀ Day mode' : '☾ Dark mode'}
+          <span aria-hidden="true">{theme === 'dark' ? '☀' : '☾'}</span>{' '}
+          {theme === 'dark' ? 'Day mode' : 'Dark mode'}
         </button>
         <button
           onClick={handleLogout}

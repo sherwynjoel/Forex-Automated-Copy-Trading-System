@@ -68,3 +68,8 @@ test('links back to login', () => {
   renderRegister()
   expect(screen.getByRole('link', { name: /sign in/i })).toHaveAttribute('href', '/login')
 })
+
+test('the password hint is exposed as an accessible description', () => {
+  renderRegister()
+  expect(screen.getByLabelText(/^password$/i)).toHaveAccessibleDescription(/10 characters/i)
+})
