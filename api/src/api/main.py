@@ -144,6 +144,11 @@ def create_app(http_transport: Optional[httpx.BaseTransport] = None) -> FastAPI:
     auth_router = create_auth_router(rate_limiter)
     app.include_router(auth_router)
 
+    # MPIN second factor: set / verify / reset on a half session, change on a
+    # full one. Shares the login rate limiter for the password-reset path.
+    from .routes.mpin import create_mpin_router
+    app.include_router(create_mpin_router(rate_limiter))
+
     # Include orgs router (lifecycle, members, invites, join)
     app.include_router(create_orgs_router())
 

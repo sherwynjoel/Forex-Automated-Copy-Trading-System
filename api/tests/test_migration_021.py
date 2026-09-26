@@ -13,7 +13,7 @@ def test_migration_021_is_recorded_right_after_020(db):
 
 
 def test_users_gain_the_four_mpin_columns_with_safe_defaults(db, make_user):
-    user = make_user()
+    user = make_user(mpin=None)
     with psycopg.connect(db, autocommit=True) as conn:
         cols = dict(conn.execute(
             """SELECT column_name, is_nullable FROM information_schema.columns

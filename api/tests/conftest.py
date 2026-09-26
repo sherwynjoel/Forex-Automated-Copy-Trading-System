@@ -353,18 +353,23 @@ def copier_error_response(app_client):
 
 @pytest.fixture
 def make_user(db):
-    """Create a user directly in the DB; returns {id, email, password, display_name}."""
+    """Create a user directly in the DB; returns {id, email, password,
+    display_name, mpin}. Every fixture user has the test MPIN 123456 unless
+    mpin=None is passed (a user who has never set one)."""
     from api.auth import hash_password
 
-    def _make(email="user@example.com", password="a-solid-password", display_name="User"):
+    def _make(email="user@example.com", password="a-solid-password", display_name="User",
+              mpin="123456"):
         with psycopg.connect(db, autocommit=True) as conn:
             (user_id,) = conn.execute(
-                "INSERT INTO users (email, password_hash, display_name) "
-                "VALUES (%s, %s, %s) RETURNING id",
-                (email, hash_password(password), display_name),
+                "INSERT INTO users (email, password_hash, display_name, mpin_hash, mpin_set_at) "
+                "VALUES (%s, %s, %s, %s, CASE WHEN %s::text IS NULL THEN NULL ELSE now() END) "
+                "RETURNING id",
+                (email, hash_password(password), display_name,
+                 hash_password(mpin) if mpin else None, mpin),
             ).fetchone()
         return {"id": user_id, "email": email, "password": password,
-                "display_name": display_name}
+                "display_name": display_name, "mpin": mpin}
 
     return _make
 
@@ -391,12 +396,22 @@ def make_org(db):
 
 @pytest.fixture
 def login_as():
-    """Log a TestClient in as a make_user() user (sets session+csrf cookies)."""
+    """Log a TestClient in as a make_user() user and pass the MPIN gate
+    (sets session+csrf cookies twice: half session, then full)."""
 
     def _login(client, user):
         r = client.post("/api/login", json={
             "email": user["email"], "password": user["password"]})
         assert r.status_code == 204, f"login failed: {r.status_code} {r.text}"
+        mpin = user.get("mpin", "123456")
+        if mpin:
+            r = client.post("/api/mpin/verify", json={"mpin": mpin},
+                            headers={"X-CSRF-Token": client.cookies.get("csrf")})
+            # Task 4 removes the 409 leniency: registered test users get an
+            # MPIN from _register there, so verify always succeeds.
+            assert r.status_code == 204 or (
+                r.status_code == 409 and r.json().get("detail") == "MPIN not set"
+            ), f"mpin verify failed: {r.status_code} {r.text}"
 
     return _login
 
