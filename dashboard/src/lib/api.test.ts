@@ -1,5 +1,5 @@
 import { afterEach, expect, test, vi, beforeEach } from 'vitest'
-import { api } from './api'
+import { api, type ApiError } from './api'
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -93,4 +93,15 @@ test('a wrong-current-MPIN 401 from the change-MPIN route is an inline error, ne
   ))
   await expect(api('/api/me/mpin', { method: 'POST', body: '{}' })).rejects.toThrow('Invalid MPIN')
   expect(window.location.href).toBe(originalLocation)
+})
+
+test('a failed response exposes its status and JSON body on the error', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+    new Response(JSON.stringify({ detail: 'MPIN locked', locked_until: '2026-09-26T10:00:00Z' }), {
+      status: 423, headers: { 'content-type': 'application/json' },
+    })
+  ))
+  const err = await api('/api/mpin/verify', { method: 'POST', body: '{}' }).catch((e) => e as ApiError)
+  expect(err.response?.status).toBe(423)
+  expect(err.response?.body?.locked_until).toBe('2026-09-26T10:00:00Z')
 })

@@ -1,3 +1,6 @@
+/** Every non-2xx throws one of these; `response` carries what the server said. */
+export type ApiError = Error & { response?: { status: number; body?: Record<string, unknown> } }
+
 /**
  * Get CSRF token from cookie
  */
@@ -71,13 +74,16 @@ export async function api<T>(
   // e.g. Join.tsx's `.includes('410')` — keep working).
   if (!response.ok) {
     let detail: string | undefined
+    let parsed: Record<string, unknown> | undefined
     try {
-      const body = (await response.json()) as { detail?: unknown }
-      if (typeof body.detail === 'string') detail = body.detail
+      parsed = (await response.json()) as Record<string, unknown>
+      if (typeof parsed.detail === 'string') detail = parsed.detail
     } catch {
       // Body wasn't JSON (or was empty) — fall back to the bare status.
     }
-    throw new Error(detail ? `${response.status}: ${detail}` : `${response.status}`)
+    const error = new Error(detail ? `${response.status}: ${detail}` : `${response.status}`) as ApiError
+    error.response = { status: response.status, body: parsed }
+    throw error
   }
 
   // Parse JSON if there's content

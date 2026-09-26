@@ -6,6 +6,7 @@ import { isMpinPending } from './lib/types'
 import type { Me, MpinPending } from './lib/types'
 import Layout from './components/Layout'
 import Login from './pages/Login'
+import Mpin from './pages/Mpin'
 import Register from './pages/Register'
 import Welcome from './pages/Welcome'
 import Join from './pages/Join'
@@ -61,7 +62,7 @@ export default function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/login" element={<Login />} />
-        <Route path="/mpin" element={<div>mpin</div>} />
+        <Route path="/mpin" element={<Mpin />} />
         <Route path="/register" element={<Register />} />
         <Route path="/join/:token" element={<Join />} />
         <Route path="/welcome" element={<Welcome />} />
