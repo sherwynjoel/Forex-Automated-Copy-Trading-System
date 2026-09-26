@@ -32,7 +32,7 @@ The signed cookie payload today is `{"user_id", "sv"}`. It gains `"pin"`:
 
 | Cookie | Issued by | Accepted by |
 |---|---|---|
-| `pin: false` — half session | `POST /api/login` | the MPIN routes, `POST /api/logout`, and `GET /api/me` in its trimmed form |
+| `pin: false` — half session | `POST /api/login`, `POST /api/register` | the MPIN routes, `POST /api/logout`, and `GET /api/me` in its trimmed form |
 | `pin: true` — full session | `POST /api/mpin/set`, `/verify`, `/reset` | everything, as today |
 
 - `_issue_session(response, cfg, user_id, session_version, pin)` writes the
@@ -107,7 +107,12 @@ the limiter, and an attacker without the password never reaches it.
 redirects to `/mpin` (not `/login`), unless the caller passed
 `redirectOn401: false`. `RootRedirect` and `OrgProvider` read `/api/me`;
 when `mpin.pending` is true they navigate to `/mpin` before anything else.
-`Login` keeps navigating to `/`. The `Me` type gains `mpin: { pending:
+`Login` keeps navigating to `/`. `Register` navigates to
+`/mpin?next=/join/<token>` when it carried an invite and to
+`/mpin?next=/welcome` otherwise, and no longer tries the join itself; `Join`
+sends a half session to `/mpin?next=/join/<token>`; `Welcome` sends a half
+session to `/mpin`. The `/mpin` page honours `next` only when it is a
+same-origin path (starts with a single `/`), defaulting to `/`. The `Me` type gains `mpin: { pending:
 boolean; set: boolean }`, and the half-session shape is a separate
 `MpinPending` type so no page can mistake it for a signed-in user.
 
@@ -153,8 +158,9 @@ Copy avoids "PIN code" and "OTP": the word is **MPIN** everywhere.
   `require_user` fails closed with the specific detail, and the WebSocket
   refuses it. The RBAC matrix test gains a row proving a half session is
   refused on a desk route and on an investor route.
-- Registration and invite-join do not set an MPIN (Set mode does, on the
-  first login), so the join flow is untouched.
+- Registration issues a half session exactly like login, so a brand-new
+  account sets its MPIN before it can join an invite or open the desk; the
+  invite token travels through `next` and the join completes afterwards.
 - The bootstrap user created from env has no MPIN and sets one on first
   login like everyone else.
 
@@ -197,6 +203,9 @@ routing tests):
   401 still goes to `/login`.
 - `App.test.tsx` and `org.test.tsx`: `mpin.pending` sends `/` and an org
   route to `/mpin`.
+- `Register.test.tsx`: success navigates to `/mpin?next=…` (welcome, or the
+  join path when an invite was carried). `Join.test.tsx`: a pending
+  `/api/me` sends to `/mpin?next=/join/<token>`.
 - Existing page tests mock `/api/me`; the mock helper gains `mpin:
   {pending: false, set: true}` so nothing else changes.
 
