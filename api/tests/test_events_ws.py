@@ -273,6 +273,18 @@ class TestWebSocket:
         except Exception as e:
             pytest.fail(f"WS connection should succeed with auth, got: {e}")
 
+    def test_ws_refuses_a_half_session(self, app_client_with_lifespan, make_user, make_org):
+        user = make_user()
+        make_org(name="Half", members=[(user, "viewer")])
+        app_client_with_lifespan.post("/api/login", json={
+            "email": user["email"], "password": user["password"]})
+        import pytest
+        from starlette.websockets import WebSocketDisconnect
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with app_client_with_lifespan.websocket_connect("/api/ws?org_id=1"):
+                pass
+        assert exc.value.code == 4401
+
 
 def test_ws_delivers_only_own_org_events(live_server, db, make_user, make_org):
     """Two orgs, two sockets: each socket sees only its org's events."""
@@ -287,6 +299,11 @@ def test_ws_delivers_only_own_org_events(live_server, db, make_user, make_org):
         r = httpx.post(f"{base_url}/api/register", json={
             "email": email, "password": "a-solid-password", "display_name": email})
         assert r.status_code == 204
+        cookies = {"session": r.cookies["session"], "csrf": r.cookies["csrf"]}
+        r = httpx.post(f"{base_url}/api/mpin/set",
+                       json={"mpin": "123456", "mpin_confirm": "123456"},
+                       cookies=cookies, headers={"X-CSRF-Token": cookies["csrf"]})
+        assert r.status_code == 204, r.text
         return {"session": r.cookies["session"], "csrf": r.cookies["csrf"]}
 
     cookies_a = session_cookies("a@example.com")
@@ -333,6 +350,11 @@ def test_ws_nonmember_closed_4404(live_server, db, make_user, make_org):
     base_url, ws_url = live_server
     r = httpx.post(f"{base_url}/api/register", json={
         "email": "x@example.com", "password": "a-solid-password", "display_name": "x"})
+    cookies = {"session": r.cookies["session"], "csrf": r.cookies["csrf"]}
+    r = httpx.post(f"{base_url}/api/mpin/set",
+                   json={"mpin": "123456", "mpin_confirm": "123456"},
+                   cookies=cookies, headers={"X-CSRF-Token": cookies["csrf"]})
+    assert r.status_code == 204, r.text
     stranger_org = make_org(name="NotYours", members=[])
     try:
         with ws_connect(f"{ws_url}?org_id={stranger_org}",
@@ -345,11 +367,14 @@ def test_ws_nonmember_closed_4404(live_server, db, make_user, make_org):
 
 def _register_client(base_url, email):
     """A persistent httpx.Client (cookie jar included) logged in as a fresh
-    user via the real, live server."""
+    user via the real, live server, with the MPIN gate already passed."""
     client = httpx.Client(base_url=base_url)
     r = client.post("/api/register", json={
         "email": email, "password": "a-solid-password", "display_name": email})
     assert r.status_code == 204
+    r = client.post("/api/mpin/set", json={"mpin": "123456", "mpin_confirm": "123456"},
+                    headers={"X-CSRF-Token": client.cookies.get("csrf")})
+    assert r.status_code == 204, r.text
     return client
 
 
@@ -496,6 +521,9 @@ class TestWebSocketLiveDelivery:
         async with httpx.AsyncClient(base_url=base_url) as http:
             resp = await http.post("/api/login", json={
                 "email": user["email"], "password": user["password"]})
+            assert resp.status_code == 204, resp.text
+            resp = await http.post("/api/mpin/verify", json={"mpin": user["mpin"]},
+                                   headers={"X-CSRF-Token": http.cookies.get("csrf")})
             assert resp.status_code == 204, resp.text
             session_cookie = resp.cookies.get("session")
             assert session_cookie, "login did not set a session cookie"

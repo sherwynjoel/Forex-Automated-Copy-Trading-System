@@ -181,3 +181,20 @@ def test_destructive_rows_allowed(matrix_org, login_as):
     assert r.status_code == 200
     r = _call(client, "DELETE", org_id, "", None)
     assert r.status_code == 204
+
+
+def test_a_half_session_is_refused_on_every_matrix_route(matrix_org):
+    """Email+password alone opens nothing: before the MPIN every org route,
+    desk or investor, answers 401 MPIN required."""
+    client, org_id, users, _ = matrix_org
+    admin = users["admin"]
+    client.cookies.clear()
+    r = client.post("/api/login", json={"email": admin["email"], "password": admin["password"]})
+    assert r.status_code == 204
+    for method, tail, body, _min_role in MATRIX:
+        if method == "DELETE":
+            continue  # destructive rows are proven denied by the 401 below on GET/POST too
+        tail = tail.replace("{investor}", str(users["investor"]["id"]))
+        r = _call(client, method, org_id, tail, body)
+        assert r.status_code == 401, f"{method} {tail} -> {r.status_code}"
+        assert r.json()["detail"] == "MPIN required", f"{method} {tail}"

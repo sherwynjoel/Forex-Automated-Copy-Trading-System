@@ -8,6 +8,9 @@ def _register(client, email="owner@example.com", name="Owner"):
     r = client.post("/api/register", json={
         "email": email, "password": "a-solid-password", "display_name": name})
     assert r.status_code == 204
+    r = client.post("/api/mpin/set", json={"mpin": "123456", "mpin_confirm": "123456"},
+                    headers=_csrf(client))
+    assert r.status_code == 204
     return client.get("/api/me").json()["user"]
 
 

@@ -125,8 +125,11 @@ def test_callback_rejects_state_from_different_session(org_client, make_user, db
     # --- session B: a different, still-valid session for another user ---
     other_user = make_user(email="other-session@example.com")
     cfg = ApiConfig.from_env()
+    # pin=True: this must be a full session so the request reaches the
+    # oauth callback's own session-mismatch check (what this test is
+    # about) instead of being turned away 401 by the MPIN gate first.
     session_b = URLSafeTimedSerializer(cfg.session_secret, salt="session").dumps(
-        {"user_id": other_user["id"]}
+        {"user_id": other_user["id"], "pin": True}
     )
     assert session_b != session_a
     client.cookies.set("session", session_b)

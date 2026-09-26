@@ -1,6 +1,5 @@
 """MPIN routes: set, verify (with lock), reset via password, change."""
 import psycopg
-import pytest
 
 
 def _csrf(client):
@@ -113,8 +112,10 @@ def test_verify_works_again_once_the_lock_has_passed(app_client, make_user, db):
 def test_a_right_mpin_resets_the_counter(app_client, make_user, db):
     user = make_user()
     _half_login(app_client, user)
-    app_client.post("/api/mpin/verify", json={"mpin": "000000"}, headers=_csrf(app_client))
-    app_client.post("/api/mpin/verify", json={"mpin": "123456"}, headers=_csrf(app_client))
+    r = app_client.post("/api/mpin/verify", json={"mpin": "000000"}, headers=_csrf(app_client))
+    assert r.status_code == 401
+    r = app_client.post("/api/mpin/verify", json={"mpin": "123456"}, headers=_csrf(app_client))
+    assert r.status_code == 204
     with psycopg.connect(db, autocommit=True) as conn:
         (attempts,) = conn.execute(
             "SELECT mpin_failed_attempts FROM users WHERE id = %s", (user["id"],)).fetchone()
@@ -175,7 +176,6 @@ def test_reset_is_rate_limited_like_login(app_client, make_user):
 
 # ---------- change (signed in) ----------
 
-@pytest.mark.xfail(strict=True, reason="Task 4 enforces the gate")
 def test_change_refuses_a_half_session(app_client, make_user):
     user = make_user()
     _half_login(app_client, user)

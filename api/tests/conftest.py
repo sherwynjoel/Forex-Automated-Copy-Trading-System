@@ -407,11 +407,7 @@ def login_as():
         if mpin:
             r = client.post("/api/mpin/verify", json={"mpin": mpin},
                             headers={"X-CSRF-Token": client.cookies.get("csrf")})
-            # Task 4 removes the 409 leniency: registered test users get an
-            # MPIN from _register there, so verify always succeeds.
-            assert r.status_code == 204 or (
-                r.status_code == 409 and r.json().get("detail") == "MPIN not set"
-            ), f"mpin verify failed: {r.status_code} {r.text}"
+            assert r.status_code == 204, f"mpin verify failed: {r.status_code} {r.text}"
 
     return _login
 

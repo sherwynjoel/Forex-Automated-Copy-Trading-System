@@ -107,6 +107,8 @@ NEGATIVE_WAIT_S = 5.0
 REGISTER_RATE_LIMIT_RETRIES = 4
 REGISTER_RATE_LIMIT_BACKOFF_S = 20.0
 
+E2E_MPIN = "123456"
+
 
 # ---------- repo-root .env (git-ignored; see module docstring) ----------
 
@@ -314,6 +316,14 @@ def _register_owner(postgres_dsn: str, org_id: int, email: str, password: str,
     assert csrf_token, "register did not set a csrf cookie"
     # harmless on GET; required by CSRFMiddleware on POST/PUT/DELETE/PATCH
     client.headers["X-CSRF-Token"] = csrf_token
+
+    # Registration leaves a half session: nothing but the MPIN routes and a
+    # trimmed /api/me answer until the six-digit MPIN is set. Every e2e user
+    # uses the fixture MPIN.
+    set_resp = client.post("/api/mpin/set", json={"mpin": E2E_MPIN, "mpin_confirm": E2E_MPIN})
+    assert set_resp.status_code == 204, set_resp.text
+    # The full session re-issued the CSRF cookie; carry the new one.
+    client.headers["X-CSRF-Token"] = client.cookies.get("csrf")
 
     with psycopg.connect(postgres_dsn, autocommit=True) as conn:
         conn.execute(

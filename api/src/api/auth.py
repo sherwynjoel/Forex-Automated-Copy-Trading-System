@@ -146,6 +146,7 @@ def require_half_session(
         raise HTTPException(status_code=401, detail="Not authenticated")
     user_id, version, pin = unpacked
     if not session_version_matches(conn, user_id, version):
+        # Password changed, signed out everywhere, or the account is gone.
         raise HTTPException(status_code=401, detail="Session expired")
     return SessionInfo(user_id, version, pin)
 
@@ -155,8 +156,16 @@ def require_user(
     cfg: ApiConfig = Depends(ApiConfig.from_env),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> int:
-    """Dependency: the authenticated user's id from the session cookie."""
+    """Dependency: the authenticated user's id from the session cookie.
+
+    Email+password alone is a half session: it may set or verify the MPIN,
+    log out, and ask /api/me what it is -- nothing else. Every route that
+    depends on this (directly or through require_org_role) is therefore
+    behind the MPIN with no per-route edit.
+    """
     info = require_half_session(session, cfg, conn)
+    if not info.pin:
+        raise HTTPException(status_code=401, detail="MPIN required")
     return info.user_id
 
 
@@ -485,22 +494,29 @@ def create_auth_router(rate_limiter: LoginRateLimiter) -> APIRouter:
 
     @router.get("/me")
     async def me(
-        user_id: int = Depends(require_user),
+        info: SessionInfo = Depends(require_half_session),
         conn: psycopg.Connection = Depends(get_conn),
     ):
+        (mpin_set,) = conn.execute(
+            "SELECT mpin_hash IS NOT NULL FROM users WHERE id = %s", (info.user_id,)
+        ).fetchone() or (False,)
+        if not info.pin:
+            # A half session learns only what it must do next.
+            return {"mpin": {"pending": True, "set": bool(mpin_set)}}
         row = conn.execute(
-            "SELECT id, email, display_name FROM users WHERE id = %s", (user_id,)
+            "SELECT id, email, display_name FROM users WHERE id = %s", (info.user_id,)
         ).fetchone()
         if not row:
             raise HTTPException(status_code=401, detail="Not authenticated")
         orgs = conn.execute(
             """SELECT o.id, o.name, m.role FROM org_memberships m
                JOIN orgs o ON o.id = m.org_id WHERE m.user_id = %s ORDER BY o.id""",
-            (user_id,),
+            (info.user_id,),
         ).fetchall()
         return {
             "user": {"id": row[0], "email": row[1], "display_name": row[2]},
             "orgs": [{"id": o[0], "name": o[1], "role": o[2]} for o in orgs],
+            "mpin": {"pending": False, "set": True},
         }
 
     return router

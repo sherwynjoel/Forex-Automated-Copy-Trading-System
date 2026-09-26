@@ -88,7 +88,7 @@ def _check_mpin(conn: psycopg.Connection, user_id: int, mpin: str) -> Optional[R
     """One argon2 verify on every path. Returns None when the MPIN is right
     (and the counter has been reset), otherwise the error response to send:
     409 when no MPIN exists, 423 while locked, 401 with attempts_left."""
-    mpin_hash, attempts, locked_until = _lock_state(conn, user_id)
+    mpin_hash, _, locked_until = _lock_state(conn, user_id)
     now = datetime.now(timezone.utc)
     if mpin_hash is None:
         verify_password(_DUMMY_HASH, mpin)
@@ -100,14 +100,17 @@ def _check_mpin(conn: psycopg.Connection, user_id: int, mpin: str) -> Optional[R
         conn.execute("UPDATE users SET mpin_failed_attempts = 0, mpin_locked_until = NULL "
                      "WHERE id = %s", (user_id,))
         return None
-    attempts += 1
+    # Count the miss in the database so concurrent wrong tries each land;
+    # a read-modify-write here would let parallel guesses share one slot.
+    (attempts,) = conn.execute(
+        "UPDATE users SET mpin_failed_attempts = mpin_failed_attempts + 1 "
+        "WHERE id = %s RETURNING mpin_failed_attempts", (user_id,)).fetchone()
     if attempts >= MPIN_MAX_ATTEMPTS:
         until = now + timedelta(minutes=MPIN_LOCK_MINUTES)
         conn.execute("UPDATE users SET mpin_failed_attempts = 0, mpin_locked_until = %s "
                      "WHERE id = %s", (until, user_id))
         _audit(conn, user_id, "mpin_locked")
         return _locked_response(until)
-    conn.execute("UPDATE users SET mpin_failed_attempts = %s WHERE id = %s", (attempts, user_id))
     return JSONResponse(status_code=401,
                         content={"detail": "Invalid MPIN",
                                  "attempts_left": MPIN_MAX_ATTEMPTS - attempts})

@@ -1,12 +1,22 @@
 """Auth: register, login, sessions, /api/me, bootstrap."""
 
 
+def _pass_mpin(client, set_it=False):
+    hdr = {"X-CSRF-Token": client.cookies.get("csrf")}
+    if set_it:
+        r = client.post("/api/mpin/set", json={"mpin": "123456", "mpin_confirm": "123456"}, headers=hdr)
+    else:
+        r = client.post("/api/mpin/verify", json={"mpin": "123456"}, headers=hdr)
+    assert r.status_code == 204, r.text
+
+
 def test_register_sets_session_and_csrf_cookies(app_client):
     r = app_client.post("/api/register", json={
         "email": "ada@example.com", "password": "correct-horse", "display_name": "Ada"})
     assert r.status_code == 204
     assert "session" in app_client.cookies
     assert "csrf" in app_client.cookies
+    _pass_mpin(app_client, set_it=True)
     me = app_client.get("/api/me").json()
     assert me["user"]["email"] == "ada@example.com"
     assert me["user"]["display_name"] == "Ada"
@@ -33,6 +43,7 @@ def test_login_with_email_and_password(app_client, make_user):
     r = app_client.post("/api/login", json={
         "email": "carl@example.com", "password": "a-solid-password"})
     assert r.status_code == 204
+    _pass_mpin(app_client)
     assert app_client.get("/api/me").json()["user"]["id"] == user["id"]
 
 
@@ -109,6 +120,7 @@ def test_password_change_requires_the_current_password(app_client, make_user):
     make_user(email="rot@example.com", password="a-solid-password")
     app_client.post("/api/login", json={
         "email": "rot@example.com", "password": "a-solid-password"})
+    _pass_mpin(app_client)
 
     r = app_client.post("/api/me/password", json={
         "current_password": "not-the-password", "new_password": "another-good-one"},
@@ -123,6 +135,7 @@ def test_password_change_rotates_and_disowns_other_sessions(app_client, make_use
     make_user(email="rot2@example.com", password="a-solid-password")
     app_client.post("/api/login", json={
         "email": "rot2@example.com", "password": "a-solid-password"})
+    _pass_mpin(app_client)
     # A second device holding its own cookie for the same account.
     stolen = app_client.cookies.get("session")
 
@@ -149,6 +162,7 @@ def test_password_change_rejects_short_or_unchanged(app_client, make_user):
     make_user(email="rot3@example.com", password="a-solid-password")
     app_client.post("/api/login", json={
         "email": "rot3@example.com", "password": "a-solid-password"})
+    _pass_mpin(app_client)
 
     assert app_client.post("/api/me/password", json={
         "current_password": "a-solid-password", "new_password": "short"},
@@ -162,6 +176,7 @@ def test_logout_everywhere_kills_the_calling_session_too(app_client, make_user):
     make_user(email="rot4@example.com", password="a-solid-password")
     app_client.post("/api/login", json={
         "email": "rot4@example.com", "password": "a-solid-password"})
+    _pass_mpin(app_client)
     held = app_client.cookies.get("session")
 
     assert app_client.post(
@@ -211,6 +226,7 @@ def test_an_invite_token_authorizes_signup_while_registration_is_closed(
         "email": "colleague@example.com", "password": "long-enough-pw",
         "display_name": "C", "invite_token": token})
     assert r.status_code == 204, r.text
+    _pass_mpin(app_client, set_it=True)
     assert app_client.get("/api/me").json()["user"]["email"] == "colleague@example.com"
 
 
@@ -289,3 +305,34 @@ def test_a_cookie_without_the_pin_field_reads_as_half(app_client):
     from itsdangerous import URLSafeTimedSerializer
     old = URLSafeTimedSerializer("test-secret", salt="session").dumps({"user_id": 7, "sv": 2})
     assert _unpack_session(old, ApiConfig.from_env()) == (7, 2, False)
+
+
+def test_a_half_session_is_refused_with_mpin_required(app_client, make_user):
+    user = make_user()
+    app_client.post("/api/login", json={"email": user["email"], "password": user["password"]})
+    r = app_client.get("/api/orgs/1")
+    assert r.status_code == 401 and r.json()["detail"] == "MPIN required"
+    me = app_client.get("/api/me")
+    assert me.status_code == 200
+    assert me.json() == {"mpin": {"pending": True, "set": True}}
+
+
+def test_me_reports_set_false_for_a_user_without_an_mpin(app_client, make_user):
+    user = make_user(mpin=None)
+    app_client.post("/api/login", json={"email": user["email"], "password": user["password"]})
+    assert app_client.get("/api/me").json() == {"mpin": {"pending": True, "set": False}}
+
+
+def test_a_full_session_reports_mpin_not_pending(app_client, make_user, login_as):
+    user = make_user()
+    login_as(app_client, user)
+    me = app_client.get("/api/me").json()
+    assert me["user"]["id"] == user["id"]
+    assert me["mpin"] == {"pending": False, "set": True}
+
+
+def test_logout_works_from_a_half_session(app_client, make_user):
+    user = make_user()
+    app_client.post("/api/login", json={"email": user["email"], "password": user["password"]})
+    r = app_client.post("/api/logout", headers={"X-CSRF-Token": app_client.cookies.get("csrf")})
+    assert r.status_code == 204

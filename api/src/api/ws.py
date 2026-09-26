@@ -348,7 +348,10 @@ def create_ws_router() -> APIRouter:
         if identity is None:
             await ws.close(code=4401, reason="Unauthorized")
             return
-        user_id, session_ver, _pin_verified = identity
+        user_id, session_ver, pin_verified = identity
+        if not pin_verified:
+            await ws.close(code=4401, reason="Unauthorized")
+            return
 
         raw_org = ws.query_params.get("org_id")
         try:
