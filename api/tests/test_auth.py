@@ -261,3 +261,31 @@ def test_a_real_source_address_is_still_rate_limited(app_client, make_user):
     assert not any(
         limiter.is_limited(f"login-ip:{ip}", max_attempts=20) for _ in range(20))
     assert limiter.is_limited(f"login-ip:{ip}", max_attempts=20)
+
+
+def _cookie_payload(client):
+    from itsdangerous import URLSafeTimedSerializer
+    return URLSafeTimedSerializer("test-secret", salt="session").loads(client.cookies["session"])
+
+
+def test_login_issues_a_half_session(app_client, make_user):
+    make_user(email="half@example.com", password="a-solid-password")
+    r = app_client.post("/api/login", json={
+        "email": "half@example.com", "password": "a-solid-password"})
+    assert r.status_code == 204
+    assert _cookie_payload(app_client)["pin"] is False
+
+
+def test_register_issues_a_half_session(app_client):
+    r = app_client.post("/api/register", json={
+        "email": "new@example.com", "password": "correct-horse", "display_name": "N"})
+    assert r.status_code == 204
+    assert _cookie_payload(app_client)["pin"] is False
+
+
+def test_a_cookie_without_the_pin_field_reads_as_half(app_client):
+    from api.auth import _unpack_session
+    from api.config import ApiConfig
+    from itsdangerous import URLSafeTimedSerializer
+    old = URLSafeTimedSerializer("test-secret", salt="session").dumps({"user_id": 7, "sv": 2})
+    assert _unpack_session(old, ApiConfig.from_env()) == (7, 2, False)

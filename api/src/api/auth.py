@@ -19,6 +19,8 @@ from starlette.responses import JSONResponse
 from .config import ApiConfig
 from .db import get_conn
 
+from dataclasses import dataclass
+
 # Password hashing
 logger = logging.getLogger(__name__)
 
@@ -92,10 +94,11 @@ def ensure_bootstrap_user(dsn: str, email: str, password: str) -> None:
             )
 
 
-def _unpack_session(session: str, cfg: ApiConfig) -> Optional[tuple[int, int]]:
-    """(user_id, session_version) from a signed cookie, or None if the
+def _unpack_session(session: str, cfg: ApiConfig) -> Optional[tuple[int, int, bool]]:
+    """(user_id, session_version, pin) from a signed cookie, or None if the
     signature is bad or it has aged out. Cookies issued before the version
-    existed read as version 0, which matches the column default."""
+    existed read as version 0; cookies issued before the MPIN existed read
+    as pin=False, so every session re-verifies once after that deploy."""
     serializer = get_session_serializer(cfg)
     try:
         data = serializer.loads(session, max_age=SESSION_MAX_AGE_S)
@@ -105,7 +108,8 @@ def _unpack_session(session: str, cfg: ApiConfig) -> Optional[tuple[int, int]]:
     if not isinstance(user_id, int):
         return None
     version = data.get("sv")
-    return user_id, version if isinstance(version, int) else 0
+    pin = data.get("pin")
+    return user_id, (version if isinstance(version, int) else 0), pin is True
 
 
 def session_version_matches(conn, user_id: int, version: int) -> bool:
@@ -120,26 +124,44 @@ def session_version_matches(conn, user_id: int, version: int) -> bool:
     return row is not None and row[0] == version
 
 
+@dataclass(frozen=True)
+class SessionInfo:
+    user_id: int
+    session_version: int
+    pin: bool
+
+
+def require_half_session(
+    session: Optional[str] = Cookie(None),
+    cfg: ApiConfig = Depends(ApiConfig.from_env),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> SessionInfo:
+    """Dependency for the few routes a user may reach BEFORE the MPIN gate:
+    the MPIN routes themselves, logout, and the trimmed /api/me. Everything
+    else goes through require_user, which insists on pin=True."""
+    if not session:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    unpacked = _unpack_session(session, cfg)
+    if unpacked is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    user_id, version, pin = unpacked
+    if not session_version_matches(conn, user_id, version):
+        raise HTTPException(status_code=401, detail="Session expired")
+    return SessionInfo(user_id, version, pin)
+
+
 def require_user(
     session: Optional[str] = Cookie(None),
     cfg: ApiConfig = Depends(ApiConfig.from_env),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> int:
     """Dependency: the authenticated user's id from the session cookie."""
-    if not session:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    unpacked = _unpack_session(session, cfg)
-    if unpacked is None:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    user_id, version = unpacked
-    if not session_version_matches(conn, user_id, version):
-        # Password changed, signed out everywhere, or the account is gone.
-        raise HTTPException(status_code=401, detail="Session expired")
-    return user_id
+    info = require_half_session(session, cfg, conn)
+    return info.user_id
 
 
-def session_identity(session: str, cfg: ApiConfig) -> Optional[tuple[int, int]]:
-    """(user_id, session_version) for callers outside Depends (the
+def session_identity(session: str, cfg: ApiConfig) -> Optional[tuple[int, int, bool]]:
+    """(user_id, session_version, pin) for callers outside Depends (the
     WebSocket), which must check the version against the database
     themselves -- they already hold a connection for the membership read."""
     return _unpack_session(session, cfg)
@@ -266,16 +288,19 @@ def _invite_is_open(conn, token: Optional[str]) -> bool:
     return row is not None
 
 
-def _issue_session(response, cfg: ApiConfig, user_id: int, session_version: int = 0):
+def _issue_session(response, cfg: ApiConfig, user_id: int, session_version: int = 0,
+                   *, pin: bool):
     """Set a fresh session + CSRF cookie pair (login-time re-issue prevents
     session fixation).
 
     The user's session_version is baked into the cookie so the server can
     disown it later: bumping the column invalidates every cookie already
-    issued for that user (see require_user).
+    issued for that user (see require_user). `pin` records whether the MPIN
+    gate has been passed: login and register issue pin=False (a half
+    session), the MPIN routes re-issue pin=True.
     """
     serializer = URLSafeTimedSerializer(cfg.session_secret, salt="session")
-    session_cookie = serializer.dumps({"user_id": user_id, "sv": session_version})
+    session_cookie = serializer.dumps({"user_id": user_id, "sv": session_version, "pin": pin})
     csrf_token = secrets.token_urlsafe(32)
     response.set_cookie("session", session_cookie, httponly=True, samesite="lax",
                         secure=cfg.cookie_secure, max_age=SESSION_MAX_AGE_S)
@@ -341,7 +366,7 @@ def create_auth_router(rate_limiter: LoginRateLimiter) -> APIRouter:
             raise HTTPException(status_code=409, detail="Email already registered")
 
         response = Response(status_code=204)
-        _issue_session(response, cfg, user_id)
+        _issue_session(response, cfg, user_id, pin=False)
         return response
 
     @router.post("/login")
@@ -380,7 +405,7 @@ def create_auth_router(rate_limiter: LoginRateLimiter) -> APIRouter:
             raise HTTPException(status_code=401, detail="Invalid email or password")
 
         response = Response(status_code=204)
-        _issue_session(response, cfg, row[0], row[2])
+        _issue_session(response, cfg, row[0], row[2], pin=False)
         return response
 
     @router.post("/logout")
@@ -436,7 +461,7 @@ def create_auth_router(rate_limiter: LoginRateLimiter) -> APIRouter:
         await broadcaster.close_for_user(user_id)
 
         response = Response(status_code=204)
-        _issue_session(response, cfg, user_id, new_version)
+        _issue_session(response, cfg, user_id, new_version, pin=True)
         return response
 
     @router.post("/me/logout-all")
