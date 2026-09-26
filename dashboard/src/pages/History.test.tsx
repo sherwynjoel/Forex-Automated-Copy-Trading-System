@@ -463,6 +463,23 @@ test('closing the drill drawer returns focus to the position that opened it', as
   expect(opener).toHaveFocus()
 })
 
+test('Escape on a drill opened from the fleet view also closes it and returns focus there', async () => {
+  // The shared Drawer's keyboard contract must hold for every call site that
+  // opens it, not just the per-account tab -- the fleet view opens the same
+  // drawer via a different button (and a different account argument).
+  mockRoutes()
+  renderHistory()
+  await screen.findAllByText('+20.00')
+  await userEvent.click(screen.getByRole('tab', { name: /all accounts/i }))
+
+  const opener = await screen.findByRole('button', { name: /view master position 21/i })
+  await userEvent.click(opener)
+  expect(await screen.findByRole('dialog')).toBeInTheDocument()
+  await userEvent.keyboard('{Escape}')
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  expect(opener).toHaveFocus()
+})
+
 const slaveDeals = {
   deals: [
     {

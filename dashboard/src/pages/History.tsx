@@ -6,6 +6,7 @@ import { money, signed, formatWhen, errorText } from '../lib/format'
 import { accountWho } from '../lib/platform'
 import Banner from '../components/Banner'
 import Button from '../components/Button'
+import Drawer from '../components/Drawer'
 import Input from '../components/Input'
 import Select from '../components/Select'
 import Badge from '../components/Badge'
@@ -161,9 +162,6 @@ export default function History() {
   const [fleetProgress, setFleetProgress] = useState<{ done: number; total: number } | null>(null)
   const seqRef = useRef(0)
   const drillSeqRef = useRef(0)
-  const drillCloseRef = useRef<HTMLButtonElement>(null)
-  const drawerRef = useRef<HTMLElement>(null)
-  const drillOpenerRef = useRef<HTMLElement | null>(null)
 
   const windowMs = windowDays * DAY_MS
 
@@ -420,7 +418,6 @@ export default function History() {
 
   const openDrill = async (positionId: number, forAccountId?: number) => {
     const account = forAccountId ?? accountId
-    drillOpenerRef.current = document.activeElement as HTMLElement | null
     setDrillPosition(positionId)
     setDrillDeals(null)
     setDrillError(null)
@@ -438,44 +435,6 @@ export default function History() {
       setDrillDeals([])
     }
   }
-
-  // Drawer keyboard contract: Escape closes, Tab is trapped inside, focus
-  // starts on the close button and returns to the opener afterwards.
-  useEffect(() => {
-    if (drillPosition == null) return
-    drillCloseRef.current?.focus()
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        setDrillPosition(null)
-        return
-      }
-      if (e.key !== 'Tab') return
-      const panel = drawerRef.current
-      if (!panel) return
-      const focusables = Array.from(
-        panel.querySelectorAll<HTMLElement>('button, input, [href]')
-      ).filter((el) => !el.hasAttribute('disabled'))
-      if (focusables.length === 0) return
-      const first = focusables[0]
-      const last = focusables[focusables.length - 1]
-      const active = document.activeElement
-      if (!panel.contains(active)) {
-        e.preventDefault()
-        first.focus()
-      } else if (e.shiftKey && active === first) {
-        e.preventDefault()
-        last.focus()
-      } else if (!e.shiftKey && active === last) {
-        e.preventDefault()
-        first.focus()
-      }
-    }
-    document.addEventListener('keydown', onKey, true)
-    return () => {
-      document.removeEventListener('keydown', onKey, true)
-      drillOpenerRef.current?.focus?.()
-    }
-  }, [drillPosition])
 
   const currentYear = new Date().getFullYear()
   const showYear = new Date(from).getFullYear() !== currentYear
@@ -699,89 +658,66 @@ export default function History() {
       )}
 
       {/* Position drill-down drawer */}
-      {drillPosition != null && (
-        <div
-          className="fixed inset-0 z-40 flex justify-end bg-black/60"
-          onClick={() => setDrillPosition(null)}
-        >
-          <aside
-            ref={drawerRef}
-            className="w-full max-w-lg h-full bg-card border-l border-line overflow-y-auto"
-            onClick={(e) => e.stopPropagation()}
-            role="dialog"
-            aria-modal="true"
-            aria-label={`Deals for position ${drillPosition}`}
-          >
-            <div className="px-6 py-5 border-b border-line flex items-start justify-between">
-              <div>
-                <h2 className="font-display text-xl text-ink">Position {drillPosition}</h2>
-                <p className="text-sm text-ink-soft mt-0.5">
-                  Every fill, partial close, and close of this position.
-                </p>
-              </div>
-              <button
-                ref={drillCloseRef}
-                onClick={() => setDrillPosition(null)}
-                aria-label="Close position details"
-                className="text-ink-soft hover:text-ink text-xl leading-none"
-              >
-                ×
-              </button>
-            </div>
-            {drillError != null ? (
-              <p className="px-6 py-4 text-sm text-loss-deep">
-                Could not fetch this position's deals: {drillError}
-              </p>
-            ) : drillDeals == null ? (
-              <p className="px-6 py-4 text-sm text-ink-soft">Fetching from the broker…</p>
-            ) : drillDeals.length === 0 ? (
-              <p className="px-6 py-4 text-sm text-ink-soft">
-                The broker returned no deals for this position.
-              </p>
-            ) : (
-              <table className="stack-table w-full text-sm">
-                <thead>
-                  <tr className="text-left border-b border-line">
-                    <th className="desk-label px-6 py-2 font-semibold">When</th>
-                    <th className="desk-label px-3 py-2 font-semibold">Side</th>
-                    <th className="desk-label px-3 py-2 font-semibold text-right">Lots</th>
-                    <th className="desk-label px-3 py-2 font-semibold text-right">Price</th>
-                    <th className="desk-label px-6 py-2 font-semibold text-right">P&L</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {drillDeals.map((deal) => (
-                    <tr key={deal.deal_id} className="border-b border-line last:border-0">
-                      <td data-label="When" className="num px-6 py-2.5 text-ink-soft whitespace-nowrap">
-                        {formatWhen(deal.execution_timestamp)}
-                      </td>
-                      <td data-label="Side" className={`px-3 py-2.5 font-medium ${deal.side === 'BUY' ? 'text-profit' : 'text-loss'}`}>
-                        {deal.side}
-                        <span className="text-xs text-ink-faint ml-1">
-                          {deal.close ? 'close' : 'open'}
-                        </span>
-                      </td>
-                      <td data-label="Lots" className="num px-3 py-2.5 text-right">
-                        {deal.volume_lots ?? deal.filled_volume}
-                      </td>
-                      <td data-label="Price" className="num px-3 py-2.5 text-right">
-                        {price(deal.execution_price, digitsFor(deal.symbol))}
-                      </td>
-                      <td data-label="P&L" className={`num px-6 py-2.5 text-right ${
-                        deal.close
-                          ? deal.close.gross_profit < 0 ? 'text-loss' : 'text-profit'
-                          : 'text-ink-faint'
-                      }`}>
-                        {deal.close ? signed(deal.close.gross_profit) : '—'}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </aside>
-        </div>
-      )}
+      <Drawer
+        open={drillPosition != null}
+        title={`Position ${drillPosition}`}
+        onClose={() => setDrillPosition(null)}
+      >
+        <p className="text-sm text-ink-soft mb-4">
+          Every fill, partial close, and close of this position.
+        </p>
+        {drillError != null ? (
+          <p className="text-sm text-loss-deep">
+            Could not fetch this position's deals: {drillError}
+          </p>
+        ) : drillDeals == null ? (
+          <p className="text-sm text-ink-soft">Fetching from the broker…</p>
+        ) : drillDeals.length === 0 ? (
+          <p className="text-sm text-ink-soft">
+            The broker returned no deals for this position.
+          </p>
+        ) : (
+          <table className="stack-table w-full text-sm">
+            <thead>
+              <tr className="text-left border-b border-line">
+                <th className="desk-label py-2 font-semibold">When</th>
+                <th className="desk-label px-3 py-2 font-semibold">Side</th>
+                <th className="desk-label px-3 py-2 font-semibold text-right">Lots</th>
+                <th className="desk-label px-3 py-2 font-semibold text-right">Price</th>
+                <th className="desk-label py-2 font-semibold text-right">P&L</th>
+              </tr>
+            </thead>
+            <tbody>
+              {drillDeals.map((deal) => (
+                <tr key={deal.deal_id} className="border-b border-line last:border-0">
+                  <td data-label="When" className="num py-2.5 text-ink-soft whitespace-nowrap">
+                    {formatWhen(deal.execution_timestamp)}
+                  </td>
+                  <td data-label="Side" className={`px-3 py-2.5 font-medium ${deal.side === 'BUY' ? 'text-profit' : 'text-loss'}`}>
+                    {deal.side}
+                    <span className="text-xs text-ink-faint ml-1">
+                      {deal.close ? 'close' : 'open'}
+                    </span>
+                  </td>
+                  <td data-label="Lots" className="num px-3 py-2.5 text-right">
+                    {deal.volume_lots ?? deal.filled_volume}
+                  </td>
+                  <td data-label="Price" className="num px-3 py-2.5 text-right">
+                    {price(deal.execution_price, digitsFor(deal.symbol))}
+                  </td>
+                  <td data-label="P&L" className={`num py-2.5 text-right ${
+                    deal.close
+                      ? deal.close.gross_profit < 0 ? 'text-loss' : 'text-profit'
+                      : 'text-ink-faint'
+                  }`}>
+                    {deal.close ? signed(deal.close.gross_profit) : '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Drawer>
     </div>
   )
 }
