@@ -254,6 +254,26 @@ test('placing a market order POSTs /api/orgs/1/orders in one click, no dialog', 
   expect(await screen.findByRole('status')).toHaveTextContent(/order sent/i)
 })
 
+test('the Buy/Sell toggle carries its selected state as aria-pressed, not colour alone', async () => {
+  setRole('admin')
+  mockRoutes()
+  renderTrade()
+
+  await waitFor(() => {
+    expect((screen.getByLabelText(/symbol/i) as HTMLInputElement).value).toBe('EURUSD')
+  })
+
+  const buyButton = screen.getByRole('button', { name: /^buy/i })
+  const sellButton = screen.getByRole('button', { name: /^sell/i })
+  expect(buyButton).toHaveAttribute('aria-pressed', 'true')
+  expect(sellButton).toHaveAttribute('aria-pressed', 'false')
+
+  await userEvent.click(sellButton)
+
+  expect(sellButton).toHaveAttribute('aria-pressed', 'true')
+  expect(buyButton).toHaveAttribute('aria-pressed', 'false')
+})
+
 test('limit order includes the limit price', async () => {
   setRole('admin')
   const fetchMock = mockRoutes()

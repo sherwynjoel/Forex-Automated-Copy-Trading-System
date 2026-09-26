@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi, afterEach, beforeEach } from 'vitest'
@@ -211,6 +211,41 @@ test('can delete a risk rule', async () => {
   await userEvent.click(screen.getByRole('button', { name: /remove xauusd/i }))
 
   await waitFor(() => expect(screen.queryByText('XAUUSD')).not.toBeInTheDocument())
+})
+
+test('enabling automation opens a confirmation and cancel sends no request', async () => {
+  const fetchMock = mockRoutes({ 'GET /webhook': () => jsonResponse({ ...webhook, enabled: false }) })
+  render(<MemoryRouter><Automation /></MemoryRouter>)
+
+  expect(await screen.findByText(/automation is off/i)).toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: /turn on/i }))
+
+  const dialog = await screen.findByRole('dialog')
+  expect(within(dialog).getByText(/enable tradingview automation/i)).toBeInTheDocument()
+
+  const before = webhookCalls(fetchMock)
+  await userEvent.click(within(dialog).getByRole('button', { name: /^cancel$/i }))
+
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  expect(webhookCalls(fetchMock)).toBe(before)
+  expect(screen.getByText(/automation is off/i)).toBeInTheDocument()
+})
+
+test('confirming turns automation on and PUTs enabled: true', async () => {
+  const fetchMock = mockRoutes({ 'GET /webhook': () => jsonResponse({ ...webhook, enabled: false }) })
+  render(<MemoryRouter><Automation /></MemoryRouter>)
+
+  await userEvent.click(await screen.findByRole('button', { name: /turn on/i }))
+  const dialog = await screen.findByRole('dialog')
+  await userEvent.click(within(dialog).getByRole('button', { name: /enable automation/i }))
+
+  await waitFor(() => {
+    const call = fetchMock.mock.calls.find(([u, init]) =>
+      String(u).includes('/webhook') && (init as RequestInit)?.method === 'PUT')
+    expect(call).toBeTruthy()
+    const body = JSON.parse((call![1] as RequestInit).body as string)
+    expect(body).toMatchObject({ enabled: true })
+  })
 })
 
 test('a rejected risk rule save shows the server error instead of doing nothing', async () => {

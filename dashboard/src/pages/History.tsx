@@ -5,6 +5,10 @@ import type { Account, CashFlowEntry, Deal, HistoricalOrder, TradeSymbol } from 
 import { money, signed, formatWhen, errorText } from '../lib/format'
 import { accountWho } from '../lib/platform'
 import Banner from '../components/Banner'
+import Button from '../components/Button'
+import Input from '../components/Input'
+import Select from '../components/Select'
+import Badge from '../components/Badge'
 
 const DAY_MS = 24 * 3600 * 1000
 
@@ -535,18 +539,18 @@ export default function History() {
         {tab !== 'bymaster' && (
           <div>
             <label htmlFor="history-account" className="desk-label block mb-1">Account</label>
-            <select
+            <Select
               id="history-account"
               value={accountId ?? ''}
               onChange={(e) => { setAccountId(Number(e.target.value)); setJumpDate('') }}
-              className="rounded border border-line-strong px-3 py-2 text-sm bg-card min-w-64"
+              className="min-w-64"
             >
               {accounts.map((a) => (
                 <option key={a.ctid_trader_account_id} value={a.ctid_trader_account_id}>
                   {accountLabel(a)}
                 </option>
               ))}
-            </select>
+            </Select>
           </div>
         )}
         <div className="flex items-center gap-2 flex-wrap">
@@ -566,40 +570,39 @@ export default function History() {
               </button>
             ))}
           </div>
-          <button
+          <Button
+            variant="secondary"
             onClick={goEarlier}
-            className="px-3 py-2 text-sm rounded border border-line-strong text-ink-soft hover:text-ink transition-colors"
           >
             ← Earlier
-          </button>
+          </Button>
           <span className="num text-sm text-ink-soft min-w-44 text-center">
             {rangeDate(from)}{' – '}{rangeDate(windowEnd)}
           </span>
-          <button
+          <Button
+            variant="secondary"
             onClick={goLater}
             disabled={atNow}
-            className="px-3 py-2 text-sm rounded border border-line-strong text-ink-soft hover:text-ink transition-colors disabled:opacity-40"
           >
             Later →
-          </button>
+          </Button>
         </div>
         <div>
           <label htmlFor="history-jump" className="desk-label block mb-1">Jump to date</label>
-          <input
+          <Input
             id="history-jump"
             type="date"
             value={jumpDate}
             onChange={(e) => jumpToDate(e.target.value)}
-            className="rounded border border-line-strong px-3 py-2 text-sm bg-card"
           />
         </div>
         <div className="flex items-center gap-2">
-          <button
+          <Button
+            variant="secondary"
             onClick={refresh}
-            className="px-3 py-2 text-sm rounded border border-line-strong text-ink-soft hover:text-ink transition-colors"
           >
             Refresh
-          </button>
+          </Button>
           {fetchedAt != null && (
             <span className="num text-xs text-ink-faint">
               as of {new Date(fetchedAt).toLocaleTimeString('en-GB')}
@@ -619,12 +622,9 @@ export default function History() {
         <div className="space-y-3">
           <Banner kind="error">{error}</Banner>
           <div className="flex items-center gap-3 flex-wrap">
-            <button
-              onClick={retry}
-              className="px-4 py-2 text-sm font-semibold rounded bg-brand text-on-accent hover:bg-brand-deep transition-colors"
-            >
+            <Button onClick={retry}>
               Retry
-            </button>
+            </Button>
             <p className="text-xs text-ink-soft">
               If this keeps happening, the account's cTrader connection may
               need re-authorizing on the Accounts page.
@@ -814,12 +814,9 @@ function MasterGroupsView({
     )
   }
   const retryButton = (
-    <button
-      onClick={onRetryFleet}
-      className="px-4 py-2 text-sm font-semibold rounded bg-brand text-on-accent hover:bg-brand-deep transition-colors"
-    >
+    <Button onClick={onRetryFleet}>
       Retry fleet
-    </button>
+    </Button>
   )
   if (!masterLoaded) {
     // Without the master's rows there is nothing to group under: say so —
@@ -989,11 +986,7 @@ function CashFlowTable({ entries, windowNoun }: { entries: CashFlowEntry[]; wind
                   {formatWhen(entry.timestamp)}
                 </td>
                 <td data-label="Type" className="px-3 py-2.5">
-                  <span className={`text-xs font-medium px-2 py-0.5 rounded ${
-                    isDeposit ? 'bg-profit-wash text-profit-deep' : 'bg-loss-wash text-loss-deep'
-                  }`}>
-                    {entry.type}
-                  </span>
+                  <Badge tone={isDeposit ? 'profit' : 'loss'}>{entry.type}</Badge>
                 </td>
                 <td data-label="Amount" className={`num px-3 py-2.5 text-right font-medium ${
                   isDeposit ? 'text-profit' : 'text-loss'
@@ -1238,17 +1231,13 @@ function OrdersTable({ orders, digitsFor, windowNoun }: {
                   {price(order.stop_loss, digits)} / {price(order.take_profit, digits)}
                 </td>
                 <td data-label="Status" className="px-3 py-2.5">
-                  <span
-                    className={`text-xs font-medium px-2 py-0.5 rounded ${
-                      order.status === 'FILLED'
-                        ? 'bg-profit-wash text-profit-deep'
-                        : order.status === 'REJECTED' || order.status === 'CANCELLED'
-                          ? 'bg-loss-wash text-loss-deep'
-                          : 'bg-line text-ink'
-                    }`}
-                  >
+                  <Badge tone={
+                    order.status === 'FILLED' ? 'profit'
+                    : order.status === 'REJECTED' || order.status === 'CANCELLED' ? 'loss'
+                    : 'neutral'
+                  }>
                     {order.status}
-                  </span>
+                  </Badge>
                 </td>
                 <td data-label="Label" className="px-5 py-2.5 text-ink-soft">{order.label || '—'}</td>
               </tr>

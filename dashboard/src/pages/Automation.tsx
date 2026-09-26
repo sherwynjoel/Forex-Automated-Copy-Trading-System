@@ -5,6 +5,9 @@ import { useOrg } from '../lib/org'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
 import Banner from '../components/Banner'
 import ConfirmDialog from '../components/ConfirmDialog'
+import Button from '../components/Button'
+import Input from '../components/Input'
+import Badge, { type BadgeTone } from '../components/Badge'
 import type { WebhookReceipt, WebhookSettings, WebhookSecret, RiskRule } from '../lib/types'
 
 const POLL_MS = 5000
@@ -33,6 +36,7 @@ export default function Automation() {
   const [copied, setCopied] = useState<'url' | 'template' | null>(null)
   const [templateKind, setTemplateKind] = useState<'indicator' | 'strategy'>('indicator')
   const [confirmRotate, setConfirmRotate] = useState(false)
+  const [confirmEnable, setConfirmEnable] = useState(false)
   const [draft, setDraft] = useState({ max_lots: '', max_per_minute: '', max_open_positions: '' })
   const [tfDraft, setTfDraft] = useState<string[] | null>(null)
   const [riskRules, setRiskRules] = useState<RiskRule[]>([])
@@ -88,12 +92,16 @@ export default function Automation() {
 
   const toggleEnabled = async () => {
     if (!settings) return
-    const next = !settings.enabled
-    if (next && !window.confirm(
-      'Turn automation ON? From now on a valid TradingView alert will place a real order on the master, and every follower will copy it.')) {
+    if (!settings.enabled) {
+      setConfirmEnable(true)
       return
     }
-    await put({ enabled: next }, next ? 'Automation is ON.' : 'Automation is OFF.')
+    await put({ enabled: false }, 'Automation is OFF.')
+  }
+
+  const confirmEnableAutomation = async () => {
+    setConfirmEnable(false)
+    await put({ enabled: true }, 'Automation is ON.')
   }
 
   const rotate = async () => {
@@ -228,25 +236,25 @@ export default function Automation() {
               {settings.enabled ? 'Automation is ON' : 'Automation is OFF'}
             </span>
             {settings.enabled && !settings.copying_enabled && (
-              <span className="desk-label text-loss-deep bg-loss-wash px-2 py-0.5 rounded">
+              <Badge tone="loss">
                 copying is stopped — alerts are refused
-              </span>
+              </Badge>
             )}
             {settings.enabled && settings.dry_run && (
-              <span className="desk-label text-warn-deep bg-warn-wash px-2 py-0.5 rounded">
+              <Badge tone="warn">
                 dry run — alerts are refused
-              </span>
+              </Badge>
             )}
           </div>
           {control && (
-            <button
+            <Button
               onClick={toggleEnabled}
-              disabled={busy || (!settings.enabled && !ready)}
-              className={`px-4 py-2 text-sm font-semibold rounded text-on-accent disabled:opacity-50 ${
-                settings.enabled ? 'bg-loss hover:bg-loss-deep' : 'bg-profit hover:bg-profit-deep'}`}
+              disabled={!settings.enabled && !ready}
+              busy={busy}
+              tone={settings.enabled ? 'loss' : 'profit'}
             >
               {settings.enabled ? 'TURN OFF' : 'TURN ON'}
-            </button>
+            </Button>
           )}
         </div>
         {!settings.enabled && blockers.length > 0 && (
@@ -265,10 +273,9 @@ export default function Automation() {
               <code className="block text-xs break-all bg-paper border border-line rounded px-3 py-2 text-ink">
                 {settings.url}
               </code>
-              <button onClick={() => copy(settings.url!, 'url')}
-                      className="text-sm font-semibold text-brand hover:underline">
+              <Button variant="ghost" tone="brand" onClick={() => copy(settings.url!, 'url')}>
                 {copied === 'url' ? 'Copied' : 'Copy URL'}
-              </button>
+              </Button>
               <p className="text-xs text-ink-faint">
                 The URL is an address, not a password. It is safe in TradingView's dialog.
               </p>
@@ -292,11 +299,14 @@ export default function Automation() {
             <p className="text-sm text-ink-soft">No secret yet. TradingView cannot sign requests, so this is the only thing that proves an alert is yours.</p>
           )}
           {control && (
-            <button onClick={() => settings.has_secret ? setConfirmRotate(true) : rotate()}
-                    disabled={busy}
-                    className="px-3 py-1.5 text-sm font-semibold rounded border border-brand text-brand hover:bg-brand hover:text-on-accent disabled:opacity-50">
+            <Button
+              variant="secondary"
+              tone="brand"
+              onClick={() => settings.has_secret ? setConfirmRotate(true) : rotate()}
+              disabled={busy}
+            >
               {settings.has_secret ? 'Generate new secret' : 'Generate secret'}
-            </button>
+            </Button>
           )}
         </div>
       </section>
@@ -313,31 +323,27 @@ export default function Automation() {
         <div className="grid gap-4 sm:grid-cols-3">
           <label className="block">
             <span className="desk-label block mb-1">Max lots per alert</span>
-            <input type="number" step="0.01" min="0.01" max="50" value={draft.max_lots}
+            <Input type="number" step="0.01" min="0.01" max="50" value={draft.max_lots} num
                    disabled={!control}
-                   onChange={(e) => setDraft({ ...draft, max_lots: e.target.value })}
-                   className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink" />
+                   onChange={(e) => setDraft({ ...draft, max_lots: e.target.value })} />
           </label>
           <label className="block">
             <span className="desk-label block mb-1">Alerts per minute</span>
-            <input type="number" step="1" min="1" max="60" value={draft.max_per_minute}
+            <Input type="number" step="1" min="1" max="60" value={draft.max_per_minute} num
                    disabled={!control}
-                   onChange={(e) => setDraft({ ...draft, max_per_minute: e.target.value })}
-                   className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink" />
+                   onChange={(e) => setDraft({ ...draft, max_per_minute: e.target.value })} />
           </label>
           <label className="block">
             <span className="desk-label block mb-1">Max open positions</span>
-            <input type="number" step="1" min="1" max="50" value={draft.max_open_positions}
+            <Input type="number" step="1" min="1" max="50" value={draft.max_open_positions} num
                    disabled={!control}
-                   onChange={(e) => setDraft({ ...draft, max_open_positions: e.target.value })}
-                   className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink" />
+                   onChange={(e) => setDraft({ ...draft, max_open_positions: e.target.value })} />
           </label>
         </div>
         {control && (
-          <button onClick={saveLimits} disabled={busy}
-                  className="px-4 py-2 text-sm font-semibold rounded bg-brand text-on-accent hover:bg-brand-deep disabled:opacity-50">
+          <Button onClick={saveLimits} disabled={busy}>
             Save limits
-          </button>
+          </Button>
         )}
       </section>
 
@@ -367,12 +373,16 @@ export default function Automation() {
                 <td>{rule.trailing_enabled ? 'On' : 'Off'}</td>
                 <td>
                   {control && (
-                    <button aria-label={`remove ${rule.symbol.toLowerCase()}`}
-                            onClick={() => removeRiskRule(rule.symbol)}
-                            disabled={busy}
-                            className="px-2.5 py-1 text-xs font-medium rounded border border-line-strong text-ink-soft hover:text-loss hover:border-loss transition-colors disabled:opacity-50">
+                    <Button
+                      variant="secondary"
+                      tone="loss"
+                      size="sm"
+                      aria-label={`remove ${rule.symbol.toLowerCase()}`}
+                      onClick={() => removeRiskRule(rule.symbol)}
+                      disabled={busy}
+                    >
                       Remove
-                    </button>
+                    </Button>
                   )}
                 </td>
               </tr>
@@ -382,24 +392,21 @@ export default function Automation() {
         <div className="flex gap-2 items-end flex-wrap">
           <label className="block w-28">
             <span className="desk-label block mb-1">Symbol</span>
-            <input aria-label="symbol" value={newRule.symbol}
+            <Input aria-label="symbol" value={newRule.symbol} num
                    disabled={!control}
-                   onChange={e => setNewRule({ ...newRule, symbol: e.target.value })}
-                   className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink" />
+                   onChange={e => setNewRule({ ...newRule, symbol: e.target.value })} />
           </label>
           <label className="block w-28">
             <span className="desk-label block mb-1">Stop (points)</span>
-            <input aria-label="stop (points)" value={newRule.stop_points}
+            <Input aria-label="stop (points)" value={newRule.stop_points} num
                    disabled={!control}
-                   onChange={e => setNewRule({ ...newRule, stop_points: e.target.value })}
-                   className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink" />
+                   onChange={e => setNewRule({ ...newRule, stop_points: e.target.value })} />
           </label>
           <label className="block w-28">
             <span className="desk-label block mb-1">Target (points)</span>
-            <input aria-label="target (points)" value={newRule.target_points}
+            <Input aria-label="target (points)" value={newRule.target_points} num
                    disabled={!control}
-                   onChange={e => setNewRule({ ...newRule, target_points: e.target.value })}
-                   className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink" />
+                   onChange={e => setNewRule({ ...newRule, target_points: e.target.value })} />
           </label>
           <label className="flex items-center gap-2 text-sm text-ink">
             <input type="checkbox" checked={newRule.trailing_enabled}
@@ -412,25 +419,22 @@ export default function Automation() {
             <>
               <label className="block w-32">
                 <span className="desk-label block mb-1">Start after (points)</span>
-                <input aria-label="start after (points)" value={newRule.trail_start_points}
+                <Input aria-label="start after (points)" value={newRule.trail_start_points} num
                        disabled={!control}
-                       onChange={e => setNewRule({ ...newRule, trail_start_points: e.target.value })}
-                       className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink" />
+                       onChange={e => setNewRule({ ...newRule, trail_start_points: e.target.value })} />
               </label>
               <label className="block w-32">
                 <span className="desk-label block mb-1">Step (points)</span>
-                <input aria-label="step (points)" value={newRule.trail_step_points}
+                <Input aria-label="step (points)" value={newRule.trail_step_points} num
                        disabled={!control}
-                       onChange={e => setNewRule({ ...newRule, trail_step_points: e.target.value })}
-                       className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink" />
+                       onChange={e => setNewRule({ ...newRule, trail_step_points: e.target.value })} />
               </label>
             </>
           )}
           {control && (
-            <button onClick={addRiskRule} disabled={busy}
-                    className="px-4 py-2 text-sm font-semibold rounded bg-brand text-on-accent hover:bg-brand-deep disabled:opacity-50">
+            <Button onClick={addRiskRule} disabled={busy}>
               Add rule
-            </button>
+            </Button>
           )}
         </div>
       </section>
@@ -466,10 +470,9 @@ export default function Automation() {
           ))}
         </div>
         {control && (
-          <button onClick={saveTimeframes} disabled={busy}
-                  className="px-4 py-2 text-sm font-semibold rounded bg-brand text-on-accent hover:bg-brand-deep disabled:opacity-50">
+          <Button onClick={saveTimeframes} disabled={busy}>
             Save entry timeframes
-          </button>
+          </Button>
         )}
       </section>
 
@@ -557,22 +560,22 @@ export default function Automation() {
               this, the secret is gone from this screen and cannot be shown again.
             </p>
             <div className="flex gap-2" role="group" aria-label="Alert template">
-              <button onClick={() => setTemplateKind('indicator')}
-                      aria-pressed={templateKind === 'indicator'}
-                      className={`px-3 py-1 text-xs font-semibold rounded border ${
-                        templateKind === 'indicator'
-                          ? 'bg-brand text-on-accent border-brand'
-                          : 'border-line-strong text-ink hover:bg-paper'}`}>
+              <Button
+                size="sm"
+                variant={templateKind === 'indicator' ? 'primary' : 'secondary'}
+                aria-pressed={templateKind === 'indicator'}
+                onClick={() => setTemplateKind('indicator')}
+              >
                 Indicator
-              </button>
-              <button onClick={() => setTemplateKind('strategy')}
-                      aria-pressed={templateKind === 'strategy'}
-                      className={`px-3 py-1 text-xs font-semibold rounded border ${
-                        templateKind === 'strategy'
-                          ? 'bg-brand text-on-accent border-brand'
-                          : 'border-line-strong text-ink hover:bg-paper'}`}>
+              </Button>
+              <Button
+                size="sm"
+                variant={templateKind === 'strategy' ? 'primary' : 'secondary'}
+                aria-pressed={templateKind === 'strategy'}
+                onClick={() => setTemplateKind('strategy')}
+              >
                 Strategy
-              </button>
+              </Button>
             </div>
             {templateKind === 'strategy' && (
               <p className="text-xs text-ink-soft">
@@ -585,22 +588,19 @@ export default function Automation() {
 {templateKind === 'strategy' ? strategyTemplate(reveal.secret) : reveal.template}
             </pre>
             <div className="flex gap-3 flex-wrap">
-              <button onClick={() => copy(
+              <Button onClick={() => copy(
                         templateKind === 'strategy' ? strategyTemplate(reveal.secret) : reveal.template,
-                        'template')}
-                      className="px-4 py-2 text-sm font-semibold rounded bg-brand text-on-accent hover:bg-brand-deep">
+                        'template')}>
                 {copied === 'template' ? 'Copied' : 'Copy template'}
-              </button>
+              </Button>
               {reveal.url && (
-                <button onClick={() => copy(reveal.url!, 'url')}
-                        className="px-4 py-2 text-sm font-semibold rounded border border-line-strong text-ink hover:bg-paper">
+                <Button variant="secondary" onClick={() => copy(reveal.url!, 'url')}>
                   {copied === 'url' ? 'Copied' : 'Copy URL'}
-                </button>
+                </Button>
               )}
-              <button onClick={closeReveal}
-                      className="ml-auto px-4 py-2 text-sm font-semibold rounded border border-line-strong text-ink hover:bg-paper">
+              <Button variant="secondary" className="ml-auto" onClick={closeReveal}>
                 I have copied it — close
-              </button>
+              </Button>
             </div>
           </div>
         </div>
@@ -619,22 +619,35 @@ export default function Automation() {
         TradingView alert still using the old template will be refused until you
         update it.
       </ConfirmDialog>
+
+      <ConfirmDialog
+        open={confirmEnable}
+        title="Enable TradingView automation?"
+        confirmLabel="Enable automation"
+        danger
+        busy={busy}
+        onConfirm={confirmEnableAutomation}
+        onCancel={() => setConfirmEnable(false)}
+      >
+        From now on, a valid TradingView alert places a real order on the
+        master, and every follower copies it.
+      </ConfirmDialog>
     </div>
   )
 }
 
 function OutcomePill({ outcome }: { outcome: string }) {
-  const style =
-    outcome === 'accepted' ? 'bg-profit-wash text-profit-deep'
-    : outcome === 'duplicate' ? 'bg-paper text-ink-soft'
-    : outcome === 'nothing_to_close' || outcome === 'nothing_to_cancel' ? 'bg-warn-wash text-warn-deep'
-    : outcome === 'unknown' ? 'bg-loss-wash text-loss-deep'
-    : outcome === 'failed' ? 'bg-warn-wash text-warn-deep'
-    : 'bg-loss-wash text-loss-deep'
+  const tone: BadgeTone =
+    outcome === 'accepted' ? 'profit'
+    : outcome === 'duplicate' ? 'neutral'
+    : outcome === 'nothing_to_close' || outcome === 'nothing_to_cancel' ? 'warn'
+    : outcome === 'unknown' ? 'loss'
+    : outcome === 'failed' ? 'warn'
+    : 'loss'
   const label = outcome === 'nothing_to_close' ? 'nothing to close'
     : outcome === 'nothing_to_cancel' ? 'nothing to cancel'
     : outcome === 'unknown' ? 'UNCONFIRMED' : outcome
-  return <span className={`desk-label px-2 py-0.5 rounded ${style}`}>{label}</span>
+  return <Badge tone={tone}>{label}</Badge>
 }
 
 /**

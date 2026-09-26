@@ -3,6 +3,10 @@ import { orgApi, eventsSocket } from '../lib/api'
 import { useOrg } from '../lib/org'
 import { formatWhen } from '../lib/format'
 import { EventResponse } from '../lib/types'
+import Button from '../components/Button'
+import Input from '../components/Input'
+import Select from '../components/Select'
+import Badge, { type BadgeTone } from '../components/Badge'
 
 export default function Logs() {
   const { orgId } = useOrg()
@@ -131,16 +135,16 @@ export default function Logs() {
     setExpandedRows(newExpanded)
   }
 
-  const getSeverityColor = (severity: string) => {
+  const severityTone = (severity: string): BadgeTone => {
     switch (severity) {
       case 'error':
-        return 'bg-loss-wash text-loss-deep'
+        return 'loss'
       case 'warning':
-        return 'bg-warn-wash text-warn-deep'
+        return 'warn'
       case 'info':
-        return 'bg-brand-wash text-brand-deep'
+        return 'brand'
       default:
-        return 'bg-line text-ink-soft'
+        return 'neutral'
     }
   }
 
@@ -173,50 +177,47 @@ export default function Logs() {
           {/* Account Select */}
           <div>
             <label className="block desk-label mb-1">Account</label>
-            <input
+            <Input
               type="text"
               placeholder="Account ID"
               value={filters.account_id}
               onChange={(e) => setFilters({ ...filters, account_id: e.target.value })}
-              className="w-full px-3 py-2 border border-line-strong rounded-md text-sm bg-card"
             />
           </div>
 
           {/* Severity Select */}
           <div>
             <label className="block desk-label mb-1">Severity</label>
-            <select
+            <Select
+              block
               value={filters.severity}
               onChange={(e) => setFilters({ ...filters, severity: e.target.value })}
-              className="w-full px-3 py-2 border border-line-strong rounded-md text-sm bg-card"
             >
               <option value="all">all</option>
               <option value="info">info</option>
               <option value="warning">warning</option>
               <option value="error">error</option>
-            </select>
+            </Select>
           </div>
 
           {/* Category Select */}
           <div>
             <label className="block desk-label mb-1">Category</label>
-            <input
+            <Input
               type="text"
               placeholder="Category"
               value={filters.category}
               onChange={(e) => setFilters({ ...filters, category: e.target.value })}
-              className="w-full px-3 py-2 border border-line-strong rounded-md text-sm bg-card"
             />
           </div>
 
           {/* Date Since Select */}
           <div>
             <label className="block desk-label mb-1">Since</label>
-            <input
+            <Input
               type="datetime-local"
               value={filters.since}
               onChange={(e) => setFilters({ ...filters, since: e.target.value })}
-              className="w-full px-3 py-2 border border-line-strong rounded-md text-sm bg-card"
             />
           </div>
         </div>
@@ -284,20 +285,22 @@ export default function Logs() {
                     {event.category}
                   </td>
                   <td data-label="Severity" className="px-6 py-4 whitespace-nowrap text-sm">
-                    <span className={`px-3 py-1 inline-flex text-xs leading-5 font-semibold rounded-full ${getSeverityColor(event.severity)}`}>
+                    <Badge tone={severityTone(event.severity)} pill>
                       {event.severity}
-                    </span>
+                    </Badge>
                   </td>
                   <td data-label="Latency (ms)" className="num px-6 py-4 whitespace-nowrap text-sm text-ink">
                     {event.latency_ms ?? '-'}
                   </td>
                   <td data-label="Payload" className="px-6 py-4 text-sm text-ink">
-                    <button
+                    <Button
+                      variant="ghost"
+                      tone="brand"
+                      size="sm"
                       onClick={() => toggleRowExpand(event.id)}
-                      className="text-brand hover:text-brand-deep underline"
                     >
                       {expandedRows.has(event.id) ? 'Hide' : 'Show'}
-                    </button>
+                    </Button>
                     {expandedRows.has(event.id) && (
                       <div className="num mt-2 p-3 bg-paper rounded text-xs whitespace-pre-wrap">
                         {JSON.stringify(event.payload, null, 2)}

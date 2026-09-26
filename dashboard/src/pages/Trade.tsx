@@ -11,10 +11,12 @@ import type {
   Account, AccountDetails, ApiState, MarginEstimate, OpenPosition, TradeSymbol,
   Trendbars, WorkingOrder,
 } from '../lib/types'
-import { Link } from 'react-router-dom'
 import Banner from '../components/Banner'
 import ConfirmDialog from '../components/ConfirmDialog'
 import SearchSelect from '../components/SearchSelect'
+import Button from '../components/Button'
+import Input from '../components/Input'
+import Select from '../components/Select'
 
 // Only used to recover a last-known price when the market is shut and no
 // live quote exists; two H1 bars is plenty.
@@ -479,25 +481,22 @@ export default function Trade() {
   // Category-standard ticket: the sell button carries the bid, buy the ask.
   const sideButton = (side: Side) => {
     const price = side === 'BUY' ? quote?.ask : quote?.bid
+    const selected = ticket.side === side
     return (
-      <button
+      <Button
         key={side}
-        type="button"
+        variant={selected ? 'primary' : 'secondary'}
+        tone={side === 'BUY' ? 'profit' : 'loss'}
+        aria-pressed={selected}
         onClick={() => setTicket({ ...ticket, side })}
-        className={`flex-1 py-2 text-sm font-semibold rounded transition-colors ${
-          ticket.side === side
-            ? side === 'BUY'
-              ? 'bg-profit text-on-accent'
-              : 'bg-loss text-on-accent'
-            : 'bg-paper text-ink-soft hover:text-ink border border-line'
-        }`}
+        className="flex-1 flex-col"
       >
         <span className="block">{side === 'BUY' ? 'Buy' : 'Sell'}</span>
         {/* Always rendered so an arriving quote never shifts the layout. */}
         <span className="num block text-[11px] font-medium opacity-90">
           {price != null ? price.toFixed(priceDigits) : ' '}
         </span>
-      </button>
+      </Button>
     )
   }
 
@@ -552,12 +551,9 @@ export default function Trade() {
               <p className="text-sm text-ink-soft">
                 No trading accounts are connected yet.
               </p>
-              <Link
-                to={`/org/${orgId}/accounts`}
-                className="inline-block px-4 py-2.5 bg-brand text-on-accent text-sm font-semibold rounded hover:bg-brand-deep transition-colors"
-              >
+              <Button to={`/org/${orgId}/accounts`}>
                 Connect a cTrader account
-              </Link>
+              </Button>
               <p className="text-xs text-ink-faint">
                 One grant covers every account under your cTrader ID; orders on
                 the master replicate to every enabled slave.
@@ -567,18 +563,18 @@ export default function Trade() {
           <>
           <div>
             <label htmlFor="ticket-account" className="desk-label block mb-1">Account</label>
-            <select
+            <Select
               id="ticket-account"
+              block
               value={accountId ?? ''}
               onChange={(e) => setAccountId(Number(e.target.value))}
-              className="w-full rounded border border-line-strong px-3 py-2 text-sm bg-card"
             >
               {accounts.map((a) => (
                 <option key={a.ctid_trader_account_id} value={a.ctid_trader_account_id}>
                   {accountLabel(a)}
                 </option>
               ))}
-            </select>
+            </Select>
             {selected?.role === 'slave' && (
               <p className="mt-2 text-xs text-warn-deep bg-warn-wash rounded px-2 py-1.5">
                 Manual order on a slave: it is not copied anywhere and the
@@ -638,27 +634,27 @@ export default function Trade() {
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label htmlFor="ticket-type" className="desk-label block mb-1">Order type</label>
-              <select
+              <Select
                 id="ticket-type"
+                block
                 value={ticket.orderType}
                 onChange={(e) => setTicket({ ...ticket, orderType: e.target.value as OrderType })}
-                className="w-full rounded border border-line-strong px-3 py-2 text-sm bg-card"
               >
                 <option value="MARKET">Market</option>
                 <option value="LIMIT">Limit</option>
                 <option value="STOP">Stop</option>
-              </select>
+              </Select>
             </div>
             <div>
               <label htmlFor="ticket-volume" className="desk-label block mb-1">Volume (lots)</label>
-              <input
+              <Input
                 id="ticket-volume"
                 type="number"
+                num
                 step={selectedSymbol?.step_volume_lots ?? 0.01}
                 min={selectedSymbol?.min_volume_lots ?? 0.01}
                 value={ticket.volumeLots}
                 onChange={(e) => setTicket({ ...ticket, volumeLots: e.target.value })}
-                className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card"
               />
             </div>
           </div>
@@ -666,20 +662,18 @@ export default function Trade() {
           {ticket.orderType === 'LIMIT' && (
             <div>
               <label htmlFor="ticket-limit" className="desk-label block mb-1">Limit price</label>
-              <input
-                id="ticket-limit" type="number" step="0.00001" value={ticket.limitPrice}
+              <Input
+                id="ticket-limit" type="number" step="0.00001" num value={ticket.limitPrice}
                 onChange={(e) => setTicket({ ...ticket, limitPrice: e.target.value })}
-                className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card"
               />
             </div>
           )}
           {ticket.orderType === 'STOP' && (
             <div>
               <label htmlFor="ticket-stop" className="desk-label block mb-1">Stop price</label>
-              <input
-                id="ticket-stop" type="number" step="0.00001" value={ticket.stopPrice}
+              <Input
+                id="ticket-stop" type="number" step="0.00001" num value={ticket.stopPrice}
                 onChange={(e) => setTicket({ ...ticket, stopPrice: e.target.value })}
-                className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card"
               />
             </div>
           )}
@@ -708,11 +702,10 @@ export default function Trade() {
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label htmlFor="ticket-sl" className="desk-label block mb-1">Stop loss</label>
-              <input
-                id="ticket-sl" type="number" step="0.00001" value={ticket.stopLoss}
+              <Input
+                id="ticket-sl" type="number" step="0.00001" num value={ticket.stopLoss}
                 placeholder={ticket.protectionMode === 'amount' ? 'e.g. 1.50' : 'none'}
                 onChange={(e) => setTicket({ ...ticket, stopLoss: e.target.value })}
-                className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card"
               />
               {/* Show the price the amount becomes. Converting silently would
                   just move the guesswork somewhere the operator cannot see. */}
@@ -726,11 +719,10 @@ export default function Trade() {
             </div>
             <div>
               <label htmlFor="ticket-tp" className="desk-label block mb-1">Take profit</label>
-              <input
-                id="ticket-tp" type="number" step="0.00001" value={ticket.takeProfit}
+              <Input
+                id="ticket-tp" type="number" step="0.00001" num value={ticket.takeProfit}
                 placeholder={ticket.protectionMode === 'amount' ? 'e.g. 1.50' : 'none'}
                 onChange={(e) => setTicket({ ...ticket, takeProfit: e.target.value })}
-                className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card"
               />
               {ticket.protectionMode === 'amount' && ticket.takeProfit !== '' && (
                 <p className="mt-1 text-xs text-ink-faint">
@@ -831,13 +823,14 @@ export default function Trade() {
               )}
             </div>
           )}
-          <button
+          <Button
             onClick={submitOrder}
-            disabled={Boolean(ticketProblem) || busy}
-            className="w-full py-2.5 rounded bg-brand text-on-accent text-sm font-semibold hover:bg-brand-deep transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            disabled={Boolean(ticketProblem)}
+            busy={busy}
+            block
           >
             {busy ? 'Placing…' : 'Place order'}
-          </button>
+          </Button>
           </>
           )}
         </section>
@@ -906,12 +899,14 @@ export default function Trade() {
                               Closing…
                             </span>
                           ) : (
-                          <button
+                          <Button
+                            variant="secondary"
+                            tone="loss"
+                            size="sm"
                             onClick={() => { setClosing(pos); setPartialLots('') }}
-                            className="px-3 py-2.5 md:py-1 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-on-accent transition-colors"
                           >
                             Close
-                          </button>
+                          </Button>
                           )}
                         </td>
                       </tr>
@@ -963,12 +958,13 @@ export default function Trade() {
                               Cancelling…
                             </span>
                           ) : (
-                          <button
+                          <Button
+                            variant="secondary"
+                            size="sm"
                             onClick={() => setCancelling(order)}
-                            className="px-3 py-2.5 md:py-1 text-xs font-semibold rounded border border-line-strong text-ink-soft hover:text-ink hover:border-ink transition-colors"
                           >
                             Cancel order
-                          </button>
+                          </Button>
                           )}
                         </td>
                       </tr>
@@ -1000,15 +996,15 @@ export default function Trade() {
           <label htmlFor="partial-lots" className="desk-label block mb-1">
             Lots to close (leave empty for all)
           </label>
-          <input
+          <Input
             id="partial-lots"
             type="number"
             step="0.01"
             min="0.01"
+            num
             value={partialLots}
             placeholder={closing?.volume_lots ?? 'all'}
             onChange={(e) => setPartialLots(e.target.value)}
-            className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card"
           />
         </div>
       </ConfirmDialog>

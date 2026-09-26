@@ -7,6 +7,7 @@ import {
   EquityCurve, MirrorScore, PerfBars, PerfLine, PnlBars,
 } from '../components/charts'
 import StatTile from '../components/StatTile'
+import Select from '../components/Select'
 import { money, signed } from '../lib/format'
 import { cumulativeSeries, drawdownSeries, dailyPnl } from '../lib/perf'
 
@@ -116,26 +117,25 @@ export default function Performance() {
       <div className="flex flex-wrap items-end gap-4">
         <div>
           <label htmlFor="perf-account" className="desk-label block mb-1">Account</label>
-          <select
+          <Select
             id="perf-account"
             value={accountId ?? ''}
             onChange={(e) => setAccountId(Number(e.target.value))}
-            className="rounded border border-line-strong px-3 py-2 text-sm bg-card min-w-64"
+            className="min-w-64"
           >
             {accounts.map((acc) => (
               <option key={acc.ctid_trader_account_id} value={acc.ctid_trader_account_id}>
                 {accountLabel(acc)}
               </option>
             ))}
-          </select>
+          </Select>
         </div>
         <div>
           <label htmlFor="perf-range" className="desk-label block mb-1">Range</label>
-          <select
+          <Select
             id="perf-range"
             value={weeks}
             onChange={(e) => setWeeks(Number(e.target.value))}
-            className="rounded border border-line-strong px-3 py-2 text-sm bg-card"
           >
             {/* 12 weeks is the API's ceiling (routes/insights.py:
                 MAX_ANALYTICS_WEEKS): each week is one sequential broker
@@ -144,7 +144,7 @@ export default function Performance() {
             <option value={4}>4 weeks</option>
             <option value={8}>8 weeks</option>
             <option value={12}>12 weeks</option>
-          </select>
+          </Select>
         </div>
         {a?.truncated && (
           <p className="text-xs font-medium text-warn-deep">
