@@ -30,7 +30,7 @@ test('renders display name, email, and password inputs', () => {
   expect(screen.getByLabelText(/password/i)).toBeInTheDocument()
 })
 
-test('posts to /api/register and navigates to /welcome on success', async () => {
+test('posts to /api/register and navigates to /mpin with next=/welcome on success', async () => {
   const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }))
   vi.stubGlobal('fetch', fetchMock)
   renderRegister()

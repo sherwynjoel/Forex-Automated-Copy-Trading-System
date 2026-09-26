@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { api } from '../lib/api'
 import { errorText } from '../lib/format'
+import { isMpinPending } from '../lib/types'
+import type { Me, MpinPending } from '../lib/types'
 import Banner from '../components/Banner'
 import Button from '../components/Button'
 import Input from '../components/Input'
@@ -24,10 +26,10 @@ export default function Welcome() {
 
   useEffect(() => {
     let cancelled = false
-    api<{ orgs?: MyOrg[]; mpin?: { pending: boolean } }>('/api/me')
+    api<Me | MpinPending>('/api/me')
       .then((me) => {
         if (cancelled) return
-        if (me.mpin?.pending) {
+        if (isMpinPending(me)) {
           navigate('/mpin', { replace: true })
           return
         }

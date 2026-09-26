@@ -82,3 +82,15 @@ test('401s from the MPIN routes are inline errors, never redirects', async () =>
   await expect(api('/api/mpin/verify', { method: 'POST', body: '{}' })).rejects.toThrow('401: Invalid MPIN')
   expect(window.location.href).toBe('/mpin')
 })
+
+test('a wrong-current-MPIN 401 from the change-MPIN route is an inline error, never a redirect', async () => {
+  const originalLocation = window.location.href
+  Object.defineProperty(window, 'location', { value: { href: originalLocation }, writable: true })
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+    new Response(JSON.stringify({ detail: 'Invalid MPIN', attempts_left: 3 }), {
+      status: 401, headers: { 'content-type': 'application/json' },
+    })
+  ))
+  await expect(api('/api/me/mpin', { method: 'POST', body: '{}' })).rejects.toThrow('Invalid MPIN')
+  expect(window.location.href).toBe(originalLocation)
+})

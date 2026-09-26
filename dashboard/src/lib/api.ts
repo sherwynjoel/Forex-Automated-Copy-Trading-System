@@ -13,8 +13,13 @@ function getCsrfToken(): string | null {
 }
 
 /**
- * Make an API request with CSRF protection and automatic redirect on 401
- * (except for /api/login where 401 is propagated to the caller)
+ * Make an API request with CSRF protection and automatic redirect on 401.
+ * A 401 sends the browser to /login, except: /api/login propagates its own
+ * 401 as an inline error; a half session's 401 (server detail "MPIN
+ * required") goes to /mpin instead of /login; and the MPIN routes
+ * (/api/mpin/* and /api/me/mpin) own their 401s ("Invalid MPIN" etc.) as
+ * inline errors, never a redirect. Callers that pass
+ * `opts.redirectOn401: false` handle every 401 themselves.
  */
 export async function api<T>(
   path: string,
@@ -45,10 +50,11 @@ export async function api<T>(
 
   // A 401 means "go sign in" -- except when it means "finish signing in":
   // a half session (email+password done, MPIN owed) is told exactly that by
-  // the server, and belongs on /mpin. The MPIN routes' own 401s ("Invalid
-  // MPIN") are inline errors for the /mpin page, like /api/login's.
-  if (response.status === 401 && path !== '/api/login' && !path.startsWith('/api/mpin/')
-      && opts?.redirectOn401 !== false) {
+  // the server, and belongs on /mpin. The MPIN routes (/api/mpin/* and
+  // /api/me/mpin, the full-session change-MPIN route) own their own 401s
+  // ("Invalid MPIN" etc.) as inline errors, like /api/login's.
+  if (response.status === 401 && path !== '/api/login' && path !== '/api/me/mpin'
+      && !path.startsWith('/api/mpin/') && opts?.redirectOn401 !== false) {
     let detail: string | undefined
     try {
       const body = (await response.clone().json()) as { detail?: unknown }
