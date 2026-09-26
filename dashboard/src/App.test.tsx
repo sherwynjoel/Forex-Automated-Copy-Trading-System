@@ -114,3 +114,12 @@ test('/ shows the public front page when nobody is signed in', async () => {
   expect(window.location.pathname).toBe('/')
   expect(screen.getAllByRole('link', { name: 'Sign in' })[0]).toHaveAttribute('href', '/login')
 })
+
+test('a pending MPIN sends / to /mpin', async () => {
+  vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(
+    JSON.stringify({ mpin: { pending: true, set: true } }),
+    { status: 200, headers: { 'content-type': 'application/json' } }))))
+  window.history.pushState({}, '', '/')
+  render(<App />)
+  await waitFor(() => expect(window.location.pathname).toBe('/mpin'))
+})

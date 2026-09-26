@@ -43,14 +43,20 @@ export async function api<T>(
     headers,
   })
 
-  // Redirect to login on 401, but only for non-login endpoints
-  // (login endpoint 401 should propagate as inline error), and only when
-  // the caller has not said it will handle 401 itself -- the invite flow
-  // must keep its token instead of being bounced to a login page it
-  // cannot use.
-  if (response.status === 401 && path !== '/api/login'
+  // A 401 means "go sign in" -- except when it means "finish signing in":
+  // a half session (email+password done, MPIN owed) is told exactly that by
+  // the server, and belongs on /mpin. The MPIN routes' own 401s ("Invalid
+  // MPIN") are inline errors for the /mpin page, like /api/login's.
+  if (response.status === 401 && path !== '/api/login' && !path.startsWith('/api/mpin/')
       && opts?.redirectOn401 !== false) {
-    window.location.href = '/login'
+    let detail: string | undefined
+    try {
+      const body = (await response.clone().json()) as { detail?: unknown }
+      if (typeof body.detail === 'string') detail = body.detail
+    } catch {
+      // not JSON
+    }
+    window.location.href = detail === 'MPIN required' ? '/mpin' : '/login'
     throw new Error('Unauthorized')
   }
 

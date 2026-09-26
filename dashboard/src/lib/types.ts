@@ -6,9 +6,26 @@ export interface OrgSummary {
   role: Role
 }
 
+export interface MpinState {
+  /** True on a half session: email and password were right, the MPIN is still owed. */
+  pending: boolean
+  /** False for a user who has never set an MPIN (the /mpin page shows Set mode). */
+  set: boolean
+}
+
 export interface Me {
   user: { id: number; email: string; display_name: string }
   orgs: OrgSummary[]
+  mpin?: MpinState
+}
+
+/** What /api/me answers on a half session: only what to do next. */
+export interface MpinPending {
+  mpin: MpinState
+}
+
+export function isMpinPending(me: Me | MpinPending): me is MpinPending {
+  return !('user' in me) && me.mpin?.pending === true
 }
 
 export interface Member {

@@ -60,3 +60,25 @@ test('api does NOT redirect on 401 from /api/login', async () => {
   // Location should NOT have changed (no redirect)
   expect(window.location.href).toBe(originalLocation)
 })
+
+test('a 401 with detail "MPIN required" redirects to /mpin, not /login', async () => {
+  Object.defineProperty(window, 'location', { value: { href: '/org/1' }, writable: true })
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+    new Response(JSON.stringify({ detail: 'MPIN required' }), {
+      status: 401, headers: { 'content-type': 'application/json' },
+    })
+  ))
+  await expect(api('/api/orgs/1/accounts')).rejects.toThrow('Unauthorized')
+  expect(window.location.href).toBe('/mpin')
+})
+
+test('401s from the MPIN routes are inline errors, never redirects', async () => {
+  Object.defineProperty(window, 'location', { value: { href: '/mpin' }, writable: true })
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+    new Response(JSON.stringify({ detail: 'Invalid MPIN', attempts_left: 3 }), {
+      status: 401, headers: { 'content-type': 'application/json' },
+    })
+  ))
+  await expect(api('/api/mpin/verify', { method: 'POST', body: '{}' })).rejects.toThrow('401: Invalid MPIN')
+  expect(window.location.href).toBe('/mpin')
+})

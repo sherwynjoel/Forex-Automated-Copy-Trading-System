@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { api } from './lib/api'
 import { LAST_ORG_KEY, OrgProvider } from './lib/org'
-import type { Me } from './lib/types'
+import { isMpinPending } from './lib/types'
+import type { Me, MpinPending } from './lib/types'
 import Layout from './components/Layout'
 import Login from './pages/Login'
 import Register from './pages/Register'
@@ -33,7 +34,11 @@ function RootRedirect() {
   useEffect(() => {
     const resolve = async () => {
       try {
-        const me = await api<Me>('/api/me', undefined, { redirectOn401: false })
+        const me = await api<Me | MpinPending>('/api/me', undefined, { redirectOn401: false })
+        if (isMpinPending(me)) {
+          setTarget('/mpin')
+          return
+        }
         const last = Number(localStorage.getItem(LAST_ORG_KEY))
         const org = me.orgs.find((o) => o.id === last) ?? me.orgs[0]
         setTarget(org ? `/org/${org.id}` : '/welcome')
@@ -56,6 +61,7 @@ export default function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/login" element={<Login />} />
+        <Route path="/mpin" element={<div>mpin</div>} />
         <Route path="/register" element={<Register />} />
         <Route path="/join/:token" element={<Join />} />
         <Route path="/welcome" element={<Welcome />} />

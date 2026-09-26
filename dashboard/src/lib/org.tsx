@@ -1,7 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useState } from 'react'
 import { Navigate, useParams } from 'react-router-dom'
 import { api } from './api'
-import type { Me, OrgSummary } from './types'
+import { isMpinPending } from './types'
+import type { Me, MpinPending, OrgSummary } from './types'
 
 export const LAST_ORG_KEY = 'copydesk.lastOrg'
 
@@ -28,10 +29,16 @@ export function OrgProvider({ children }: { children: React.ReactNode }) {
   const orgId = Number(rawOrgId)
   const [me, setMe] = useState<Me | null>(null)
   const [failed, setFailed] = useState(false)
+  const [mpinPending, setMpinPending] = useState(false)
 
   const refreshMe = useCallback(async () => {
     try {
-      setMe(await api<Me>('/api/me'))
+      const next = await api<Me | MpinPending>('/api/me')
+      if (isMpinPending(next)) {
+        setMpinPending(true)
+        return
+      }
+      setMe(next)
     } catch {
       setFailed(true)
     }
@@ -47,6 +54,7 @@ export function OrgProvider({ children }: { children: React.ReactNode }) {
     if (org) localStorage.setItem(LAST_ORG_KEY, String(org.id))
   }, [org?.id])
 
+  if (mpinPending) return <Navigate to="/mpin" replace />
   if (failed) return <Navigate to="/login" replace />
   if (!me) {
     return <div className="flex items-center justify-center h-screen">Loading...</div>

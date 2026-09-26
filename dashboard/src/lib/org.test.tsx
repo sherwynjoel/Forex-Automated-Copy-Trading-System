@@ -34,6 +34,7 @@ function renderAtOrg(path: string) {
             </OrgProvider>
           }
         />
+        <Route path="/mpin" element={<div>mpin screen</div>} />
       </Routes>
     </MemoryRouter>
   )
@@ -95,4 +96,12 @@ test('redirects to /welcome when the user is not a member of :orgId, without tou
     expect(screen.getByText('welcome')).toBeInTheDocument()
   })
   expect(window.localStorage.getItem(LAST_ORG_KEY)).toBeNull()
+})
+
+test('a pending MPIN sends an org route to /mpin', async () => {
+  vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(
+    JSON.stringify({ mpin: { pending: true, set: false } }),
+    { status: 200, headers: { 'content-type': 'application/json' } }))))
+  renderAtOrg('/org/1')
+  expect(await screen.findByText('mpin screen')).toBeInTheDocument()
 })

@@ -33,23 +33,10 @@ export default function Register() {
           ...(invite ? { invite_token: invite } : {}),
         }),
       })
-      if (invite) {
-        // Registration signed us in; redeem the invite so the new member
-        // lands inside the workspace they were invited to rather than on
-        // an empty welcome screen.
-        try {
-          const joined = await api<{ org_id: number }>('/api/orgs/join', {
-            method: 'POST',
-            body: JSON.stringify({ token: invite }),
-          })
-          navigate(`/org/${joined.org_id}`, { replace: true })
-          return
-        } catch {
-          // The account exists either way; let them in and they can retry
-          // the link.
-        }
-      }
-      navigate('/welcome')
+      // Registration leaves a half session: the MPIN comes first, and the
+      // MPIN page hands over to the invite (or the welcome screen) after.
+      const next = invite ? `/join/${invite}` : '/welcome'
+      navigate(`/mpin?next=${encodeURIComponent(next)}`, { replace: true })
     } catch (err) {
       setError(errorText(err, 'Registration failed'))
     } finally {

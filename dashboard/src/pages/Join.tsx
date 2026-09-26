@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { api } from '../lib/api'
+import { isMpinPending } from '../lib/types'
+import type { Me, MpinPending } from '../lib/types'
 import Button from '../components/Button'
 import Logo from '../components/Logo'
 
@@ -34,12 +36,19 @@ export default function Join() {
       // cookie, so attempting the join would be refused at the CSRF layer
       // (403) before auth was ever considered -- an unreadable failure for
       // the most ordinary case there is. /api/me is a plain GET.
+      let me: Me | MpinPending
       try {
-        await api('/api/me', undefined, { redirectOn401: false })
+        me = await api<Me | MpinPending>('/api/me', undefined, { redirectOn401: false })
       } catch {
         if (cancelled) return
         navigate(`/register?invite=${encodeURIComponent(token ?? '')}`,
                  { replace: true })
+        return
+      }
+      if (isMpinPending(me)) {
+        if (!cancelled) {
+          navigate(`/mpin?next=${encodeURIComponent(`/join/${token ?? ''}`)}`, { replace: true })
+        }
         return
       }
 

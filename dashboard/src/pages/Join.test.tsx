@@ -17,6 +17,11 @@ function RegisterLanding() {
   return <div>register carrying {params.get('invite')}</div>
 }
 
+function MpinLanding() {
+  const [params] = useSearchParams()
+  return <div>mpin next {params.get('next')}</div>
+}
+
 function renderJoin(token: string) {
   return render(
     <MemoryRouter initialEntries={[`/join/${token}`]}>
@@ -25,6 +30,7 @@ function renderJoin(token: string) {
         <Route path="/org/:orgId" element={<OrgLanding />} />
         <Route path="/register" element={<RegisterLanding />} />
         <Route path="/welcome" element={<div>welcome</div>} />
+        <Route path="/mpin" element={<MpinLanding />} />
       </Routes>
     </MemoryRouter>
   )
@@ -103,4 +109,14 @@ test('an existing member is offered a way into the app, not a dead end', async (
   expect(await screen.findByText(/already a member/i)).toBeInTheDocument()
   expect(screen.getByRole('link', { name: /open mirrorfleet/i }))
     .toHaveAttribute('href', '/welcome')
+})
+
+test('a half session is sent to /mpin carrying the join path', async () => {
+  stubFetch({
+    me: new Response(JSON.stringify({ mpin: { pending: true, set: true } }), {
+      status: 200, headers: { 'content-type': 'application/json' },
+    }),
+  })
+  renderJoin('tok9')
+  expect(await screen.findByText('mpin next /join/tok9')).toBeInTheDocument()
 })

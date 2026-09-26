@@ -18,6 +18,7 @@ function renderWelcome() {
         <Route path="/welcome" element={<Welcome />} />
         <Route path="/org/:orgId" element={<div>org home</div>} />
         <Route path="/join/:token" element={<JoinLanding />} />
+        <Route path="/mpin" element={<div>mpin screen</div>} />
       </Routes>
     </MemoryRouter>
   )
@@ -109,4 +110,14 @@ test('a brand-new account sees no workspace list', async () => {
 
   expect(await screen.findByText(/create an organization/i)).toBeInTheDocument()
   expect(screen.queryByText(/your workspaces/i)).not.toBeInTheDocument()
+})
+
+test('a pending MPIN sends /welcome to /mpin', async () => {
+  vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(
+    JSON.stringify({ mpin: { pending: true, set: true } }),
+    { status: 200, headers: { 'content-type': 'application/json' } }))))
+
+  renderWelcome()
+
+  expect(await screen.findByText('mpin screen')).toBeInTheDocument()
 })

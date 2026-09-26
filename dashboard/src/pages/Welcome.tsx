@@ -24,11 +24,18 @@ export default function Welcome() {
 
   useEffect(() => {
     let cancelled = false
-    api<{ orgs: MyOrg[] }>('/api/me')
-      .then((me) => { if (!cancelled) setOrgs(me.orgs ?? []) })
+    api<{ orgs?: MyOrg[]; mpin?: { pending: boolean } }>('/api/me')
+      .then((me) => {
+        if (cancelled) return
+        if (me.mpin?.pending) {
+          navigate('/mpin', { replace: true })
+          return
+        }
+        setOrgs(me.orgs ?? [])
+      })
       .catch(() => { if (!cancelled) setOrgs([]) })
     return () => { cancelled = true }
-  }, [])
+  }, [navigate])
 
   const createOrg = async (e: React.FormEvent) => {
     e.preventDefault()
