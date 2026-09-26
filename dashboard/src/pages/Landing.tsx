@@ -103,7 +103,7 @@ export default function Landing() {
   const year = new Date().getFullYear()
   return (
     <div className="min-h-screen bg-paper text-ink">
-      <header className="sticky top-0 z-10 bg-card/95 backdrop-blur border-b border-line">
+      <header className="sticky top-0 z-10 glass border-b">
         <div className="max-w-6xl mx-auto px-4 md:px-6 min-h-16 py-2 flex items-center justify-between gap-6">
           <Logo size={30} textClass="text-xl" />
           <nav aria-label="Sections" className="hidden md:flex items-center gap-6 text-sm text-ink-soft">

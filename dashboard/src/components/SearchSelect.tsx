@@ -133,7 +133,7 @@ export default function SearchSelect({
           id={listboxId}
           ref={listRef}
           role="listbox"
-          className="absolute z-10 mt-1 w-full max-h-60 overflow-auto rounded border border-line-strong bg-card shadow-sm"
+          className="glass absolute z-10 mt-1 w-full max-h-60 overflow-auto rounded border shadow-sm"
         >
           {filtered.length === 0 && (
             <li className="px-3 py-2 text-sm text-ink-soft" aria-disabled="true">

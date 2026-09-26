@@ -33,6 +33,11 @@
   /* Text on accent-colored surfaces (buttons, chips): white in day mode,
      near-black ink in dark mode where the accents lighten. */
   --color-on-accent: #ffffff;
+  /* Glass: the floating layers (desk strip, drawers, popovers) frost what
+     scrolls beneath them. The fill stays high so ink text keeps AA over
+     any underlay; data surfaces (tables, tickets, tiles) stay opaque. */
+  --color-glass: rgb(255 255 255 / 0.82);
+  --color-glass-line: rgb(43 34 51 / 0.10);
 
   --font-sans: "Rubik", "Helvetica Neue", Arial, sans-serif;
   --font-mono: "JetBrains Mono", "SFMono-Regular", Menlo, monospace;
@@ -72,6 +77,8 @@
   --color-warn-deep: #e9c37c;
   --color-warn-wash: #332708;
   --color-on-accent: #17141f;
+  --color-glass: rgb(28 25 38 / 0.80);
+  --color-glass-line: rgb(238 234 244 / 0.10);
 }
 
 /* The select chevron follows the brand tone per theme. */
@@ -131,6 +138,38 @@ select.bg-card {
   background-position: right 0.55rem center;
   background-size: 0.85rem;
   padding-right: 2rem;
+}
+
+/* ---------------------------------------------------------------------------
+   Glass surface.  Used only for layers that float over the desk: the sticky
+   strip and headers, drawers, the symbol popover, the modal backdrop.  The
+   fill is opaque enough (0.82 day / 0.80 night) that ink on glass stays AA
+   over any content; no data table or ticket ever sits on glass.  Falls back
+   to the solid card when blur is unsupported or the user asked for reduced
+   transparency.
+
+   Layer scale (Tailwind z-*): 10 sticky chrome and popovers, 40 drawers and
+   the phone nav, 50 modals.
+--------------------------------------------------------------------------- */
+.glass {
+  background-color: var(--color-glass);
+  border-color: var(--color-glass-line);
+  -webkit-backdrop-filter: blur(14px) saturate(1.4);
+  backdrop-filter: blur(14px) saturate(1.4);
+}
+
+@supports not (backdrop-filter: blur(1px)) {
+  .glass {
+    background-color: var(--color-card);
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .glass {
+    background-color: var(--color-card);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
 }
 
 /* ---------------------------------------------------------------------------
