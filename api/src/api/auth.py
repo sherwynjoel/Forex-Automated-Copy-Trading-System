@@ -516,7 +516,7 @@ def create_auth_router(rate_limiter: LoginRateLimiter) -> APIRouter:
         return {
             "user": {"id": row[0], "email": row[1], "display_name": row[2]},
             "orgs": [{"id": o[0], "name": o[1], "role": o[2]} for o in orgs],
-            "mpin": {"pending": False, "set": True},
+            "mpin": {"pending": False, "set": bool(mpin_set)},
         }
 
     return router

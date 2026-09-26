@@ -330,3 +330,18 @@ test('every member can change their MPIN with the current one', async () => {
   })
   expect(await screen.findByText(/MPIN changed/i)).toBeInTheDocument()
 })
+
+test('a wrong current MPIN says how many tries are left', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('viewer'))
+  mockRoutes({
+    'POST /api/me/mpin': () => jsonResponse({ detail: 'Invalid MPIN', attempts_left: 2 }, 401),
+  })
+  renderMembers()
+  await screen.findByRole('heading', { name: /your login/i })
+  const boxes = () => Array.from(document.querySelectorAll<HTMLInputElement>('input[inputmode="numeric"]'))
+  boxes()[0].focus(); await userEvent.keyboard('000000')
+  boxes()[6].focus(); await userEvent.keyboard('654321')
+  boxes()[12].focus(); await userEvent.keyboard('654321')
+  await userEvent.click(screen.getByRole('button', { name: /change mpin/i }))
+  expect(await screen.findByText('Wrong MPIN, 2 tries left')).toBeInTheDocument()
+})

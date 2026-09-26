@@ -158,6 +158,24 @@ def test_password_change_rotates_and_disowns_other_sessions(app_client, make_use
         "email": "rot2@example.com", "password": "brand-new-secret"}).status_code == 204
 
 
+def test_the_login_after_a_password_change_is_a_half_session(app_client, make_user):
+    make_user(email="rot3@example.com", password="a-solid-password")
+    app_client.post("/api/login", json={
+        "email": "rot3@example.com", "password": "a-solid-password"})
+    _pass_mpin(app_client)
+    r = app_client.post("/api/me/password", json={
+        "current_password": "a-solid-password", "new_password": "brand-new-secret"},
+        headers=_csrf_headers(app_client))
+    assert r.status_code == 204
+
+    app_client.cookies.clear()
+    assert app_client.post("/api/login", json={
+        "email": "rot3@example.com", "password": "brand-new-secret"}).status_code == 204
+    r = app_client.get("/api/me")
+    assert r.status_code == 200
+    assert r.json() == {"mpin": {"pending": True, "set": True}}
+
+
 def test_password_change_rejects_short_or_unchanged(app_client, make_user):
     make_user(email="rot3@example.com", password="a-solid-password")
     app_client.post("/api/login", json={

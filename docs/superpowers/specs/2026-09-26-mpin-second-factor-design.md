@@ -1,7 +1,7 @@
 # MPIN second factor after login — Design
 
 **Date:** 2026-09-26
-**Status:** approved in discussion (Approach A of three), awaiting review of this document
+**Status:** implemented on branch mpin-second-factor (2026-09-26); rollout per §9
 **Builds on:** `2026-08-18-multi-org-rbac-design.md` §3 (sessions) and
 `2026-09-25-single-admin-role-design.md` (roles). Neither changes.
 
@@ -51,7 +51,8 @@ The signed cookie payload today is `{"user_id", "sv"}`. It gains `"pin"`:
   `/api/me` use it.
 - `ws.py`: `session_identity` returns the flag; the handshake closes with
   **4401** for a half session, the same code it uses for no session.
-- Password change and "sign out everywhere" still bump `session_version`;
+- Password change and "sign out everywhere" still bump `session_version`,
+  and so do MPIN reset and MPIN change (which re-issue the caller's cookie);
   the next login is a fresh half session, so the MPIN is asked again.
   Nothing else about sessions changes (12-hour age, SameSite=Lax, Secure).
 
@@ -81,22 +82,26 @@ confirmation is sent it must match, else **400 `MPINs do not match`**.
 | `GET /api/me` | half or full | Half: `{"mpin": {"pending": true, "set": <bool>}}` and nothing else. Full: today's `{user, orgs}` plus `"mpin": {"pending": false, "set": true}`. |
 | `POST /api/mpin/set` `{mpin, mpin_confirm}` | half | **409 `MPIN already set`** if `mpin_hash` is not NULL. Otherwise hash, set `mpin_set_at = now()`, reset attempts and lock, issue a full session, audit `mpin_set`. 204. |
 | `POST /api/mpin/verify` `{mpin}` | half | **409 `MPIN not set`** if NULL. If `mpin_locked_until > now()`: **423 `MPIN locked`** with `{"locked_until": <iso>}`. Verify the hash. Wrong: `mpin_failed_attempts += 1`; on reaching **5**, set `mpin_locked_until = now() + 15 min`, reset attempts to 0, audit `mpin_locked`, answer 423 with the timestamp; otherwise **401 `Invalid MPIN`** with `{"attempts_left": n}`. Right: reset attempts, issue a full session, 204. |
-| `POST /api/mpin/reset` `{password, mpin, mpin_confirm}` | half | The login rate limiter's per-credential bucket applies (`login:{email}:{ip}`). Verify the password (401 `Invalid password` on failure, with the dummy-hash timing equaliser). Set the new hash and `mpin_set_at`, clear attempts and lock, issue a full session, audit `mpin_reset`. 204. Works while locked: that is its purpose. |
-| `POST /api/me/mpin` `{current_mpin, mpin, mpin_confirm}` | full | Refused with the same **423** while `mpin_locked_until` is in the future. Verify the current MPIN (401 `Invalid MPIN`, counting toward the same lock and locking on the 5th failure exactly like verify), set the new hash and `mpin_set_at`, clear attempts, audit `mpin_changed`. 204. No new cookie needed. |
+| `POST /api/mpin/reset` `{password, mpin, mpin_confirm}` | half | The login rate limiter's per-credential bucket applies (`login:{email}:{ip}`). Verify the password (401 `Invalid password` on failure, with the dummy-hash timing equaliser). Set the new hash and `mpin_set_at`, clear attempts and lock, bump `session_version` and close the user's WebSockets (every other session is signed out), issue a full session with the new version, audit `mpin_reset`. 204. Works while locked: that is its purpose. |
+| `POST /api/me/mpin` `{current_mpin, mpin, mpin_confirm}` | full | Refused with the same **423** while `mpin_locked_until` is in the future. Verify the current MPIN (401 `Invalid MPIN`, counting toward the same lock and locking on the 5th failure exactly like verify), set the new hash and `mpin_set_at`, clear attempts, bump `session_version` and close the user's WebSockets (every other session is signed out), re-issue this browser's full session with the new version, audit `mpin_changed`. 204. |
 
 Timing: verify and reset run exactly one argon2 verification on every path
 (wrong, locked, not set), the way login does, so responses do not reveal
-state by duration.
+state by duration. The try is reserved before the verify, in one UPDATE
+guarded by the lock and the cap (`mpin_failed_attempts < 5`), so a burst of
+concurrent guesses gets at most five verifies per lock window; a call that
+finds the cap reached with no lock written starts the lock itself (423).
 
 CSRF: the `/api/mpin/*` routes are ordinary mutations and are NOT added to
 `CSRF_EXEMPT_PREFIXES`; the half session already carries a CSRF cookie.
 
 Audit events (`events` table, category `auth`, `account_id` NULL, `org_id`
 NULL, payload `{action, user_id}`): `mpin_set`, `mpin_reset`, `mpin_changed`,
-`mpin_locked`. They are written with the existing `log_event` helper used by
-the auth router; being org-less they reach the operator log through
-`docker compose logs`, not the org events feed, which is acceptable for
-account-level security events.
+`mpin_locked`. Each is inserted into the `events` table with `org_id` NULL
+(category `auth`) and also written to the api log -- `mpin_locked` and
+`mpin_reset` at WARNING, `mpin_set` and `mpin_changed` at INFO -- so they are
+visible in `docker compose logs api`. Being org-less they do not appear in
+any org's events feed, which is acceptable for account-level security events.
 
 Rate limiting the verify route itself is unnecessary: the per-user lock is
 the limiter, and an attacker without the password never reaches it.

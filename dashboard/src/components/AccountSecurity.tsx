@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { api } from '../lib/api'
+import { api, type ApiError } from '../lib/api'
 import Banner from './Banner'
 import Button from './Button'
 import Input from './Input'
@@ -54,9 +54,19 @@ export default function AccountSecurity() {
         body: JSON.stringify({ current_mpin: currentMpin, mpin: newMpin, mpin_confirm: confirmMpin }),
       })
       setCurrentMpin(''); setNewMpin(''); setConfirmMpin('')
-      setNotice('MPIN changed. Use the new one at your next sign-in.')
+      setNotice('MPIN changed. Use the new one at your next sign-in; any other device signed in as you has been signed out.')
     } catch (err) {
-      setProblem(err instanceof Error ? err.message : 'Could not change the MPIN')
+      const res = (err as ApiError).response
+      const left = res?.body?.attempts_left
+      const until = res?.body?.locked_until
+      if (res?.status === 401 && typeof left === 'number') {
+        setProblem(`Wrong MPIN, ${left} ${left === 1 ? 'try' : 'tries'} left`)
+      } else if (res?.status === 423 && typeof until === 'string') {
+        const minutes = Math.max(1, Math.ceil((Date.parse(until) - Date.now()) / 60000))
+        setProblem(`MPIN locked. Try again in about ${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`)
+      } else {
+        setProblem(err instanceof Error ? err.message : 'Could not change the MPIN')
+      }
     } finally {
       setBusy(false)
     }

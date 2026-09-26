@@ -32,9 +32,11 @@ the dashboard.
 Every sign-in has two steps. After the email and password, the dashboard
 asks for a six-digit **MPIN**; nothing in the platform answers until it is
 entered, and a first-time user is made to choose one before going further.
-Five wrong tries lock the MPIN step for fifteen minutes; "Forgot MPIN?"
-re-verifies the password and sets a new one. Members change their MPIN
-from Members → Your login.
+Five wrong tries lock the MPIN step for fifteen minutes. "Forgot MPIN?"
+re-verifies the password, sets a new one and signs out every other
+session, so the password is still the credential to keep private. Members
+change their MPIN from Members → Your login; investors from their
+Investor account page.
 
 An org is the unit of isolation and the unit of trading: one master account,
 its slaves, its cTrader ID grants, its mappings, its audit log, its

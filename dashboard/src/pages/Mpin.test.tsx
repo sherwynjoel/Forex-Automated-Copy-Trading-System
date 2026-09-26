@@ -158,8 +158,11 @@ test('a session that is not pending bounces to /; no session bounces to /login',
 
 test('next must be a same-origin path; anything else falls back to /', async () => {
   stub({ mpin: { pending: true, set: true } }, { '/api/mpin/verify': () => json(null, 204) })
-  renderMpin('/mpin?next=https%3A%2F%2Fevil.example')
-  await screen.findByRole('heading', { name: 'Enter your MPIN' })
-  await typePin('123456')
-  await waitFor(() => expect(screen.getByText('desk root')).toBeInTheDocument())
+  for (const next of ['https%3A%2F%2Fevil.example', '%2F%5Cevil.com']) {
+    const view = renderMpin(`/mpin?next=${next}`)
+    await screen.findByRole('heading', { name: 'Enter your MPIN' })
+    await typePin('123456')
+    await waitFor(() => expect(screen.getByText('desk root')).toBeInTheDocument())
+    view.unmount()
+  }
 })

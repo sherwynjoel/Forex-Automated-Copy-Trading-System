@@ -213,3 +213,59 @@ def test_change_is_refused_while_locked(app_client, make_user, login_as, db):
         "current_mpin": "123456", "mpin": "222222", "mpin_confirm": "222222"},
         headers=_csrf(app_client))
     assert r.status_code == 423
+
+
+# ---------- other sessions die on reset/change ----------
+
+def test_reset_signs_out_other_sessions(app_client, make_user, login_as):
+    from fastapi.testclient import TestClient
+    user = make_user()
+    login_as(app_client, user)  # A: a full session elsewhere
+    other = TestClient(app_client.app)  # B: a second device that forgot the MPIN
+    _half_login(other, user)
+    r = other.post("/api/mpin/reset", json={
+        "password": user["password"], "mpin": "999999", "mpin_confirm": "999999"},
+        headers=_csrf(other))
+    assert r.status_code == 204
+    r = other.get("/api/me")
+    assert r.status_code == 200 and r.json()["mpin"]["pending"] is False
+    r = app_client.get("/api/me")
+    assert r.status_code == 401 and r.json()["detail"] == "Session expired"
+
+
+def test_change_signs_out_other_sessions(app_client, make_user, login_as):
+    from fastapi.testclient import TestClient
+    user = make_user()
+    login_as(app_client, user)  # A
+    other = TestClient(app_client.app)  # B: a second device
+    login_as(other, user)
+    r = other.post("/api/me/mpin", json={
+        "current_mpin": "123456", "mpin": "222222", "mpin_confirm": "222222"},
+        headers=_csrf(other))
+    assert r.status_code == 204
+    assert other.get("/api/me").status_code == 200
+    r = app_client.get("/api/me")
+    assert r.status_code == 401 and r.json()["detail"] == "Session expired"
+
+
+# ---------- the gate reserves a try before verifying ----------
+
+def test_a_burst_that_reached_the_cap_is_locked_even_for_the_right_mpin(app_client, make_user, db):
+    from datetime import datetime, timezone
+    user = make_user()
+    _half_login(app_client, user)
+    # Five tries landed (concurrently) before any lock was written.
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute("UPDATE users SET mpin_failed_attempts = 5, mpin_locked_until = NULL "
+                     "WHERE id = %s", (user["id"],))
+    r = app_client.post("/api/mpin/verify", json={"mpin": "123456"}, headers=_csrf(app_client))
+    assert r.status_code == 423 and r.json()["detail"] == "MPIN locked"
+    assert r.json()["locked_until"]
+    with psycopg.connect(db, autocommit=True) as conn:
+        attempts, until = conn.execute(
+            "SELECT mpin_failed_attempts, mpin_locked_until FROM users WHERE id = %s",
+            (user["id"],)).fetchone()
+    assert attempts == 0
+    assert until is not None and until > datetime.now(timezone.utc)
+    assert len(_events(db, "mpin_locked")) == 1
+    assert _payload(app_client)["pin"] is False

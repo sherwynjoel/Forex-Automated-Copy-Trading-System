@@ -14,7 +14,7 @@ type Mode = 'loading' | 'set' | 'verify' | 'forgot'
 /** Only a same-origin path may be the landing after the MPIN. */
 function safeNext(raw: string | null): string {
   if (!raw) return '/'
-  if (!raw.startsWith('/') || raw.startsWith('//')) return '/'
+  if (!raw.startsWith('/') || raw.startsWith('//') || raw.includes('\\')) return '/'
   return raw
 }
 
