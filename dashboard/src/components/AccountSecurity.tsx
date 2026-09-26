@@ -4,6 +4,7 @@ import { api } from '../lib/api'
 import Banner from './Banner'
 import Button from './Button'
 import Input from './Input'
+import PinInput from './PinInput'
 
 /**
  * Your own login, not the org's: rotate the password and cut every other
@@ -13,6 +14,9 @@ import Input from './Input'
 export default function AccountSecurity() {
   const [current, setCurrent] = useState('')
   const [next, setNext] = useState('')
+  const [currentMpin, setCurrentMpin] = useState('')
+  const [newMpin, setNewMpin] = useState('')
+  const [confirmMpin, setConfirmMpin] = useState('')
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const [problem, setProblem] = useState<string | null>(null)
@@ -33,6 +37,26 @@ export default function AccountSecurity() {
       setNotice('Password changed. Any other device signed in as you has been signed out.')
     } catch (err) {
       setProblem(err instanceof Error ? err.message : 'Could not change the password')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const submitMpin = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setNotice(null)
+    setProblem(null)
+    if (newMpin !== confirmMpin) { setProblem('MPINs do not match'); return }
+    setBusy(true)
+    try {
+      await api('/api/me/mpin', {
+        method: 'POST',
+        body: JSON.stringify({ current_mpin: currentMpin, mpin: newMpin, mpin_confirm: confirmMpin }),
+      })
+      setCurrentMpin(''); setNewMpin(''); setConfirmMpin('')
+      setNotice('MPIN changed. Use the new one at your next sign-in.')
+    } catch (err) {
+      setProblem(err instanceof Error ? err.message : 'Could not change the MPIN')
     } finally {
       setBusy(false)
     }
@@ -83,6 +107,17 @@ export default function AccountSecurity() {
         </div>
         <Button type="submit" disabled={busy || !current || !next}>
           Change password
+        </Button>
+      </form>
+
+      <form onSubmit={submitMpin} className="space-y-3">
+        <div className="flex flex-wrap items-start gap-4">
+          <PinInput id="current-mpin" label="Current MPIN" value={currentMpin} onChange={setCurrentMpin} disabled={busy} />
+          <PinInput id="new-mpin" label="New MPIN" value={newMpin} onChange={setNewMpin} disabled={busy} />
+          <PinInput id="confirm-mpin" label="Confirm new MPIN" value={confirmMpin} onChange={setConfirmMpin} disabled={busy} />
+        </div>
+        <Button type="submit" disabled={busy || currentMpin.length !== 6 || newMpin.length !== 6 || confirmMpin.length !== 6}>
+          Change MPIN
         </Button>
       </form>
 

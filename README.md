@@ -29,6 +29,13 @@ Admin) or you join one through an **invite link** an existing Admin generated
 for you. A user can belong to any number of orgs and switches between them in
 the dashboard.
 
+Every sign-in has two steps. After the email and password, the dashboard
+asks for a six-digit **MPIN**; nothing in the platform answers until it is
+entered, and a first-time user is made to choose one before going further.
+Five wrong tries lock the MPIN step for fifteen minutes; "Forgot MPIN?"
+re-verifies the password and sets a new one. Members change their MPIN
+from Members → Your login.
+
 An org is the unit of isolation and the unit of trading: one master account,
 its slaves, its cTrader ID grants, its mappings, its audit log, its
 copying/dry-run switches. **Nothing crosses an org boundary** — every

@@ -1,4 +1,4 @@
-import { render, screen, waitFor, act } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
 import { afterEach, expect, test, vi } from 'vitest'
@@ -65,6 +65,16 @@ test('a wrong MPIN shows the tries left and clears the boxes', async () => {
   await typePin('000000')
   expect(await screen.findByRole('alert')).toHaveTextContent('Wrong MPIN, 3 tries left')
   expect(document.querySelector<HTMLInputElement>('input')!.value).toBe('')
+})
+
+test('shows the singular copy when one try is left', async () => {
+  stub({ mpin: { pending: true, set: true } }, {
+    '/api/mpin/verify': () => json({ detail: 'Invalid MPIN', attempts_left: 1 }, 401),
+  })
+  renderMpin()
+  await screen.findByRole('heading', { name: 'Enter your MPIN' })
+  await typePin('000000')
+  expect(await screen.findByRole('alert')).toHaveTextContent('Wrong MPIN, 1 try left')
 })
 
 test('a lock disables entry and counts down; Forgot MPIN still works', async () => {

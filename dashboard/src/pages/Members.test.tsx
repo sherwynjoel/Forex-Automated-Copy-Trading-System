@@ -309,3 +309,24 @@ test('sign out everywhere calls the revocation endpoint', async () => {
         && (init as RequestInit)?.method === 'POST')).toBe(true)
   })
 })
+
+test('every member can change their MPIN with the current one', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('viewer'))
+  const fetchMock = mockRoutes({ 'POST /api/me/mpin': () => jsonResponse(null, 204) })
+  renderMembers()
+  await screen.findByRole('heading', { name: /your login/i })
+  const boxes = () => Array.from(document.querySelectorAll<HTMLInputElement>('input[inputmode="numeric"]'))
+  boxes()[0].focus(); await userEvent.keyboard('123456')
+  boxes()[6].focus(); await userEvent.keyboard('654321')
+  boxes()[12].focus(); await userEvent.keyboard('654321')
+  await userEvent.click(screen.getByRole('button', { name: /change mpin/i }))
+  await waitFor(() => {
+    const call = fetchMock.mock.calls.find(
+      ([u, init]) => String(u) === '/api/me/mpin' && (init as RequestInit)?.method === 'POST')
+    expect(call).toBeTruthy()
+    expect(JSON.parse(String((call![1] as RequestInit).body))).toEqual({
+      current_mpin: '123456', mpin: '654321', mpin_confirm: '654321',
+    })
+  })
+  expect(await screen.findByText(/MPIN changed/i)).toBeInTheDocument()
+})
