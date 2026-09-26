@@ -11,7 +11,7 @@ test('renders the one select recipe on the card surface so the violet chevron ap
     </Select>
   )
   const select = screen.getByLabelText('Role')
-  expect(select).toHaveClass('rounded', 'border', 'border-line-strong', 'bg-card', 'text-ink', 'text-sm')
+  expect(select).toHaveClass('rounded', 'border', 'border-field-line', 'bg-card', 'text-ink', 'text-sm')
   expect(select).toHaveValue('viewer')
 })
 

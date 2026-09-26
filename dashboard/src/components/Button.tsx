@@ -36,7 +36,7 @@ const SECONDARY: Record<ButtonTone, string> = {
   loss: 'border border-loss bg-card text-loss hover:bg-loss hover:text-on-accent',
   warn: 'border border-warn bg-card text-warn-deep hover:bg-warn-wash',
 }
-const SECONDARY_NEUTRAL = 'border border-line-strong bg-card text-ink hover:bg-line'
+const SECONDARY_NEUTRAL = 'border border-field-line bg-card text-ink hover:bg-line'
 
 const GHOST: Record<ButtonTone, string> = {
   brand: 'text-brand hover:text-brand-deep hover:underline',

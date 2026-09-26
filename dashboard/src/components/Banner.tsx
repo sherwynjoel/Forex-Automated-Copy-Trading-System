@@ -25,7 +25,7 @@ export default function Banner({ kind, children, onDismiss, announce = true }: {
       {onDismiss && (
         <button
           onClick={onDismiss}
-          className="text-xs font-semibold shrink-0 opacity-70 hover:opacity-100"
+          className="text-xs font-semibold shrink-0 underline-offset-2 hover:underline min-h-11 md:min-h-0"
         >
           Dismiss
         </button>

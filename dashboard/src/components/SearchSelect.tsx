@@ -151,7 +151,7 @@ export default function SearchSelect({
               onMouseEnter={() => setHighlight(index)}
               className={`${mono ? 'num ' : ''}px-3 py-2 text-sm cursor-pointer ${
                 index === highlight ? 'bg-brand-wash text-ink' : 'text-ink'
-              } ${option.value === value ? 'font-semibold text-brand' : ''}`}
+              } ${option.value === value ? 'font-semibold text-brand-deep' : ''}`}
             >
               {option.label}
             </li>

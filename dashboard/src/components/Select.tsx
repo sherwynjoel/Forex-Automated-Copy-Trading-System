@@ -13,7 +13,7 @@ const Select = forwardRef<HTMLSelectElement, SelectProps>(function Select(
   ref,
 ) {
   const classes = [
-    'rounded border border-line-strong bg-card px-2 py-1 text-sm text-ink',
+    'rounded border border-field-line bg-card px-2 py-1 text-sm text-ink',
     'disabled:opacity-50 disabled:cursor-not-allowed',
     block ? 'w-full' : '',
     className ?? '',

@@ -6,7 +6,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "tsc --noEmit -p tsconfig.app.json && vitest run",
+    "test": "node scripts/palette_check.mjs && tsc --noEmit -p tsconfig.app.json && vitest run",
     "test:ui": "vitest --ui"
   },
   "dependencies": {

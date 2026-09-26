@@ -18,7 +18,7 @@ const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
   const classes = [
     'w-full rounded border bg-card px-3 py-2 text-sm text-ink placeholder:text-ink-faint',
     'disabled:opacity-50 disabled:cursor-not-allowed',
-    invalid ? 'border-loss' : 'border-line-strong',
+    invalid ? 'border-loss' : 'border-field-line',
     num ? 'num' : '',
     className ?? '',
   ].filter(Boolean).join(' ')

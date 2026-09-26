@@ -31,7 +31,7 @@ test('secondary is an outlined control on the card surface; brand tone outlines 
       <Button variant="secondary" tone="brand">Connect</Button>
     </>
   )
-  expect(screen.getByRole('button', { name: 'Cancel' })).toHaveClass('border', 'border-line-strong', 'text-ink', 'bg-card')
+  expect(screen.getByRole('button', { name: 'Cancel' })).toHaveClass('border', 'border-field-line', 'text-ink', 'bg-card')
   expect(screen.getByRole('button', { name: 'Connect' })).toHaveClass('border-brand', 'text-brand', 'hover:bg-brand-wash')
 })
 

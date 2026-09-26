@@ -7,7 +7,7 @@ test('renders the one text-field recipe: card surface, strong hairline, ink text
   render(<Input aria-label="Symbol" placeholder="EURUSD" />)
   const input = screen.getByLabelText('Symbol')
   expect(input).toHaveClass(
-    'w-full', 'rounded', 'border', 'border-line-strong', 'bg-card', 'text-ink', 'text-sm',
+    'w-full', 'rounded', 'border', 'border-field-line', 'bg-card', 'text-ink', 'text-sm',
     'placeholder:text-ink-faint',
   )
 })
@@ -22,7 +22,7 @@ test('invalid paints the loss border and sets aria-invalid', () => {
   const input = screen.getByLabelText('Price')
   expect(input).toHaveAttribute('aria-invalid', 'true')
   expect(input).toHaveClass('border-loss')
-  expect(input).not.toHaveClass('border-line-strong')
+  expect(input).not.toHaveClass('border-field-line')
 })
 
 test('passes native attributes through and forwards the ref', () => {
