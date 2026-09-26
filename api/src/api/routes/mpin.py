@@ -115,10 +115,13 @@ def _check_mpin(conn: psycopg.Connection, user_id: int, mpin: str) -> Optional[R
         verify_password(_DUMMY_HASH, mpin)
         if mpin_hash is None:
             return JSONResponse(status_code=409, content={"detail": "MPIN not set"})
-        if locked_until is None or locked_until <= now:
+        # Judge the lock by the database clock, the one the reservation used;
+        # a skewed api clock must not extend a lock the database still holds.
+        (db_now,) = conn.execute("SELECT now()").fetchone()
+        if locked_until is None or locked_until <= db_now:
             # The cap was reached before a lock was written (a burst of
             # concurrent tries); start the window now.
-            locked_until = _lock(conn, user_id, now)
+            locked_until = _lock(conn, user_id, db_now)
         return _locked_response(locked_until)
     attempts, mpin_hash = reserved
     if verify_password(mpin_hash, mpin):
