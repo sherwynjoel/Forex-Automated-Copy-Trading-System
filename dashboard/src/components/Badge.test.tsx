@@ -29,6 +29,11 @@ test('pill rounds fully for status pills', () => {
   expect(screen.getByText('DRY RUN')).toHaveClass('rounded-full')
 })
 
+test('title passes through for chips that abbreviate a longer message', () => {
+  render(<Badge tone="loss" title="Send failed: connection reset">send failed</Badge>)
+  expect(screen.getByText('send failed')).toHaveAttribute('title', 'Send failed: connection reset')
+})
+
 test('extra className is appended', () => {
   render(<Badge tone="neutral" className="ml-2">x</Badge>)
   expect(screen.getByText('x')).toHaveClass('ml-2', 'bg-line')

@@ -42,15 +42,28 @@ test('ghost is text-only and still keeps the touch-height floor on phones', () =
   expect(btn).not.toHaveClass('bg-loss')
 })
 
-test('sizes: sm is the compact table-action size, md the default', () => {
+test('sizes: sm is the compact table-action size, md the default, lg for hero calls to action', () => {
   render(
     <>
       <Button size="sm">Small</Button>
       <Button>Medium</Button>
+      <Button size="lg">Large</Button>
     </>
   )
   expect(screen.getByRole('button', { name: 'Small' })).toHaveClass('text-xs', 'px-3', 'py-1.5')
   expect(screen.getByRole('button', { name: 'Medium' })).toHaveClass('text-sm', 'px-4', 'py-2')
+  expect(screen.getByRole('button', { name: 'Large' })).toHaveClass('text-base', 'px-6', 'py-3')
+})
+
+test('neutral tone is quiet chrome: ghost reads in soft ink, secondary is the plain outline', () => {
+  render(
+    <>
+      <Button variant="ghost" tone="neutral">Dismiss</Button>
+      <Button variant="secondary" tone="neutral">Plain</Button>
+    </>
+  )
+  expect(screen.getByRole('button', { name: 'Dismiss' })).toHaveClass('text-ink-soft', 'hover:text-ink')
+  expect(screen.getByRole('button', { name: 'Plain' })).toHaveClass('border-field-line', 'text-ink')
 })
 
 test('block stretches to the container', () => {

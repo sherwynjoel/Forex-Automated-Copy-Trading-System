@@ -2,13 +2,14 @@ import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 
 export type ButtonVariant = 'primary' | 'secondary' | 'ghost'
-export type ButtonTone = 'brand' | 'profit' | 'loss' | 'warn'
-export type ButtonSize = 'sm' | 'md'
+export type ButtonTone = 'brand' | 'profit' | 'loss' | 'warn' | 'neutral'
+export type ButtonSize = 'sm' | 'md' | 'lg'
 
 /**
  * The desk's one button. `variant` is the shape (filled, outlined, text),
  * `tone` the meaning (brand for ordinary actions, profit for Buy/resume,
- * loss for Sell/stop/destroy, warn for dry-run). Every button keeps the
+ * loss for Sell/stop/destroy, warn for dry-run, neutral for quiet chrome
+ * such as Dismiss, sidebar rows and icon buttons). Every button keeps the
  * 44px touch floor on phones and drops it from md up, where density wins.
  *
  * Class strings are spelled out per variant × tone so Tailwind can see them.
@@ -20,6 +21,8 @@ const BASE =
 const SIZE: Record<ButtonSize, string> = {
   sm: 'px-3 py-1.5 text-xs',
   md: 'px-4 py-2 text-sm',
+  // Hero and empty-state calls to action only.
+  lg: 'px-6 py-3 text-base',
 }
 
 const PRIMARY: Record<ButtonTone, string> = {
@@ -27,6 +30,8 @@ const PRIMARY: Record<ButtonTone, string> = {
   profit: 'bg-profit text-on-accent hover:bg-profit-deep',
   loss: 'bg-loss text-on-accent hover:bg-loss-deep',
   warn: 'bg-warn text-on-accent hover:bg-warn-deep',
+  // A filled neutral is ink on paper: the rare "dark" button.
+  neutral: 'bg-ink text-paper hover:bg-ink-soft',
 }
 
 const SECONDARY: Record<ButtonTone, string> = {
@@ -35,14 +40,16 @@ const SECONDARY: Record<ButtonTone, string> = {
   profit: 'border border-profit bg-card text-profit-deep hover:bg-profit-wash',
   loss: 'border border-loss bg-card text-loss hover:bg-loss hover:text-on-accent',
   warn: 'border border-warn bg-card text-warn-deep hover:bg-warn-wash',
+  neutral: 'border border-field-line bg-card text-ink hover:bg-line',
 }
-const SECONDARY_NEUTRAL = 'border border-field-line bg-card text-ink hover:bg-line'
+const SECONDARY_NEUTRAL = SECONDARY.neutral
 
 const GHOST: Record<ButtonTone, string> = {
   brand: 'text-brand hover:text-brand-deep hover:underline',
   profit: 'text-profit hover:text-profit-deep hover:underline',
   loss: 'text-loss hover:text-loss-deep hover:underline',
   warn: 'text-warn-deep hover:underline',
+  neutral: 'text-ink-soft hover:text-ink hover:bg-line',
 }
 
 function recipe(variant: ButtonVariant, tone: ButtonTone | undefined, size: ButtonSize, block?: boolean, extra?: string) {

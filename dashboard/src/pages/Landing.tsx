@@ -76,7 +76,7 @@ const RISK_NOTICE =
   'Trading leveraged products such as forex, metals and CFDs carries a high level of risk and may not be suitable for everyone. Past results do not predict future results. Nothing on this page is investment advice.'
 
 function Ctas({ large = false }: { large?: boolean }) {
-  const size = large ? 'md' : 'sm'
+  const size = large ? 'lg' : 'sm'
   return (
     <div className="flex flex-wrap items-center gap-3">
       <Button to="/register" size={size}>Create account</Button>

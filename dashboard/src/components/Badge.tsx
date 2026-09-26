@@ -15,11 +15,13 @@ const TONE: Record<BadgeTone, string> = {
   neutral: 'bg-line text-ink-soft',
 }
 
-export default function Badge({ tone, pill, className, children }: {
+export default function Badge({ tone, pill, className, title, children }: {
   tone: BadgeTone
   /** Fully rounded, for status pills such as DRY RUN. */
   pill?: boolean
   className?: string
+  /** Hover text for a chip that abbreviates something longer (an error). */
+  title?: string
   children: ReactNode
 }) {
   const classes = [
@@ -28,5 +30,5 @@ export default function Badge({ tone, pill, className, children }: {
     TONE[tone],
     className ?? '',
   ].filter(Boolean).join(' ')
-  return <span className={classes}>{children}</span>
+  return <span className={classes} title={title}>{children}</span>
 }
