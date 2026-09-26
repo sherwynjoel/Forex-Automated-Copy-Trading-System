@@ -76,3 +76,20 @@ test('disabled boxes take no input', async () => {
   expect(boxes()[0]).toHaveValue('')
   expect(onComplete).not.toHaveBeenCalled()
 })
+
+test('the Show toggle follows disabled and announces its pressed state', async () => {
+  const disabledRender = render(<Harness disabled />)
+  for (const el of boxes()) expect(el).toBeDisabled()
+  expect(screen.getByRole('button', { name: /show/i })).toBeDisabled()
+  disabledRender.unmount()
+
+  render(<Harness />)
+  const toggle = screen.getByRole('button', { name: /show/i })
+  expect(toggle).toHaveAttribute('aria-pressed', 'false')
+  await userEvent.click(toggle)
+  expect(toggle).toHaveAttribute('aria-pressed', 'true')
+  expect(boxes()[0]).toHaveAttribute('type', 'text')
+  await userEvent.click(toggle)
+  expect(toggle).toHaveAttribute('aria-pressed', 'false')
+  expect(boxes()[0]).toHaveAttribute('type', 'password')
+})

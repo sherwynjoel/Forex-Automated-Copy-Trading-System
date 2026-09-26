@@ -76,7 +76,12 @@ export default function PinInput({ id, label, value, onChange, onComplete, disab
     <div>
       <div className="flex items-center justify-between mb-1">
         <span id={labelId} className="desk-label">{label}</span>
-        <Button variant="ghost" tone="neutral" size="sm" type="button" onClick={() => setShow((s) => !s)}>
+        <Button
+          variant="ghost" tone="neutral" size="sm" type="button"
+          disabled={disabled}
+          aria-pressed={show}
+          onClick={() => setShow((s) => !s)}
+        >
           {show ? 'Hide' : 'Show'}
         </Button>
       </div>
@@ -97,7 +102,7 @@ export default function PinInput({ id, label, value, onChange, onComplete, disab
             onPaste={onPaste}
             onFocus={(e) => e.currentTarget.select()}
             disabled={disabled}
-            aria-label={`${label} digit ${i + 1}`}
+            aria-label={`${label} digit ${i + 1} of ${LENGTH}`}
             aria-invalid={error ? true : undefined}
             aria-describedby={error ? errorId : undefined}
             className={[
