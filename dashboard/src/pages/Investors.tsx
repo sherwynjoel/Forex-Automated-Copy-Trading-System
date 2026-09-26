@@ -4,14 +4,25 @@ import { useOrg } from '../lib/org'
 import { can } from '../lib/roles'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
 import { errorText, formatWhen, money } from '../lib/format'
-import { moneyOrDash, pillClass, statusLabel } from '../lib/investor'
+import { moneyOrDash, statusLabel, statusTone } from '../lib/investor'
 import Banner from '../components/Banner'
 import ConfirmDialog from '../components/ConfirmDialog'
+import Button from '../components/Button'
+import Input from '../components/Input'
+import Select from '../components/Select'
+import Badge, { type BadgeTone } from '../components/Badge'
 import type {
   Account, InvestorDeposit, InvestorRow, InvestorWallet, InvestorWithdrawal,
 } from '../lib/types'
 
 const POLL_MS = 10000
+
+/** Maps the shared status-tone vocabulary onto the Badge's tone names --
+ *  `pillClass`'s exact bg-*-wash/text-*-deep pairs, one level up. */
+function statusBadgeTone(status: string): BadgeTone {
+  const tone = statusTone(status)
+  return tone === 'ok' ? 'profit' : tone === 'warn' ? 'warn' : tone === 'bad' ? 'loss' : 'neutral'
+}
 
 /** What the admin is being asked to confirm. `requireText` blocks the
  *  confirm button until the note/txid box has something in it. */
@@ -177,11 +188,10 @@ export default function Investors() {
                   </td>
                   <td data-label="Account" className="px-5 py-2.5">
                     {control ? (
-                      <select aria-label={`Account for ${r.email}`}
+                      <Select aria-label={`Account for ${r.email}`}
                               value={r.account_id ?? ''}
                               disabled={busy}
-                              onChange={(e) => linkAccount(r.user_id, e.target.value ? Number(e.target.value) : null)}
-                              className="border border-line-strong rounded bg-card px-2 py-1 text-sm">
+                              onChange={(e) => linkAccount(r.user_id, e.target.value ? Number(e.target.value) : null)}>
                         <option value="">not linked</option>
                         {r.account_id != null && (
                           <option value={r.account_id}>{r.nickname ?? r.account_id}</option>
@@ -191,7 +201,7 @@ export default function Investors() {
                             {a.nickname ?? a.trader_login} ({a.platform ?? 'ctrader'})
                           </option>
                         ))}
-                      </select>
+                      </Select>
                     ) : (r.nickname ?? r.account_id ?? 'not linked')}
                   </td>
                   <td data-label="Equity" className="tnum px-5 py-2.5 text-right">{moneyOrDash(r.equity)}</td>
@@ -236,14 +246,12 @@ export default function Investors() {
                     <td data-label="Investor" className="px-5 py-2.5">{d.display_name}<div className="text-xs text-ink-soft">{d.email}</div></td>
                     <td data-label="Amount" className="tnum px-5 py-2.5 text-right">{money(d.amount)} {d.coin}</td>
                     <td data-label="Transaction" className="num px-5 py-2.5 break-all">{d.txid}{d.note && <div className="text-xs text-ink-soft">{d.note}</div>}</td>
-                    <td data-label="Status" className="px-5 py-2.5"><span className={`desk-label px-2 py-0.5 rounded ${pillClass(d.status)}`}>{statusLabel(d.status)}</span>{d.decision_note && <div className="text-xs text-ink-soft">{d.decision_note}</div>}</td>
+                    <td data-label="Status" className="px-5 py-2.5"><Badge tone={statusBadgeTone(d.status)}>{statusLabel(d.status)}</Badge>{d.decision_note && <div className="text-xs text-ink-soft">{d.decision_note}</div>}</td>
                     <td className="px-5 py-2.5 text-right whitespace-nowrap">
                       {control && d.status === 'pending' && (
                         <>
-                          <button aria-label={`Confirm deposit ${d.id}`} disabled={busy} onClick={() => decideDeposit(d, 'confirmed')}
-                                  className="px-3 py-1.5 text-xs font-semibold rounded bg-brand text-on-accent hover:bg-brand-deep disabled:opacity-50 mr-2">Confirm</button>
-                          <button aria-label={`Reject deposit ${d.id}`} disabled={busy} onClick={() => decideDeposit(d, 'rejected')}
-                                  className="px-3 py-1.5 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-on-accent transition-colors disabled:opacity-50">Reject</button>
+                          <Button size="sm" className="mr-2" disabled={busy} aria-label={`Confirm deposit ${d.id}`} onClick={() => decideDeposit(d, 'confirmed')}>Confirm</Button>
+                          <Button variant="secondary" tone="loss" size="sm" disabled={busy} aria-label={`Reject deposit ${d.id}`} onClick={() => decideDeposit(d, 'rejected')}>Reject</Button>
                         </>
                       )}
                     </td>
@@ -274,19 +282,16 @@ export default function Investors() {
                       {w.equity_verified && w.equity_at_request != null && <div className="text-xs text-ink-soft">of {money(w.equity_at_request)} equity</div>}
                     </td>
                     <td data-label="Destination" className="num px-5 py-2.5 break-all">{w.destination}{w.txid && <div className="text-xs text-ink-soft">tx {w.txid}</div>}</td>
-                    <td data-label="Status" className="px-5 py-2.5"><span className={`desk-label px-2 py-0.5 rounded ${pillClass(w.status)}`}>{statusLabel(w.status)}</span>{w.decision_note && <div className="text-xs text-ink-soft">{w.decision_note}</div>}</td>
+                    <td data-label="Status" className="px-5 py-2.5"><Badge tone={statusBadgeTone(w.status)}>{statusLabel(w.status)}</Badge>{w.decision_note && <div className="text-xs text-ink-soft">{w.decision_note}</div>}</td>
                     <td className="px-5 py-2.5 text-right whitespace-nowrap">
                       {control && w.status === 'requested' && (
-                        <button aria-label={`Approve withdrawal ${w.id}`} disabled={busy} onClick={() => decideWithdrawal(w, 'approved')}
-                                className="px-3 py-1.5 text-xs font-semibold rounded bg-brand text-on-accent hover:bg-brand-deep disabled:opacity-50 mr-2">Approve</button>
+                        <Button size="sm" className="mr-2" disabled={busy} aria-label={`Approve withdrawal ${w.id}`} onClick={() => decideWithdrawal(w, 'approved')}>Approve</Button>
                       )}
                       {control && w.status === 'approved' && (
-                        <button aria-label={`Mark withdrawal ${w.id} paid`} disabled={busy} onClick={() => markPaid(w)}
-                                className="px-3 py-1.5 text-xs font-semibold rounded bg-brand text-on-accent hover:bg-brand-deep disabled:opacity-50 mr-2">Mark paid</button>
+                        <Button size="sm" className="mr-2" disabled={busy} aria-label={`Mark withdrawal ${w.id} paid`} onClick={() => markPaid(w)}>Mark paid</Button>
                       )}
                       {control && (w.status === 'requested' || w.status === 'approved') && (
-                        <button aria-label={`Reject withdrawal ${w.id}`} disabled={busy} onClick={() => decideWithdrawal(w, 'rejected')}
-                                className="px-3 py-1.5 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-on-accent transition-colors disabled:opacity-50">Reject</button>
+                        <Button variant="secondary" tone="loss" size="sm" disabled={busy} aria-label={`Reject withdrawal ${w.id}`} onClick={() => decideWithdrawal(w, 'rejected')}>Reject</Button>
                       )}
                     </td>
                   </tr>
@@ -308,16 +313,14 @@ export default function Investors() {
              ['address', 'Address', 'flex-1 min-w-64'], ['memo', 'Memo (optional)', 'w-40']] as const).map(([key, label, width]) => (
             <label key={key} className={`block ${width}`}>
               <span className="desk-label block mb-1">{label}</span>
-              <input aria-label={label.replace(' (optional)', '')} value={wallet[key]} disabled={!control}
-                     onChange={(e) => editWallet({ [key]: e.target.value })}
-                     className="num w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink" />
+              <Input aria-label={label.replace(' (optional)', '')} value={wallet[key]} disabled={!control} num
+                     onChange={(e) => editWallet({ [key]: e.target.value })} />
             </label>
           ))}
           {control && (
-            <button type="submit" disabled={busy}
-                    className="px-4 py-2 text-sm font-semibold rounded bg-brand text-on-accent hover:bg-brand-deep disabled:opacity-50">
+            <Button type="submit" disabled={busy}>
               Save wallet
-            </button>
+            </Button>
           )}
         </div>
       </form>

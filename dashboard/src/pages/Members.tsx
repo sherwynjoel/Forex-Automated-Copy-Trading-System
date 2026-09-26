@@ -6,6 +6,9 @@ import { useOrg } from '../lib/org'
 import Banner from '../components/Banner'
 import type { Invite, Member } from '../lib/types'
 import ConfirmDialog from '../components/ConfirmDialog'
+import Button from '../components/Button'
+import Input from '../components/Input'
+import Select from '../components/Select'
 import AccountSecurity from '../components/AccountSecurity'
 
 export default function Members() {
@@ -103,28 +106,24 @@ export default function Members() {
                 {/* Your own role is changed by another admin, never from here;
                     the server refuses to leave an org without one. */}
                 {can(role, 'manage_members') && m.user_id !== me.user.id ? (
-                  <select
+                  <Select
                     aria-label={`Role for ${m.email}`}
                     value={m.role}
                     onChange={(e) => changeRole(m.user_id, e.target.value)}
-                    className="border border-line-strong rounded bg-card px-2 py-1"
                   >
                     {OFFERED_ROLES.map((r) => (
                       <option key={r} value={r}>{roleLabel(r)}</option>
                     ))}
-                  </select>
+                  </Select>
                 ) : (
                   <span className="text-ink">{roleLabel(m.role)}</span>
                 )}
               </td>
               <td className="text-right">
                 {(can(role, 'manage_members') || m.user_id === me.user.id) && (
-                  <button
-                    onClick={() => removeMember(m.user_id)}
-                    className="text-xs text-loss hover:underline"
-                  >
+                  <Button variant="ghost" tone="loss" size="sm" onClick={() => removeMember(m.user_id)}>
                     {m.user_id === me.user.id ? 'Leave' : 'Remove'}
-                  </button>
+                  </Button>
                 )}
               </td>
             </tr>
@@ -136,33 +135,32 @@ export default function Members() {
         <div className="space-y-4">
           <h3 className="text-lg font-semibold text-ink">Invites</h3>
           <form onSubmit={createInvite} className="flex items-center gap-3">
-            <select
+            <Select
               aria-label="Invite role"
               value={inviteRole}
               onChange={(e) => setInviteRole(e.target.value as Role)}
-              className="border border-line-strong rounded bg-card px-2 py-1 text-sm"
             >
               {OFFERED_ROLES.map((r) => <option key={r} value={r}>{roleLabel(r)}</option>)}
-            </select>
-            <button
-              type="submit"
-              className="px-3 py-1.5 text-xs font-semibold rounded bg-brand text-on-accent hover:bg-brand-deep"
-            >
+            </Select>
+            <Button type="submit" size="sm">
               Create invite link
-            </button>
+            </Button>
           </form>
           {newInviteLink && (
             <div className="flex items-center gap-2 bg-brand-wash rounded p-3 text-sm">
               <code className="text-ink break-all">{newInviteLink}</code>
-              <button
+              <Button
+                variant="ghost"
+                tone="brand"
+                size="sm"
+                className="shrink-0"
                 onClick={() => {
                   navigator.clipboard.writeText(newInviteLink)
                   setLinkCopied(true)
                 }}
-                className="text-xs font-medium text-brand-deep hover:underline shrink-0"
               >
                 {linkCopied ? 'Copied ✓' : 'Copy'}
-              </button>
+              </Button>
               <span className="desk-label shrink-0">shown once — copy it now</span>
             </div>
           )}
@@ -172,15 +170,17 @@ export default function Members() {
                 <span>{roleLabel(inv.role)}</span>
                 <span>{inv.consumed ? 'used' : `expires ${new Date(inv.expires_at).toLocaleDateString()}`}</span>
                 {!inv.consumed && (
-                  <button
+                  <Button
+                    variant="ghost"
+                    tone="loss"
+                    size="sm"
                     onClick={async () => {
                       await orgApi(orgId, `invites/${inv.id}`, { method: 'DELETE' })
                       await refresh()
                     }}
-                    className="text-xs text-loss hover:underline"
                   >
                     Revoke
-                  </button>
+                  </Button>
                 )}
               </li>
             ))}
@@ -206,22 +206,18 @@ export default function Members() {
             }}
             className="flex items-center gap-3"
           >
-            <input
+            <Input
               value={orgName}
               onChange={(e) => setOrgName(e.target.value)}
               aria-label="Organization name"
-              className="border border-line-strong rounded bg-card px-2 py-1 text-sm"
             />
-            <button type="submit" className="px-3 py-1.5 text-xs font-semibold rounded border border-brand text-brand hover:bg-brand-wash hover:text-brand-deep">
+            <Button type="submit" variant="secondary" tone="brand" size="sm">
               Rename
-            </button>
+            </Button>
           </form>
-          <button
-            onClick={() => setDeleteOpen(true)}
-            className="px-3 py-1.5 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-on-accent transition-colors"
-          >
+          <Button variant="secondary" tone="loss" size="sm" onClick={() => setDeleteOpen(true)}>
             Delete organization
-          </button>
+          </Button>
           <ConfirmDialog
             open={deleteOpen}
             title="Delete this organization"

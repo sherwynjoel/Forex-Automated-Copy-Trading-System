@@ -7,6 +7,10 @@ import type {
   SymbolAliases,
 } from '../lib/types'
 import ConfirmDialog from '../components/ConfirmDialog'
+import Button from '../components/Button'
+import Input from '../components/Input'
+import Select from '../components/Select'
+import Badge from '../components/Badge'
 import { money, formatWhen } from '../lib/format'
 import { isMt5, accountName } from '../lib/platform'
 
@@ -449,18 +453,12 @@ export default function Accounts() {
         </div>
         {can(role, 'control') && (
           <div className="flex flex-col gap-2 md:flex-row md:items-center shrink-0">
-            <button
-              onClick={() => setAddingMt5(true)}
-              className="w-full md:w-auto px-4 py-2.5 text-sm font-semibold rounded border border-line-strong text-ink hover:border-ink transition-colors"
-            >
+            <Button variant="secondary" block className="md:w-auto" onClick={() => setAddingMt5(true)}>
               Add MT5 account
-            </button>
-            <button
-              onClick={handleConnectOAuth}
-              className="w-full md:w-auto px-4 py-2.5 bg-brand text-on-accent text-sm font-semibold rounded hover:bg-brand-deep transition-colors"
-            >
+            </Button>
+            <Button block className="md:w-auto" onClick={handleConnectOAuth}>
               Connect cTrader ID
-            </button>
+            </Button>
           </div>
         )}
       </header>
@@ -525,11 +523,9 @@ export default function Accounts() {
                       <div className="text-xs text-ink-faint">
                         {onMt5 ? mt5Subtitle(account.mt5) : `cTID ${id}`}
                       </div>
-                      <span className={`mt-1 inline-block text-xs font-semibold px-2 py-0.5 rounded ${
-                        onMt5 ? 'bg-brand-wash text-ink' : 'bg-line text-ink-soft'
-                      }`}>
+                      <Badge tone={onMt5 ? 'brand' : 'neutral'} className="mt-1">
                         {onMt5 ? 'MT5' : 'cTrader'}
-                      </span>
+                      </Badge>
                       {account.status === 'degraded' && (
                         <div
                           className="mt-1 text-xs text-loss-deep bg-loss-wash rounded px-1.5 py-0.5 max-w-44 truncate"
@@ -557,11 +553,9 @@ export default function Accounts() {
                       )}
                     </td>
                     <td data-label="Env" className="px-3 py-3">
-                      <span className={`text-xs font-semibold px-2 py-0.5 rounded ${
-                        account.is_live ? 'bg-loss-wash text-loss-deep' : 'bg-line text-ink-soft'
-                      }`}>
+                      <Badge tone={account.is_live ? 'loss' : 'neutral'}>
                         {account.is_live ? 'Live' : 'Demo'}
-                      </span>
+                      </Badge>
                     </td>
                     <td data-label="Equity" className="num px-3 py-3 text-right whitespace-nowrap">
                       {/* An account the engine has no reading for shows a dash. Rendering
@@ -572,7 +566,7 @@ export default function Accounts() {
                     </td>
                     <td data-label="Role" className="px-3 py-3">
                       {can(role, 'control') ? (
-                        <select
+                        <Select
                           aria-label={`Role for account ${account.trader_login}`}
                           value={account.role}
                           onChange={(e) => {
@@ -580,12 +574,11 @@ export default function Accounts() {
                             else handleRoleChange(id, e.target.value)
                           }}
                           disabled={isPending}
-                          className="rounded border border-line-strong px-2 py-1 text-sm bg-card disabled:opacity-50"
                         >
                           <option value="master">Master</option>
                           <option value="slave">Slave</option>
                           <option value="ignored">Ignored</option>
-                        </select>
+                        </Select>
                       ) : (
                         <span className="text-ink">{account.role}</span>
                       )}
@@ -637,41 +630,38 @@ export default function Accounts() {
                       {onMt5 ? (
                         <Mt5ConnectionBadge account={account} />
                       ) : (
-                        <span className={`text-xs font-medium px-2 py-0.5 rounded ${
-                          account.connection_status === 'active'
-                            ? 'bg-profit-wash text-profit-deep'
-                            : 'bg-warn-wash text-warn-deep'
-                        }`}>
+                        <Badge tone={account.connection_status === 'active' ? 'profit' : 'warn'}>
                           {account.connection_status === 'active' ? 'Active' : account.connection_status}
-                        </span>
+                        </Badge>
                       )}
                     </td>
                     <td className="px-5 py-3">
                       <div className="flex justify-end gap-2 flex-wrap">
-                        <button
+                        <Button
+                          variant="secondary"
+                          size="sm"
                           onClick={() => openDetails(account)}
                           disabled={isPending}
-                          className="px-2.5 py-1 text-xs font-medium rounded border border-line-strong text-ink-soft hover:text-ink hover:border-ink transition-colors disabled:opacity-50"
                         >
                           Details
-                        </button>
+                        </Button>
                         {can(role, 'control') && !onMt5 && (
-                          <button
-                            onClick={handleConnectOAuth}
-                            disabled={isPending}
-                            className="px-2.5 py-1 text-xs font-medium rounded border border-line-strong text-ink-soft hover:text-ink hover:border-ink transition-colors disabled:opacity-50"
-                          >
+                          <Button variant="secondary" size="sm" onClick={handleConnectOAuth} disabled={isPending}>
                             Re-grant access
-                          </button>
+                          </Button>
                         )}
                         {can(role, 'control') && (flattenStatus[id] === 'busy' ? (
-                          <button
+                          <Button
+                            variant="secondary"
+                            size="sm"
                             aria-disabled="true"
-                            className="min-w-[6.5rem] px-2.5 py-1 text-xs font-semibold rounded border border-line-strong text-ink-soft animate-pulse motion-reduce:animate-none"
+                            className="min-w-[6.5rem] animate-pulse motion-reduce:animate-none"
                           >
                             Flattening…
-                          </button>
+                          </Button>
                         ) : flattenStatus[id] === 'done' ? (
+                          // No Button recipe reproduces this non-interactive
+                          // bg-profit-wash checkmark state -- see group report.
                           <button
                             aria-disabled="true"
                             className="min-w-[6.5rem] px-2.5 py-1 text-xs font-semibold rounded border border-profit bg-profit-wash text-profit-deep"
@@ -679,7 +669,11 @@ export default function Accounts() {
                             Flattened ✓
                           </button>
                         ) : (
-                          <button
+                          <Button
+                            variant={flattenStatus[id] === 'error' ? 'primary' : 'secondary'}
+                            tone="loss"
+                            size="sm"
+                            className="min-w-[6.5rem]"
                             onClick={() => {
                               setFlattenStatus((prev) => {
                                 const next = { ...prev }
@@ -689,23 +683,19 @@ export default function Accounts() {
                               setFlattening(account)
                             }}
                             disabled={isPending}
-                            className={flattenStatus[id] === 'error'
-                              ? 'min-w-[6.5rem] px-2.5 py-1 text-xs font-semibold rounded border border-loss bg-loss text-on-accent hover:bg-loss-deep transition-colors disabled:opacity-50'
-                              : 'min-w-[6.5rem] px-2.5 py-1 text-xs font-semibold rounded border border-loss text-loss hover:bg-loss hover:text-on-accent transition-colors disabled:opacity-50'}
                           >
                             {flattenStatus[id] === 'error' ? 'Failed — retry' : 'Flatten'}
-                          </button>
+                          </Button>
                         ))}
                         {can(role, 'control') && onMt5 && (
-                          <button
-                            onClick={() => setRotating(account)}
-                            disabled={isPending}
-                            className="px-2.5 py-1 text-xs font-medium rounded border border-line-strong text-ink-soft hover:text-ink hover:border-ink transition-colors disabled:opacity-50"
-                          >
+                          <Button variant="secondary" size="sm" onClick={() => setRotating(account)} disabled={isPending}>
                             Rotate key
-                          </button>
+                          </Button>
                         )}
                         {can(role, 'control') && onMt5 && account.role !== 'master' && (
+                          // Neutral-until-hover-red has no Button equivalent
+                          // (secondary loses the hover cue; tone="loss" is
+                          // persistently red) -- left native, see group report.
                           <button
                             onClick={() => setRemoving(account)}
                             disabled={isPending}
@@ -825,14 +815,13 @@ export default function Accounts() {
         </p>
         <div>
           <label className="desk-label block mb-1" htmlFor="mt5-nickname">Nickname</label>
-          <input
+          <Input
             id="mt5-nickname"
             type="text"
             value={mt5Nickname}
             onChange={(e) => setMt5Nickname(e.target.value)}
             autoComplete="off"
             placeholder="e.g. VPS desk"
-            className="w-full rounded border border-line-strong px-3 py-2 text-sm text-ink bg-card"
           />
         </div>
       </ConfirmDialog>
@@ -857,13 +846,14 @@ export default function Accounts() {
           >
             {keyReveal?.key}
           </code>
-          <button
-            type="button"
+          <Button
+            variant="secondary"
+            size="sm"
+            className="shrink-0"
             onClick={() => { if (keyReveal) copyKey(keyReveal.key) }}
-            className="shrink-0 px-2.5 py-1 text-xs font-medium rounded border border-line-strong text-ink-soft hover:text-ink hover:border-ink transition-colors"
           >
             {copied ? 'Copied' : 'Copy'}
-          </button>
+          </Button>
         </div>
         {keyReveal?.download_url && (
           <a
@@ -1008,13 +998,9 @@ export default function Accounts() {
                     {/* The spec puts Rotate key here, beside the terminal it
                         cuts off; the row button opens the same dialog. */}
                     {can(role, 'control') && (
-                      <button
-                        type="button"
-                        onClick={() => setRotating(detailsFor)}
-                        className="mt-3 px-2.5 py-1 text-xs font-medium rounded border border-line-strong text-ink-soft hover:text-ink hover:border-ink transition-colors"
-                      >
+                      <Button variant="secondary" size="sm" className="mt-3" onClick={() => setRotating(detailsFor)}>
                         Rotate key
-                      </button>
+                      </Button>
                     )}
                   </section>
                 ) : (
@@ -1065,11 +1051,9 @@ export default function Accounts() {
                                   ) : (
                                     <span className="num text-ink">{row.broker_name}</span>
                                   )}
-                                  <span className={`text-xs px-1.5 py-0.5 rounded ${
-                                    row.source === 'manual' ? 'bg-brand-wash text-ink' : 'bg-line text-ink-soft'
-                                  }`}>
+                                  <Badge tone={row.source === 'manual' ? 'brand' : 'neutral'}>
                                     {row.source}
-                                  </span>
+                                  </Badge>
                                 </span>
                               </li>
                             ))}
@@ -1077,32 +1061,34 @@ export default function Accounts() {
                         )}
                         {can(role, 'control') && (
                           <div className="mt-3 flex items-center gap-2">
-                            <input
+                            <Input
                               type="text"
+                              num
                               aria-label="New canonical symbol"
                               placeholder="XAUUSD"
                               value={newAlias.canonical}
                               onChange={(e) => setNewAlias((prev) => ({ ...prev, canonical: e.target.value }))}
-                              className="num w-24 rounded border border-line-strong px-2 py-1 text-sm bg-card"
+                              className="w-24"
                             />
                             <span className="text-ink-faint">→</span>
-                            <input
+                            <Input
                               type="text"
+                              num
                               aria-label="New broker symbol"
                               placeholder="GOLD.r"
                               list="mt5-broker-symbols"
                               value={newAlias.broker_name}
                               onChange={(e) => setNewAlias((prev) => ({ ...prev, broker_name: e.target.value }))}
-                              className="num w-28 rounded border border-line-strong px-2 py-1 text-sm bg-card"
+                              className="w-28"
                             />
-                            <button
-                              type="button"
+                            <Button
+                              variant="secondary"
+                              size="sm"
                               onClick={handleAddAlias}
                               disabled={!newAlias.canonical.trim() || !newAlias.broker_name.trim()}
-                              className="px-2.5 py-1 text-xs font-medium rounded border border-line-strong text-ink-soft hover:text-ink hover:border-ink transition-colors disabled:opacity-50"
                             >
                               Add mapping
-                            </button>
+                            </Button>
                           </div>
                         )}
                         <datalist id="mt5-broker-symbols">
@@ -1162,22 +1148,10 @@ function DetailRow({ label, value, mono }: { label: string; value: string; mono?
 function Mt5ConnectionBadge({ account }: { account: Account }) {
   switch (account.connection_status) {
     case 'connected':
-      return (
-        <span className="text-xs font-medium px-2 py-0.5 rounded bg-profit-wash text-profit-deep">
-          Connected
-        </span>
-      )
+      return <Badge tone="profit">Connected</Badge>
     case 'offline':
-      return (
-        <span className="text-xs font-medium px-2 py-0.5 rounded bg-warn-wash text-warn-deep">
-          Offline · last seen {formatWhen(account.mt5?.last_seen_at)}
-        </span>
-      )
+      return <Badge tone="warn">Offline · last seen {formatWhen(account.mt5?.last_seen_at)}</Badge>
     default:
-      return (
-        <span className="text-xs font-medium px-2 py-0.5 rounded bg-line text-ink-soft">
-          Waiting for the terminal
-        </span>
-      )
+      return <Badge tone="neutral">Waiting for the terminal</Badge>
   }
 }
