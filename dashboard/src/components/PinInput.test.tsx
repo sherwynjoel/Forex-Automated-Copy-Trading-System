@@ -90,6 +90,26 @@ test('Delete clears the digit under the cursor; Home and End move the focus', as
   expect(inputs[2]).toHaveFocus()
 })
 
+test('when the parent clears the value after six digits, focus returns to the first box', async () => {
+  // The /mpin page does exactly this on a wrong MPIN: the verify call fails
+  // and it sets the value back to '' while focus is still on the last box.
+  function Retrying() {
+    const [value, setValue] = useState('')
+    return (
+      <PinInput id="mpin" label="MPIN" value={value} onChange={setValue} autoFocus
+                onComplete={() => { setTimeout(() => setValue(''), 0) }} />
+    )
+  }
+  render(<Retrying />)
+  const inputs = boxes()
+  await userEvent.keyboard('123456')
+  await waitFor(() => expect(inputs[0]).toHaveFocus())
+  expect(inputs.map((b) => (b as HTMLInputElement).value).join('')).toBe('')
+  await userEvent.keyboard('9')
+  expect(inputs[0]).toHaveValue('9')
+  expect(inputs[1]).toHaveFocus()
+})
+
 test('Show reveals the digits; the error is announced and linked', async () => {
   render(<Harness error="Wrong MPIN, 3 tries left" />)
   expect(screen.getByRole('alert')).toHaveTextContent('Wrong MPIN, 3 tries left')

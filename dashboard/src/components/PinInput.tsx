@@ -67,6 +67,14 @@ export default function PinInput({ id, label, value, onChange, onComplete, disab
     if (value.length < LENGTH) completedFor.current = null
   }, [value, onComplete])
 
+  // A parent that clears the value (a wrong MPIN) leaves focus on the last
+  // box; bring the caret back to where entry now continues.
+  useEffect(() => {
+    const active = document.activeElement as HTMLInputElement | null
+    const i = active ? refs.current.indexOf(active) : -1
+    if (i > firstEmpty.current) focusAt(firstEmpty.current)
+  }, [value, focusAt])
+
   // A new error shakes the row once; the message itself is announced below.
   useEffect(() => {
     if (!error || reduced || !row.current) return
@@ -155,12 +163,12 @@ export default function PinInput({ id, label, value, onChange, onComplete, disab
           {show ? 'Hide' : 'Show'}
         </Button>
       </div>
-      <motion.div ref={row} role="group" aria-labelledby={labelId} className="flex gap-2">
+      <motion.div ref={row} role="group" aria-labelledby={labelId} className="flex gap-1.5 sm:gap-2">
         {chars.map((char, i) => {
           const active = focused === i
           const glyph = char ? (show ? char : MASK) : ''
           return (
-            <div key={i} className={`relative h-12 w-11 ${i > 0 && i % GROUP === 0 ? 'ml-3' : ''}`}>
+            <div key={i} className={`relative h-11 w-9 sm:h-12 sm:w-11 ${i > 0 && i % GROUP === 0 ? 'ml-2 sm:ml-3' : ''}`}>
               <input
                 ref={(el) => { refs.current[i] = el }}
                 id={i === 0 ? id : `${id}-${i}`}
@@ -183,14 +191,16 @@ export default function PinInput({ id, label, value, onChange, onComplete, disab
                 className={[
                   // The input owns focus and the value; the glyph beside it is
                   // what the eye sees, so its own text and caret stay invisible.
-                  'num h-12 w-11 rounded border-2 bg-card text-center text-lg',
+                  'num h-11 w-9 sm:h-12 sm:w-11 rounded border bg-card text-center text-lg',
                   'text-transparent caret-transparent selection:bg-transparent',
                   'transition-[border-color] duration-150 motion-reduce:transition-none disabled:opacity-50',
-                  error ? 'border-loss' : active ? 'border-brand' : 'border-field-line',
+                  // The global focus ring marks the active box; the border only
+                  // carries the error state, like every other control.
+                  error ? 'border-loss' : 'border-field-line',
                 ].join(' ')}
               />
               <span aria-hidden className="pointer-events-none absolute inset-0 grid place-items-center">
-                <AnimatePresence initial={false} mode="popLayout">
+                <AnimatePresence initial={false}>
                   {glyph ? (
                     <motion.span
                       key={glyph}
