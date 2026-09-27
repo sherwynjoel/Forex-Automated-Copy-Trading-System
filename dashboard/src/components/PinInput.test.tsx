@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { expect, test, vi } from 'vitest'
 import PinInput from './PinInput'
@@ -24,6 +24,8 @@ function boxes() {
     : Array.from(document.querySelectorAll<HTMLInputElement>('input'))
 }
 
+const dots = () => screen.queryAllByText('●')
+
 test('renders six masked single-digit boxes under one label', () => {
   render(<Harness />)
   const inputs = boxes()
@@ -31,10 +33,10 @@ test('renders six masked single-digit boxes under one label', () => {
   for (const el of inputs) {
     expect(el).toHaveAttribute('type', 'password')
     expect(el).toHaveAttribute('inputmode', 'numeric')
-    expect(el).toHaveAttribute('maxlength', '1')
   }
   expect(screen.getByRole('group', { name: 'MPIN' })).toBeInTheDocument()
   expect(inputs[0]).toHaveFocus()
+  expect(dots()).toHaveLength(0)
 })
 
 test('typing advances, Backspace retreats, non-digits are ignored, six digits complete', async () => {
@@ -53,6 +55,18 @@ test('typing advances, Backspace retreats, non-digits are ignored, six digits co
   expect(onComplete).toHaveBeenCalledTimes(1)
 })
 
+test('each typed digit is masked as a dot until Show reveals it', async () => {
+  render(<Harness />)
+  await userEvent.keyboard('12')
+  expect(dots()).toHaveLength(2)
+  expect(screen.queryByText('1')).not.toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: /show/i }))
+  // The dots leave with a short exit animation before the digits stand alone.
+  await waitFor(() => expect(dots()).toHaveLength(0))
+  expect(screen.getByText('1')).toBeInTheDocument()
+  expect(screen.getByText('2')).toBeInTheDocument()
+})
+
 test('pasting six digits fills every box and completes', async () => {
   const onComplete = vi.fn()
   render(<Harness onComplete={onComplete} />)
@@ -61,10 +75,26 @@ test('pasting six digits fills every box and completes', async () => {
   expect(onComplete).toHaveBeenCalledWith('987654')
 })
 
+test('Delete clears the digit under the cursor; Home and End move the focus', async () => {
+  render(<Harness />)
+  const inputs = boxes()
+  await userEvent.keyboard('123')
+  expect(inputs[3]).toHaveFocus()
+  await userEvent.keyboard('{Home}')
+  expect(inputs[0]).toHaveFocus()
+  await userEvent.keyboard('{End}')
+  // The first empty box is where entry continues; End cannot skip past it.
+  expect(inputs[3]).toHaveFocus()
+  await userEvent.keyboard('{ArrowLeft}{Delete}')
+  expect(inputs[2]).toHaveValue('')
+  expect(inputs[2]).toHaveFocus()
+})
+
 test('Show reveals the digits; the error is announced and linked', async () => {
   render(<Harness error="Wrong MPIN, 3 tries left" />)
   expect(screen.getByRole('alert')).toHaveTextContent('Wrong MPIN, 3 tries left')
   expect(boxes()[0]).toHaveAccessibleDescription(/3 tries left/)
+  expect(boxes()[0]).toHaveAttribute('aria-invalid', 'true')
   await userEvent.click(screen.getByRole('button', { name: /show/i }))
   expect(boxes()[0]).toHaveAttribute('type', 'text')
 })
