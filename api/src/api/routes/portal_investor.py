@@ -10,20 +10,28 @@ withdrawals, transfers, wallet entries and the summary follow.
 from __future__ import annotations
 
 import logging
+from datetime import date
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 import psycopg
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel
 
 from ..auth import LoginRateLimiter
+from ..config import ApiConfig
 from ..db import get_conn
 from ..mpin_core import require_mpin
 from ..rbac import OrgContext, require_org_role
 from .. import portal_common as pc
+# Controller ruling (Task 10): account_card/org_state/equity_from already
+# live in portal_common (Task 5); imported under these underscore names
+# rather than re-defined here, byte-identical to what this router used to
+# carry privately.
+from ..portal_common import account_card as _account_card
 from .portal_files import file_belongs
+from .settings_control import COPIER_SLOW_COMMAND_TIMEOUT_S, _proxy_to_copier
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +110,78 @@ def money_ref_label(kind: str, account_id: Optional[int]) -> str:
     if kind == "account":
         return f"trading account {account_id}"
     return WALLET_LABELS.get(kind, kind)
+
+
+ENTRY_KINDS = ("deposit", "withdrawal", "transfer", "adjustment", "bonus", "commission", "fee")
+ENTRIES_DEFAULT_LIMIT = 50
+ENTRIES_MAX_LIMIT = 200
+
+
+def pending_counts(conn: psycopg.Connection, org_id: int, user_id: int) -> Dict[str, int]:
+    """Open requests of one investor, per type: what the dashboard's
+    Pending row and the admin list's chips show."""
+    row = conn.execute(
+        """SELECT
+             (SELECT count(*) FROM deposits
+               WHERE org_id = %(o)s AND user_id = %(u)s AND status = 'pending'),
+             (SELECT count(*) FROM withdrawals
+               WHERE org_id = %(o)s AND user_id = %(u)s AND status IN ('requested', 'approved')),
+             (SELECT count(*) FROM transfers
+               WHERE org_id = %(o)s AND user_id = %(u)s AND status IN ('requested', 'approved')),
+             (SELECT count(*) FROM payout_destinations
+               WHERE org_id = %(o)s AND user_id = %(u)s AND status = 'pending')""",
+        {"o": org_id, "u": user_id}).fetchone()
+    return {"deposits": int(row[0]), "withdrawals": int(row[1]), "transfers": int(row[2]),
+            "payout_destinations": int(row[3])}
+
+
+def _parse_day(raw: Optional[str], field: str) -> Optional[date]:
+    if raw is None or str(raw).strip() == "":
+        return None
+    try:
+        return date.fromisoformat(str(raw).strip())
+    except ValueError:
+        raise pc.LedgerError(f"{field} must be a date (YYYY-MM-DD)")
+
+
+def entries_page(conn: psycopg.Connection, org_id: int, user_id: int, *,
+                 wallet: Optional[str] = None, kind: Optional[str] = None,
+                 date_from: Optional[str] = None, date_to: Optional[str] = None,
+                 limit: Optional[int] = None, before: Optional[int] = None) -> Dict[str, Any]:
+    """One page of an investor's ledger, newest first, keyed by id (ids are
+    monotonic: every entry is written with created_at = now()). Raises
+    LedgerError for a bad filter; both routers turn that into a 400."""
+    if wallet is not None and wallet not in pc.WALLETS:
+        raise pc.LedgerError("wallet must be one of main, credit, pamm, social")
+    if kind is not None and kind not in ENTRY_KINDS:
+        raise pc.LedgerError("kind must be one of " + ", ".join(ENTRY_KINDS))
+    start = _parse_day(date_from, "from")
+    end = _parse_day(date_to, "to")
+    size = ENTRIES_DEFAULT_LIMIT if limit is None else max(1, min(int(limit), ENTRIES_MAX_LIMIT))
+    where = ["org_id = %s", "user_id = %s"]
+    params: List[Any] = [org_id, user_id]
+    if wallet is not None:
+        where.append("wallet = %s")
+        params.append(wallet)
+    if kind is not None:
+        where.append("kind = %s")
+        params.append(kind)
+    if start is not None:
+        where.append("created_at >= %s::date")
+        params.append(start)
+    if end is not None:
+        where.append("created_at < %s::date + interval '1 day'")
+        params.append(end)
+    if before is not None:
+        where.append("id < %s")
+        params.append(before)
+    rows = conn.execute(
+        f"SELECT {pc.ENTRY_COLS} FROM wallet_entries WHERE {' AND '.join(where)} "
+        "ORDER BY id DESC LIMIT %s", (*params, size + 1)).fetchall()
+    has_more = len(rows) > size
+    entries = [pc.entry_json(r) for r in rows[:size]]
+    return {"entries": entries, "has_more": has_more,
+            "next_before": entries[-1]["id"] if has_more and entries else None}
 
 
 def create_portal_investor_router() -> APIRouter:
@@ -553,5 +633,148 @@ def create_portal_investor_router() -> APIRouter:
             actor_email=ctx.user_email, user_id=ctx.user_id,
             transfer_id=tr_id, amount=out["amount"])
         return out
+
+    # ---------------------------------------------------------------- summary
+
+    def _require_linked(conn: psycopg.Connection, ctx: OrgContext) -> int:
+        account_id = pc.linked_account(conn, ctx.org_id, ctx.user_id)
+        if account_id is None:
+            raise HTTPException(status_code=409, detail="no account linked yet")
+        return account_id
+
+    @router.get("/investor/summary", response_model=Dict[str, Any])
+    async def investor_summary(http_request: Request,
+                               ctx: OrgContext = Depends(require_org_role("investor")),
+                               conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
+        org_name, display_name, member_since = conn.execute(
+            "SELECT o.name, u.display_name, m.created_at FROM org_memberships m "
+            "JOIN orgs o ON o.id = m.org_id JOIN users u ON u.id = m.user_id "
+            "WHERE m.org_id = %s AND m.user_id = %s", (ctx.org_id, ctx.user_id)).fetchone()
+        figures = pc.wallet_figures(conn, ctx.org_id, ctx.user_id)
+        deposited, withdrawn = conn.execute(
+            "SELECT COALESCE(SUM(CASE WHEN kind = 'deposit' THEN amount END), 0), "
+            "COALESCE(SUM(CASE WHEN kind = 'withdrawal' THEN -amount END), 0) "
+            "FROM wallet_entries WHERE org_id = %s AND user_id = %s",
+            (ctx.org_id, ctx.user_id)).fetchone()
+        # Transfers between the wallets and the trading account, settled.
+        transferred_out, transferred_in = conn.execute(
+            "SELECT COALESCE(SUM(CASE WHEN target_kind = 'account' THEN amount END), 0), "
+            "COALESCE(SUM(CASE WHEN source_kind = 'account' THEN amount END), 0) "
+            "FROM transfers WHERE org_id = %s AND user_id = %s AND status = 'done'",
+            (ctx.org_id, ctx.user_id)).fetchone()
+        flow = conn.execute(
+            "SELECT (created_at AT TIME ZONE 'UTC')::date AS day, "
+            "COALESCE(SUM(CASE WHEN kind = 'deposit' THEN amount END), 0), "
+            "COALESCE(SUM(CASE WHEN kind = 'withdrawal' THEN -amount END), 0) "
+            "FROM wallet_entries WHERE org_id = %s AND user_id = %s "
+            "AND kind IN ('deposit', 'withdrawal') AND created_at >= now() - interval '90 days' "
+            "GROUP BY day ORDER BY day", (ctx.org_id, ctx.user_id)).fetchall()
+        settings = pc.portal_settings(conn, ctx.org_id)
+        deposits_open = conn.execute(
+            "SELECT 1 FROM payment_methods WHERE org_id = %s AND enabled LIMIT 1",
+            (ctx.org_id,)).fetchone() is not None
+        account_id = pc.linked_account(conn, ctx.org_id, ctx.user_id)
+        card = None
+        equity: Optional[Decimal] = None
+        source = "unknown"
+        positions: list = []
+        funded = Decimal("0")
+        profit: Optional[Decimal] = None
+        account_available: Optional[Decimal] = None
+        if account_id is not None:
+            card = _account_card(conn, ctx.org_id, account_id)
+            equity, source, positions = await pc.equity_for(http_request, conn, ctx.org_id,
+                                                             account_id)
+            funded = pc.net_funded(conn, ctx.org_id, ctx.user_id, account_id)
+            if equity is not None:
+                profit = equity - funded
+                account_available = pc.floor_cents(
+                    equity - pc.open_account_transfers_out(conn, ctx.org_id, ctx.user_id,
+                                                            account_id))
+        words = (display_name or "").split()
+        return {
+            "org": {"id": ctx.org_id, "name": org_name},
+            "currency": "USD",
+            "investor": {"display_name": display_name,
+                         "first_name": words[0] if words else display_name,
+                         "member_since": member_since.isoformat()},
+            "wallets": {w: {"balance": pc.money(figures[w]["balance"]),
+                            "on_hold": pc.money(figures[w]["on_hold"]),
+                            "available": pc.money(figures[w]["available"])} for w in pc.WALLETS},
+            "totals": {"deposited": pc.money(Decimal(deposited)),
+                       "withdrawn": pc.money(Decimal(withdrawn)),
+                       "transferred_in": pc.money(Decimal(transferred_in)),
+                       "transferred_out": pc.money(Decimal(transferred_out))},
+            "cash_flow": [{"date": day.isoformat(), "deposits": pc.money(Decimal(dep)),
+                           "withdrawals": pc.money(Decimal(wd))} for day, dep, wd in flow],
+            "pending": pending_counts(conn, ctx.org_id, ctx.user_id),
+            "deposits_open": deposits_open,
+            "withdrawal_rules": {"min": pc.money(settings["withdrawal_min"]),
+                                 "fee_pct": float(settings["withdrawal_fee_pct"])},
+            "link_state": "linked" if account_id is not None else "unlinked",
+            "account": card,
+            "equity_source": source,
+            "equity": pc.money(equity),
+            "net_funded": pc.money(funded),
+            "profit": pc.money(profit),
+            "account_available": pc.money(account_available),
+            "open_positions": len([p for p in positions if isinstance(p, dict)]),
+        }
+
+    @router.get("/investor/wallet-entries", response_model=Dict[str, Any])
+    async def my_wallet_entries(wallet: Optional[str] = None, kind: Optional[str] = None,
+                                date_from: Optional[str] = Query(None, alias="from"),
+                                date_to: Optional[str] = Query(None, alias="to"),
+                                limit: int = ENTRIES_DEFAULT_LIMIT,
+                                before: Optional[int] = None,
+                                ctx: OrgContext = Depends(require_org_role("investor")),
+                                conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
+        try:
+            return entries_page(conn, ctx.org_id, ctx.user_id, wallet=wallet, kind=kind,
+                                date_from=date_from, date_to=date_to, limit=limit, before=before)
+        except pc.LedgerError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    # ---------------------------------------------------------- read-throughs
+    # Moved from the old investor router unchanged in behaviour.
+
+    @router.get("/investor/positions", response_model=Dict[str, Any])
+    async def my_positions(http_request: Request,
+                           ctx: OrgContext = Depends(require_org_role("investor")),
+                           conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
+        account_id = _require_linked(conn, ctx)
+        _equity, source, positions = await pc.equity_for(http_request, conn, ctx.org_id,
+                                                          account_id)
+        keys = ("position_id", "symbol", "side", "volume", "entry_price", "current_price",
+                "stop_loss", "take_profit", "pnl_quote")
+        return {"equity_source": source,
+                "positions": [{k: p.get(k) for k in keys} for p in positions if isinstance(p, dict)]}
+
+    @router.get("/investor/analytics", response_model=Dict[str, Any])
+    async def my_analytics(http_request: Request, weeks: int = 4,
+                           ctx: OrgContext = Depends(require_org_role("investor")),
+                           conn: psycopg.Connection = Depends(get_conn),
+                           cfg: ApiConfig = Depends(ApiConfig.from_env)) -> Dict[str, Any]:
+        account_id = _require_linked(conn, ctx)
+        weeks = max(1, min(weeks, 12))
+        return await _proxy_to_copier(
+            http_request.app.state.http,
+            f"{cfg.copier_control_url}/analytics?account_id={account_id}&weeks={weeks}",
+            method="GET", timeout=COPIER_SLOW_COMMAND_TIMEOUT_S)
+
+    @router.get("/investor/history/{kind}", response_model=Dict[str, Any])
+    async def my_history(kind: str, http_request: Request,
+                         from_ms: int = Query(..., alias="from"),
+                         to_ms: int = Query(..., alias="to"),
+                         ctx: OrgContext = Depends(require_org_role("investor")),
+                         conn: psycopg.Connection = Depends(get_conn),
+                         cfg: ApiConfig = Depends(ApiConfig.from_env)) -> Dict[str, Any]:
+        if kind not in ("deals", "orders", "cashflow"):
+            raise HTTPException(status_code=400, detail="kind must be deals, orders or cashflow")
+        account_id = _require_linked(conn, ctx)
+        return await _proxy_to_copier(
+            http_request.app.state.http,
+            f"{cfg.copier_control_url}/history/{kind}"
+            f"?account_id={account_id}&from={from_ms}&to={to_ms}", method="GET")
 
     return router

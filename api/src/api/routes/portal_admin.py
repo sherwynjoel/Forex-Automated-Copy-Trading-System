@@ -14,14 +14,21 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional
 
 import psycopg
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel
 
+from ..config import ApiConfig
 from ..db import get_conn
+from ..mpin_core import require_mpin
 from ..rbac import OrgContext, require_org_role
-from .portal_investor import money_ref_label
+from .portal_investor import WALLET_LABELS, entries_page, money_ref_label, pending_counts
 from .. import portal_common as pc
+# Controller ruling (Task 10): org_state/equity_from already live in
+# portal_common (Task 5); imported under these underscore names rather than
+# re-defined here, byte-identical to what this router used to carry
+# privately.
+from ..portal_common import org_state as _org_state, equity_from as _equity_from
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +78,17 @@ class PaidBody(BaseModel):
     txid: str
 
 
+class AdjustmentBody(BaseModel):
+    wallet: str
+    amount: Any
+    note: str
+    mpin: Any = None
+
+
+class LinkBody(BaseModel):
+    account_id: Optional[int] = None
+
+
 def clean_details(kind: str, raw: Any) -> dict:
     """Trimmed details for `kind`: every required key present and non-blank
     (else LedgerError "<field> is required"), optional keys kept when
@@ -114,6 +132,17 @@ def parse_pct(raw: object, field: str) -> Decimal:
     if value != value.quantize(Decimal("0.001")):
         raise pc.LedgerError(message)
     return value
+
+
+def _require_investor(conn: psycopg.Connection, org_id: int, user_id: int) -> str:
+    """The investor member's email, or 404 'Investor not found'."""
+    row = conn.execute(
+        "SELECT u.email FROM org_memberships m JOIN users u ON u.id = m.user_id "
+        "WHERE m.org_id = %s AND m.user_id = %s AND m.role = 'investor'",
+        (org_id, user_id)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Investor not found")
+    return row[0]
 
 
 def create_portal_admin_router() -> APIRouter:
@@ -630,5 +659,165 @@ def create_portal_admin_router() -> APIRouter:
             f"Status: {new_status}\nAmount: {amount:.2f} USD\nFrom: {from_label}\n"
             f"To: {to_label}\nNote: {note or '—'}\n\nOpen the portal for details.")
         return out
+
+    # ---------------------------------------------------------------- investors
+
+    @router.get("/investors", response_model=List[Dict[str, Any]])
+    async def list_investors(http_request: Request,
+                             ctx: OrgContext = Depends(require_org_role("admin")),
+                             conn: psycopg.Connection = Depends(get_conn),
+                             cfg: ApiConfig = Depends(ApiConfig.from_env)) -> List[Dict[str, Any]]:
+        rows = conn.execute(
+            """SELECT u.id, u.email, u.display_name, m.created_at, a.ctid_trader_account_id,
+                      a.nickname
+               FROM org_memberships m
+               JOIN users u ON u.id = m.user_id
+               LEFT JOIN accounts a ON a.org_id = m.org_id AND a.investor_user_id = u.id
+               WHERE m.org_id = %s AND m.role = 'investor'
+               ORDER BY u.display_name, u.id""", (ctx.org_id,)).fetchall()
+        # One /state round trip for the whole list, never one per investor.
+        state = await _org_state(http_request.app.state.http, cfg, ctx.org_id)
+        out = []
+        for user_id, email, name, joined_at, account_id, nickname in rows:
+            figures = pc.wallet_figures(conn, ctx.org_id, user_id)
+            equity, source = None, "unknown"
+            if account_id is not None:
+                equity, source, _positions = _equity_from(state, conn, int(account_id))
+            out.append({
+                "user_id": user_id, "email": email, "display_name": name,
+                "joined_at": joined_at.isoformat(),
+                "account_id": int(account_id) if account_id is not None else None,
+                "nickname": nickname, "equity": pc.money(equity), "equity_source": source,
+                "balances": {w: pc.money(figures[w]["balance"]) for w in pc.WALLETS},
+                "on_hold": pc.money(figures["main"]["on_hold"]),
+                "available": pc.money(figures["main"]["available"]),
+                "pending": pending_counts(conn, ctx.org_id, user_id),
+            })
+        return out
+
+    @router.put("/investors/{user_id}/account", response_model=Dict[str, Any])
+    async def link_account(user_id: int, body: LinkBody,
+                           ctx: OrgContext = Depends(require_org_role("admin")),
+                           conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
+        _require_investor(conn, ctx.org_id, user_id)
+        with conn.transaction():
+            conn.execute("UPDATE accounts SET investor_user_id = NULL "
+                         "WHERE org_id = %s AND investor_user_id = %s", (ctx.org_id, user_id))
+            if body.account_id is not None:
+                # The master is the desk's own account. Linked to an investor
+                # it would show them the desk's equity as their balance.
+                # Checked inside the transaction, so the unlink rolls back.
+                role_row = conn.execute(
+                    "SELECT role FROM accounts WHERE ctid_trader_account_id = %s AND org_id = %s",
+                    (body.account_id, ctx.org_id)).fetchone()
+                if role_row and role_row[0] == "master":
+                    raise HTTPException(
+                        status_code=400,
+                        detail="The master account cannot be linked to an investor")
+                updated = conn.execute(
+                    "UPDATE accounts SET investor_user_id = %s "
+                    "WHERE ctid_trader_account_id = %s AND org_id = %s "
+                    "AND investor_user_id IS NULL RETURNING ctid_trader_account_id",
+                    (user_id, body.account_id, ctx.org_id)).fetchone()
+                if not updated:
+                    raise HTTPException(
+                        status_code=404,
+                        detail="Account not found in this workspace, or already linked")
+        await pc.audit_control(
+            conn, org_id=ctx.org_id, action="investor_account_linked",
+            actor_email=ctx.user_email, user_id=user_id, account_id=body.account_id)
+        return {"user_id": user_id, "account_id": body.account_id}
+
+    @router.get("/investors/{user_id}/wallet-entries", response_model=Dict[str, Any])
+    async def investor_wallet_entries(user_id: int, wallet: Optional[str] = None,
+                                      kind: Optional[str] = None,
+                                      date_from: Optional[str] = Query(None, alias="from"),
+                                      date_to: Optional[str] = Query(None, alias="to"),
+                                      limit: int = 50, before: Optional[int] = None,
+                                      ctx: OrgContext = Depends(require_org_role("admin")),
+                                      conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
+        _require_investor(conn, ctx.org_id, user_id)
+        try:
+            return entries_page(conn, ctx.org_id, user_id, wallet=wallet, kind=kind,
+                                date_from=date_from, date_to=date_to, limit=limit, before=before)
+        except pc.LedgerError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @router.post("/investors/{user_id}/adjustments", status_code=201,
+                 response_model=Dict[str, Any])
+    async def post_adjustment(user_id: int, body: AdjustmentBody, http_request: Request,
+                              ctx: OrgContext = Depends(require_org_role("admin")),
+                              conn: psycopg.Connection = Depends(get_conn)):
+        # The ADMIN's own MPIN confirms a hand-posted ledger row. Checked,
+        # and the investor resolved, and the wallet/amount/note parsed,
+        # all OUTSIDE any transaction -- only the INSERT itself needs the
+        # per-investor ledger lock.
+        failure = require_mpin(conn, ctx.user_id, body.mpin)
+        if failure is not None:
+            return failure
+        email = _require_investor(conn, ctx.org_id, user_id)
+        wallet = (body.wallet or "").strip().lower()
+        if wallet not in pc.WALLETS:
+            raise HTTPException(status_code=400,
+                                detail="wallet must be one of main, credit, pamm, social")
+        raw = "" if body.amount is None or isinstance(body.amount, bool) else str(body.amount).strip()
+        try:
+            if raw and Decimal(raw) == 0:
+                raise HTTPException(status_code=400, detail="amount must not be zero")
+        except InvalidOperation:
+            pass  # parse_amount below names the problem
+        negative = raw.startswith("-")
+        try:
+            magnitude = pc.parse_amount(raw.lstrip("+-") if raw else body.amount)
+            note = pc.clean_text(body.note, "note", max_len=500)
+        except pc.LedgerError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        amount = -magnitude if negative else magnitude
+        # An adjustment has no request row to reference, so it is a plain
+        # insert rather than settle(): nothing to make idempotent against.
+        # The per-investor ledger lock is the FIRST statement inside the
+        # transaction -- keyed on the investor being adjusted, user_id,
+        # never the admin posting it (ctx.user_id) -- the same rule every
+        # other writer of wallet_entries follows. Nothing is awaited while
+        # the lock is held.
+        with conn.transaction():
+            pc.lock_investor_ledger(conn, ctx.org_id, user_id)
+            row = conn.execute(
+                "INSERT INTO wallet_entries (org_id, user_id, wallet, amount, kind, note, "
+                "created_by) VALUES (%s, %s, %s, %s, 'adjustment', %s, %s) "
+                f"RETURNING {pc.ENTRY_COLS}",
+                (ctx.org_id, user_id, wallet, amount, note, ctx.user_id)).fetchone()
+        out = pc.entry_json(row)
+        label = WALLET_LABELS[wallet]
+        await pc.audit_control(
+            conn, org_id=ctx.org_id, action="investor_ledger_adjusted",
+            actor_email=ctx.user_email, user_id=user_id, severity="warning",
+            entry_id=out["id"], wallet=wallet, amount=out["amount"], note=note,
+            summary=f"Ledger adjusted: {amount:+.2f} USD on {label} of {email} by {ctx.user_email}")
+        await pc.notify_investor(
+            conn, http_request, user_id,
+            f"Your {label} was adjusted by {amount:+.2f} USD",
+            f"Wallet: {label}\nAmount: {amount:+.2f} USD\nNote: {note}\n\n"
+            "Open the portal for details.")
+        return out
+
+    # ---------------------------------------------------------------- requests
+
+    @router.get("/requests/summary", response_model=Dict[str, Any])
+    async def requests_summary(ctx: OrgContext = Depends(require_org_role("admin")),
+                               conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
+        row = conn.execute(
+            """SELECT
+                 (SELECT count(*) FROM deposits WHERE org_id = %(o)s AND status = 'pending'),
+                 (SELECT count(*) FROM withdrawals
+                   WHERE org_id = %(o)s AND status IN ('requested', 'approved')),
+                 (SELECT count(*) FROM transfers
+                   WHERE org_id = %(o)s AND status IN ('requested', 'approved')),
+                 (SELECT count(*) FROM payout_destinations
+                   WHERE org_id = %(o)s AND status = 'pending')""",
+            {"o": ctx.org_id}).fetchone()
+        counts = {"deposits": int(row[0]), "withdrawals": int(row[1]),
+                  "transfers": int(row[2]), "payout_destinations": int(row[3])}
+        return {**counts, "total": sum(counts.values())}
 
     return router

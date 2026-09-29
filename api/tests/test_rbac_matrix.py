@@ -7,16 +7,27 @@ nonexistent account, 409 for a row whose state forbids the change, 502
 copier). 401/403/404-membership are the denials under test. Endpoints listed
 with a seeded account id 100 where needed.
 
-The client-portal rows (investor/*, investors, payment-methods, requests,
-deposits, withdrawals, transfers, payout-destinations, files) are added in
-Task 10 of the client-portal plan once their routers exist; migration 022
-dropped the tables the 2026-09-23 rows seeded. `{investor}` in a path is
-the investor member's user id, substituted per test.
+The mutating portal rows aim at seeded rows with deterministic ids (the db
+fixture TRUNCATEs with RESTART IDENTITY, and every parametrised case gets its
+own fixture): payment method 1, the investor's approved payout destination 1
+and pending destination 2, deposit 1, withdrawal 1, transfer 1. They are
+written so that the FIRST allowed role really performs the change and the
+later ones get a 409 or 400 from the row's state or the body — never a
+403/404 — so what the row proves is authorization, never business rules.
+`{investor}` in a path is the investor member's user id, substituted per test.
+Investor routes take `require_org_role("investor")`, the lowest rank, so
+every member passes them; the bodies are chosen so a desk member's call
+still answers after the role check (a 400 from validation, or a 409
+duplicate).
 """
 import psycopg
 import pytest
+from psycopg.types.json import Jsonb
+from portal_helpers import add_method, approved_destination
 
 ROLES = ["investor", "viewer", "admin"]
+
+MPIN = "123456"
 
 # (method, path_tail, body, min_role)
 MATRIX = [
@@ -57,6 +68,52 @@ MATRIX = [
     ("GET",    "invites",                        None,                           "admin"),
     ("PATCH",  "",                               {"name": "Renamed"},            "admin"),
     ("DELETE", "",                               None,                           "admin"),
+    # ---- investor portal, investor side
+    ("GET",    "investor/summary",               None,                          "investor"),
+    ("GET",    "investor/payment-methods",       None,                          "investor"),
+    ("GET",    "investor/deposits",              None,                          "investor"),
+    ("GET",    "investor/payout-destinations",   None,                          "investor"),
+    ("GET",    "investor/withdrawals",           None,                          "investor"),
+    ("GET",    "investor/transfers",             None,                          "investor"),
+    ("GET",    "investor/wallet-entries",        None,                          "investor"),
+    ("GET",    "investor/positions",             None,                          "investor"),
+    ("POST",   "investor/deposits",              {"method_id": 1, "amount": "10",
+                                                  "reference": "matrix-filed",
+                                                  "target": "wallet"},          "investor"),
+    ("POST",   "investor/payout-destinations",   {"kind": "crypto", "nickname": "Matrix",
+                                                  "details": {"coin": "USDT", "network": "TRC20",
+                                                              "address": "TMatrix"},
+                                                  "mpin": MPIN},                "investor"),
+    ("POST",   "investor/withdrawals",           {"destination_id": 1, "amount": "0",
+                                                  "mpin": MPIN},                "investor"),
+    ("POST",   "investor/transfers",             {"source": {"kind": "wallet", "wallet": "main"},
+                                                  "target": {"kind": "wallet", "wallet": "pamm"},
+                                                  "amount": "10", "mpin": MPIN}, "investor"),
+    # ---- investor portal, admin side
+    ("GET",    "investors",                      None,                          "admin"),
+    ("GET",    "investors/{investor}/wallet-entries", None,                     "admin"),
+    ("PUT",    "investors/{investor}/account",   {"account_id": None},           "admin"),
+    ("POST",   "investors/{investor}/adjustments", {"wallet": "main", "amount": "1",
+                                                    "note": "matrix", "mpin": MPIN}, "admin"),
+    ("GET",    "payment-methods",                None,                          "admin"),
+    ("POST",   "payment-methods",                {"kind": "crypto", "label": "BTC",
+                                                  "details": {"coin": "BTC", "network": "BTC",
+                                                              "address": "bc1matrix"}}, "admin"),
+    ("PATCH",  "payment-methods/1",              {"label": "Renamed"},           "admin"),
+    ("DELETE", "payment-methods/1",              None,                           "admin"),
+    ("GET",    "portal-settings",                None,                          "admin"),
+    ("PUT",    "portal-settings",                {"withdrawal_min": "0",
+                                                  "withdrawal_fee_pct": "0"},   "admin"),
+    ("GET",    "requests/summary",               None,                          "admin"),
+    ("GET",    "deposits",                       None,                          "admin"),
+    ("GET",    "withdrawals",                    None,                          "admin"),
+    ("GET",    "transfers",                      None,                          "admin"),
+    ("GET",    "payout-destinations",            None,                          "admin"),
+    ("POST",   "deposits/1/decision",            {"status": "rejected", "note": "matrix"}, "admin"),
+    ("POST",   "withdrawals/1/decision",         {"status": "rejected", "note": "matrix"}, "admin"),
+    ("POST",   "withdrawals/1/paid",             {"txid": "matrix"},             "admin"),
+    ("POST",   "transfers/1/decision",           {"status": "rejected", "note": "matrix"}, "admin"),
+    ("POST",   "payout-destinations/2/decision", {"status": "rejected", "note": "matrix"}, "admin"),
 ]
 
 RANK = {"investor": -1, "viewer": 0, "admin": 1}
@@ -64,10 +121,14 @@ RANK = {"investor": -1, "viewer": 0, "admin": 1}
 
 @pytest.fixture
 def matrix_org(app_client, make_user, make_org, db, login_as):
-    """One org, one user per role, one seeded master account 100."""
+    """One org, one user per role, one seeded master account 100, and one
+    open row of every portal request type belonging to the investor."""
     users = {role: make_user(email=f"{role}@example.com") for role in ROLES}
     org_id = make_org(name="Matrix", members=[(users[r], r) for r in ROLES])
     outsider = make_user(email="outsider@example.com")
+    investor_id = users["investor"]["id"]
+    method_id = add_method(db, org_id)                                    # id 1
+    approved_id = approved_destination(db, org_id, investor_id)           # id 1
     with psycopg.connect(db, autocommit=True) as conn:
         (connection_id,) = conn.execute(
             """INSERT INTO ctid_connections
@@ -79,6 +140,33 @@ def matrix_org(app_client, make_user, make_org, db, login_as):
                    org_id, trader_login, is_live, role)
                VALUES (100, %s, %s, 100, false, 'master')""",
             (connection_id, org_id))
+        # The transfer targets an MT5-style account (no cTrader connection)
+        # rather than account 100: `DELETE accounts/100/connection` cascades
+        # account 100 away, and transfers.target_account_id would be set
+        # NULL against its CHECK constraint.
+        (mt5_id,) = conn.execute(
+            "INSERT INTO accounts (ctid_trader_account_id, ctid_connection_id, org_id, "
+            "platform, trader_login, is_live, role, enabled) "
+            "VALUES (nextval('mt5_account_id_seq'), NULL, %s, 'mt5', 0, false, 'slave', true) "
+            "RETURNING ctid_trader_account_id", (org_id,)).fetchone()
+        conn.execute(
+            "INSERT INTO payout_destinations (org_id, user_id, kind, nickname, details) "
+            "VALUES (%s, %s, 'crypto', 'Pending', %s)",                        # id 2
+            (org_id, investor_id,
+             Jsonb({"coin": "USDT", "network": "TRC20", "address": "TPending"})))
+        conn.execute(
+            "INSERT INTO deposits (org_id, user_id, method_id, method_kind, method_label, "
+            "amount, reference) VALUES (%s, %s, %s, 'crypto', 'USDT on TRC20', 100, "
+            "'matrix-seeded')", (org_id, investor_id, method_id))                # id 1
+        conn.execute(
+            "INSERT INTO withdrawals (org_id, user_id, destination_id, destination_kind, "
+            "destination_summary, amount, fee, net_amount) "
+            "VALUES (%s, %s, %s, 'crypto', 'TRC20 T…st', 50, 0, 50)",
+            (org_id, investor_id, approved_id))                                 # id 1
+        conn.execute(
+            "INSERT INTO transfers (org_id, user_id, source_kind, source_wallet, target_kind, "
+            "target_account_id, amount) VALUES (%s, %s, 'wallet', 'main', 'account', %s, 10)",
+            (org_id, investor_id, mt5_id))                                      # id 1
     return app_client, org_id, users, outsider
 
 
@@ -110,9 +198,9 @@ def test_role_thresholds(matrix_org, login_as, method, tail, body, min_role):
     r = _call(client, method, org_id, tail, body)
     assert r.status_code == 404, f"outsider got {r.status_code}"
 
-    # DELETE org and connection-delete are destructive — only probe DENIED
-    # roles for them, and prove the allowed role separately in
-    # test_destructive_rows_allowed to keep the fixture intact per param.
+    # DELETE rows are destructive — only probe DENIED roles for them, and
+    # prove the allowed role separately in test_destructive_rows_allowed to
+    # keep the fixture intact per param.
     destructive = (method == "DELETE")
     for role in ROLES:
         allowed = RANK[role] >= RANK[min_role]
@@ -130,9 +218,12 @@ def test_role_thresholds(matrix_org, login_as, method, tail, body, min_role):
 
 def test_destructive_rows_allowed(matrix_org, login_as):
     """The allowed-role half of the destructive rows, run last against a
-    dedicated fixture instance."""
+    dedicated fixture instance. The payment method is still used by the
+    pending deposit, so its DELETE answers 409 -- authorization passed."""
     client, org_id, users, _ = matrix_org
     login_as(client, users["admin"])
+    r = _call(client, "DELETE", org_id, "payment-methods/1", None)
+    assert r.status_code == 409
     r = _call(client, "DELETE", org_id, "accounts/100/connection", None)
     assert r.status_code == 200
     r = _call(client, "DELETE", org_id, "", None)

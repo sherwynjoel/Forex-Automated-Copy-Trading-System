@@ -38,6 +38,12 @@ ALERT_RULES: dict[tuple[str, str, str], str] = {
     # investor (payload.user_id), not per account -- see consider().
     ("control", "warning", "investor_deposit_noticed"): "Investor deposit notice",
     ("control", "warning", "investor_withdrawal_requested"): "Investor withdrawal request",
+    ("control", "warning", "investor_transfer_requested"): "Investor transfer request",
+    ("control", "warning", "investor_destination_added"): "Investor payout account added",
+    # An admin hand-posted a ledger row, or changed where investors are told
+    # to send money. Both are what a stolen admin session would do.
+    ("control", "warning", "investor_ledger_adjusted"): "Investor ledger adjusted",
+    ("control", "warning", "payment_method_changed"): "Payment method changed",
     # Where every investor is told to send money. Changed by an admin --
     # or by whoever stole an admin's session. The payload carries the new
     # and the previous address. No payload.user_id: this is about the
