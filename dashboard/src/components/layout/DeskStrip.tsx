@@ -9,6 +9,7 @@ import type { Account, ApiState, CloseAllResult, EventResponse, Settings, Webhoo
 import Button from '../Button'
 import ConfirmDialog from '../ConfirmDialog'
 import KillSwitch from '../KillSwitch'
+import { publishSettings } from '../../lib/settingsBus'
 import { money, signed, errorText } from '../../lib/format'
 
 function localISODate(): string {
@@ -78,6 +79,9 @@ export default function DeskStrip({ onAccounts }: { onAccounts?: (accounts: Acco
         orgApi<ApiState>(orgId, 'state'),
       ])
       setSettings(sett)
+      // Pages (Overview's copying line, its setup checklist) read the same
+      // settings, so a stop/resume here is reflected there at once.
+      publishSettings(sett)
       onAccounts?.(accounts)
       // The copier's close-all only touches an account that is both enabled
       // AND not paused (a per-slave Pause sets status 'paused' without
@@ -138,6 +142,16 @@ export default function DeskStrip({ onAccounts }: { onAccounts?: (accounts: Acco
       // Older api without the reminder category: no banner.
     }
   }, [orgId, role, onAccounts])
+
+  // A different org's settings must never be read as this one's.
+  useEffect(() => {
+    publishSettings(null)
+  }, [orgId])
+
+  const updateSettings = useCallback((next: Settings) => {
+    setSettings(next)
+    publishSettings(next)
+  }, [])
 
   useEffect(() => {
     refresh()
@@ -256,21 +270,20 @@ export default function DeskStrip({ onAccounts }: { onAccounts?: (accounts: Acco
             Dry run
           </span>
         )}
-        {settings && can(role, 'control') && (
-          <div className="order-3 ml-auto md:order-5 md:ml-0 flex items-center">
-            <KillSwitch settings={settings} onUpdate={setSettings} />
-          </div>
-        )}
         {can(role, 'control') && (
-          <Button
-            variant="secondary"
-            tone="loss"
-            size="sm"
-            className="order-3 ml-auto md:order-5 md:ml-0"
-            onClick={() => setDialogOpen(true)}
-          >
-            Close all positions
-          </Button>
+          // One group, so the kill switch and Close all wrap together
+          // instead of splitting the row's free space between them.
+          <div className="order-3 ml-auto md:order-5 md:ml-0 flex flex-wrap items-center justify-end gap-2">
+            {settings && <KillSwitch settings={settings} onUpdate={updateSettings} />}
+            <Button
+              variant="secondary"
+              tone="loss"
+              size="sm"
+              onClick={() => setDialogOpen(true)}
+            >
+              Close all positions
+            </Button>
+          </div>
         )}
         <div className="order-4 w-full flex items-center justify-between gap-x-4 md:w-auto md:ml-auto md:justify-start md:gap-6">
           {contracts.slice(0, 3).map((c) => (

@@ -7,6 +7,7 @@ import type { Account, ApiState, Settings, StateSnapshot } from '../lib/types'
 import type { Role } from '../lib/roles'
 import { mockUseOrg } from '../test/orgMock'
 import { mt5Account } from '../test/mt5Fixtures'
+import { publishSettings } from '../lib/settingsBus'
 
 const { useOrgMock } = vi.hoisted(() => ({ useOrgMock: vi.fn() }))
 vi.mock('../lib/org', () => ({ useOrg: useOrgMock }))
@@ -151,6 +152,7 @@ const mockState: ApiState = {
 afterEach(() => {
   vi.unstubAllGlobals()
   vi.clearAllMocks()
+  publishSettings(null)
 })
 
 test('master equity sits in the KPI row; the master card keeps balance and P&L', async () => {
@@ -283,8 +285,8 @@ test('renders slave tiles with status icons', async () => {
   // Check slave tiles are rendered with login numbers. Each tile's View link
   // also names its account for screen readers, so the login is matched on
   // the tile heading rather than on any text.
-  expect(screen.getByRole('heading', { name: 'Account 1002' })).toBeInTheDocument() // Slave 1 (ok)
-  expect(screen.getByRole('heading', { name: 'Account 1003' })).toBeInTheDocument() // Slave 2 (degraded)
+  expect(screen.getByRole('heading', { name: 'Account 1002' })).toBeInTheDocument() // Follower 1 (ok)
+  expect(screen.getByRole('heading', { name: 'Account 1003' })).toBeInTheDocument() // Follower 2 (degraded)
 
   // Check status icons exist (use emoji checks or data-testid)
   const tiles = screen.getAllByTestId(/slave-tile/)
@@ -1297,7 +1299,11 @@ test('an offline terminal and a disconnected enabled follower are both listed', 
     '/api/orgs/1/accounts': [
       mockAccounts[0],
       { ...mockAccounts[1], status: 'disconnected' },
-      { ...mt5Account, connection_status: 'offline', mt5: { ...mt5Account.mt5!, connected: false } },
+      // As the copier reports it: an offline terminal is also marked degraded.
+      {
+        ...mt5Account, status: 'degraded', connection_status: 'offline',
+        mt5: { ...mt5Account.mt5!, connected: false },
+      },
     ],
   })
 
@@ -1307,6 +1313,9 @@ test('an offline terminal and a disconnected enabled follower are both listed', 
   await waitFor(() => expect(within(card).getAllByRole('listitem')).toHaveLength(2))
   expect(card).toHaveTextContent("VPS desk's terminal is offline, so copies wait until the EA reports again.")
   expect(card).toHaveTextContent('Account 1002 is not connected to its broker, so it receives no copies.')
+  // One row per account: the offline terminal is not listed again as degraded.
+  expect(within(card).getAllByText(/VPS desk/)).toHaveLength(1)
+  expect(card).not.toHaveTextContent('VPS desk is degraded')
 })
 
 test('a failed live-state read is listed with a Retry that refetches', async () => {
@@ -1471,4 +1480,33 @@ test('the setup checklist marks steps done from real state', async () => {
   expect(steps[3]).toHaveTextContent('To do')  // not live
   // The master card still renders beside the checklist.
   expect(screen.getByText(/Master account \(1001\)/)).toBeInTheDocument()
+})
+
+// ---------- Task 6 review, round 1 ----------
+
+test('a degraded master is an Attention row, never "All clear"', async () => {
+  setRole('admin')
+  stubApi({
+    ...quietRoutes,
+    '/api/orgs/1/accounts': [{ ...mockAccounts[0], status: 'degraded' }, mockAccounts[1], mockAccounts[2]],
+  })
+
+  render(<MemoryRouter><Overview /></MemoryRouter>)
+
+  const card = await screen.findByTestId('attention-card')
+  const rows = within(card).getAllByRole('listitem')
+  expect(rows).toHaveLength(1)
+  expect(rows[0]).toHaveTextContent('The master account is degraded — nothing is being copied.')
+  expect(within(rows[0]).getByRole('link', { name: 'Open Accounts' })).toHaveAttribute('href', '/org/1/accounts')
+  expect(card).not.toHaveTextContent(/all clear/i)
+})
+
+test("settings the desk strip published win over the page's own load", async () => {
+  setRole('admin')
+  stubApi(quietRoutes) // the page's own read says copying is live
+  publishSettings({ copying_enabled: false, dry_run: false })
+
+  render(<MemoryRouter><Overview /></MemoryRouter>)
+
+  expect(await screen.findByTestId('attention-card')).toHaveTextContent('All clear — copying paused')
 })

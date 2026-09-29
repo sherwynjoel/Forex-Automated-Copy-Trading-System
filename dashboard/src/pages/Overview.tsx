@@ -14,6 +14,7 @@ import Loading from '../components/Loading'
 import { money, signed, errorText } from '../lib/format'
 import { actionBurst } from '../lib/refresh'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
+import { useSharedSettings } from '../lib/settingsBus'
 import { mergeTicksIntoSnapshot, TicksPayload } from '../lib/ticks'
 import AttentionCard, { type AttentionItem } from './overview/AttentionCard'
 import SetupChecklist from './overview/SetupChecklist'
@@ -61,7 +62,11 @@ const MARGIN_CALL_WINDOW_MS = 30 * 60_000
 export default function Overview() {
   const { orgId, role, org } = useOrg()
   const [accounts, setAccounts] = useState<Account[]>([])
-  const [settings, setSettings] = useState<Settings | null>(null)
+  const [ownSettings, setSettings] = useState<Settings | null>(null)
+  // The desk strip owns the kill switch; what it last fetched or saved wins
+  // over this page's own load, so the copying line never goes stale.
+  const sharedSettings = useSharedSettings()
+  const settings = sharedSettings ?? ownSettings
   const [state, setState] = useState<StateSnapshot>({})
   const [envelope, setEnvelope] = useState<ApiState | null>(null)
   const [stats, setStats] = useState<OverviewStats | null>(null)
@@ -372,29 +377,35 @@ export default function Overview() {
       action: openAccounts,
     })
   }
+  // One row per account, its most severe problem only: an offline MT5
+  // terminal is also marked degraded by the copier ("terminal offline
+  // since ..."), and saying both would list one fault twice.
   for (const a of accounts) {
+    const id = a.ctid_trader_account_id
+    const isMaster = a.role === 'master'
     if (a.connection_status === 'offline') {
       attention.push({
-        key: `offline-${a.ctid_trader_account_id}`,
+        key: `offline-${id}`,
         tone: 'warn',
         message: `${accountName(a)}'s terminal is offline, so copies wait until the EA reports again.`,
         action: openAccounts,
       })
-    }
-  }
-  for (const f of followers) {
-    if (f.status === 'degraded') {
+    } else if (a.status === 'degraded') {
       attention.push({
-        key: `degraded-${f.ctid_trader_account_id}`,
+        key: `degraded-${id}`,
         tone: 'degraded',
-        message: `${accountName(f)} is degraded: copies to it are failing.`,
+        // A degraded master (authorization failure, broker refusal) stops
+        // every copy, not just one follower's.
+        message: isMaster
+          ? 'The master account is degraded — nothing is being copied.'
+          : `${accountName(a)} is degraded: copies to it are failing.`,
         action: openAccounts,
       })
-    } else if (f.enabled && f.status === 'disconnected') {
+    } else if (!isMaster && a.enabled && a.status === 'disconnected') {
       attention.push({
-        key: `disconnected-${f.ctid_trader_account_id}`,
+        key: `disconnected-${id}`,
         tone: 'warn',
-        message: `${accountName(f)} is not connected to its broker, so it receives no copies.`,
+        message: `${accountName(a)} is not connected to its broker, so it receives no copies.`,
         action: openAccounts,
       })
     }

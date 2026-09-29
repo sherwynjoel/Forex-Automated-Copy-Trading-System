@@ -5,6 +5,7 @@ import { expect, test, vi, afterEach } from 'vitest'
 import { useEffect } from 'react'
 import Layout from './Layout'
 import PageHeader from './PageHeader'
+import Overview from '../pages/Overview'
 import type { Role } from '../lib/roles'
 import { mt5Account } from '../test/mt5Fixtures'
 
@@ -846,4 +847,28 @@ test('a viewer, who has no kill switch, still sees the strip dry-run chip', asyn
   renderLayout()
 
   expect(await screen.findByText('Dry run')).toBeInTheDocument()
+})
+
+test('stopping copying from the strip updates Overview without a reload', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
+  mockRoutes()
+  render(
+    <MemoryRouter initialEntries={['/']}>
+      <Routes>
+        <Route element={<Layout />}>
+          <Route index element={<Overview />} />
+        </Route>
+      </Routes>
+    </MemoryRouter>
+  )
+
+  await waitFor(() =>
+    expect(screen.getByTestId('attention-card')).toHaveTextContent('All clear — copying live'))
+
+  await userEvent.click(await screen.findByRole('button', { name: /stop copying/i }))
+  const dialog = await screen.findByRole('dialog')
+  await userEvent.click(within(dialog).getByRole('button', { name: /^stop copying$/i }))
+
+  await waitFor(() =>
+    expect(screen.getByTestId('attention-card')).toHaveTextContent('All clear — copying paused'))
 })
