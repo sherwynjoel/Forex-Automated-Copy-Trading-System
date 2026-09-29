@@ -10,8 +10,9 @@ import HeroPreview from './landing/HeroPreview'
  *  not rendered, so the page stays truthful if one is cleared. */
 export const LANDING_FACTS = {
   legalName: 'MirrorFleet',
-  address: 'Chennai, India',
-  supportEmail: 'support@mirrorfleet.com',
+  // Filled by the owner: blank until the mailbox and address are confirmed.
+  address: '',
+  supportEmail: '',
 }
 
 /** The tab title. Set here rather than through usePageTitle, whose

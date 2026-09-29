@@ -1,4 +1,5 @@
-import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react'
+import { createPortal } from 'react-dom'
 import Button from './Button'
 
 export interface MenuItem {
@@ -14,28 +15,70 @@ export interface MenuItem {
  * Focus lands on the first enabled item, arrows move (skipping disabled
  * items), Enter/Space select, Escape and outside clicks close, and focus
  * returns to the trigger.
+ *
+ * The popover is portalled to <body> and positioned `fixed` from the
+ * trigger's rect, so a scrolling or clipping ancestor (the Accounts table
+ * sits in `overflow-x-auto` inside a backdrop-filtered glass card) can never
+ * cut it off. It opens upward when there is no room below, and any scroll or
+ * resize closes it rather than let it drift away from its row.
  */
 export default function Menu({ label, items }: { label: string; items: MenuItem[] }) {
   const [open, setOpen] = useState(false)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
   const menuId = useId()
+  const [pos, setPos] = useState<CSSProperties | null>(null)
 
   const enabled = items.map((it, i) => (it.disabled ? -1 : i)).filter((i) => i >= 0)
   const focusItem = (i: number) => {
     const el = listRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')[i]
-    el?.focus()
+    // The popover is fixed; focusing it must never scroll the page (a
+    // scroll closes the menu).
+    el?.focus({ preventScroll: true })
   }
   const close = () => {
     setOpen(false)
     triggerRef.current?.focus()
   }
 
+  // Right edge on the trigger's right edge, below it unless that would run
+  // past the viewport's bottom margin. Before the popover exists its height
+  // is estimated from the row count (jsdom always reports 0).
+  const place = (): CSSProperties | null => {
+    const rect = triggerRef.current?.getBoundingClientRect()
+    if (!rect) return null
+    const menuHeight = listRef.current?.offsetHeight || items.length * 36 + 8
+    const right = window.innerWidth - rect.right
+    return rect.bottom + menuHeight > window.innerHeight - 8
+      ? { position: 'fixed', right, bottom: window.innerHeight - rect.top + 4 }
+      : { position: 'fixed', right, top: rect.bottom + 4 }
+  }
+
+  // Re-place with the measured height before paint.
+  useLayoutEffect(() => {
+    if (open) setPos(place())
+  }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!open) return
+    const dismiss = () => {
+      // Keep focus somewhere sensible without scrolling the page again.
+      if (listRef.current?.contains(document.activeElement)) triggerRef.current?.focus({ preventScroll: true })
+      setOpen(false)
+    }
+    window.addEventListener('scroll', dismiss, true)
+    window.addEventListener('resize', dismiss)
+    return () => {
+      window.removeEventListener('scroll', dismiss, true)
+      window.removeEventListener('resize', dismiss)
+    }
+  }, [open])
+
   useEffect(() => {
     if (!open) return
     focusItem(enabled[0] ?? 0)
     const onDocClick = (e: MouseEvent) => {
-      if (!listRef.current?.contains(e.target as Node) && e.target !== triggerRef.current) setOpen(false)
+      if (!listRef.current?.contains(e.target as Node) && !triggerRef.current?.contains(e.target as Node)) setOpen(false)
     }
     document.addEventListener('mousedown', onDocClick)
     return () => document.removeEventListener('mousedown', onDocClick)
@@ -54,7 +97,9 @@ export default function Menu({ label, items }: { label: string; items: MenuItem[
     else if (e.key === 'Home') { e.preventDefault(); focusItem(enabled[0]) }
     else if (e.key === 'End') { e.preventDefault(); focusItem(enabled[enabled.length - 1]) }
     else if (e.key === 'Escape') { e.preventDefault(); close() }
-    else if (e.key === 'Tab') { setOpen(false) }
+    // The popover lives at the end of <body>: hand focus back to the trigger
+    // first so the browser's Tab moves on from the row, not from the page end.
+    else if (e.key === 'Tab') { triggerRef.current?.focus({ preventScroll: true }); setOpen(false) }
   }
 
   return (
@@ -66,19 +111,23 @@ export default function Menu({ label, items }: { label: string; items: MenuItem[
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={open ? menuId : undefined}
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => {
+          if (!open) setPos(place())
+          setOpen(!open)
+        }}
         className="h-11 w-11 md:h-8 md:w-8 justify-center"
       >
         <span aria-hidden="true" className="text-lg leading-none">⋯</span>
       </Button>
-      {open && (
+      {open && createPortal(
         <div
           ref={listRef}
           id={menuId}
           role="menu"
           aria-label={label}
           onKeyDown={onKeyDown}
-          className="glass absolute right-0 z-10 mt-1 min-w-44 rounded-inset border p-1 shadow-float"
+          style={pos ?? { position: 'fixed' }}
+          className="glass fixed z-40 min-w-44 rounded-inset border p-1 shadow-float"
         >
           {items.map((it) => (
             <button
@@ -97,7 +146,8 @@ export default function Menu({ label, items }: { label: string; items: MenuItem[
               {it.label}
             </button>
           ))}
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   )

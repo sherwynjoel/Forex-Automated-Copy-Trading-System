@@ -10,11 +10,15 @@ import ConfirmDialog from './ConfirmDialog'
 interface KillSwitchProps {
   settings: Settings
   onUpdate: (settings: Settings) => void
+  /** The desk strip's phone row: small buttons with one-word labels below
+   *  md (the full action stays the accessible name), and the filled dry-run
+   *  toggle stands in for the Dry run badge there. */
+  compact?: boolean
 }
 
 type PendingAction = 'dry-run-off' | 'stop' | 'resume' | null
 
-export default function KillSwitch({ settings, onUpdate }: KillSwitchProps) {
+export default function KillSwitch({ settings, onUpdate, compact }: KillSwitchProps) {
   const { orgId, role } = useOrg()
   const [busy, setBusy] = useState(false)
   // A failed toggle must never be silent: mid-incident, "the button did
@@ -88,19 +92,26 @@ export default function KillSwitch({ settings, onUpdate }: KillSwitchProps) {
   }
 
   const buttonText = settings.copying_enabled ? 'Stop copying' : 'Resume copying'
+  const dryRunText = settings.dry_run ? 'Turn dry-run off' : 'Turn dry-run on'
+  // Short on phones, whole from md up; screen readers always get the whole.
+  const label = (short: string, full: string) => compact
+    ? <><span className="md:hidden">{short}</span><span className="hidden md:inline">{full}</span></>
+    : full
 
   // Kill switches are a control-level action; viewers never see them.
   if (!can(role, 'control')) return null
 
   return (
-    <div className="flex items-center gap-3 flex-wrap">
+    <div className={`flex items-center flex-wrap ${compact ? 'gap-1.5 md:gap-3' : 'gap-3'}`}>
       {error && (
         <p role="alert" className="w-full text-sm font-medium text-loss-deep bg-loss-wash border border-loss/30 rounded px-3 py-2">
           {error}
         </p>
       )}
       {settings.dry_run && (
-        <Badge tone="warn" pill>Dry run</Badge>
+        compact
+          ? <span className="hidden md:inline-flex"><Badge tone="warn" pill>Dry run</Badge></span>
+          : <Badge tone="warn" pill>Dry run</Badge>
       )}
       <Button
         data-testid="dry-run-toggle"
@@ -108,15 +119,19 @@ export default function KillSwitch({ settings, onUpdate }: KillSwitchProps) {
         disabled={busy}
         variant={settings.dry_run ? 'primary' : 'secondary'}
         tone={settings.dry_run ? 'warn' : undefined}
+        size={compact ? 'sm' : 'md'}
+        aria-label={compact ? dryRunText : undefined}
       >
-        {settings.dry_run ? 'Turn dry-run off' : 'Turn dry-run on'}
+        {label('Dry run', dryRunText)}
       </Button>
       <Button
         onClick={handleToggleCopying}
         disabled={busy}
         tone={settings.copying_enabled ? 'loss' : 'profit'}
+        size={compact ? 'sm' : 'md'}
+        aria-label={compact ? buttonText : undefined}
       >
-        {buttonText}
+        {label(settings.copying_enabled ? 'Stop' : 'Resume', buttonText)}
       </Button>
 
       <ConfirmDialog

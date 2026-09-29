@@ -100,13 +100,24 @@ test('no eyebrow kickers: the small-caps label only appears on table headers', (
   for (const el of labels) expect(el.tagName).toBe('TH')
 })
 
-test('the footer carries the risk notice, the support email and the address', () => {
+test('the public facts stay blank until the owner confirms them', () => {
+  expect(LANDING_FACTS.supportEmail).toBe('')
+  expect(LANDING_FACTS.address).toBe('')
+})
+
+test('the footer carries the risk notice, and neither contact line while the facts are blank', () => {
   renderLanding()
   const footer = screen.getByRole('contentinfo')
-  const mail = within(footer).getByRole('link', { name: LANDING_FACTS.supportEmail })
-  expect(mail).toHaveAttribute('href', `mailto:${LANDING_FACTS.supportEmail}`)
-  expect(within(footer).getByText(new RegExp(LANDING_FACTS.address))).toBeInTheDocument()
   expect(within(footer).getByText(/high level of risk/i)).toBeInTheDocument()
+  expect(within(footer).queryByRole('link', { name: /@/ })).toBeNull()
+  expect(footer.querySelector('a[href^="mailto:"]')).toBeNull()
+  expect(footer.querySelector('address')).toBeNull()
+})
+
+test('the footer carries the support email and the address once they are filled', () => {
+  render(<FooterContact facts={{ ...LANDING_FACTS, address: 'Somewhere', supportEmail: 'help@desk.example' }} />)
+  expect(screen.getByRole('link', { name: 'help@desk.example' })).toHaveAttribute('href', 'mailto:help@desk.example')
+  expect(screen.getByText(/Somewhere/)).toBeInTheDocument()
 })
 
 test('the footer omits the email and address when they are empty', () => {

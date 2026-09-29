@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { orgApi } from '../../lib/api'
 import { useOrg } from '../../lib/org'
@@ -70,14 +70,22 @@ export default function DeskStrip({ onAccounts }: { onAccounts?: (accounts: Acco
   const [dismissedRiskId, setDismissedRiskId] = useState<number | null>(null)
   const [cutoffReminder, setCutoffReminder] = useState<EventResponse | null>(null)
   const [dismissedReminderId, setDismissedReminderId] = useState<number | null>(null)
+  // The org the strip is showing now. Layout (and so the strip) stays
+  // mounted across /org/:id changes, so a refresh started for the previous
+  // org can land after the switch; it is dropped rather than shown here.
+  const currentOrgRef = useRef(orgId)
+  currentOrgRef.current = orgId
 
   const refresh = useCallback(async () => {
+    const forOrg = orgId
+    const stale = () => currentOrgRef.current !== forOrg
     try {
       const [sett, accounts, state] = await Promise.all([
         orgApi<Settings>(orgId, 'settings'),
         orgApi<Account[]>(orgId, 'accounts'),
         orgApi<ApiState>(orgId, 'state'),
       ])
+      if (stale()) return
       setSettings(sett)
       // Pages (Overview's copying line, its setup checklist) read the same
       // settings, so a stop/resume here is reflected there at once.
@@ -106,9 +114,11 @@ export default function DeskStrip({ onAccounts }: { onAccounts?: (accounts: Acco
     if (can(role, 'trade')) {
       try {
         const hook = await orgApi<WebhookSettings>(orgId, 'webhook')
+        if (stale()) return
         setAutomation({ enabled: hook.enabled, configured: hook.configured })
       } catch {
         // Older api without automation: no pill.
+        if (stale()) return
         setAutomation(null)
       }
     }
@@ -120,6 +130,7 @@ export default function DeskStrip({ onAccounts }: { onAccounts?: (accounts: Acco
       // rows, so this only ever surfaces THIS desk's margin calls.
       const risk = await orgApi<EventResponse[]>(
         orgId, 'events?category=risk&limit=5')
+      if (stale()) return
       const recent = (risk ?? []).find((event) =>
         Date.now() - new Date(event.ts).getTime() < 30 * 60_000)
       setMarginCall(recent ?? null)
@@ -133,6 +144,7 @@ export default function DeskStrip({ onAccounts }: { onAccounts?: (accounts: Acco
       // poll above.
       const reminders = await orgApi<EventResponse[]>(
         orgId, 'events?category=reminder&limit=5')
+      if (stale()) return
       const upcoming = (reminders ?? []).find((event) => {
         const cutoff = event.payload?.cutoff_date
         return typeof cutoff === 'string' && cutoff >= localISODate()
@@ -143,9 +155,22 @@ export default function DeskStrip({ onAccounts }: { onAccounts?: (accounts: Acco
     }
   }, [orgId, role, onAccounts])
 
-  // A different org's settings must never be read as this one's.
-  useEffect(() => {
+  // A different org's settings (and every other org-scoped figure) must
+  // never be read, or acted on, as this one's: clear them before paint on
+  // an org switch, and let the refresh below fill them for the new org.
+  useLayoutEffect(() => {
     publishSettings(null)
+    setSettings(null)
+    setAutomation(null)
+    setMasterState(null)
+    masterIdRef.current = null
+    setContracts([])
+    setEnabledAccountCount(null)
+    setMasterPositionCount(null)
+    setMarginCall(null)
+    setCutoffReminder(null)
+    setNotice(null)
+    setDialogOpen(false)
   }, [orgId])
 
   const updateSettings = useCallback((next: Settings) => {
@@ -178,6 +203,9 @@ export default function DeskStrip({ onAccounts }: { onAccounts?: (accounts: Acco
         method: 'POST',
         body: JSON.stringify({}),
       })
+      // The operator switched org while the flatten ran: its outcome
+      // belongs to the org it ran in, not the one on screen now.
+      if (currentOrgRef.current !== orgId) return
       const closed = result.accounts.reduce((n, a) => n + a.positions_closed, 0)
       const cancelled = result.accounts.reduce((n, a) => n + a.orders_cancelled, 0)
       // Anything the copier could not close, or could not even check. Both
@@ -213,6 +241,7 @@ export default function DeskStrip({ onAccounts }: { onAccounts?: (accounts: Acco
       setDialogOpen(false)
       await refresh()
     } catch (err) {
+      if (currentOrgRef.current !== orgId) return
       setNotice({
         kind: 'error',
         text: `Close all failed: ${errorText(err, 'unknown error')} — positions may still be open.`,
@@ -235,8 +264,11 @@ export default function DeskStrip({ onAccounts }: { onAccounts?: (accounts: Acco
 
   return (
     <>
-      <div className="glass min-h-11 border-b flex flex-wrap items-center gap-x-4 gap-y-1.5 px-4 md:px-6 py-2 md:py-1.5 text-sm">
-        <div className="order-1 flex items-center gap-2">
+      {/* Below md: one row of about 56 px -- the pulse and a state word,
+          the master's equity, and the controls. Prices, open P&L and the
+          Automation pill join from md up. */}
+      <div className="glass min-h-14 md:min-h-11 border-b flex flex-wrap items-center gap-x-2 md:gap-x-4 gap-y-1.5 px-3 md:px-6 py-1.5 text-sm">
+        <div className="order-1 flex items-center gap-1.5 md:gap-2">
           <span
             aria-hidden="true"
             className={`inline-block w-2 h-2 rounded-full ${
@@ -245,14 +277,19 @@ export default function DeskStrip({ onAccounts }: { onAccounts?: (accounts: Acco
             }`}
           />
           <span className="font-medium text-ink">
-            {copying == null ? 'Connecting…' : copying ? 'Copying live' : 'Copying paused'}
+            {copying == null ? 'Connecting…' : (
+              <>
+                <span className="md:hidden">{copying ? 'Live' : 'Paused'}</span>
+                <span className="hidden md:inline">{copying ? 'Copying live' : 'Copying paused'}</span>
+              </>
+            )}
           </span>
         </div>
         {automation && typeof automation.enabled === 'boolean' && (
           <Link
             to={`/org/${orgId}/automation`}
             title="Open Automation"
-            className="order-2 flex items-center gap-2"
+            className="order-2 hidden md:flex items-center gap-2"
           >
             <span
               aria-hidden="true"
@@ -273,19 +310,21 @@ export default function DeskStrip({ onAccounts }: { onAccounts?: (accounts: Acco
         {can(role, 'control') && (
           // One group, so the kill switch and Close all wrap together
           // instead of splitting the row's free space between them.
-          <div className="order-3 ml-auto md:order-5 md:ml-0 flex flex-wrap items-center justify-end gap-2">
-            {settings && <KillSwitch settings={settings} onUpdate={updateSettings} />}
+          <div className="order-4 ml-auto md:order-5 md:ml-0 flex flex-wrap items-center justify-end gap-1.5 md:gap-2">
+            {settings && <KillSwitch settings={settings} onUpdate={updateSettings} compact />}
             <Button
               variant="secondary"
               tone="loss"
               size="sm"
+              aria-label="Close all positions"
               onClick={() => setDialogOpen(true)}
             >
-              Close all positions
+              <span className="md:hidden">Close all</span>
+              <span className="hidden md:inline">Close all positions</span>
             </Button>
           </div>
         )}
-        <div className="order-4 w-full flex items-center justify-between gap-x-4 md:w-auto md:ml-auto md:justify-start md:gap-6">
+        <div className="order-3 md:order-4 flex items-center gap-x-4 md:ml-auto md:gap-6">
           {contracts.slice(0, 3).map((c) => (
             <div key={c.symbol} className="hidden md:flex items-baseline gap-2">
               <span className="desk-label">{c.symbol}</span>
@@ -298,10 +337,11 @@ export default function DeskStrip({ onAccounts }: { onAccounts?: (accounts: Acco
             <span className="hidden md:inline desk-label">+{contracts.length - 3}</span>
           )}
           <div className="flex items-baseline gap-2">
-            <span className="desk-label">Master equity</span>
+            {/* Phones drop the label's ink, not its words: it stays for screen readers. */}
+            <span className="desk-label sr-only md:not-sr-only">Master equity</span>
             <span className="num font-semibold text-ink">{money(masterState?.equity)}</span>
           </div>
-          <div className="flex items-baseline gap-2">
+          <div className="hidden md:flex items-baseline gap-2">
             <span className="desk-label">Open P&L</span>
             <span
               className={`num font-semibold ${

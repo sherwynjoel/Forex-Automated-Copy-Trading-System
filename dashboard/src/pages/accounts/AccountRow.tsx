@@ -129,9 +129,13 @@ export default function AccountRow({
   return (
     <tr className={`border-b border-line last:border-0 align-top ${pending ? 'opacity-60' : ''}`}>
       <td data-label="Account" className="px-5 py-3">
-        <div className="num text-ink">{onMt5 ? (account.mt5?.login ?? '—') : account.trader_login}</div>
-        <div className="text-xs text-ink-faint">{onMt5 ? mt5Subtitle(account.mt5) : `cTID ${id}`}</div>
-        <Badge tone={onMt5 ? 'brand' : 'neutral'} className="mt-1">{onMt5 ? 'MT5' : 'cTrader'}</Badge>
+        {/* One child per cell: the stacked phone layout is a flex row of
+            label and value, and three loose children would split it. */}
+        <div className="min-w-0">
+          <div className="num text-ink">{onMt5 ? (account.mt5?.login ?? '—') : account.trader_login}</div>
+          <div className="text-xs text-ink-faint">{onMt5 ? mt5Subtitle(account.mt5) : `cTID ${id}`}</div>
+          <Badge tone={onMt5 ? 'brand' : 'neutral'} className="mt-1">{onMt5 ? 'MT5' : 'cTrader'}</Badge>
+        </div>
       </td>
       <td data-label="Nickname" className="px-3 py-3">
         <span className="text-ink">{account.nickname || '—'}</span>
@@ -152,19 +156,21 @@ export default function AccountRow({
         <span className="text-ink">{money(equity)}</span>
       </td>
       <td data-label="Health" className="px-3 py-3">
-        <div className="flex items-center gap-1.5 text-ink">
-          <StatusDot tone={health.tone} />
-          <span>{health.word}</span>
-        </div>
-        {account.status === 'degraded' && (
-          // The error expands in place rather than hiding in a tooltip.
-          <div className="mt-1 flex items-start gap-1.5 text-xs text-loss-deep">
-            <StatusDot tone="degraded" />
-            <span className="break-words">
-              Degraded{account.last_error ? `: ${account.last_error}` : ''}
-            </span>
+        <div className="min-w-0">
+          <div className="flex items-center gap-1.5 text-ink">
+            <StatusDot tone={health.tone} />
+            <span>{health.word}</span>
           </div>
-        )}
+          {account.status === 'degraded' && (
+            // The error expands in place rather than hiding in a tooltip.
+            <div className="mt-1 flex items-start gap-1.5 text-xs text-loss-deep">
+              <StatusDot tone="degraded" />
+              <span className="break-words">
+                Degraded{account.last_error ? `: ${account.last_error}` : ''}
+              </span>
+            </div>
+          )}
+        </div>
       </td>
       <td className="px-5 py-3">
         <div className="flex flex-wrap items-center justify-end gap-2">

@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { act, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { expect, test, vi } from 'vitest'
 import Menu from './Menu'
@@ -63,4 +63,37 @@ test('clicking outside closes the menu', async () => {
   await userEvent.click(screen.getByRole('button', { name: 'Elsewhere' }))
   expect(screen.queryByRole('menu')).toBeNull()
   expect(spy).not.toHaveBeenCalled()
+})
+
+test('the popover is fixed-position outside any scrolling wrapper, and a scroll closes it', async () => {
+  const spy = vi.fn()
+  render(
+    <div data-testid="scroller" style={{ overflow: 'hidden' }}>
+      <Menu label="Actions" items={items(spy)} />
+    </div>
+  )
+  await userEvent.click(screen.getByRole('button', { name: 'Actions' }))
+  const menu = screen.getByRole('menu')
+  expect(menu.className).toMatch(/\bfixed\b/)
+  expect(menu.style.position === 'fixed' || /\bfixed\b/.test(menu.className)).toBe(true)
+  // Out of the clipping (and backdrop-filtered) ancestors entirely.
+  expect(screen.getByTestId('scroller')).not.toContainElement(menu)
+  // Keyboard still works through the portal.
+  await userEvent.keyboard('{ArrowDown}')
+  expect(screen.getByRole('menuitem', { name: 'Remove' })).toHaveFocus()
+  act(() => { screen.getByTestId('scroller').dispatchEvent(new Event('scroll')) })
+  expect(screen.queryByRole('menu')).toBeNull()
+  expect(spy).not.toHaveBeenCalled()
+})
+
+test('opens upward when there is no room below the trigger', async () => {
+  render(<Menu label="Actions" items={items(vi.fn())} />)
+  const trigger = screen.getByRole('button', { name: 'Actions' })
+  trigger.getBoundingClientRect = () =>
+    ({ top: window.innerHeight - 40, bottom: window.innerHeight - 8, left: 100, right: 140, width: 40, height: 32, x: 100, y: window.innerHeight - 40, toJSON: () => ({}) }) as DOMRect
+  await userEvent.click(trigger)
+  const menu = screen.getByRole('menu')
+  expect(menu.style.bottom).not.toBe('')
+  expect(menu.style.top).toBe('')
+  expect(menu.style.right).toBe(`${window.innerWidth - 140}px`)
 })

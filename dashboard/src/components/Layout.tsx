@@ -1,6 +1,5 @@
-import { Suspense, useCallback, useEffect, useRef, useState } from 'react'
-import { Navigate, useLocation, useNavigate } from 'react-router-dom'
-import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
+import { Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { Navigate, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { api } from '../lib/api'
 import { useOrg } from '../lib/org'
 import { useTheme } from '../hooks/useTheme'
@@ -11,28 +10,25 @@ import Logo from './Logo'
 import Select from './Select'
 import SkipLink from './SkipLink'
 import Loading from './Loading'
+import ChunkBoundary from './ChunkBoundary'
 import NavRail from './layout/NavRail'
 import BottomBar from './layout/BottomBar'
 import DeskStrip from './layout/DeskStrip'
-import FrozenOutlet from './layout/FrozenOutlet'
 import { consumePendingFocus, markNavigated } from '../lib/navigationFocus'
 import { adminNav, investorNav } from './layout/nav'
 import { platformCaption } from '../lib/platform'
 
-const EASE = [0.23, 1, 0.32, 1] as const
-
 /**
  * The authenticated shell: a floating glass rail from lg up, a glass
  * bottom tab bar plus a menu drawer below it, the desk strip for admins
- * and viewers, and the page in a main region that crossfades on route
- * change. Investors are held inside their portal.
+ * and viewers, and the page in a main region that fades in on route
+ * change (a CSS enter animation, .page-enter). Investors are held inside their portal.
  */
 export default function Layout() {
   const { theme, toggle: toggleTheme } = useTheme()
   const location = useLocation()
   const navigate = useNavigate()
   const { orgId, role, me } = useOrg()
-  const reduced = useReducedMotion()
   const [menuOpen, setMenuOpen] = useState(false)
   // "cTrader", "MT5" or "cTrader · MT5" -- null until the first fetch, so
   // the rail never claims a platform list it has not seen.
@@ -71,15 +67,18 @@ export default function Layout() {
 
   // After a navigation (not on first load) the new page's heading takes
   // focus when it mounts, so keyboard and screen-reader users land on its
-  // name. The entering page mounts only after the exit animation, so the
-  // heading claims the flag itself rather than Layout guessing a moment.
+  // name. The heading claims the flag itself rather than Layout guessing a
+  // moment. The entering page now mounts in the same commit as the path
+  // change, and a child's effects run before its parent's, so the flag is
+  // set in a layout effect: every layout effect in a commit runs before any
+  // passive one, including the heading's.
   const firstPath = useRef(location.pathname)
   // A flag left by an earlier navigation that no heading claimed (a page
   // without PageHeader, a previous shell) must not steal focus on this
   // shell's first load. Cleared at first render, because the first page's
   // heading mounts -- and runs its effect -- before this component's effects.
   useState(consumePendingFocus)
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (location.pathname === firstPath.current) return
     firstPath.current = ''
     markNavigated()
@@ -116,7 +115,7 @@ export default function Layout() {
   )
 
   return (
-    <div className="flex h-screen">
+    <div className="flex h-screen h-dvh">
       <SkipLink />
 
       {/* Floating glass rail — desktop only */}
@@ -146,19 +145,15 @@ export default function Layout() {
           {strayed ? (
             <Navigate to={portalRoot} replace />
           ) : (
-            <AnimatePresence mode="wait" initial={false}>
-              <motion.div
-                key={location.pathname}
-                initial={reduced ? false : { opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={reduced ? { opacity: 0 } : { opacity: 0, y: -4 }}
-                transition={reduced ? { duration: 0 } : { duration: 0.18, ease: EASE }}
-              >
-                <Suspense fallback={<Loading lines={6} />}>
-                  <FrozenOutlet />
-                </Suspense>
-              </motion.div>
-            </AnimatePresence>
+            // Keyed by path so a chunk failure on one page does not stick
+            // to the next one the operator opens.
+            <ChunkBoundary key={location.pathname}>
+              <Suspense fallback={<Loading lines={6} />}>
+                <div key={location.pathname} className="page-enter">
+                  <Outlet />
+                </div>
+              </Suspense>
+            </ChunkBoundary>
           )}
         </main>
         <BottomBar orgId={orgId} role={role} onMore={() => setMenuOpen(true)} />

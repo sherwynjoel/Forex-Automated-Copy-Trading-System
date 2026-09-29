@@ -7,6 +7,7 @@ import { isMpinPending } from './lib/types'
 import type { Me, MpinPending } from './lib/types'
 import Layout from './components/Layout'
 import Loading from './components/Loading'
+import ChunkBoundary, { markChunkError } from './components/ChunkBoundary'
 import Landing from './pages/Landing'
 import NotFound from './pages/NotFound'
 
@@ -16,8 +17,13 @@ import NotFound from './pages/NotFound'
 const admin = () => import('./pages/groups/admin')
 const investor = () => import('./pages/groups/investor')
 const auth = () => import('./pages/groups/auth')
+// A failed group import is marked, so ChunkBoundary offers a reload for it
+// whatever the browser calls the failure.
 const pick = <M, K extends keyof M>(load: () => Promise<M>, key: K) =>
-  lazy(() => load().then((m) => ({ default: m[key] as ComponentType })))
+  lazy(() => load().then(
+    (m) => ({ default: m[key] as ComponentType }),
+    (err: unknown) => { throw markChunkError(err) },
+  ))
 
 const Login = pick(auth, 'Login')
 const Mpin = pick(auth, 'Mpin')
@@ -72,42 +78,44 @@ const fullPage = <div className="mx-auto max-w-md pt-24"><Loading lines={4} /></
 export default function App() {
   return (
     <BrowserRouter>
-      <Suspense fallback={fullPage}>
-        <Routes>
-          <Route path="/login" element={<Login />} />
-          <Route path="/mpin" element={<Mpin />} />
-          <Route path="/register" element={<Register />} />
-          <Route path="/join/:token" element={<Join />} />
-          <Route path="/welcome" element={<Welcome />} />
-          <Route
-            path="/org/:orgId"
-            element={
-              <OrgProvider>
-                <Layout />
-              </OrgProvider>
-            }
-          >
-            <Route index element={<Overview />} />
-            <Route path="accounts" element={<Accounts />} />
-            <Route path="positions" element={<Positions />} />
-            <Route path="trade" element={<Trade />} />
-            <Route path="automation" element={<Automation />} />
-            <Route path="history" element={<History />} />
-            <Route path="performance" element={<Performance />} />
-            <Route path="logs" element={<Logs />} />
-            <Route path="members" element={<Members />} />
-            <Route path="investors" element={<Investors />} />
-            <Route path="invest" element={<InvestorOverview />} />
-            <Route path="invest/deposit" element={<InvestorDeposit />} />
-            <Route path="invest/withdraw" element={<InvestorWithdraw />} />
-            <Route path="invest/history" element={<InvestorHistory />} />
-            <Route path="invest/account" element={<InvestorAccount />} />
+      <ChunkBoundary>
+        <Suspense fallback={fullPage}>
+          <Routes>
+            <Route path="/login" element={<Login />} />
+            <Route path="/mpin" element={<Mpin />} />
+            <Route path="/register" element={<Register />} />
+            <Route path="/join/:token" element={<Join />} />
+            <Route path="/welcome" element={<Welcome />} />
+            <Route
+              path="/org/:orgId"
+              element={
+                <OrgProvider>
+                  <Layout />
+                </OrgProvider>
+              }
+            >
+              <Route index element={<Overview />} />
+              <Route path="accounts" element={<Accounts />} />
+              <Route path="positions" element={<Positions />} />
+              <Route path="trade" element={<Trade />} />
+              <Route path="automation" element={<Automation />} />
+              <Route path="history" element={<History />} />
+              <Route path="performance" element={<Performance />} />
+              <Route path="logs" element={<Logs />} />
+              <Route path="members" element={<Members />} />
+              <Route path="investors" element={<Investors />} />
+              <Route path="invest" element={<InvestorOverview />} />
+              <Route path="invest/deposit" element={<InvestorDeposit />} />
+              <Route path="invest/withdraw" element={<InvestorWithdraw />} />
+              <Route path="invest/history" element={<InvestorHistory />} />
+              <Route path="invest/account" element={<InvestorAccount />} />
+              <Route path="*" element={<NotFound />} />
+            </Route>
+            <Route path="/" element={<RootRedirect />} />
             <Route path="*" element={<NotFound />} />
-          </Route>
-          <Route path="/" element={<RootRedirect />} />
-          <Route path="*" element={<NotFound />} />
-        </Routes>
-      </Suspense>
+          </Routes>
+        </Suspense>
+      </ChunkBoundary>
     </BrowserRouter>
   )
 }

@@ -14,3 +14,10 @@ test('the label is customisable', () => {
   render(<Loading label="Loading positions" />)
   expect(screen.getByRole('status', { name: 'Loading positions' })).toBeInTheDocument()
 })
+
+test('the label is also real text inside the status, for readers that skip aria-label on a div', () => {
+  render(<Loading label="Loading positions" />)
+  const status = screen.getByRole('status', { name: 'Loading positions' })
+  expect(status.textContent).toBe('Loading positions')
+  expect(status.querySelector('.sr-only')).toHaveTextContent('Loading positions')
+})

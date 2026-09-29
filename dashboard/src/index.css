@@ -144,9 +144,11 @@ body::before {
   pointer-events: none;
   background-color: var(--color-paper);
   background-image:
-    radial-gradient(60% 55% at 12% 8%, var(--wash-a), transparent 70%),
-    radial-gradient(55% 50% at 92% 25%, var(--wash-b), transparent 70%),
-    radial-gradient(70% 60% at 50% 100%, var(--wash-c), transparent 70%);
+    /* Sized in vmax, not %, so a portrait phone gets round blooms rather
+       than tall bands. */
+    radial-gradient(70vmax 55vmax at 12% 8%, var(--wash-a), transparent 70%),
+    radial-gradient(65vmax 50vmax at 92% 25%, var(--wash-b), transparent 70%),
+    radial-gradient(80vmax 60vmax at 50% 100%, var(--wash-c), transparent 70%);
   animation: wash-drift 60s var(--ease-out-quint) infinite alternate;
   will-change: transform;
 }
@@ -154,6 +156,12 @@ body::before {
 @keyframes wash-drift {
   from { transform: translate3d(0, 0, 0) rotate(0deg); }
   to   { transform: translate3d(-3%, 2%, 0) rotate(1.5deg); }
+}
+
+/* main.tsx sets data-paused while the tab is hidden: no compositing work
+   for a wash nobody can see. */
+[data-paused="true"] body::before {
+  animation-play-state: paused;
 }
 
 /* Every number in the product: Rubik digits, tabular so columns align,
@@ -330,6 +338,17 @@ select.bg-card {
 
 .pulse-dot {
   animation: desk-pulse 2s ease-in-out infinite;
+}
+
+/* The route change: the entering page fades up once (Layout keys it by
+   path). Reduced motion flattens it through the block below. */
+@keyframes page-enter {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
+.page-enter {
+  animation: page-enter 180ms var(--ease-out-quint) both;
 }
 
 /* Reduced motion stops every animation and transition in one place, so no

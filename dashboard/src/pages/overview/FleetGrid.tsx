@@ -5,6 +5,11 @@ import StatusDot from '../../components/StatusDot'
 import { money, signed } from '../../lib/format'
 import ExpandableText from './ExpandableText'
 import { accountName } from './Panels'
+import { accountHealth, type HealthLevel } from './health'
+
+const HEALTH_DOT: Record<HealthLevel, 'ok' | 'paused' | 'warn' | 'degraded'> = {
+  ok: 'ok', paused: 'paused', offline: 'warn', degraded: 'degraded', disconnected: 'warn',
+}
 
 /** The master card: identity, health, balance and open P&L. Its equity is
  *  the KPI row's job, so it is not repeated here. */
@@ -13,7 +18,8 @@ function MasterCard({ orgId, master, snap }: {
   master: Account
   snap: AccountStateData
 }) {
-  const healthy = master.status === 'ok' || master.status === 'connected'
+  // The same reading as the Attention card, so the two never disagree.
+  const health = accountHealth(master)
   const pnlTone = snap.open_pnl >= 0 ? 'text-profit' : 'text-loss'
   return (
     <Card
@@ -23,8 +29,8 @@ function MasterCard({ orgId, master, snap }: {
     >
       <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
         <span className="inline-flex items-center gap-1.5 text-ink">
-          <StatusDot tone={healthy ? 'ok' : 'degraded'} />
-          {healthy ? 'OK' : 'Degraded'}
+          <StatusDot tone={HEALTH_DOT[health.level]} />
+          {health.label}
         </span>
         <span className="num text-xs text-ink-faint">ID: {master.ctid_trader_account_id}</span>
       </p>

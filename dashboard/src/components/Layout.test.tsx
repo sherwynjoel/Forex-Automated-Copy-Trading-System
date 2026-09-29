@@ -8,6 +8,7 @@ import PageHeader from './PageHeader'
 import Overview from '../pages/Overview'
 import type { Role } from '../lib/roles'
 import { mt5Account } from '../test/mt5Fixtures'
+import { readSettings } from '../lib/settingsBus'
 
 const { useOrgMock, navigateMock } = vi.hoisted(() => ({
   useOrgMock: vi.fn(),
@@ -392,6 +393,24 @@ test('shows the kill switch for admin', async () => {
   expect(await screen.findByRole('button', { name: /close all positions/i })).toBeInTheDocument()
 })
 
+test('on phones the strip is one row: short labels, full accessible names, P&L and Automation from md up', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
+  mockRoutes()
+  renderLayout()
+
+  const closeAll = await screen.findByRole('button', { name: 'Close all positions' })
+  expect(within(closeAll).getByText('Close all')).toHaveClass('md:hidden')
+  expect(within(closeAll).getByText('Close all positions')).toHaveClass('hidden', 'md:inline')
+  const stop = await screen.findByRole('button', { name: 'Stop copying' })
+  expect(within(stop).getByText('Stop')).toHaveClass('md:hidden')
+  expect(screen.getByText('Live')).toHaveClass('md:hidden')
+  // Open P&L and the Automation pill are desktop-only; equity keeps a
+  // screen-reader label on phones.
+  expect(screen.getByText('Open P&L').parentElement).toHaveClass('hidden', 'md:flex')
+  expect((await screen.findByText('Automation on')).closest('a')).toHaveClass('hidden', 'md:flex')
+  expect(screen.getByText('Master equity')).toHaveClass('sr-only', 'md:not-sr-only')
+})
+
 test('hides the Trade nav item for viewers', async () => {
   useOrgMock.mockReturnValue(makeOrgValue('viewer'))
   mockRoutes()
@@ -677,6 +696,69 @@ test('a navigation mounts the entering page once, not twice', async () => {
   expect(mounts).toHaveBeenCalledTimes(1)
 })
 
+test("switching org never shows, or lets a late answer restore, the previous org's copying state", async () => {
+  let current = makeOrgValue('admin')
+  useOrgMock.mockImplementation(() => current)
+  const respond = (payload: unknown) =>
+    new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } })
+  let releaseOrg1: (r: Response) => void = () => {}
+  let releaseOrg2: (r: Response) => void = () => {}
+  const heldOrg1 = new Promise<Response>((r) => { releaseOrg1 = r })
+  const heldOrg2 = new Promise<Response>((r) => { releaseOrg2 = r })
+  let org1SettingsCalls = 0
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input)
+    if (url.includes('/orgs/1/settings')) {
+      org1SettingsCalls += 1
+      return org1SettingsCalls === 1 ? respond(settings) : heldOrg1
+    }
+    if (url.includes('/orgs/2/settings')) return heldOrg2
+    if (url.includes('/events')) return respond([])
+    if (url.includes('/webhook')) return respond({ configured: true, enabled: true })
+    if (url.includes('/state')) return respond(apiState)
+    if (url.includes('/accounts')) return respond(accounts)
+    return respond({})
+  }))
+  // A fresh element each time, so the rerender reaches the strip (the org
+  // comes from the mocked useOrg, the way an /org/:id change would).
+  const tree = () => (
+    <MemoryRouter initialEntries={['/']}>
+      <Routes>
+        <Route element={<Layout />}>
+          <Route index element={<div>page body</div>} />
+        </Route>
+      </Routes>
+    </MemoryRouter>
+  )
+  const { rerender } = render(tree())
+  expect(await screen.findByRole('button', { name: 'Stop copying' })).toBeInTheDocument()
+
+  // A live event starts a second org-1 refresh whose settings answer is held.
+  const ws = fakeSockets[fakeSockets.length - 1]
+  act(() => { ws.onmessage?.({ data: JSON.stringify({ category: 'control' }) }) })
+  await waitFor(() => expect(org1SettingsCalls).toBe(2))
+
+  // Switch to org 2: org 1's state is gone at once, nothing to act on yet.
+  current = { ...makeOrgValue('admin'), orgId: 2, org: { id: 2, name: 'Beta', role: 'admin' } }
+  rerender(tree())
+  expect(screen.queryByRole('button', { name: 'Stop copying' })).toBeNull()
+  expect(screen.queryByText(/copying live/i)).toBeNull()
+  expect(screen.getByText('Connecting…')).toBeInTheDocument()
+  expect(readSettings()).toBeNull()
+
+  // Org 2 answers: paused.
+  await act(async () => { releaseOrg2(respond({ copying_enabled: false, dry_run: false, shards: 1 })) })
+  expect(await screen.findByRole('button', { name: 'Resume copying' })).toBeInTheDocument()
+
+  // Org 1's late answer lands after org 2's and must be ignored.
+  await act(async () => { releaseOrg1(respond(settings)) })
+  await act(async () => { await new Promise((r) => setTimeout(r, 20)) })
+  expect(screen.getByRole('button', { name: 'Resume copying' })).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Stop copying' })).toBeNull()
+  expect(screen.getByText(/copying paused/i)).toBeInTheDocument()
+  expect(readSettings()?.copying_enabled).toBe(false)
+})
+
 // ---------- the kill switch (moved here from Overview in Task 6) ----------
 
 function settingsPuts(fetchMock: ReturnType<typeof mockRoutes>) {
@@ -812,14 +894,18 @@ test('the strip Dry run badge reflects the toggled state without a reload', asyn
   mockRoutes() // dry_run: false -> no badge initially
   renderLayout()
 
-  await screen.findByTestId('dry-run-toggle')
-  expect(screen.queryByText('Dry run')).not.toBeInTheDocument()
+  const toggle = await screen.findByTestId('dry-run-toggle')
+  expect(screen.queryAllByText('Dry run').filter((el) => !toggle.contains(el))).toHaveLength(0)
 
   await userEvent.click(screen.getByTestId('dry-run-toggle'))
 
   // One dry-run marker for an admin: the kill switch's badge, not the strip
-  // chip too (both read "Dry run", so exactly one must be on screen).
-  expect(await screen.findAllByText('Dry run')).toHaveLength(1)
+  // chip too (both read "Dry run", so exactly one must be on screen). The
+  // toggle's own phone label also reads "Dry run"; it is the control, not a
+  // second marker, and the badge beside it is hidden below md.
+  await waitFor(() => {
+    expect(screen.queryAllByText('Dry run').filter((el) => !toggle.contains(el))).toHaveLength(1)
+  })
 })
 
 test('the strip kill switch is hidden for a viewer (below control)', async () => {

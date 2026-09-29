@@ -19,6 +19,7 @@ import { mergeTicksIntoSnapshot, TicksPayload } from '../lib/ticks'
 import AttentionCard, { type AttentionItem } from './overview/AttentionCard'
 import SetupChecklist from './overview/SetupChecklist'
 import FleetGrid from './overview/FleetGrid'
+import { accountHealth } from './overview/health'
 import {
   ContractsPanel, CopyLogCard, FillsPanel, FleetStatusPanel, PortfolioPanel,
   accountName, type ContractRow,
@@ -380,17 +381,19 @@ export default function Overview() {
   // One row per account, its most severe problem only: an offline MT5
   // terminal is also marked degraded by the copier ("terminal offline
   // since ..."), and saying both would list one fault twice.
+  // The level comes from accountHealth, the master card's reading too.
   for (const a of accounts) {
     const id = a.ctid_trader_account_id
     const isMaster = a.role === 'master'
-    if (a.connection_status === 'offline') {
+    const { level } = accountHealth(a)
+    if (level === 'offline') {
       attention.push({
         key: `offline-${id}`,
         tone: 'warn',
         message: `${accountName(a)}'s terminal is offline, so copies wait until the EA reports again.`,
         action: openAccounts,
       })
-    } else if (a.status === 'degraded') {
+    } else if (level === 'degraded') {
       attention.push({
         key: `degraded-${id}`,
         tone: 'degraded',
@@ -401,11 +404,14 @@ export default function Overview() {
           : `${accountName(a)} is degraded: copies to it are failing.`,
         action: openAccounts,
       })
-    } else if (!isMaster && a.enabled && a.status === 'disconnected') {
+    } else if ((isMaster || a.enabled) && level === 'disconnected') {
+      // The master card says Disconnected; Attention must not say All clear.
       attention.push({
         key: `disconnected-${id}`,
-        tone: 'warn',
-        message: `${accountName(a)} is not connected to its broker, so it receives no copies.`,
+        tone: isMaster ? 'degraded' : 'warn',
+        message: isMaster
+          ? 'The master account is not connected to its broker — nothing is being copied.'
+          : `${accountName(a)} is not connected to its broker, so it receives no copies.`,
         action: openAccounts,
       })
     }
