@@ -10,7 +10,7 @@ import HeroPreview from './landing/HeroPreview'
  *  not rendered, so the page stays truthful if one is cleared. */
 export const LANDING_FACTS = {
   legalName: 'MirrorFleet',
-  address: 'MirrorFleet, Chennai, India',
+  address: 'Chennai, India',
   supportEmail: 'support@mirrorfleet.com',
 }
 
@@ -70,7 +70,7 @@ const INVESTOR_STEPS = [
 const FAQ = [
   {
     q: 'Which platforms are supported?',
-    a: "cTrader accounts connect through the broker's Open API. MetaTrader 5 accounts connect through a small expert advisor that runs in the terminal. Either can be a master or a follower.",
+    a: 'cTrader accounts connect through the cTrader Open API via cTrader ID OAuth, and no broker password is ever entered. MetaTrader 5 accounts connect through a small expert advisor that runs in the terminal. Either can be a master or a follower.',
   },
   {
     q: 'Does MirrorFleet hold my funds?',
@@ -97,6 +97,24 @@ const FAQ = [
 const RISK_NOTICE =
   'Trading leveraged products such as forex, metals and CFDs carries a high level of risk and may not be suitable for everyone. Past results do not predict future results. Nothing on this page is investment advice.'
 
+/** The footer's address/email block. Extracted so its empty-value
+ *  behaviour is unit-testable by rendering a variant with different facts,
+ *  without needing a second data module or a module mock. */
+export function FooterContact({ facts = LANDING_FACTS }: { facts?: typeof LANDING_FACTS }) {
+  if (!facts.address && !facts.supportEmail) return null
+  return (
+    <address className="not-italic">
+      {facts.address}
+      {facts.address && facts.supportEmail && ' · '}
+      {facts.supportEmail && (
+        <a href={`mailto:${facts.supportEmail}`} className="text-brand-deep hover:underline">
+          {facts.supportEmail}
+        </a>
+      )}
+    </address>
+  )
+}
+
 function Ctas({ large = false, compact = false }: { large?: boolean; compact?: boolean }) {
   const size = large ? 'lg' : 'sm'
   return (
@@ -112,14 +130,15 @@ function Ctas({ large = false, compact = false }: { large?: boolean; compact?: b
 
 function FleetPanel() {
   return (
-    <Card as="article" className="md:col-span-2 md:row-span-2">
+    <Card as="article" className="md:col-span-2 md:self-start">
       <div className="space-y-4">
         <div className="space-y-1">
           <h3 className="text-lg font-semibold text-ink">Every follower on one screen</h3>
           <p className="text-sm text-ink-soft max-w-xl">
             Each follower copies the master with its own lot multiplier. cTrader accounts connect
-            through the broker&apos;s Open API, MetaTrader 5 terminals through the MirrorFleet expert
-            advisor, and the desk shows each one&apos;s equity and whether it is copying.
+            through the cTrader Open API via cTrader ID OAuth, so no broker password is ever entered;
+            MetaTrader 5 terminals connect through the MirrorFleet expert advisor, and the desk shows
+            each one&apos;s equity and whether it is copying.
           </p>
         </div>
         <div className="inset p-3 space-y-3">
@@ -169,7 +188,7 @@ function CopyLogPanel() {
         <ol className="inset divide-y divide-line text-sm">
           {COPY_LOG.map((line) => (
             <li key={`${line.at}-${line.who}`} className="flex gap-3 px-3 py-2">
-              <time dateTime={line.at} className="num text-ink-faint shrink-0">{line.at.slice(0, 8)}</time>
+              <time dateTime={line.at} className="num text-ink-faint shrink-0">{line.at}</time>
               <span className={line.tone}>
                 <span className="font-semibold">{line.who}</span> {line.what}
               </span>
@@ -267,6 +286,7 @@ export default function Landing() {
           </div>
           <figure className="glass rounded-card shadow-card p-2 md:p-3">
             <HeroPreview />
+            <figcaption className="mt-2 text-sm text-ink-faint">Example data, not trading results.</figcaption>
           </figure>
         </section>
 
@@ -298,8 +318,8 @@ export default function Landing() {
           </p>
         </section>
 
-        <section id="investors" className="max-w-6xl mx-auto px-4 md:px-6 py-16 md:py-20">
-          <Card as="div" title="For investors">
+        <div id="investors" className="max-w-6xl mx-auto px-4 md:px-6 py-16 md:py-20">
+          <Card as="section" title="For investors">
             <div className="space-y-6">
               <p className="text-ink-soft max-w-2xl">
                 Your money is traded on an account that is yours to watch, from deposit to withdrawal.
@@ -315,7 +335,7 @@ export default function Landing() {
               <Ctas />
             </div>
           </Card>
-        </section>
+        </div>
 
         <section id="faq" className="max-w-3xl mx-auto px-4 md:px-6 py-16 md:py-20 space-y-6">
           <h2 className="text-3xl font-bold text-ink">Questions</h2>
@@ -349,17 +369,7 @@ export default function Landing() {
           <p>{RISK_NOTICE}</p>
           <div className="space-y-1">
             <p>© {year} {LANDING_FACTS.legalName}</p>
-            {(LANDING_FACTS.address || LANDING_FACTS.supportEmail) && (
-              <address className="not-italic">
-                {LANDING_FACTS.address}
-                {LANDING_FACTS.address && LANDING_FACTS.supportEmail && ' · '}
-                {LANDING_FACTS.supportEmail && (
-                  <a href={`mailto:${LANDING_FACTS.supportEmail}`} className="text-brand-deep hover:underline">
-                    {LANDING_FACTS.supportEmail}
-                  </a>
-                )}
-              </address>
-            )}
+            <FooterContact />
           </div>
         </div>
       </footer>

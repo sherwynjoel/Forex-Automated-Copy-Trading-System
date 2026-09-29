@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { render, screen, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { expect, test } from 'vitest'
-import Landing, { LANDING_FACTS, PAGE_TITLE } from './Landing'
+import Landing, { FooterContact, LANDING_FACTS, PAGE_TITLE } from './Landing'
 
 function renderLanding() {
   return render(<MemoryRouter><Landing /></MemoryRouter>)
@@ -59,7 +59,17 @@ test('three asymmetric panels each show a piece of the product, marked as exampl
   expect(log!.querySelectorAll('time').length).toBeGreaterThan(3)
   expect(within(risk!).getByRole('table')).toBeInTheDocument()
 
-  expect(screen.getByText(/example data, not trading results/i)).toBeInTheDocument()
+  // The hero figure carries its own "example data" caption, so scope this
+  // check to the platform section's own caption under the panels.
+  const platform = document.getElementById('platform')
+  expect(within(platform!).getByText(/example data, not trading results/i)).toBeInTheDocument()
+})
+
+test('the hero carries a visible example-data caption alongside its labelled image', () => {
+  renderLanding()
+  const shot = screen.getByRole('img', { name: /MirrorFleet Overview/i })
+  const frame = shot.closest('figure')
+  expect(within(frame!).getByText(/example data, not trading results/i)).toBeInTheDocument()
 })
 
 test('how it works is prose, with no numbered markers', () => {
@@ -92,9 +102,14 @@ test('the footer carries the risk notice, the support email and the address', ()
   renderLanding()
   const footer = screen.getByRole('contentinfo')
   const mail = within(footer).getByRole('link', { name: LANDING_FACTS.supportEmail })
-  expect(mail).toHaveAttribute('href', 'mailto:support@mirrorfleet.com')
-  expect(within(footer).getByText(/Chennai, India/)).toBeInTheDocument()
+  expect(mail).toHaveAttribute('href', `mailto:${LANDING_FACTS.supportEmail}`)
+  expect(within(footer).getByText(new RegExp(LANDING_FACTS.address))).toBeInTheDocument()
   expect(within(footer).getByText(/high level of risk/i)).toBeInTheDocument()
+})
+
+test('the footer omits the email and address when they are empty', () => {
+  const { container } = render(<FooterContact facts={{ ...LANDING_FACTS, address: '', supportEmail: '' }} />)
+  expect(container).toBeEmptyDOMElement()
 })
 
 test('the page sets its own title and hands the old one back on unmount', () => {
