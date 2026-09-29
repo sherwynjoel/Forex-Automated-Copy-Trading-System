@@ -93,7 +93,9 @@ CREATE TABLE wallet_entries (
     ref_id      BIGINT NULL,
     note        TEXT NULL,
     created_by  BIGINT NULL REFERENCES users(id) ON DELETE SET NULL,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- A reference is a (table, id) pair; half of one names nothing.
+    CHECK ((ref_table IS NULL) = (ref_id IS NULL))
 );
 CREATE INDEX wallet_entries_by_user
     ON wallet_entries (org_id, user_id, wallet, created_at DESC, id DESC);
@@ -128,10 +130,15 @@ CREATE TABLE deposits (
 CREATE INDEX deposits_queue ON deposits (org_id, status, created_at);
 CREATE INDEX deposits_by_user ON deposits (org_id, user_id, created_at DESC);
 -- One live notice per transaction reference per org: two pending rows
--- quoting the same transfer are the same money twice. Rejected and
--- cancelled rows leave the index so a mistake can be re-filed.
-CREATE UNIQUE INDEX deposits_one_live_reference ON deposits (org_id, reference)
+-- quoting the same transfer are the same money twice, and so are two that
+-- differ only in case (a hash or bank reference retyped in capitals).
+-- Rejected and cancelled rows leave the index so a mistake can be re-filed.
+CREATE UNIQUE INDEX deposits_one_live_reference ON deposits (org_id, lower(reference))
     WHERE status IN ('pending', 'confirmed');
+-- A receipt backs at most one notice, whatever that notice's status (spec
+-- section 9; routes check it first, this closes the race between two).
+CREATE UNIQUE INDEX deposits_one_receipt ON deposits (receipt_file_id)
+    WHERE receipt_file_id IS NOT NULL;
 
 -- A cash-out request, always from the main wallet. The destination is a
 -- snapshot too; the row it points at is kept forever (RESTRICT).
@@ -159,8 +166,11 @@ CREATE INDEX withdrawals_queue ON withdrawals (org_id, status, created_at);
 CREATE INDEX withdrawals_by_user ON withdrawals (org_id, user_id, created_at DESC);
 
 -- Money between wallets and the trading account. Each end is a wallet or
--- an account, never neither and never both; account -> account is not a
--- transfer the portal makes.
+-- an account, never both; account -> account and a wallet to itself are
+-- not transfers the portal makes. An account end's id may be NULL: the
+-- account FKs are ON DELETE SET NULL so removing an MT5 account or
+-- disconnecting a cTrader grant keeps the transfer history, and the
+-- account-side CHECKs allow exactly that (a wallet end never carries one).
 CREATE TABLE transfers (
     id                 BIGSERIAL PRIMARY KEY,
     org_id             BIGINT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -184,10 +194,12 @@ CREATE TABLE transfers (
     note               TEXT NULL,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK ((source_kind = 'wallet') = (source_wallet IS NOT NULL)),
-    CHECK ((source_kind = 'account') = (source_account_id IS NOT NULL)),
+    CHECK (source_kind = 'account' OR source_account_id IS NULL),
     CHECK ((target_kind = 'wallet') = (target_wallet IS NOT NULL)),
-    CHECK ((target_kind = 'account') = (target_account_id IS NOT NULL)),
-    CHECK (NOT (source_kind = 'account' AND target_kind = 'account'))
+    CHECK (target_kind = 'account' OR target_account_id IS NULL),
+    CHECK (NOT (source_kind = 'account' AND target_kind = 'account')),
+    CHECK (NOT (source_kind = 'wallet' AND target_kind = 'wallet'
+                AND source_wallet = target_wallet))
 );
 CREATE INDEX transfers_queue ON transfers (org_id, status, created_at);
 CREATE INDEX transfers_by_user ON transfers (org_id, user_id, created_at DESC);

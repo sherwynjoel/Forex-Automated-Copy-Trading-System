@@ -464,3 +464,40 @@ def test_decide_transfer_done_takes_the_lock_for_the_investor_not_the_admin(
     r = _decide(client, org_id, tr["id"], "done")
     assert r.status_code == 200, r.text
     assert calls == [(org_id, investor["id"])], "locked on the investor, not the admin"
+
+
+def test_removing_the_linked_mt5_account_keeps_its_transfers_with_no_account(
+        org_client, make_user, login_as, db):
+    """transfers.*_account_id are ON DELETE SET NULL, and the account-side
+    CHECKs allow that NULL. Removing an MT5 account that transfers name
+    succeeds (it used to be a 500 from the CHECK) and both rows stay
+    readable by the desk and the investor, the account end naming none."""
+    from conftest import seed_mt5
+    client, org_id, seed = org_client
+    investor = make_user(email="inv@example.com")
+    _member(db, org_id, investor, "investor")
+    account_id = seed_mt5(db, org_id, "mt5_transfer-test-key-0123456789abcdefghijk")
+    link(db, org_id, investor["id"], account_id)
+    with psycopg.connect(db, autocommit=True) as conn:
+        (into,) = conn.execute(
+            "INSERT INTO transfers (org_id, user_id, source_kind, source_wallet, target_kind, "
+            "target_account_id, amount) VALUES (%s, %s, 'wallet', 'main', 'account', %s, 10) "
+            "RETURNING id", (org_id, investor["id"], account_id)).fetchone()
+        (out,) = conn.execute(
+            "INSERT INTO transfers (org_id, user_id, source_kind, source_account_id, "
+            "target_kind, target_wallet, amount, status, done_at) "
+            "VALUES (%s, %s, 'account', %s, 'wallet', 'main', 20, 'done', now()) RETURNING id",
+            (org_id, investor["id"], account_id)).fetchone()
+
+    r = client.delete(f"/api/orgs/{org_id}/mt5/accounts/{account_id}", headers=csrf(client))
+
+    assert r.status_code == 200, r.text
+    desk = {t["id"]: t for t in client.get(f"/api/orgs/{org_id}/transfers").json()}
+    assert desk[into]["source"] == W("main")
+    assert desk[into]["target"] == {"kind": "account", "account_id": None}
+    assert desk[out]["source"] == {"kind": "account", "account_id": None}
+    assert desk[out]["target"] == W("main")
+    login_as(client, investor)
+    mine = client.get(f"/api/orgs/{org_id}/investor/transfers")
+    assert mine.status_code == 200
+    assert sorted(t["id"] for t in mine.json()) == sorted([into, out])

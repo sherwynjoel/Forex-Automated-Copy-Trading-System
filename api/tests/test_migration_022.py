@@ -6,6 +6,7 @@ withdrawals and transfers -- and the copy-then-drop of the three
 assert the post-migration shape; the copy is exercised on a scratch
 database stopped at 021, like test_migration_020's upgrade test."""
 import pathlib
+import re
 from decimal import Decimal
 
 import psycopg
@@ -45,8 +46,18 @@ COLUMNS = {
 INDEXES = ["files_by_user", "payment_methods_by_org", "payout_destinations_by_user",
            "payout_destinations_queue", "wallet_entries_by_user", "wallet_entries_by_org_time",
            "wallet_entries_one_per_ref", "deposits_queue", "deposits_by_user",
-           "deposits_one_live_reference", "withdrawals_queue", "withdrawals_by_user",
-           "transfers_queue", "transfers_by_user"]
+           "deposits_one_live_reference", "deposits_one_receipt", "withdrawals_queue",
+           "withdrawals_by_user", "transfers_queue", "transfers_by_user"]
+
+
+def _checks(conn, table):
+    """The table's CHECK constraints as pg_get_constraintdef prints them,
+    flattened: no CHECK keyword, no parentheses, no ::text casts, single
+    spaces -- so a test can name a rule the way the migration spells it."""
+    defs = [r[0] for r in conn.execute(
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+        "WHERE conrelid = %s::regclass AND contype = 'c'", (table,)).fetchall()]
+    return [" ".join(re.sub(r"[()]|::text", "", d).split()).removeprefix("CHECK ") for d in defs]
 
 
 def _people(make_user, make_org):
@@ -87,8 +98,11 @@ def test_the_named_indexes_exist_and_the_unique_ones_are_partial(db):
             (INDEXES,)).fetchall())
     assert sorted(defs) == sorted(INDEXES)
     live = defs["deposits_one_live_reference"]
-    assert "UNIQUE" in live and "(org_id, reference)" in live
+    assert "UNIQUE" in live and "(org_id, lower(reference))" in live
     assert "pending" in live and "confirmed" in live
+    receipt = defs["deposits_one_receipt"]
+    assert "UNIQUE" in receipt and "(receipt_file_id)" in receipt
+    assert "receipt_file_id IS NOT NULL" in receipt
     once = defs["wallet_entries_one_per_ref"]
     assert "UNIQUE" in once and "(ref_table, ref_id, wallet)" in once and "IS NOT NULL" in once
     for queue in ("deposits_queue", "withdrawals_queue", "transfers_queue",
@@ -122,6 +136,11 @@ def test_wallet_entries_refuse_zero_and_settle_once_per_reference(db, make_user,
             conn.execute(entry, (org_id, investor["id"], "savings", 1, "adjustment", None, None))
         with pytest.raises(psycopg.errors.CheckViolation):
             conn.execute(entry, (org_id, investor["id"], "main", 1, "refund", None, None))
+        # A reference is a (table, id) pair: half of one names nothing.
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute(entry, (org_id, investor["id"], "main", 1, "deposit", "deposits", None))
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute(entry, (org_id, investor["id"], "main", 1, "deposit", None, 7))
         (total,) = conn.execute(
             "SELECT sum(amount) FROM wallet_entries WHERE wallet = 'main'").fetchone()
     assert total == Decimal("210.00")
@@ -136,6 +155,11 @@ def test_deposits_keep_one_live_reference_per_org(db, make_user, make_org):
         assert row[1:] == ("pending", "wallet", Decimal("0"))
         with pytest.raises(psycopg.errors.UniqueViolation):
             conn.execute(dep, (org_id, investor["id"], 20, "same-tx"))
+        # Case is not a different transaction: a hash or a bank reference
+        # retyped in capitals is the same money.
+        with pytest.raises(psycopg.errors.UniqueViolation) as caught:
+            conn.execute(dep, (org_id, investor["id"], 20, "SAME-TX"))
+        assert caught.value.diag.constraint_name == "deposits_one_live_reference"
         # A cancelled (or rejected) row leaves the index, so the reference is free again.
         conn.execute("UPDATE deposits SET status = 'cancelled' WHERE id = %s", (row[0],))
         conn.execute(dep, (org_id, investor["id"], 20, "same-tx"))
@@ -154,6 +178,27 @@ def test_deposits_keep_one_live_reference_per_org(db, make_user, make_org):
                 "INSERT INTO deposits (org_id, user_id, method_kind, method_label, amount, "
                 "reference, target) VALUES (%s, %s, 'crypto', 'x', 1, 'tg', 'bank')",
                 (org_id, investor["id"]))
+
+
+def test_a_receipt_backs_at_most_one_notice_whatever_its_status(db, make_user, make_org):
+    org_id, admin, investor = _people(make_user, make_org)
+    with psycopg.connect(db, autocommit=True) as conn:
+        (file_id,) = conn.execute(
+            "INSERT INTO files (org_id, user_id, purpose, content_type, size_bytes, sha256, "
+            "storage_key) VALUES (%s, %s, 'deposit_receipt', 'image/png', 1, 'x', %s) "
+            "RETURNING id", (org_id, investor["id"], f"{org_id}/r.png")).fetchone()
+        dep = ("INSERT INTO deposits (org_id, user_id, method_kind, method_label, amount, "
+               "reference, receipt_file_id) VALUES (%s, %s, 'bank', 'ICICI', 10, %s, %s) "
+               "RETURNING id")
+        (first,) = conn.execute(dep, (org_id, investor["id"], "ref-1", file_id)).fetchone()
+        # Rejecting the first notice does not free its receipt (unlike its reference).
+        conn.execute("UPDATE deposits SET status = 'rejected' WHERE id = %s", (first,))
+        with pytest.raises(psycopg.errors.UniqueViolation) as caught:
+            conn.execute(dep, (org_id, investor["id"], "ref-2", file_id))
+        assert caught.value.diag.constraint_name == "deposits_one_receipt"
+        # Notices without a receipt never collide with each other.
+        conn.execute(dep, (org_id, investor["id"], "ref-3", None))
+        conn.execute(dep, (org_id, investor["id"], "ref-4", None))
 
 
 def test_transfers_check_both_ends(db, make_user, make_org):
@@ -176,7 +221,8 @@ def test_transfers_check_both_ends(db, make_user, make_org):
             ("account", None, aid, "account", None, aid),       # account -> account
             ("wallet", None, None, "wallet", "main", None),     # wallet kind without a wallet
             ("wallet", "main", aid, "wallet", "pamm", None),    # wallet kind carrying an account
-            ("account", None, None, "wallet", "main", None),    # account kind without an account
+            ("wallet", None, None, "account", None, aid),       # ...and the same on the target side
+            ("wallet", "main", None, "wallet", "main", None),   # a wallet to itself
             ("wallet", "savings", None, "wallet", "main", None),
         ]:
             with pytest.raises(psycopg.errors.CheckViolation):
@@ -184,6 +230,50 @@ def test_transfers_check_both_ends(db, make_user, make_org):
         with pytest.raises(psycopg.errors.CheckViolation):
             conn.execute(tr, (org_id, investor["id"], "wallet", "main", None,
                               "wallet", "pamm", None, 0))
+        # An account end whose account is gone (removed, or its grant
+        # disconnected) is a NULL account id: the history row stays.
+        conn.execute(tr, (org_id, investor["id"], "account", None, None, "wallet", "main", None, 50))
+        conn.execute(tr, (org_id, investor["id"], "wallet", "main", None, "account", None, None, 50))
+        checks = _checks(conn, "transfers")
+    assert "source_kind = 'account' OR source_account_id IS NULL" in checks
+    assert "target_kind = 'account' OR target_account_id IS NULL" in checks
+    assert ("NOT source_kind = 'wallet' AND target_kind = 'wallet' AND "
+            "source_wallet = target_wallet") in checks
+    assert "source_kind = 'wallet' = source_wallet IS NOT NULL" in checks
+    assert "target_kind = 'wallet' = target_wallet IS NOT NULL" in checks
+    assert "NOT source_kind = 'account' AND target_kind = 'account'" in checks
+    assert not any("account_id IS NOT NULL" in c for c in checks), checks
+
+
+def test_removing_an_account_keeps_its_transfers_with_a_null_account(db, make_user, make_org):
+    """transfers.*_account_id are ON DELETE SET NULL: deleting the account
+    row (MT5 removal, or a cTrader grant disconnect cascading to its
+    accounts) must succeed and leave the transfer history in place."""
+    org_id, admin, investor = _people(make_user, make_org)
+    tr = ("INSERT INTO transfers (org_id, user_id, source_kind, source_wallet, source_account_id, "
+          "target_kind, target_wallet, target_account_id, amount) "
+          "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 50) RETURNING id")
+    with psycopg.connect(db, autocommit=True) as conn:
+        (aid,) = conn.execute(
+            "INSERT INTO accounts (ctid_trader_account_id, ctid_connection_id, org_id, platform, "
+            "trader_login, is_live, role, enabled) "
+            "VALUES (nextval('mt5_account_id_seq'), NULL, %s, 'mt5', 0, false, 'slave', true) "
+            "RETURNING ctid_trader_account_id", (org_id,)).fetchone()
+        (into,) = conn.execute(tr, (org_id, investor["id"], "wallet", "main", None,
+                                    "account", None, aid)).fetchone()
+        (out,) = conn.execute(tr, (org_id, investor["id"], "account", None, aid,
+                                   "wallet", "main", None)).fetchone()
+        conn.execute("DELETE FROM accounts WHERE ctid_trader_account_id = %s", (aid,))
+        rows = conn.execute(
+            "SELECT id, source_kind, source_account_id, target_kind, target_account_id "
+            "FROM transfers ORDER BY id").fetchall()
+    assert rows == [(into, "wallet", None, "account", None), (out, "account", None, "wallet", None)]
+
+
+def test_wallet_entries_check_the_reference_pair(db):
+    with psycopg.connect(db, autocommit=True) as conn:
+        checks = _checks(conn, "wallet_entries")
+    assert "ref_table IS NULL = ref_id IS NULL" in checks
 
 
 def test_a_destination_with_history_cannot_be_deleted(db, make_user, make_org):

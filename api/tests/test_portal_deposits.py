@@ -229,6 +229,41 @@ def test_one_live_reference_per_workspace(org_client, make_user, login_as, db):
     assert _notice(client, org_id, method_id).status_code == 409
 
 
+def test_a_reference_differing_only_in_case_is_the_same_notice(
+        org_client, make_user, login_as, db):
+    client, org_id, investor, method_id = _investor(org_client, make_user, login_as, db)
+    assert _notice(client, org_id, method_id, reference="0xAbC123").status_code == 201
+    for retyped in ("0XABC123", "0xabc123"):
+        r = _notice(client, org_id, method_id, reference=retyped)
+        assert r.status_code == 409, retyped
+        assert r.json()["detail"] == "A notice with this reference already exists"
+
+
+def test_a_receipt_attached_by_a_racing_notice_is_named_as_such(
+        org_client, make_user, login_as, db, monkeypatch):
+    """The route's 'already attached' probe runs before the INSERT; a second
+    notice attaching the same receipt in between is caught by the
+    deposits_one_receipt index, and the refusal names the receipt -- not
+    the reference, which the racing notice does not share."""
+    client, org_id, investor, method_id = _investor(org_client, make_user, login_as, db)
+    mine = seed_file(db, org_id, investor["id"])
+    real_fee_for = pc.fee_for
+
+    def racing_fee_for(amount, fee_pct):
+        # Runs after every check and before the INSERT: the other notice lands now.
+        with psycopg.connect(db, autocommit=True) as conn:
+            conn.execute(
+                "INSERT INTO deposits (org_id, user_id, method_kind, method_label, amount, "
+                "reference, receipt_file_id) VALUES (%s, %s, 'crypto', 'x', 1, 'racer', %s)",
+                (org_id, investor["id"], mine))
+        return real_fee_for(amount, fee_pct)
+
+    monkeypatch.setattr(pc, "fee_for", racing_fee_for)
+    r = _notice(client, org_id, method_id, reference="slow-tx", receipt_file_id=mine)
+    assert r.status_code == 400
+    assert r.json()["detail"] == "receipt file is already attached to another notice"
+
+
 def test_ten_notices_an_hour_then_429(org_client, make_user, login_as, db):
     client, org_id, investor, method_id = _investor(org_client, make_user, login_as, db)
     for i in range(10):

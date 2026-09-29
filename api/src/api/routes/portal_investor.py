@@ -285,14 +285,22 @@ def create_portal_investor_router() -> APIRouter:
                 f"RETURNING {pc.DEPOSIT_COLS}",
                 (ctx.org_id, ctx.user_id, method_id, kind, label, amount, fee, reference,
                  body.receipt_file_id, target, target_account_id, note)).fetchone()
-        except psycopg.errors.UniqueViolation:
-            # deposits_one_live_reference: the same transaction is already
-            # pending or confirmed in this workspace (possibly another
-            # investor's). Two rows for one transfer is the same money
-            # counted twice. Rejected and cancelled rows are not in the
-            # index, so a re-file after a mistake still works.
-            raise HTTPException(status_code=409,
-                                detail="A notice with this reference already exists")
+        except psycopg.errors.UniqueViolation as exc:
+            constraint = exc.diag.constraint_name
+            if constraint == "deposits_one_live_reference":
+                # The same transaction (compared case-insensitively) is
+                # already pending or confirmed in this workspace, possibly
+                # another investor's. Two rows for one transfer is the same
+                # money counted twice. Rejected and cancelled rows are not
+                # in the index, so a re-file after a mistake still works.
+                raise HTTPException(status_code=409,
+                                    detail="A notice with this reference already exists")
+            if constraint == "deposits_one_receipt":
+                # Another notice attached this receipt between the probe
+                # above and this INSERT.
+                raise HTTPException(
+                    status_code=400, detail="receipt file is already attached to another notice")
+            raise
         out = pc.deposit_json(row)
         await pc.audit_control(
             conn, org_id=ctx.org_id, action="investor_deposit_noticed",

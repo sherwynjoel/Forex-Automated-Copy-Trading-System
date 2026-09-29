@@ -140,15 +140,6 @@ def matrix_org(app_client, make_user, make_org, db, login_as):
                    org_id, trader_login, is_live, role)
                VALUES (100, %s, %s, 100, false, 'master')""",
             (connection_id, org_id))
-        # The transfer targets an MT5-style account (no cTrader connection)
-        # rather than account 100: `DELETE accounts/100/connection` cascades
-        # account 100 away, and transfers.target_account_id would be set
-        # NULL against its CHECK constraint.
-        (mt5_id,) = conn.execute(
-            "INSERT INTO accounts (ctid_trader_account_id, ctid_connection_id, org_id, "
-            "platform, trader_login, is_live, role, enabled) "
-            "VALUES (nextval('mt5_account_id_seq'), NULL, %s, 'mt5', 0, false, 'slave', true) "
-            "RETURNING ctid_trader_account_id", (org_id,)).fetchone()
         conn.execute(
             "INSERT INTO payout_destinations (org_id, user_id, kind, nickname, details) "
             "VALUES (%s, %s, 'crypto', 'Pending', %s)",                        # id 2
@@ -165,8 +156,8 @@ def matrix_org(app_client, make_user, make_org, db, login_as):
             (org_id, investor_id, approved_id))                                 # id 1
         conn.execute(
             "INSERT INTO transfers (org_id, user_id, source_kind, source_wallet, target_kind, "
-            "target_account_id, amount) VALUES (%s, %s, 'wallet', 'main', 'account', %s, 10)",
-            (org_id, investor_id, mt5_id))                                      # id 1
+            "target_account_id, amount) VALUES (%s, %s, 'wallet', 'main', 'account', 100, 10)",
+            (org_id, investor_id))                                              # id 1
     return app_client, org_id, users, outsider
 
 
@@ -219,13 +210,20 @@ def test_role_thresholds(matrix_org, login_as, method, tail, body, min_role):
 def test_destructive_rows_allowed(matrix_org, login_as):
     """The allowed-role half of the destructive rows, run last against a
     dedicated fixture instance. The payment method is still used by the
-    pending deposit, so its DELETE answers 409 -- authorization passed."""
+    pending deposit, so its DELETE answers 409 -- authorization passed.
+    Disconnecting account 100's grant must succeed although transfer 1
+    targets it (transfers.target_account_id is ON DELETE SET NULL)."""
     client, org_id, users, _ = matrix_org
     login_as(client, users["admin"])
     r = _call(client, "DELETE", org_id, "payment-methods/1", None)
     assert r.status_code == 409
     r = _call(client, "DELETE", org_id, "accounts/100/connection", None)
     assert r.status_code == 200
+    # Transfer 1 targeted account 100; the grant's accounts cascade away and
+    # the transfer stays, its account end now naming no account.
+    (transfer,) = client.get(f"/api/orgs/{org_id}/transfers").json()
+    assert transfer["id"] == 1
+    assert transfer["target"] == {"kind": "account", "account_id": None}
     r = _call(client, "DELETE", org_id, "", None)
     assert r.status_code == 204
 
