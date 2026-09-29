@@ -9,7 +9,7 @@ from typing import Optional
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from .config import ApiConfig
+from .config import ApiConfig, DEFAULT_UPLOAD_DIR
 from .auth import (
     ensure_bootstrap_user,
     LoginRateLimiter,
@@ -142,12 +142,14 @@ def create_app(http_transport: Optional[httpx.BaseTransport] = None) -> FastAPI:
     # volume in compose). Created here rather than in lifespan so a
     # TestClient app, which skips lifespan, has it too; tests swap it for
     # a temp directory. The one value is read straight from the env
-    # (mirroring ApiConfig.upload_dir, same default and same "empty means
-    # default" rule) rather than through ApiConfig.from_env(): create_app
-    # runs at import time (`app = create_app()` below) and from_env would
-    # make importing api.main demand SESSION_SECRET, FERNET_KEY and the
-    # rest -- test_events_ws.py builds an app with only STATIC_DIR set.
-    app.state.uploads = UploadStore(Path(os.environ.get("UPLOAD_DIR") or "./data/uploads"))
+    # (mirroring ApiConfig.upload_dir -- DEFAULT_UPLOAD_DIR is the same
+    # constant, so there is one spelling of the default -- and the same
+    # "empty means default" rule) rather than through ApiConfig.from_env():
+    # create_app runs at import time (`app = create_app()` below) and
+    # from_env would make importing api.main demand SESSION_SECRET,
+    # FERNET_KEY and the rest -- test_events_ws.py builds an app with only
+    # STATIC_DIR set.
+    app.state.uploads = UploadStore(Path(os.environ.get("UPLOAD_DIR") or DEFAULT_UPLOAD_DIR))
 
     # Add CSRF middleware
     app.add_middleware(CSRFMiddleware)

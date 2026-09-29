@@ -2,6 +2,14 @@
 import os
 from dataclasses import dataclass
 
+# The api image sets UPLOAD_DIR to /data/uploads, a named compose volume; a
+# bare `uvicorn` run -- and any direct `ApiConfig(...)` construction, e.g. in
+# tests -- gets this instead. Also used by main.py's early UploadStore
+# wiring (which reads the env directly, before ApiConfig.from_env() is
+# callable -- see the comment there), so there is one spelling of the
+# default, not two.
+DEFAULT_UPLOAD_DIR = "./data/uploads"
+
 
 @dataclass
 class ApiConfig:
@@ -31,7 +39,10 @@ class ApiConfig:
     # The api image sets /data/uploads, a named compose volume; a bare
     # `uvicorn` run gets ./data/uploads. An empty value means "default" so
     # an `UPLOAD_DIR=` line in .env cannot point the store at the cwd.
-    upload_dir: str
+    # Defaulted (unlike every other field here) so a direct `ApiConfig(...)`
+    # construction -- test_netaddr.py's local `_cfg()` helper, for one --
+    # keeps working without naming it.
+    upload_dir: str = DEFAULT_UPLOAD_DIR
 
     @classmethod
     def from_env(cls) -> "ApiConfig":
@@ -76,5 +87,5 @@ class ApiConfig:
             public_origin=os.environ.get("PUBLIC_ORIGIN", "").rstrip("/"),
             registration_enabled=os.environ.get(
                 "REGISTRATION_ENABLED", "false").lower() in ("true", "1", "yes"),
-            upload_dir=os.environ.get("UPLOAD_DIR") or "./data/uploads",
+            upload_dir=os.environ.get("UPLOAD_DIR") or DEFAULT_UPLOAD_DIR,
         )
