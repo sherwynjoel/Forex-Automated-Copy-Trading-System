@@ -14,7 +14,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional
 
 import psycopg
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel
 
@@ -58,6 +58,12 @@ class MethodPatch(BaseModel):
 class SettingsBody(BaseModel):
     withdrawal_min: Any
     withdrawal_fee_pct: Any
+
+
+class DepositDecision(BaseModel):
+    status: str
+    credited_amount: Any = None
+    note: Optional[str] = None
 
 
 def clean_details(kind: str, raw: Any) -> dict:
@@ -262,6 +268,104 @@ def create_portal_admin_router() -> APIRouter:
             actor_email=ctx.user_email, user_id=ctx.user_id, previous=previous, **out,
             summary=f"Withdrawal rules set to min {withdrawal_min:.2f} USD, fee {fee_pct}% "
                     f"by {ctx.user_email}")
+        return out
+
+    # ------------------------------------------------------------ deposits
+
+    @router.get("/deposits", response_model=List[Dict[str, Any]])
+    async def deposit_queue(status: Optional[str] = None,
+                            ctx: OrgContext = Depends(require_org_role("admin")),
+                            conn: psycopg.Connection = Depends(get_conn)) -> List[Dict[str, Any]]:
+        where = "d.org_id = %s" + (" AND d.status = %s" if status else "")
+        params = (ctx.org_id, status) if status else (ctx.org_id,)
+        rows = conn.execute(
+            f"SELECT {pc.qualify(pc.DEPOSIT_COLS, 'd')}, u.email, u.display_name "
+            "FROM deposits d JOIN users u ON u.id = d.user_id "
+            f"WHERE {where} ORDER BY (d.status = 'pending') DESC, d.created_at DESC, d.id DESC",
+            params).fetchall()
+        return [pc.deposit_json(r) for r in rows]
+
+    @router.post("/deposits/{deposit_id}/decision", response_model=Dict[str, Any])
+    async def decide_deposit(deposit_id: int, body: DepositDecision, http_request: Request,
+                             ctx: OrgContext = Depends(require_org_role("admin")),
+                             conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
+        """Confirm (credit main by credited_amount, default amount - fee) or
+        reject (note required). The status change, the ledger row and, for
+        a trading-account deposit, the approved main -> account transfer
+        are one transaction; the UPDATE carries `AND status = 'pending'` so
+        a lost race or a replay changes nothing."""
+        new_status = body.status.strip().lower()
+        if new_status not in ("confirmed", "rejected"):
+            raise HTTPException(status_code=400, detail="status must be confirmed or rejected")
+        try:
+            note = pc.require_note_on_reject(new_status, body.note)
+        except pc.LedgerError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        current = conn.execute(
+            "SELECT status, user_id, amount, fee, target FROM deposits "
+            "WHERE id = %s AND org_id = %s", (deposit_id, ctx.org_id)).fetchone()
+        if not current:
+            raise HTTPException(status_code=404, detail="Deposit not found")
+        status_now, investor_id, amount, fee, target = current
+        if not pc.can_transition("deposits", status_now, new_status):
+            raise HTTPException(status_code=409, detail=f"deposit is already {status_now}")
+        credited: Optional[Decimal] = None
+        if new_status == "confirmed":
+            try:
+                credited = (Decimal(amount) - Decimal(fee) if body.credited_amount is None
+                            else pc.parse_amount(body.credited_amount, "credited_amount"))
+            except pc.LedgerError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            if credited <= 0:
+                raise HTTPException(status_code=400,
+                                    detail="credited_amount must be greater than 0")
+        linked: Optional[int] = None
+        transfer_id: Optional[int] = None
+        with conn.transaction():
+            if new_status == "confirmed" and target == "account":
+                # The link as it is NOW, not as it was when the notice was
+                # filed: the admin funds the account the investor has today.
+                linked = pc.linked_account(conn, ctx.org_id, investor_id)
+                if linked is None:
+                    suffix = "(no account linked; credited to wallet)"
+                    note = f"{note} {suffix}" if note else suffix
+            row = conn.execute(
+                "UPDATE deposits SET status = %s, decided_by = %s, decided_at = now(), "
+                "decision_note = %s, credited_amount = %s "
+                "WHERE id = %s AND org_id = %s AND status = 'pending' "
+                f"RETURNING {pc.DEPOSIT_COLS}",
+                (new_status, ctx.user_id, note, credited, deposit_id, ctx.org_id)).fetchone()
+            if not row:
+                raise HTTPException(status_code=409, detail="decided by someone else")
+            if new_status == "confirmed":
+                pc.settle(conn, org_id=ctx.org_id, user_id=investor_id, wallet="main",
+                          amount=credited, kind="deposit", ref_table="deposits",
+                          ref_id=deposit_id, created_by=ctx.user_id)
+                if linked is not None:
+                    # Held in main until the admin funds the broker account
+                    # and marks the transfer done (Task 9 settles it).
+                    (transfer_id,) = conn.execute(
+                        "INSERT INTO transfers (org_id, user_id, source_kind, source_wallet, "
+                        "target_kind, target_account_id, amount, status, decided_by, "
+                        "decided_at, decision_note) "
+                        "VALUES (%s, %s, 'wallet', 'main', 'account', %s, %s, 'approved', %s, "
+                        "now(), %s) RETURNING id",
+                        (ctx.org_id, investor_id, linked, credited, ctx.user_id,
+                         f"funded from deposit #{deposit_id}")).fetchone()
+        out = pc.deposit_json(row)
+        await pc.audit_control(
+            conn, org_id=ctx.org_id, action="investor_deposit_decided",
+            actor_email=ctx.user_email, user_id=investor_id, account_id=linked,
+            deposit_id=deposit_id, status=new_status, amount=out["amount"],
+            credited_amount=out["credited_amount"], note=note, transfer_id=transfer_id,
+            summary=f"Deposit #{deposit_id} {new_status} by {ctx.user_email}")
+        credited_line = (f"Credited: {out['credited_amount']:.2f} USD\n"
+                         if out["credited_amount"] is not None else "")
+        await pc.notify_investor(
+            conn, http_request, investor_id,
+            f"Your deposit of {out['amount']:.2f} USD was {new_status}",
+            f"Status: {new_status}\nAmount: {out['amount']:.2f} USD via {out['method_label']}\n"
+            f"{credited_line}Note: {note or '—'}\n\nOpen the portal for details.")
         return out
 
     return router
