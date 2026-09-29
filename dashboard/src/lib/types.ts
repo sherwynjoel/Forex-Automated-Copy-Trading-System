@@ -515,8 +515,10 @@ export type RequestStatus =
   | 'pending' | 'confirmed' | 'rejected' | 'cancelled'
   | 'requested' | 'approved' | 'paid' | 'done' | 'removed'
 
-/** One end of a transfer: a wallet or the linked trading account. */
-export interface MoneyRef { kind: 'wallet' | 'account'; wallet?: WalletKind; account_id?: number }
+/** One end of a transfer: a wallet or the linked trading account. An
+ *  account end's `account_id` is null once that account has been removed
+ *  (the transfer row outlives it). */
+export interface MoneyRef { kind: 'wallet' | 'account'; wallet?: WalletKind; account_id?: number | null }
 
 export interface PaymentMethod {
   id: number

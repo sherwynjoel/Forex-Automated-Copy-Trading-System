@@ -241,6 +241,21 @@ test('marks a transfer done', async () => {
   expect(await screen.findByText('No open transfers')).toBeInTheDocument()
 })
 
+test('a transfer whose trading account was removed still lists (its account id is null)', async () => {
+  const orphan = { ...transfer, target: { kind: 'account' as const, account_id: null } }
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input)
+    if (url.endsWith('/requests/summary')) {
+      return jsonResponse({ deposits: 0, withdrawals: 0, transfers: 1, payout_destinations: 0, total: 1 })
+    }
+    if (url.endsWith('/transfers')) return jsonResponse([orphan])
+    return jsonResponse([])
+  }))
+  renderPage('/org/1/requests?tab=transfers')
+  expect(await screen.findByText(/^My wallet → Trading account/)).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Mark transfer 31 done' })).toBeInTheDocument()
+})
+
 test('approves a payout account', async () => {
   const fetchMock = mockRoutes()
   renderPage('/org/1/requests?tab=payout_destinations')
@@ -347,6 +362,56 @@ test('a stale refresh never overwrites the poll that superseded it', async () =>
   await act(async () => { await vi.advanceTimersByTimeAsync(0) })
   expect(screen.getByText('FRESH-NEW')).toBeInTheDocument()
   expect(screen.queryByText('STALE-OLD')).not.toBeInTheDocument()
+})
+
+test('a newer answer is applied even while an even newer refresh is still in flight', async () => {
+  // Latest-STARTED-wins would starve on a slow link: with the 10s poll and
+  // live-event bursts there is almost always a newer request in flight, so
+  // no answer would ever land. The guard is latest-APPLIED: any answer newer
+  // than the one on screen lands; only an older one is dropped.
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  const row = (id: number, reference: string) =>
+    depositFixture({ ...who, id, reference, status: 'pending' })
+  const first = deferredResponse()
+  const second = deferredResponse()
+  const third = deferredResponse()
+  const depositsQueue = [first, second, third]
+  let depositsCalls = 0
+  const summary = { deposits: 1, withdrawals: 0, transfers: 0, payout_destinations: 0, total: 1 }
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input)
+    const method = init?.method || 'GET'
+    if (url.endsWith('/requests/summary')) return Promise.resolve(jsonResponse(summary))
+    if (url.endsWith('/deposits') && method === 'GET') {
+      const d = depositsQueue[depositsCalls]
+      depositsCalls += 1
+      return d ? d.promise : new Promise<Response>(() => {})
+    }
+    return Promise.resolve(jsonResponse([]))
+  }))
+
+  renderPage()
+  await waitFor(() => expect(depositsCalls).toBe(1))
+  await act(async () => { await vi.advanceTimersByTimeAsync(10000) })
+  await waitFor(() => expect(depositsCalls).toBe(2))
+  await act(async () => { await vi.advanceTimersByTimeAsync(10000) })
+  await waitFor(() => expect(depositsCalls).toBe(3))
+
+  // The second answers while the third is still out: it is newer than
+  // anything on screen, so it lands.
+  second.resolve([row(92, 'SECOND')])
+  expect(await screen.findByText('SECOND')).toBeInTheDocument()
+
+  // The first answers late: older than what is on screen, dropped.
+  first.resolve([row(91, 'FIRST')])
+  await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+  expect(screen.queryByText('FIRST')).not.toBeInTheDocument()
+  expect(screen.getByText('SECOND')).toBeInTheDocument()
+
+  // The third lands over the second.
+  third.resolve([row(93, 'THIRD')])
+  expect(await screen.findByText('THIRD')).toBeInTheDocument()
+  expect(screen.queryByText('SECOND')).not.toBeInTheDocument()
 })
 
 test('a viewer sees the queues and the details but no decisions', async () => {

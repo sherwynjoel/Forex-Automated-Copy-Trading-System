@@ -72,9 +72,13 @@ export default function Requests() {
   const [loaded, setLoaded] = useState(false)
   // Bumped on every refresh(): the 10s poll, a live-refresh burst and a
   // just-decided action can all fire a fetch while an earlier one is still
-  // in flight. If the earlier one's answer lands after a newer request
-  // started, it is stale and must not overwrite what the newer one found.
+  // in flight. An answer lands only if it is newer than the one already on
+  // screen (latest-APPLIED wins): an older answer arriving late is stale
+  // and dropped, but a newer one is never held back just because an even
+  // newer request has started -- on a slow link, with the poll and live
+  // events overlapping, latest-STARTED-wins could starve every answer.
   const requestSeq = useRef(0)
+  const lastApplied = useRef(0)
 
   const refresh = useCallback(async () => {
     const seq = ++requestSeq.current
@@ -86,12 +90,14 @@ export default function Requests() {
         orgApi<PortalTransfer[]>(orgId, 'transfers'),
         orgApi<PayoutDestination[]>(orgId, 'payout-destinations'),
       ])
-      if (seq !== requestSeq.current) return
+      if (seq <= lastApplied.current) return
+      lastApplied.current = seq
       setSummary(s); setDeposits(d); setWithdrawals(w); setTransfers(t); setDestinations(p)
       setError(null)
       setLoaded(true)
     } catch (err) {
-      if (seq !== requestSeq.current) return
+      if (seq <= lastApplied.current) return
+      lastApplied.current = seq
       setError(errorText(err, 'Could not load the requests'))
     }
   }, [orgId])
