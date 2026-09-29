@@ -192,8 +192,9 @@ Acceptance criteria per screen. Everything not listed inherits the system.
    followers copying). Then an "Attention" panel listing only live problems
    (refresh failed, offline follower, degraded copier, margin call, expiring
    token), each with its action link; empty when all is well. Then the fleet
-   grid. The mid-page kill switch is removed (the strip has it); the master
-   card stops repeating equity. Empty org: a four-step setup checklist
+   grid. The mid-page kill switch (stop/resume copying, dry run) moves into
+   the desk strip beside close-all, so every page carries it and Overview
+   stops duplicating it; the master card stops repeating equity. Empty org: a four-step setup checklist
    (connect the master → add followers → dry run → go live) with links to
    Accounts and Automation, replacing "No slave accounts configured".
 4. **Accounts** (`pages/Accounts.tsx`): rows become read-only (login, nickname,
