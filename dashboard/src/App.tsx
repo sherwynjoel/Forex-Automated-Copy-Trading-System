@@ -43,6 +43,7 @@ const Investors = pick(admin, 'Investors')
 const InvestorDashboard = pick(investor, 'InvestorDashboard')
 const InvestorDeposit = pick(investor, 'InvestorDeposit')
 const InvestorWithdraw = pick(investor, 'InvestorWithdraw')
+const InvestorPayoutAccounts = pick(investor, 'InvestorPayoutAccounts')
 const InvestorHistory = pick(investor, 'InvestorHistory')
 const InvestorAccount = pick(investor, 'InvestorAccount')
 
@@ -107,6 +108,7 @@ export default function App() {
               <Route path="invest" element={<InvestorDashboard />} />
               <Route path="invest/deposit" element={<InvestorDeposit />} />
               <Route path="invest/withdraw" element={<InvestorWithdraw />} />
+              <Route path="invest/payout-accounts" element={<InvestorPayoutAccounts />} />
               <Route path="invest/history" element={<InvestorHistory />} />
               <Route path="invest/account" element={<InvestorAccount />} />
               <Route path="*" element={<NotFound />} />

@@ -98,14 +98,3 @@ export function entryLabel(e: WalletEntry): string {
   const word = ENTRY_KINDS[e.kind] ?? e.kind
   return e.ref_id != null ? `${word} #${e.ref_id}` : word
 }
-
-/** Tailwind classes for a status pill, matching Automation's OutcomePill.
- *  Used by the Withdraw Timeline until Task 15 rewrites that page; new code
- *  uses <Badge tone={BADGE_TONE[statusTone(s)]}>. */
-export function pillClass(status: string): string {
-  const tone = statusTone(status)
-  return tone === 'ok' ? 'bg-profit-wash text-profit-deep'
-    : tone === 'warn' ? 'bg-warn-wash text-warn-deep'
-    : tone === 'bad' ? 'bg-loss-wash text-loss-deep'
-    : 'bg-paper text-ink-soft'
-}

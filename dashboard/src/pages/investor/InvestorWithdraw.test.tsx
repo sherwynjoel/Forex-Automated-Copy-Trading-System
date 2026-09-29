@@ -2,13 +2,13 @@ import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi, afterEach, beforeEach } from 'vitest'
-import InvestorWithdraw from './InvestorWithdraw'
+import InvestorWithdraw, { feePreview } from './InvestorWithdraw'
 import { mockUseOrg } from '../../test/orgMock'
+import { destinationFixture, summaryFixture, withdrawalFixture } from '../../test/portalFixtures'
+import type { InvestorSummary, PayoutDestination, PortalWithdrawal } from '../../lib/types'
 
 const { useOrgMock } = vi.hoisted(() => ({ useOrgMock: vi.fn() }))
 vi.mock('../../lib/org', () => ({ useOrg: useOrgMock }))
-const facts = vi.hoisted(() => ({ legalName: 'MirrorFleet', address: '', supportEmail: '' }))
-vi.mock('../Landing', () => ({ LANDING_FACTS: facts }))
 
 function jsonResponse(payload: unknown, status = 200) {
   return new Response(JSON.stringify(payload), {
@@ -16,41 +16,56 @@ function jsonResponse(payload: unknown, status = 200) {
   })
 }
 
-const LONG = 'TQn9Y2khEsLJW1ChVWFMSMeRDow5KcbLSE9f'
-const wallet = { coin: 'USDT', network: 'TRC20', address: 'TAddr123', memo: null }
-const summary = {
-  org: { id: 1, name: 'Desk' }, link_state: 'linked',
-  account: { account_id: 1001, nickname: 'Inv', platform: 'mt5', status: 'ok', last_error: null, connected: true },
-  equity_source: 'live', wallet_configured: true, total_deposited: 5000, total_withdrawn: 0,
-  net_deposits: 5000, pending_withdrawn: 0, equity: 5120.5, profit: 120.5, available: 5120.5,
+const summary: InvestorSummary = {
+  ...summaryFixture(), currency: 'USD',
+  wallets: {
+    main: { balance: 5120.5, on_hold: 100, available: 5020.5 },
+    credit: { balance: 0, on_hold: 0, available: 0 },
+    pamm: { balance: 0, on_hold: 0, available: 0 },
+    social: { balance: 0, on_hold: 0, available: 0 },
+  },
+  withdrawal_rules: { min: 50, fee_pct: 1.5 },
 }
-const request = { id: 3, user_id: 1, account_id: 1001, amount: 1000, destination: 'TDest',
-                  status: 'approved', equity_at_request: 5120.5, equity_verified: true,
-                  decided_by: 2, decided_at: '2026-09-23T11:00:00Z', decision_note: null,
-                  paid_by: null, paid_at: null, txid: null, created_at: '2026-09-23T10:00:00Z' }
+const salary: PayoutDestination = destinationFixture({
+  id: 12, user_id: 1, kind: 'bank', nickname: 'Salary', summary: 'ICICI ••4543', status: 'approved',
+  details: { bank_name: 'ICICI Bank', holder: 'S Joel', account_number: '000112344543', code: 'ICIC0001' },
+  proof_file_id: null, decided_by: 2, decided_at: '2026-09-22T10:00:00Z', decision_note: null,
+  created_at: '2026-09-21T10:00:00Z',
+})
+const pendingOne: PayoutDestination = destinationFixture({
+  ...salary, id: 13, nickname: 'Pending one', summary: 'HDFC ••0001', status: 'pending',
+  decided_by: null, decided_at: null,
+})
+const request: PortalWithdrawal = withdrawalFixture({
+  id: 3, user_id: 1, destination_id: 12, destination_kind: 'bank', destination_summary: 'ICICI ••4543',
+  amount: 1000, fee: 15, net_amount: 985, status: 'approved', decided_by: 2,
+  decided_at: '2026-09-23T11:00:00Z', decision_note: null, paid_by: null, paid_at: null, txid: null,
+  created_at: '2026-09-23T10:00:00Z', currency: 'USD',
+})
 
-function mockRoutes(opts: { refuse?: string; unlinked?: boolean; noWallet?: boolean;
-                            rows?: unknown[]; fail?: boolean; available?: number | null } = {}) {
-  const rows: unknown[] = [...(opts.rows ?? [])]
+function mockRoutes(opts: {
+  refuse?: { status: number; body: unknown }; destinations?: PayoutDestination[]
+  rows?: PortalWithdrawal[]; fail?: boolean; available?: number
+} = {}) {
+  const rows: PortalWithdrawal[] = [...(opts.rows ?? [])]
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
     if (opts.fail) return jsonResponse({ detail: 'database unavailable' }, 500)
     if (url.endsWith('/investor/summary')) {
-      return jsonResponse(opts.unlinked
-        ? { ...summary, link_state: 'unlinked', account: null, available: null }
-        : opts.available !== undefined ? { ...summary, available: opts.available } : summary)
+      return jsonResponse(opts.available === undefined ? summary
+        : { ...summary, wallets: { ...summary.wallets, main: { ...summary.wallets.main, available: opts.available } } })
     }
-    if (url.endsWith('/investor/wallet')) {
-      return opts.noWallet
-        ? jsonResponse({ detail: 'Deposits are not open yet' }, 404)
-        : jsonResponse(wallet)
-    }
+    if (url.endsWith('/investor/payout-destinations')) return jsonResponse(opts.destinations ?? [salary, pendingOne])
     if (url.endsWith('/investor/withdrawals') && init?.method === 'POST') {
-      if (opts.refuse) return jsonResponse({ detail: opts.refuse }, 400)
+      if (opts.refuse) return jsonResponse(opts.refuse.body, opts.refuse.status)
       rows.unshift(request)
       return jsonResponse(request, 201)
     }
     if (url.endsWith('/investor/withdrawals')) return jsonResponse(rows)
+    if (/\/investor\/withdrawals\/\d+\/cancel$/.test(url) && init?.method === 'POST') {
+      rows[0] = { ...rows[0], status: 'cancelled' }
+      return jsonResponse(rows[0])
+    }
     return jsonResponse({})
   })
   vi.stubGlobal('fetch', fetchMock)
@@ -61,97 +76,113 @@ function posts(fetchMock: ReturnType<typeof mockRoutes>) {
   return fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'POST')
 }
 
-beforeEach(() => { useOrgMock.mockReturnValue(mockUseOrg('investor')) })
-afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); facts.supportEmail = '' })
+async function enterPin(dialog: HTMLElement, pin: string) {
+  within(dialog).getByLabelText('Your MPIN digit 1 of 6').focus()
+  await userEvent.keyboard(pin)
+}
 
-test('shows what is available with its unit and files a request only after the review', async () => {
+beforeEach(() => { useOrgMock.mockReturnValue(mockUseOrg('investor')) })
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
+
+test('feePreview rounds the fee half-up to cents and nets it off', () => {
+  expect(feePreview('1000', 1.5)).toEqual({ fee: 15, net: 985 })
+  expect(feePreview('333.33', 1.5)).toEqual({ fee: 5, net: 328.33 })
+  expect(feePreview('250', 0)).toEqual({ fee: 0, net: 250 })
+  expect(feePreview('1,000', 1.5)).toBeNull()
+})
+
+test('shows what is available, previews the fee, and files a request only after the MPIN', async () => {
   const fetchMock = mockRoutes()
   render(<MemoryRouter><InvestorWithdraw /></MemoryRouter>)
-  expect(await screen.findByText('5,120.50 USD')).toBeInTheDocument()
+  expect(await screen.findByText('5,020.50 USD')).toBeInTheDocument()
+  expect(screen.getByText('100.00 USD')).toBeInTheDocument()
   expect(screen.getByRole('heading', { level: 1, name: 'Withdraw' })).toBeInTheDocument()
   expect(document.title).toBe('Withdraw · MirrorFleet')
+  // Only approved payout accounts are offered.
+  expect(screen.getByRole('option', { name: 'Salary · ICICI ••4543' })).toBeInTheDocument()
+  expect(screen.queryByRole('option', { name: /Pending one/ })).not.toBeInTheDocument()
 
-  await userEvent.type(await screen.findByLabelText('Amount in USDT'), '1000')
-  await userEvent.type(screen.getByLabelText('Destination address'), LONG)
+  await userEvent.type(screen.getByLabelText('Amount in USD'), '1000')
+  expect(screen.getByText(/Fee 15\.00 USD \(1\.5%\) · You receive 985\.00 USD/)).toBeInTheDocument()
   await userEvent.click(screen.getByRole('button', { name: 'Request withdrawal' }))
 
-  const dialog = await screen.findByRole('dialog', { name: 'Send 1,000.00 USDT to T…9f?' })
-  expect(within(dialog).getByText(LONG)).toBeInTheDocument()
+  const dialog = await screen.findByRole('dialog', { name: 'Send 1,000.00 USD to ICICI ••4543?' })
+  expect(within(dialog).getByText('985.00 USD')).toBeInTheDocument()
+  expect(within(dialog).getByRole('button', { name: 'Send request' })).toBeDisabled()
   expect(posts(fetchMock)).toHaveLength(0)
 
+  await enterPin(dialog, '123456')
   await userEvent.click(within(dialog).getByRole('button', { name: 'Send request' }))
+  await waitFor(() => expect(posts(fetchMock)).toHaveLength(1))
   const post = posts(fetchMock)[0]
   expect(String(post[0])).toMatch(/\/investor\/withdrawals$/)
   expect(JSON.parse((post[1] as RequestInit).body as string))
-    .toEqual({ amount: '1000', destination: LONG })
-  await waitFor(() => expect(screen.getByText('Approved, payment pending')).toBeInTheDocument())
-  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
-  expect(screen.getByText('1,000.00 USDT')).toBeInTheDocument()
+    .toEqual({ destination_id: 12, amount: '1000', mpin: '123456' })
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  expect(screen.getByText('Approved, payment pending')).toBeInTheDocument()
+  expect(screen.getByText('1,000.00 USD')).toBeInTheDocument()
 })
 
 test('Cancel on the review sends nothing and keeps the form', async () => {
   const fetchMock = mockRoutes()
   render(<MemoryRouter><InvestorWithdraw /></MemoryRouter>)
-  await userEvent.type(await screen.findByLabelText('Amount in USDT'), '1000')
-  await userEvent.type(screen.getByLabelText('Destination address'), 'TDest')
+  await userEvent.type(await screen.findByLabelText('Amount in USD'), '1000')
   await userEvent.click(screen.getByRole('button', { name: 'Request withdrawal' }))
-  const dialog = await screen.findByRole('dialog', { name: 'Send 1,000.00 USDT to TDest?' })
-
+  const dialog = await screen.findByRole('dialog', { name: 'Send 1,000.00 USD to ICICI ••4543?' })
   await userEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   expect(posts(fetchMock)).toHaveLength(0)
-  expect(screen.getByLabelText('Amount in USDT')).toHaveValue('1000')
-  expect(screen.getByLabelText('Destination address')).toHaveValue('TDest')
+  expect(screen.getByLabelText('Amount in USD')).toHaveValue('1000')
 })
 
-test('Use max fills the available amount, and that is what is posted', async () => {
+test('Use max fills the floored available amount, and that is what is posted', async () => {
   const fetchMock = mockRoutes()
   render(<MemoryRouter><InvestorWithdraw /></MemoryRouter>)
-  await screen.findByLabelText('Amount in USDT')
+  await screen.findByLabelText('Amount in USD')
   await userEvent.click(screen.getByRole('button', { name: 'Use max' }))
-  expect(screen.getByLabelText('Amount in USDT')).toHaveValue('5120.50')
-
-  await userEvent.type(screen.getByLabelText('Destination address'), 'TDest')
+  expect(screen.getByLabelText('Amount in USD')).toHaveValue('5020.50')
   await userEvent.click(screen.getByRole('button', { name: 'Request withdrawal' }))
-  const dialog = await screen.findByRole('dialog', { name: 'Send 5,120.50 USDT to TDest?' })
+  const dialog = await screen.findByRole('dialog', { name: 'Send 5,020.50 USD to ICICI ••4543?' })
+  await enterPin(dialog, '123456')
   await userEvent.click(within(dialog).getByRole('button', { name: 'Send request' }))
   await waitFor(() => expect(posts(fetchMock)).toHaveLength(1))
   expect(JSON.parse((posts(fetchMock)[0][1] as RequestInit).body as string))
-    .toEqual({ amount: '5120.50', destination: 'TDest' })
+    .toEqual({ destination_id: 12, amount: '5020.50', mpin: '123456' })
 })
 
 test('an amount that is not above zero never reaches the review', async () => {
   const fetchMock = mockRoutes()
   render(<MemoryRouter><InvestorWithdraw /></MemoryRouter>)
-  await userEvent.type(await screen.findByLabelText('Amount in USDT'), '0')
-  await userEvent.type(screen.getByLabelText('Destination address'), 'TDest')
+  await userEvent.type(await screen.findByLabelText('Amount in USD'), '0')
   await userEvent.click(screen.getByRole('button', { name: 'Request withdrawal' }))
   expect(await screen.findByText('Enter an amount above zero')).toBeInTheDocument()
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   expect(posts(fetchMock)).toHaveLength(0)
 })
 
-test('without a wallet the figures fall back to the account currency', async () => {
-  mockRoutes({ noWallet: true })
+test('a wrong MPIN stays in the dialog with the tries left, and never bounces to /login', async () => {
+  const fetchMock = mockRoutes({ refuse: { status: 401, body: { detail: 'Invalid MPIN', attempts_left: 2 } } })
   render(<MemoryRouter><InvestorWithdraw /></MemoryRouter>)
-  await screen.findByText('5,120.50 USD')
-  await userEvent.type(screen.getByLabelText('Amount in USD'), '1000')
-  await userEvent.type(screen.getByLabelText('Destination address'), 'TDest')
-  await userEvent.click(screen.getByRole('button', { name: 'Request withdrawal' }))
-  expect(await screen.findByRole('dialog', { name: 'Send 1,000.00 USD to TDest?' })).toBeInTheDocument()
-})
-
-test("the server's refusal is shown as written", async () => {
-  mockRoutes({ refuse: 'amount exceeds what is available to withdraw (1120.50)' })
-  render(<MemoryRouter><InvestorWithdraw /></MemoryRouter>)
-  await screen.findByText('5,120.50 USD')
-  await userEvent.type(await screen.findByLabelText('Amount in USDT'), '9999')
-  await userEvent.type(screen.getByLabelText('Destination address'), 'TDest')
+  await userEvent.type(await screen.findByLabelText('Amount in USD'), '1000')
   await userEvent.click(screen.getByRole('button', { name: 'Request withdrawal' }))
   const dialog = await screen.findByRole('dialog')
+  await enterPin(dialog, '111111')
   await userEvent.click(within(dialog).getByRole('button', { name: 'Send request' }))
-  expect(await screen.findByText(/available to withdraw \(1120\.50\)/)).toBeInTheDocument()
-  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  expect(await screen.findByText('Wrong MPIN, 2 tries left')).toBeInTheDocument()
+  expect(screen.getByRole('dialog')).toBeInTheDocument()
+  expect(posts(fetchMock)).toHaveLength(1)
+  expect(screen.queryByText('Unauthorized')).not.toBeInTheDocument()
+})
+
+test("the server's money refusal is shown as written, inside the dialog", async () => {
+  mockRoutes({ refuse: { status: 400, body: { detail: 'amount exceeds what is available (1,250.00)' } } })
+  render(<MemoryRouter><InvestorWithdraw /></MemoryRouter>)
+  await userEvent.type(await screen.findByLabelText('Amount in USD'), '9999')
+  await userEvent.click(screen.getByRole('button', { name: 'Request withdrawal' }))
+  const dialog = await screen.findByRole('dialog')
+  await enterPin(dialog, '123456')
+  await userEvent.click(within(dialog).getByRole('button', { name: 'Send request' }))
+  expect(await within(dialog).findByText(/exceeds what is available \(1,250\.00\)/)).toBeInTheDocument()
 })
 
 test('the timeline names the current step in words and with aria-current', async () => {
@@ -166,15 +197,14 @@ test('the timeline names the current step in words and with aria-current', async
   expect(steps[1]).toHaveTextContent('current')
   expect(steps[2]).not.toHaveAttribute('aria-current')
   expect(steps[2]).not.toHaveTextContent('current')
+  expect(screen.getByText(/Fee 15\.00 USD · Net 985\.00 USD/)).toBeInTheDocument()
 })
 
-test('unlinked investors cannot request yet, and are told what happens next', async () => {
-  facts.supportEmail = 'help@desk.example'
-  mockRoutes({ unlinked: true })
+test('with no approved payout account the form is replaced by a link to add one', async () => {
+  mockRoutes({ destinations: [pendingOne] })
   render(<MemoryRouter><InvestorWithdraw /></MemoryRouter>)
-  expect(await screen.findByText(/your account is being set up/i)).toBeInTheDocument()
-  expect(screen.getByText('Withdrawals open once your admin links your trading account.')).toBeInTheDocument()
-  expect(screen.getByRole('link', { name: 'help@desk.example' })).toHaveAttribute('href', 'mailto:help@desk.example')
+  const link = await screen.findByRole('link', { name: 'Add a payout account' })
+  expect(link).toHaveAttribute('href', '/org/1/invest/payout-accounts')
   expect(screen.queryByRole('button', { name: 'Request withdrawal' })).not.toBeInTheDocument()
 })
 
@@ -183,32 +213,30 @@ const TWO_DECIMALS = 'Enter an amount with at most two decimals, digits only (fo
 test.each(['1000.005', '1,000'])('%s is refused before the review, and nothing is posted', async (amount) => {
   const fetchMock = mockRoutes()
   render(<MemoryRouter><InvestorWithdraw /></MemoryRouter>)
-  await userEvent.type(await screen.findByLabelText('Amount in USDT'), amount)
-  await userEvent.type(screen.getByLabelText('Destination address'), 'TDest')
+  await userEvent.type(await screen.findByLabelText('Amount in USD'), amount)
   await userEvent.click(screen.getByRole('button', { name: 'Request withdrawal' }))
   expect(await screen.findByText(TWO_DECIMALS)).toBeInTheDocument()
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   expect(posts(fetchMock)).toHaveLength(0)
 })
 
-test('one decimal is fine: the review shows two, the post carries what was typed', async () => {
-  const fetchMock = mockRoutes()
+test('Use max is disabled when nothing is available', async () => {
+  mockRoutes({ available: 0 })
   render(<MemoryRouter><InvestorWithdraw /></MemoryRouter>)
-  await userEvent.type(await screen.findByLabelText('Amount in USDT'), '250.5')
-  await userEvent.type(screen.getByLabelText('Destination address'), 'TDest')
-  await userEvent.click(screen.getByRole('button', { name: 'Request withdrawal' }))
-  const dialog = await screen.findByRole('dialog', { name: 'Send 250.50 USDT to TDest?' })
-  await userEvent.click(within(dialog).getByRole('button', { name: 'Send request' }))
-  await waitFor(() => expect(posts(fetchMock)).toHaveLength(1))
-  expect(JSON.parse((posts(fetchMock)[0][1] as RequestInit).body as string))
-    .toEqual({ amount: '250.5', destination: 'TDest' })
+  await screen.findByLabelText('Amount in USD')
+  expect(screen.getByRole('button', { name: 'Use max' })).toBeDisabled()
 })
 
-test.each([null, 0])('Use max is disabled when available is %s', async (available) => {
-  mockRoutes({ available })
+test('a requested withdrawal can be cancelled after a confirmation', async () => {
+  const fetchMock = mockRoutes({ rows: [{ ...request, status: 'requested', decided_by: null, decided_at: null }] })
   render(<MemoryRouter><InvestorWithdraw /></MemoryRouter>)
-  await screen.findByLabelText('Amount in USDT')
-  expect(screen.getByRole('button', { name: 'Use max' })).toBeDisabled()
+  await userEvent.click(await screen.findByRole('button', { name: 'Cancel withdrawal 3' }))
+  const dialog = await screen.findByRole('dialog', { name: 'Cancel withdrawal #3?' })
+  await userEvent.click(within(dialog).getByRole('button', { name: 'Yes, cancel it' }))
+  await waitFor(() => expect(posts(fetchMock)).toHaveLength(1))
+  expect(String(posts(fetchMock)[0][0])).toMatch(/\/investor\/withdrawals\/3\/cancel$/)
+  expect(await screen.findByText('Cancelled')).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Cancel withdrawal 3' })).not.toBeInTheDocument()
 })
 
 test('dismissing a load error shows the empty state, not an endless skeleton', async () => {

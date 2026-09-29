@@ -1,5 +1,6 @@
 export { default as InvestorDashboard } from '../investor/InvestorDashboard'
 export { default as InvestorDeposit } from '../investor/InvestorDeposit'
 export { default as InvestorWithdraw } from '../investor/InvestorWithdraw'
+export { default as InvestorPayoutAccounts } from '../investor/InvestorPayoutAccounts'
 export { default as InvestorHistory } from '../investor/InvestorHistory'
 export { default as InvestorAccount } from '../investor/InvestorAccount'
