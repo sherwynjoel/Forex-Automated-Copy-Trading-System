@@ -84,6 +84,43 @@ def test_settle_writes_once_per_reference(db, org_user):
             "pamm": Decimal("0"), "social": Decimal("0")}
 
 
+# ------------------------------------------------------------ locking
+
+
+def test_lock_investor_ledger_refuses_outside_a_transaction(db, org_user):
+    org_id, user_id = org_user
+    with psycopg.connect(db, autocommit=True) as conn:
+        with pytest.raises(RuntimeError, match="must run inside a transaction"):
+            pc.lock_investor_ledger(conn, org_id, user_id)
+
+
+def test_lock_investor_ledger_serialises_per_investor_not_across_investors(db, org_user):
+    """A second, independent connection to the same test database (the `db`
+    fixture's DSN): while a first connection holds the transaction-scoped
+    lock for (org_id, user_id), a second connection with a short
+    lock_timeout cannot take the SAME (org, user) lock -- it waits out the
+    timeout and raises LockNotAvailable -- but takes a DIFFERENT investor's
+    lock immediately, because the two never share a key. Ending the first
+    connection's transaction releases the lock."""
+    org_id, user_id = org_user
+    other_user_id = user_id + 1
+    with psycopg.connect(db, autocommit=True) as first:
+        with first.transaction():
+            pc.lock_investor_ledger(first, org_id, user_id)
+            with psycopg.connect(db, autocommit=True) as second:
+                second.execute("SET lock_timeout = '200ms'")
+                with pytest.raises(psycopg.errors.LockNotAvailable):
+                    with second.transaction():
+                        pc.lock_investor_ledger(second, org_id, user_id)
+                # A different investor is a different (namespace, hashtext)
+                # key -- no contention, so this must not block or raise.
+                with second.transaction():
+                    pc.lock_investor_ledger(second, org_id, other_user_id)
+        # first's `with` block has now committed, releasing its xact lock.
+        with first.transaction():
+            pc.lock_investor_ledger(first, org_id, user_id)
+
+
 # ------------------------------------------------------------ figures
 
 

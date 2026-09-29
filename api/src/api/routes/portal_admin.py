@@ -66,6 +66,10 @@ class DepositDecision(BaseModel):
     note: Optional[str] = None
 
 
+class PaidBody(BaseModel):
+    txid: str
+
+
 def clean_details(kind: str, raw: Any) -> dict:
     """Trimmed details for `kind`: every required key present and non-blank
     (else LedgerError "<field> is required"), optional keys kept when
@@ -366,6 +370,159 @@ def create_portal_admin_router() -> APIRouter:
             f"Your deposit of {out['amount']:.2f} USD was {new_status}",
             f"Status: {new_status}\nAmount: {out['amount']:.2f} USD via {out['method_label']}\n"
             f"{credited_line}Note: {note or '—'}\n\nOpen the portal for details.")
+        return out
+
+    # ------------------------------------------------------------ withdrawals
+
+    @router.get("/withdrawals", response_model=List[Dict[str, Any]])
+    async def withdrawal_queue(status: Optional[str] = None,
+                               ctx: OrgContext = Depends(require_org_role("admin")),
+                               conn: psycopg.Connection = Depends(get_conn)) -> List[Dict[str, Any]]:
+        where = "w.org_id = %s" + (" AND w.status = %s" if status else "")
+        params = (ctx.org_id, status) if status else (ctx.org_id,)
+        # A derived table so the bare column list of WITHDRAWAL_COLS is
+        # unambiguous next to users (both carry id and created_at).
+        rows = conn.execute(
+            f"SELECT {pc.WITHDRAWAL_COLS}, email, display_name FROM ("
+            "  SELECT w.*, u.email, u.display_name FROM withdrawals w "
+            f"  JOIN users u ON u.id = w.user_id WHERE {where}) AS q "
+            "ORDER BY (status IN ('requested', 'approved')) DESC, created_at DESC, id DESC",
+            params).fetchall()
+        return [pc.withdrawal_json(r) for r in rows]
+
+    @router.post("/withdrawals/{wd_id}/decision", response_model=Dict[str, Any])
+    async def decide_withdrawal(wd_id: int, body: pc.Decision, http_request: Request,
+                                ctx: OrgContext = Depends(require_org_role("admin")),
+                                conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
+        new_status = body.status.strip().lower()
+        if new_status not in ("approved", "rejected"):
+            raise HTTPException(status_code=400, detail="status must be approved or rejected")
+        try:
+            note = pc.require_note_on_reject(new_status, body.note)
+        except pc.LedgerError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        current = conn.execute(
+            "SELECT status, user_id, amount, destination_summary FROM withdrawals "
+            "WHERE id = %s AND org_id = %s", (wd_id, ctx.org_id)).fetchone()
+        if not current:
+            raise HTTPException(status_code=404, detail="Withdrawal not found")
+        status_now, user_id, amount, summary = current
+        if not pc.can_transition("withdrawals", status_now, new_status):
+            raise HTTPException(status_code=409, detail=f"withdrawal is already {status_now}")
+        row = conn.execute(
+            "UPDATE withdrawals SET status = %s, decided_by = %s, decided_at = now(), "
+            "decision_note = %s WHERE id = %s AND org_id = %s AND status = %s "
+            f"RETURNING {pc.WITHDRAWAL_COLS}",
+            (new_status, ctx.user_id, note, wd_id, ctx.org_id, status_now)).fetchone()
+        if not row:
+            raise HTTPException(status_code=409, detail="decided by someone else")
+        out = pc.withdrawal_json(row)
+        await pc.audit_control(
+            conn, org_id=ctx.org_id, action="investor_withdrawal_decided",
+            actor_email=ctx.user_email, user_id=user_id,
+            withdrawal_id=wd_id, status=new_status, note=note, amount=out["amount"])
+        await pc.notify_investor(
+            conn, http_request, user_id,
+            f"Your withdrawal of {amount:.2f} USD was {new_status}",
+            f"Status: {new_status}\nAmount: {amount:.2f} USD\nTo: {summary}\n"
+            f"Note: {note or '—'}\n\nOpen the portal for details.")
+        return out
+
+    @router.post("/withdrawals/{wd_id}/paid", response_model=Dict[str, Any])
+    async def mark_withdrawal_paid(wd_id: int, body: PaidBody, http_request: Request,
+                                   ctx: OrgContext = Depends(require_org_role("admin")),
+                                   conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
+        try:
+            txid = pc.clean_text(body.txid, "txid")
+        except pc.LedgerError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        current = conn.execute(
+            "SELECT status, user_id, amount, destination_summary FROM withdrawals "
+            "WHERE id = %s AND org_id = %s", (wd_id, ctx.org_id)).fetchone()
+        if not current:
+            raise HTTPException(status_code=404, detail="Withdrawal not found")
+        status_now, user_id, amount, summary = current
+        if not pc.can_transition("withdrawals", status_now, "paid"):
+            raise HTTPException(status_code=409,
+                                detail=f"withdrawal is {status_now}, not approved")
+        # Status change and ledger debit in ONE transaction; the unique
+        # index on (ref_table, ref_id, wallet) makes a replay a no-op.
+        with conn.transaction():
+            row = conn.execute(
+                "UPDATE withdrawals SET status = 'paid', paid_by = %s, paid_at = now(), "
+                "txid = %s WHERE id = %s AND org_id = %s AND status = 'approved' "
+                f"RETURNING {pc.WITHDRAWAL_COLS}",
+                (ctx.user_id, txid, wd_id, ctx.org_id)).fetchone()
+            if not row:
+                raise HTTPException(status_code=409, detail="decided by someone else")
+            pc.settle(conn, org_id=ctx.org_id, user_id=user_id, wallet="main",
+                     amount=-Decimal(amount), kind="withdrawal", ref_table="withdrawals",
+                     ref_id=wd_id)
+        out = pc.withdrawal_json(row)
+        await pc.audit_control(
+            conn, org_id=ctx.org_id, action="investor_withdrawal_paid",
+            actor_email=ctx.user_email, user_id=user_id,
+            withdrawal_id=wd_id, txid=txid, amount=out["amount"])
+        await pc.notify_investor(
+            conn, http_request, user_id,
+            f"Your withdrawal of {amount:.2f} USD was paid",
+            f"Amount: {amount:.2f} USD\nTo: {summary}\nTransaction: {txid}\n\n"
+            "Open the portal for details.")
+        return out
+
+    # ---------------------------------------------------- payout destinations
+
+    @router.get("/payout-destinations", response_model=List[Dict[str, Any]])
+    async def destination_queue(status: Optional[str] = None,
+                                ctx: OrgContext = Depends(require_org_role("admin")),
+                                conn: psycopg.Connection = Depends(get_conn)) -> List[Dict[str, Any]]:
+        where = "d.org_id = %s" + (" AND d.status = %s" if status else "")
+        params = (ctx.org_id, status) if status else (ctx.org_id,)
+        rows = conn.execute(
+            f"SELECT {pc.DESTINATION_COLS}, email, display_name FROM ("
+            "  SELECT d.*, u.email, u.display_name FROM payout_destinations d "
+            f"  JOIN users u ON u.id = d.user_id WHERE {where}) AS q "
+            "ORDER BY (status = 'pending') DESC, created_at DESC, id DESC", params).fetchall()
+        return [pc.destination_json(r, full=True) for r in rows]
+
+    @router.post("/payout-destinations/{dest_id}/decision", response_model=Dict[str, Any])
+    async def decide_destination(dest_id: int, body: pc.Decision, http_request: Request,
+                                 ctx: OrgContext = Depends(require_org_role("admin")),
+                                 conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
+        new_status = body.status.strip().lower()
+        if new_status not in ("approved", "rejected"):
+            raise HTTPException(status_code=400, detail="status must be approved or rejected")
+        try:
+            note = pc.require_note_on_reject(new_status, body.note)
+        except pc.LedgerError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        current = conn.execute(
+            "SELECT status, user_id, kind, details FROM payout_destinations "
+            "WHERE id = %s AND org_id = %s", (dest_id, ctx.org_id)).fetchone()
+        if not current:
+            raise HTTPException(status_code=404, detail="Payout account not found")
+        status_now, user_id, kind, details = current
+        if not pc.can_transition("payout_destinations", status_now, new_status):
+            raise HTTPException(status_code=409,
+                                detail=f"payout account is already {status_now}")
+        row = conn.execute(
+            "UPDATE payout_destinations SET status = %s, decided_by = %s, decided_at = now(), "
+            "decision_note = %s WHERE id = %s AND org_id = %s AND status = %s "
+            f"RETURNING {pc.DESTINATION_COLS}",
+            (new_status, ctx.user_id, note, dest_id, ctx.org_id, status_now)).fetchone()
+        if not row:
+            raise HTTPException(status_code=409, detail="decided by someone else")
+        out = pc.destination_json(row, full=True)
+        summary = pc.destination_summary(kind, details)
+        await pc.audit_control(
+            conn, org_id=ctx.org_id, action="investor_destination_decided",
+            actor_email=ctx.user_email, user_id=user_id,
+            destination_id=dest_id, status=new_status, note=note, destination=summary)
+        await pc.notify_investor(
+            conn, http_request, user_id,
+            f"Your payout account {summary} was {new_status}",
+            f"Status: {new_status}\nPayout account: {summary}\nNote: {note or '—'}\n\n"
+            "Open the portal for details.")
         return out
 
     return router

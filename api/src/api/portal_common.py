@@ -208,6 +208,26 @@ def net_funded(conn: psycopg.Connection, org_id: int, user_id: int, account_id: 
     return Decimal(total)
 
 
+# ------------------------------------------------------------ locking
+
+
+LEDGER_LOCK_NAMESPACE = 220229
+
+
+def lock_investor_ledger(conn: psycopg.Connection, org_id: int, user_id: int) -> None:
+    """Serialise every read-check-write on one investor's wallets.
+
+    Takes a transaction-scoped advisory lock in the two-key space
+    (namespace, hashtext("<org_id>:<user_id>")), which never overlaps the
+    single-key org locks the webhook routes take. Must be called inside
+    ``with conn.transaction():`` -- in autocommit the lock would be
+    released when the SELECT ends and protect nothing, so that is refused."""
+    if conn.info.transaction_status != psycopg.pq.TransactionStatus.INTRANS:
+        raise RuntimeError("lock_investor_ledger must run inside a transaction")
+    conn.execute("SELECT pg_advisory_xact_lock(%s, hashtext(%s))",
+                 (LEDGER_LOCK_NAMESPACE, f"{org_id}:{user_id}"))
+
+
 # ------------------------------------------------------------ settlement
 
 
