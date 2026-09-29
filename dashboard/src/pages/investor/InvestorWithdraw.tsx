@@ -39,7 +39,11 @@ const TWO_DECIMALS = 'Enter an amount with at most two decimals, digits only (fo
  *  previews them. */
 export function feePreview(amount: string, feePct: number): { fee: number; net: number } | null {
   if (!AMOUNT_RE.test(amount.trim())) return null
-  const cents = Math.round(Number(amount) * 100)
+  // A 309+ digit string parses to Infinity, and BigInt(Infinity) throws
+  // during render: no preview for a figure that is not a finite number.
+  const parsed = Number(amount)
+  const cents = Math.round(parsed * 100)
+  if (!Number.isFinite(parsed) || !Number.isFinite(cents)) return null
   const milli = Math.round(feePct * 1000)
   const feeCents = Number((BigInt(cents) * BigInt(milli) + 50_000n) / 100_000n)
   return { fee: feeCents / 100, net: (cents - feeCents) / 100 }

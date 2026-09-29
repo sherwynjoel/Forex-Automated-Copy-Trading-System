@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi, afterEach, beforeEach } from 'vitest'
@@ -83,7 +83,10 @@ async function enterPin(dialog: HTMLElement, pin: string) {
 }
 
 beforeEach(() => { useOrgMock.mockReturnValue(mockUseOrg('investor')) })
-afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); setHidden(false) })
+// Unmount before resetting the hide-balances store (see Money.test.tsx):
+// otherwise the broadcast from setHidden(false) updates a still-mounted
+// Money outside act().
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); setHidden(false) })
 
 test('feePreview rounds the fee half-up to cents and nets it off, exactly like the server', () => {
   expect(feePreview('1000', 1.5)).toEqual({ fee: 15, net: 985 })
@@ -98,6 +101,25 @@ test('feePreview rounds the fee half-up to cents and nets it off, exactly like t
   // (rounds up to 0.12).
   expect(feePreview('5.00', 0.7)).toEqual({ fee: 0.04, net: 4.96 })
   expect(feePreview('5.00', 2.3)).toEqual({ fee: 0.12, net: 4.88 })
+})
+
+test('feePreview gives up on an amount too large to be a number', () => {
+  // Number('9' x 400) is Infinity, and BigInt(Infinity) throws a RangeError --
+  // which, during render, took the whole page down.
+  expect(feePreview('9'.repeat(400), 1.5)).toBeNull()
+  expect(feePreview('9'.repeat(400) + '.99', 1.5)).toBeNull()
+})
+
+test('pasting an absurdly long amount does not crash the page', async () => {
+  mockRoutes()
+  render(<MemoryRouter><InvestorWithdraw /></MemoryRouter>)
+  await screen.findByText('5,020.50 USD')
+  const input = screen.getByLabelText('Amount in USD')
+  await userEvent.click(input)
+  await userEvent.paste('9'.repeat(400))
+  expect(input).toHaveValue('9'.repeat(400))
+  expect(screen.getByRole('heading', { level: 1, name: 'Withdraw' })).toBeInTheDocument()
+  expect(screen.queryByText(/You receive/)).not.toBeInTheDocument()
 })
 
 test('shows what is available, previews the fee, and files a request only after the MPIN', async () => {
