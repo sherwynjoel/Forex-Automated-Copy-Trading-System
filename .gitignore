@@ -6,9 +6,11 @@ __pycache__/
 *.pyc
 .pytest_cache/
 node_modules/
-# Local upload store (UPLOAD_DIR default ./data/uploads; the api tests
-# create api/data/uploads).
-data/
+# Local upload store (UPLOAD_DIR default ./data/uploads, relative to where
+# the api runs: the repo root, or api/ where the tests create
+# api/data/uploads). Anchored, so no other directory named data/ is hidden.
+/data/
+/api/data/
 dashboard/dist/
 docker-compose.override.yml
 .impeccable/
