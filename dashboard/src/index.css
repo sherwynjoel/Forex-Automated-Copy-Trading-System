@@ -341,14 +341,16 @@ select.bg-card {
 }
 
 /* The route change: the entering page fades up once (Layout keys it by
-   path). Reduced motion flattens it through the block below. */
+   path). Reduced motion flattens it through the block below. Fill mode is
+   `backwards`, never `both`/`forwards`: a transform kept after the fade
+   would make the page the containing block of its fixed dialogs. */
 @keyframes page-enter {
   from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: none; }
 }
 
 .page-enter {
-  animation: page-enter 180ms var(--ease-out-quint) both;
+  animation: page-enter 180ms var(--ease-out-quint) backwards;
 }
 
 /* Reduced motion stops every animation and transition in one place, so no

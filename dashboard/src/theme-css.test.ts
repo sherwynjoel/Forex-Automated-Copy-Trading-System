@@ -67,3 +67,13 @@ test('the favicon and the logo carry the aqua ramp, not the old violet', () => {
     expect(src.toLowerCase()).toContain('0b7c80')
   }
 })
+
+test('the page fade releases its transform when it ends, so fixed dialogs inside a page cover the viewport', () => {
+  // A retained transform (fill `both`/`forwards`) makes .page-enter the
+  // containing block of every position: fixed descendant.
+  const at = css.indexOf('.page-enter {')
+  expect(at).toBeGreaterThanOrEqual(0)
+  const rule = css.slice(at, css.indexOf('}', at))
+  expect(rule).toMatch(/animation:[^;]*\bbackwards\b/)
+  expect(rule).not.toMatch(/\bboth\b|\bforwards\b/)
+})
