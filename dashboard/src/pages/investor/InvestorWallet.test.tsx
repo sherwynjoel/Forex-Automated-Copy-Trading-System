@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react'
+import { cleanup, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi, afterEach, beforeEach } from 'vitest'
@@ -44,7 +44,13 @@ function mockRoutes(opts: { fail?: boolean } = {}) {
 }
 
 beforeEach(() => { useOrgMock.mockReturnValue(mockUseOrg('investor')) })
-afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); setHidden(false) })
+// Unmount before resetting the hide-balances store: Vitest runs afterEach
+// hooks in reverse order, so RTL's auto-cleanup (registered before this
+// file's hooks run) would otherwise fire AFTER setHidden(false) here, while
+// the tree is still mounted -- the broadcast then updates Money/ShareCell
+// outside act(). Explicit cleanup() first makes the unmount happen before
+// the store changes, no matter what order the hooks run in.
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); setHidden(false) })
 
 test('shows the four wallets with their share, quick actions and the last entries', async () => {
   const fetchMock = mockRoutes()
