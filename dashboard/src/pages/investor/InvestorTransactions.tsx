@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { orgApi } from '../../lib/api'
 import { useOrg } from '../../lib/org'
 import { errorText, formatWhen } from '../../lib/format'
@@ -74,20 +74,28 @@ export default function InvestorTransactions() {
   // True once the first load has settled, success or failure: the skeleton
   // is for "not asked yet", never for "asked and failed".
   const [loaded, setLoaded] = useState(false)
+  // Bumped on every load(): a tab click, Apply or Clear can fire a fresh
+  // request while an earlier one (that tab's Load more, say) is still in
+  // flight. If the earlier one's answer lands after the newer request
+  // started, it is a stale filter's data and must not overwrite what the
+  // current filter actually returned.
+  const requestSeq = useRef(0)
 
   const load = useCallback(async (before: number | null) => {
+    const seq = ++requestSeq.current
     setLoading(true)
     try {
       const page = await orgApi<WalletEntriesPage>(orgId, entriesQuery({ wallet, ...applied, before }))
+      if (seq !== requestSeq.current) return
       setRows((r) => (before == null ? page.entries : [...r, ...page.entries]))
       setHasMore(page.has_more)
       setNextBefore(page.next_before)
       setError(null)
     } catch (err) {
+      if (seq !== requestSeq.current) return
       setError(errorText(err, 'Could not load your transactions'))
     } finally {
-      setLoading(false)
-      setLoaded(true)
+      if (seq === requestSeq.current) { setLoading(false); setLoaded(true) }
     }
   }, [orgId, wallet, applied])
 
