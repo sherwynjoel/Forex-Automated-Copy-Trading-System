@@ -44,7 +44,11 @@ const older = entryFixture({
   note: 'Correction', created_at: '2026-09-19T10:00:00Z', currency: 'USD',
 })
 
-function mockRoutes(options: { settings?: unknown[]; refuseAdjustment?: { status: number; body: unknown } } = {}) {
+function mockRoutes(options: {
+  settings?: unknown[]
+  refuseAdjustment?: { status: number; body: unknown }
+  refuseDelete?: { status: number; body: unknown }
+} = {}) {
   const queue = options.settings ? [...options.settings] : [{ withdrawal_min: 0, withdrawal_fee_pct: 0 }]
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
@@ -64,7 +68,10 @@ function mockRoutes(options: { settings?: unknown[]; refuseAdjustment?: { status
     if (path.includes('/payment-methods/') && method === 'PATCH') {
       return jsonResponse({ ...usdt, ...JSON.parse(init!.body as string) })
     }
-    if (path.includes('/payment-methods/') && method === 'DELETE') return new Response(null, { status: 204 })
+    if (path.includes('/payment-methods/') && method === 'DELETE') {
+      if (options.refuseDelete) return jsonResponse(options.refuseDelete.body, options.refuseDelete.status)
+      return new Response(null, { status: 204 })
+    }
     if (path.endsWith('/portal-settings') && method === 'GET') {
       return jsonResponse(queue.length > 1 ? queue.shift() : queue[0])
     }
@@ -279,6 +286,18 @@ test('deleting a method asks first', async () => {
   await waitFor(() => expect(fetchMock.mock.calls.some(([u, init]) =>
     String(u).endsWith('/payment-methods/3') && (init as RequestInit)?.method === 'DELETE')).toBe(true))
   expect(await screen.findByText('Payment method deleted')).toBeInTheDocument()
+})
+
+test('a method with a pending deposit refuses the delete, and the refusal is shown', async () => {
+  mockRoutes({ refuseDelete: { status: 409, body: { detail: 'a pending deposit still uses this method' } } })
+  render(<MemoryRouter><Investors /></MemoryRouter>)
+  await screen.findByText('Ada Investor')
+  await userEvent.click(screen.getByRole('tab', { name: 'Payment methods' }))
+  await userEvent.click(screen.getByRole('button', { name: 'Delete USDT on TRC20' }))
+  const dialog = await screen.findByRole('dialog', { name: 'Delete USDT on TRC20?' })
+  await userEvent.click(within(dialog).getByRole('button', { name: 'Delete method' }))
+  expect(await screen.findByText('a pending deposit still uses this method')).toBeInTheDocument()
+  expect(screen.getByText('USDT on TRC20')).toBeInTheDocument()
 })
 
 test('saves the withdrawal settings', async () => {
