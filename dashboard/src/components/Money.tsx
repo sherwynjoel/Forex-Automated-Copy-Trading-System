@@ -17,16 +17,25 @@ function asNumber(value: MoneyProps['value']): number | null {
   return Number.isFinite(n) ? n : null
 }
 
+// A caller's className often carries a tone that was computed from the real
+// (unmasked) value -- e.g. `text-loss` on a negative ledger amount. Stripped
+// before the hidden state adds its own neutral color, so "••••" can never be
+// colored by a tone that itself gives away the sign.
+const TONE_CLASS = /\btext-(profit|loss|warn|brand)(-deep)?\b/g
+
 /**
  * The one way a money figure reaches the screen. Honours the hide-balances
  * switch: when hidden it renders four dots named "Hidden amount" and the
  * real value is nowhere in the DOM, so a screen reader hears "hidden" and
- * a shoulder-surfer sees nothing.
+ * a shoulder-surfer sees nothing -- not even through a leftover profit/loss
+ * colour, inherited from a wrapper or passed in via `className`.
  */
 export default function Money({ value, unit, signed: withSign, className }: MoneyProps) {
   const [hidden] = useHiddenBalances()
   if (hidden) {
-    return <span role="img" aria-label="Hidden amount" className={className}>••••</span>
+    const neutral = [(className ?? '').replace(TONE_CLASS, '').replace(/\s+/g, ' ').trim(), 'text-ink-soft']
+      .filter(Boolean).join(' ')
+    return <span role="img" aria-label="Hidden amount" className={neutral}>••••</span>
   }
   let text: string
   if (withSign) {

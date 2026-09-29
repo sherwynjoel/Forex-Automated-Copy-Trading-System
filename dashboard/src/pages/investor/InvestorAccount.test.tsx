@@ -1,9 +1,10 @@
-import { render, screen } from '@testing-library/react'
+import { cleanup, render, screen, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi, afterEach, beforeEach } from 'vitest'
 import InvestorAccount from './InvestorAccount'
 import { mockUseOrg } from '../../test/orgMock'
 import { summaryFixture } from '../../test/portalFixtures'
+import { setHidden } from '../../lib/hideBalances'
 import type { InvestorSummary } from '../../lib/types'
 
 const { useOrgMock } = vi.hoisted(() => ({ useOrgMock: vi.fn() }))
@@ -48,7 +49,13 @@ function mockRoutes(summary: InvestorSummary) {
 }
 
 beforeEach(() => { useOrgMock.mockReturnValue(mockUseOrg('investor')) })
-afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); facts.supportEmail = '' })
+// Unmount before resetting the hide-balances store: Vitest runs afterEach
+// hooks in reverse order, so RTL's auto-cleanup (registered before this
+// file's hooks run) would otherwise fire AFTER setHidden(false) here, while
+// the tree is still mounted -- the broadcast then updates Money/StatTile
+// outside act(). Explicit cleanup() first makes the unmount happen before
+// the store changes, no matter what order the hooks run in.
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); facts.supportEmail = ''; setHidden(false) })
 
 test('the Account page shows who you are, the login forms and its title', async () => {
   mockRoutes(linked)
@@ -75,6 +82,45 @@ test('linked investors see the trading account, open positions and the 4-week sn
   expect(screen.getByText(/66\.7%/)).toBeInTheDocument()
   expect(screen.getByRole('img', { name: 'Equity curve' })).toBeInTheDocument()
   expect(screen.getByText('Live P&L (quote currency)')).toBeInTheDocument()
+})
+
+test('hiding balances masks every money figure, drops toned colour and replaces the equity curve', async () => {
+  mockRoutes(linked)
+  setHidden(true)
+  render(<MemoryRouter><InvestorAccount /></MemoryRouter>)
+  await screen.findByText('XAUUSD')
+
+  // The equity curve -- a chart of money values -- is dropped entirely,
+  // replaced by a neutral placeholder line, not just recolored.
+  expect(screen.queryByRole('img', { name: 'Equity curve' })).not.toBeInTheDocument()
+  expect(screen.getByText('Chart hidden while balances are hidden')).toBeInTheDocument()
+
+  // Every Money-backed figure on the page reads as masked dots.
+  const masked = screen.getAllByRole('img', { name: 'Hidden amount' })
+  expect(masked.length).toBeGreaterThan(0)
+  expect(screen.queryByText('5,120.50 USD')).not.toBeInTheDocument()
+  expect(screen.queryByText('120.50 USD')).not.toBeInTheDocument()
+  // Win rate is a percentage, not a money figure -- it is not masked.
+  expect(screen.getByText(/66\.7%/)).toBeInTheDocument()
+
+  // No masked figure anywhere on the page carries a profit/loss colour that
+  // would give the sign away through the dots themselves.
+  for (const m of masked) {
+    expect(m.className).not.toMatch(/\btext-(profit|loss)(-deep)?\b/)
+  }
+
+  // The Net P&L tile: StatTile's value is a plain string (not a <Money>),
+  // masked and detoned by AnalyticsPanel itself -- checked on its own.
+  const netPnlValue = screen.getByText('Net P&L').nextElementSibling as HTMLElement
+  expect(netPnlValue).toHaveTextContent('••••')
+  expect(netPnlValue.className).not.toMatch(/\btext-(profit|loss)(-deep)?\b/)
+
+  // The Profit row on the trading-account card: its <dd> still carries a
+  // tone class computed from the real value, but nothing renders that
+  // color -- the masked <Money> inside overrides it on the element itself.
+  const profitDd = screen.getByText('Profit').nextElementSibling as HTMLElement
+  const profitMasked = within(profitDd).getByRole('img', { name: 'Hidden amount' })
+  expect(profitMasked.className).not.toMatch(/\btext-(profit|loss)(-deep)?\b/)
 })
 
 test('unlinked investors see the setup notice instead of positions', async () => {

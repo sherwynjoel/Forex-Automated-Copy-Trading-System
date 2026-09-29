@@ -32,12 +32,16 @@ function AnalyticsPanel({ analytics, unit }: { analytics: Analytics; unit: strin
           actions={<span className="text-xs text-ink-soft">{analytics.closed_trades} closed trades</span>}>
       <div className="space-y-4">
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          {/* tone is computed from the real value, so it must go along with
+              the figure it colors -- omitted while hidden, or the "••••"
+              glyph would still read red/green and give the sign away. */}
           <StatTile label="Net P&L" value={hidden ? '••••' : money(analytics.net_pnl, unit)}
-                    tone={analytics.net_pnl < 0 ? 'loss' : 'profit'} />
+                    tone={hidden ? undefined : (analytics.net_pnl < 0 ? 'loss' : 'profit')} />
           <StatTile label="Win rate"
                     value={analytics.win_rate == null ? '—' : `${analytics.win_rate.toFixed(1)}%`}
                     sub={`${analytics.wins} won · ${analytics.losses} lost`} />
-          <StatTile label="Max drawdown" value={hidden ? '••••' : money(analytics.max_drawdown, unit)} tone="loss"
+          <StatTile label="Max drawdown" value={hidden ? '••••' : money(analytics.max_drawdown, unit)}
+                    tone={hidden ? undefined : 'loss'}
                     sub={`${analytics.max_drawdown_pct.toFixed(1)}% from peak`} />
           <StatTile label="Profit factor"
                     value={analytics.profit_factor == null ? '—' : analytics.profit_factor.toFixed(2)} />

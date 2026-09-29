@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi, afterEach, beforeEach } from 'vitest'
@@ -50,6 +50,24 @@ function queries(fetchMock: ReturnType<typeof mockRoutes>) {
     .map((u) => new URL(u, 'http://x').searchParams)
 }
 
+/** A `wallet-entries` response under the test's own control, so two
+ *  requests can be made to settle out of order. */
+function deferredResponse() {
+  let resolve!: (payload: unknown) => void
+  const promise = new Promise<Response>((res) => {
+    resolve = (payload: unknown) => res(jsonResponse(payload))
+  })
+  return { promise, resolve }
+}
+
+/** All pending microtasks (a resolved fetch's `.json()` chain, the
+ *  component's `await orgApi(...)`) have had a chance to run, wrapped so a
+ *  state update this flush causes -- if the stale-response guard were
+ *  missing -- is still act()-safe. */
+async function flush() {
+  await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+}
+
 beforeEach(() => { useOrgMock.mockReturnValue(mockUseOrg('investor')) })
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
@@ -99,6 +117,89 @@ test('a wallet tab reloads with that wallet', async () => {
   const last = queries(fetchMock).at(-1)!
   expect(last.get('wallet')).toBe('pamm')
   expect(last.get('before')).toBeNull()
+})
+
+test('a stale tab load never overwrites the request that superseded it', async () => {
+  // The initial 'all' request and the PAMM tab's request both go out; PAMM's
+  // answer lands first, then the stale 'all' answer finally arrives too.
+  const initial = deferredResponse()
+  const pamm = deferredResponse()
+  const queue = [initial, pamm]
+  let call = 0
+  const fetchMock = vi.fn((input: RequestInfo | URL) => {
+    const url = String(input)
+    if (url.includes('/investor/wallet-entries')) {
+      const d = queue[call]
+      call += 1
+      return d.promise
+    }
+    return Promise.resolve(jsonResponse({}))
+  })
+  vi.stubGlobal('fetch', fetchMock)
+
+  render(<MemoryRouter><InvestorTransactions /></MemoryRouter>)
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+
+  await userEvent.click(screen.getByRole('tab', { name: 'PAMM wallet' }))
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+  // The newer (PAMM) request settles first ...
+  pamm.resolve({ entries: [adjustment], has_more: false, next_before: null })
+  expect(await screen.findByText('welcome bonus, "phase 4" later')).toBeInTheDocument()
+
+  // ... then the superseded 'all' request finally answers, with different
+  // rows entirely. Its answer must be dropped, not overwrite PAMM's rows.
+  initial.resolve({ entries: [deposit, withdrawal], has_more: true, next_before: 40 })
+  await flush()
+  expect(screen.getByText('welcome bonus, "phase 4" later')).toBeInTheDocument()
+  expect(screen.queryByRole('link', { name: 'Deposit #1' })).not.toBeInTheDocument()
+})
+
+test('a superseded Load more never overwrites the request that came after it', async () => {
+  // 'all' loads, then Load more is clicked (before=40) but kept pending;
+  // before it answers, the PAMM tab is clicked, firing a third request.
+  const staleRow: WalletEntry = entryFixture({
+    id: 99, wallet: 'main', amount: 77, kind: 'fee', ref_table: null, ref_id: null,
+    note: 'stale load-more row', created_at: '2026-09-23T10:00:00Z', currency: 'USD',
+  })
+  const loadMore = deferredResponse()
+  const pamm = deferredResponse()
+  const queue = [
+    Promise.resolve(jsonResponse({ entries: [deposit, withdrawal], has_more: true, next_before: 40 })),
+    loadMore.promise,
+    pamm.promise,
+  ]
+  let call = 0
+  const fetchMock = vi.fn((input: RequestInfo | URL) => {
+    const url = String(input)
+    if (url.includes('/investor/wallet-entries')) {
+      const p = queue[call]
+      call += 1
+      return p
+    }
+    return Promise.resolve(jsonResponse({}))
+  })
+  vi.stubGlobal('fetch', fetchMock)
+
+  render(<MemoryRouter><InvestorTransactions /></MemoryRouter>)
+  await screen.findByRole('link', { name: 'Deposit #1' })
+
+  await userEvent.click(screen.getByRole('button', { name: 'Load more' }))
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+  await userEvent.click(screen.getByRole('tab', { name: 'PAMM wallet' }))
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
+
+  // PAMM's fresh load settles first ...
+  pamm.resolve({ entries: [adjustment], has_more: false, next_before: null })
+  expect(await screen.findByText('welcome bonus, "phase 4" later')).toBeInTheDocument()
+
+  // ... then the superseded Load more finally answers. It must not append
+  // its row onto what PAMM's load replaced the table with.
+  loadMore.resolve({ entries: [staleRow], has_more: false, next_before: null })
+  await flush()
+  expect(screen.getByText('welcome bonus, "phase 4" later')).toBeInTheDocument()
+  expect(screen.queryByText('stale load-more row')).not.toBeInTheDocument()
 })
 
 test('the date and kind filters are sent only after Apply, and Clear drops them', async () => {

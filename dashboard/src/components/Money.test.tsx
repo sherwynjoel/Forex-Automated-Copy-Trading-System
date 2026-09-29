@@ -1,10 +1,17 @@
-import { render, screen } from '@testing-library/react'
+import { cleanup, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, expect, test } from 'vitest'
 import Money, { HideBalancesToggle } from './Money'
 import { setHidden } from '../lib/hideBalances'
 
+// Unmount before resetting the hide-balances store: Vitest runs afterEach
+// hooks in reverse order, so RTL's auto-cleanup (registered before this
+// file's hooks run) would otherwise fire AFTER setHidden(false) here, while
+// the tree is still mounted -- the broadcast then updates Money outside
+// act(). Explicit cleanup() first makes the unmount happen before the store
+// changes, no matter what order the hooks run in.
 afterEach(() => {
+  cleanup()
   setHidden(false)
   localStorage.clear()
 })
@@ -41,6 +48,21 @@ test('hidden balances render as dots with an accessible name and no figure', () 
   expect(masked).toHaveTextContent('••••')
   expect(masked).toHaveClass('text-2xl')
   expect(screen.queryByText(/5,120/)).toBeNull()
+})
+
+test('a masked figure never carries a profit/loss colour, inherited or passed in', () => {
+  setHidden(true)
+  // A negative amount's className is normally computed from the real value
+  // (e.g. `e.amount < 0 ? 'text-loss' : 'text-profit'`); the wrapper carries
+  // the same tone, the way a <dd> around an unsigned Money often does.
+  render(
+    <div className="text-loss">
+      <Money value={-250} unit="USD" signed className="text-loss" />
+    </div>,
+  )
+  const masked = screen.getByRole('img', { name: 'Hidden amount' })
+  expect(masked).toHaveClass('text-ink-soft')
+  expect(masked.className).not.toMatch(/\btext-(profit|loss)(-deep)?\b/)
 })
 
 test('the toggle is a pressed ghost button that flips every Money on the page and persists', async () => {
