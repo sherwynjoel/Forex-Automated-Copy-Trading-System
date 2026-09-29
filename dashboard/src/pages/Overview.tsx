@@ -1,22 +1,27 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Link } from 'react-router-dom'
 import { orgApi } from '../lib/api'
 import { useOrg } from '../lib/org'
 import { can } from '../lib/roles'
 import type {
-  Account, ApiState, OverviewStats, PositionData, Settings, StateSnapshot,
+  Account, ApiState, OverviewStats, Settings, StateSnapshot,
 } from '../lib/types'
-import KillSwitch from '../components/KillSwitch'
 import ConfirmDialog from '../components/ConfirmDialog'
 import StatTile from '../components/StatTile'
-import StatusDot from '../components/StatusDot'
 import Banner from '../components/Banner'
 import Button from '../components/Button'
-import Badge from '../components/Badge'
-import { money, signed, formatWhen, errorText } from '../lib/format'
+import PageHeader from '../components/PageHeader'
+import Loading from '../components/Loading'
+import { money, signed, errorText } from '../lib/format'
 import { actionBurst } from '../lib/refresh'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
 import { mergeTicksIntoSnapshot, TicksPayload } from '../lib/ticks'
+import AttentionCard, { type AttentionItem } from './overview/AttentionCard'
+import SetupChecklist from './overview/SetupChecklist'
+import FleetGrid from './overview/FleetGrid'
+import {
+  ContractsPanel, CopyLogCard, FillsPanel, FleetStatusPanel, PortfolioPanel,
+  accountName, type ContractRow,
+} from './overview/Panels'
 
 /**
  * Fetch GET orgs/{orgId}/state once and hand back both the envelope and its
@@ -31,10 +36,10 @@ import { mergeTicksIntoSnapshot, TicksPayload } from '../lib/ticks'
  * This screen used to do `api<StateSnapshot>('/api/state')` and index the
  * result directly, i.e. it read the envelope as if it were the account map:
  * every `state[String(accountId)]` was `undefined`, so the master card never
- * rendered at all and every slave tile silently omitted its equity, balance
- * and position count. `api<T>()` is an unchecked cast, so the wrong type
- * argument cost nothing at compile time, and Overview.test.tsx mocked a bare
- * `StateSnapshot` -- the wrong shape -- so the suite agreed with the bug.
+ * rendered at all and every follower tile silently omitted its equity,
+ * balance and position count. `api<T>()` is an unchecked cast, so the wrong
+ * type argument cost nothing at compile time, and Overview.test.tsx mocked a
+ * bare `StateSnapshot` -- the wrong shape -- so the suite agreed with the bug.
  *
  * Typing the fetch as `ApiState` and projecting explicitly here is what makes
  * a future shape change a type error rather than a blank screen; the tests
@@ -47,30 +52,33 @@ async function loadState(
   return { accounts: envelope.accounts ?? {}, envelope }
 }
 
-// Shared desk primitives: one tile, one banner, one formatter set app-wide.
+type KpiPanel = 'portfolio' | 'accounts' | 'contracts' | 'fills'
 
-/** The one chip's tone for a copy's status, shared by the fills panel and the copy log. */
-function copyStatusTone(status: string): 'profit' | 'loss' | 'neutral' | 'warn' {
-  if (status === 'active') return 'profit'
-  if (status === 'failed') return 'loss'
-  if (status === 'closed') return 'neutral'
-  return 'warn'
-}
+/** How long a streamed margin call stays on the Attention card: the same
+ *  30-minute window the desk strip's banner uses. */
+const MARGIN_CALL_WINDOW_MS = 30 * 60_000
 
 export default function Overview() {
-  const { orgId, role } = useOrg()
+  const { orgId, role, org } = useOrg()
   const [accounts, setAccounts] = useState<Account[]>([])
   const [settings, setSettings] = useState<Settings | null>(null)
   const [state, setState] = useState<StateSnapshot>({})
   const [envelope, setEnvelope] = useState<ApiState | null>(null)
   const [stats, setStats] = useState<OverviewStats | null>(null)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
-  type KpiPanel = 'portfolio' | 'accounts' | 'contracts' | 'fills'
+  // Why the last live-state read failed; null once a read succeeds.
+  const [stateError, setStateError] = useState<string | null>(null)
+  const [marginCall, setMarginCall] = useState<{ accountId: number | null; at: number } | null>(null)
   const [expandedKpi, setExpandedKpi] = useState<KpiPanel | null>(null)
   const toggleKpi = (panel: KpiPanel) =>
     setExpandedKpi((cur) => (cur === panel ? null : panel))
-  const [error, setError] = useState<string | null>(null)
+
+  const [closingContract, setClosingContract] = useState<ContractRow | null>(null)
+  const [closingIds, setClosingIds] = useState<Set<number>>(new Set())
+  const [closingAll, setClosingAll] = useState(false)
+  const [closeBusy, setCloseBusy] = useState(false)
 
   // Load accounts and settings on mount
   useEffect(() => {
@@ -98,8 +106,11 @@ export default function Overview() {
       const { accounts: snapshot, envelope: env } = await loadState(orgId)
       setState(snapshot)
       setEnvelope(env)
+      setStateError(null)
     } catch (err) {
       console.error('Failed to load state:', err)
+      // A 5xx here is also how an unreachable copier shows up.
+      setStateError(errorText(err, 'the copier did not answer'))
     }
     // The DB-side stats and copier performance are passengers: if they
     // fail (older api, copier offline) the live sections still render.
@@ -117,8 +128,14 @@ export default function Overview() {
   }, [refreshState])
 
   // Refetch immediately when a trade event streams in (5s poll is
-  // fallback); quotes ticks fold into the snapshot in place instead.
+  // fallback); quotes ticks fold into the snapshot in place instead. A
+  // margin call arrives on the same socket as a 'risk' event (the copier's
+  // _on_margin_call) and is kept for the Attention card.
   useLiveRefresh(refreshState, orgId, (evt) => {
+    if (evt?.category === 'risk' && evt.payload?.action === 'margin_call') {
+      setMarginCall({ accountId: evt.account_id ?? null, at: Date.now() })
+      return
+    }
     if (evt?.category !== 'quotes') return
     const ticks = (evt.payload as TicksPayload | undefined)?.accounts
     if (!ticks) return
@@ -145,12 +162,6 @@ export default function Overview() {
         `${isPaused ? 'Resume' : 'Pause'} failed: ${errorText(err, 'the copier did not respond')}`)
     }
   }
-
-  type ContractRow = { accountId: number; accountLabel: string; pos: PositionData }
-  const [closingContract, setClosingContract] = useState<ContractRow | null>(null)
-  const [closingIds, setClosingIds] = useState<Set<number>>(new Set())
-  const [closingAll, setClosingAll] = useState(false)
-  const [closeBusy, setCloseBusy] = useState(false)
 
   const closeOne = async (row: ContractRow) => {
     await orgApi(orgId, 'positions/close', {
@@ -187,9 +198,9 @@ export default function Overview() {
       setCloseBusy(true)
       setActionError(null)
       const failures: string[] = []
-      // Sequential on purpose: master closes replicate to slave copies, so a
-      // copy may already be gone by the time its own close is attempted --
-      // treat those errors as per-row outcomes, not a batch abort.
+      // Sequential on purpose: master closes replicate to follower copies,
+      // so a copy may already be gone by the time its own close is
+      // attempted -- treat those errors as per-row outcomes, not a batch abort.
       for (const row of rows) {
         try {
           await closeOne(row)
@@ -208,20 +219,28 @@ export default function Overview() {
     }
   }
 
-  const handleSettingsUpdate = (newSettings: Settings) => {
-    setSettings(newSettings)
-  }
+  const header = <PageHeader title="Overview" subtitle={org.name} />
 
   if (loading) {
-    return <div className="text-center py-12 text-ink-faint">Loading...</div>
+    return (
+      <div className="space-y-8 max-w-6xl">
+        {header}
+        <Loading lines={6} />
+      </div>
+    )
   }
 
   if (error) {
-    return <Banner kind="error">{error}</Banner>
+    return (
+      <div className="space-y-8 max-w-6xl">
+        {header}
+        <Banner kind="error">{error}</Banner>
+      </div>
+    )
   }
 
   const masterAccount = accounts.find((a) => a.role === 'master')
-  const slaveAccounts = accounts.filter((a) => a.role === 'slave')
+  const followers = accounts.filter((a) => a.role === 'slave')
   const masterState = masterAccount ? state[String(masterAccount.ctid_trader_account_id)] : undefined
 
   // Portfolio aggregates across this ORG's accounts -- `state` is the
@@ -241,7 +260,7 @@ export default function Overview() {
     : null
 
   /**
-   * Total P&L across the fleet: the change in equity since yesterday,
+   * Today's P&L across the fleet: the change in equity since yesterday,
    * summed over ONLY the accounts present on both days.
    *
    * Subtracting yesterday's total from today's total looks equivalent and
@@ -259,22 +278,22 @@ export default function Overview() {
   const totalPnl = ((): { value: number; accounts: number; skipped: number } | null => {
     if (!yesterdayByAccount) return null
     let value = 0
-    let accounts = 0
+    let counted = 0
     let skipped = 0
     for (const [id, snap] of Object.entries(state)) {
       const before = yesterdayByAccount[id]
       const now = snap.equity
       if (before == null || now == null) { skipped += 1; continue }
       value += now - before
-      accounts += 1
+      counted += 1
     }
     // Nothing comparable is not the same as no change.
-    return accounts > 0 ? { value, accounts, skipped } : null
+    return counted > 0 ? { value, accounts: counted, skipped } : null
   })()
 
-  // Accounts (master or slave) whose cTrader-ID token refresh has failed. Once the
-  // token expires, copying for these accounts silently stops, so this must be
-  // impossible to miss on the dashboard - not just a row in the Logs table.
+  // Accounts (master or follower) whose cTrader-ID token refresh has failed.
+  // Once the token expires, copying for these accounts silently stops, so
+  // this must be impossible to miss - not just a row in the Logs table.
   const refreshFailedAccounts = accounts.filter((a) => a.connection_status === 'refresh_failed')
 
   // Today's copy fills from the stats feed, newest first.
@@ -285,10 +304,10 @@ export default function Overview() {
 
   // Every running contract across the fleet, flattened from the live state
   // feed -- refreshed by the same 5s poll / websocket as the KPI row.
-  const openContracts = accounts.flatMap((a) => {
+  const openContracts: ContractRow[] = accounts.flatMap((a) => {
     const snap = state[String(a.ctid_trader_account_id)]
     if (!snap?.positions?.length) return []
-    const accountLabel = `${a.nickname || `Account ${a.trader_login}`}${a.role === 'master' ? ' · master' : ''}`
+    const accountLabel = `${accountName(a)}${a.role === 'master' ? ' · master' : ''}`
     return snap.positions.map((pos) => ({
       accountId: a.ctid_trader_account_id,
       accountLabel,
@@ -302,565 +321,230 @@ export default function Overview() {
     masterPnlByPosition.set(pos.position_id, { pnl: pos.pnl_quote ?? null, volume: pos.volume })
   }
 
+  // ---- Attention: only live problems, each with its action ----
+  const accountsPath = `/org/${orgId}/accounts`
+  const positionsPath = `/org/${orgId}/positions`
+  const openAccounts = (
+    <Button to={accountsPath} variant="secondary" size="sm">Open Accounts</Button>
+  )
+  const attention: AttentionItem[] = []
+  if (stateError) {
+    attention.push({
+      key: 'state',
+      tone: 'degraded',
+      testId: 'attention-state-error',
+      message: `Live figures stopped refreshing (${stateError}), so the numbers on this page may be stale.`,
+      action: (
+        <Button variant="secondary" size="sm" onClick={() => { void refreshState() }}>Retry</Button>
+      ),
+    })
+  }
+  if (marginCall && Date.now() - marginCall.at < MARGIN_CALL_WINDOW_MS) {
+    const hit = accounts.find((a) => a.ctid_trader_account_id === marginCall.accountId)
+    const who = hit ? accountName(hit)
+      : marginCall.accountId != null ? `account ${marginCall.accountId}` : 'an account'
+    attention.push({
+      key: 'margin-call',
+      tone: 'degraded',
+      testId: 'attention-margin-call',
+      message: `Margin call on ${who}: the broker may start force-closing positions, so reduce exposure or add funds now.`,
+      action: (
+        <div className="flex items-center gap-2">
+          <Button to={positionsPath} variant="secondary" tone="loss" size="sm">Open Positions</Button>
+          <Button variant="ghost" tone="neutral" size="sm" onClick={() => setMarginCall(null)}>Dismiss</Button>
+        </div>
+      ),
+    })
+  }
+  if (refreshFailedAccounts.length > 0) {
+    attention.push({
+      key: 'token',
+      tone: 'degraded',
+      testId: 'refresh-failed-banner',
+      message: (
+        <>
+          Token refresh failed for account{refreshFailedAccounts.length > 1 ? 's' : ''}:{' '}
+          <span className="num">{refreshFailedAccounts.map((a) => a.trader_login).join(', ')}</span>.
+          Copying for these accounts will stop when the token expires; reconnect via
+          Accounts → Connect cTrader ID.
+        </>
+      ),
+      action: openAccounts,
+    })
+  }
+  for (const a of accounts) {
+    if (a.connection_status === 'offline') {
+      attention.push({
+        key: `offline-${a.ctid_trader_account_id}`,
+        tone: 'warn',
+        message: `${accountName(a)}'s terminal is offline, so copies wait until the EA reports again.`,
+        action: openAccounts,
+      })
+    }
+  }
+  for (const f of followers) {
+    if (f.status === 'degraded') {
+      attention.push({
+        key: `degraded-${f.ctid_trader_account_id}`,
+        tone: 'degraded',
+        message: `${accountName(f)} is degraded: copies to it are failing.`,
+        action: openAccounts,
+      })
+    } else if (f.enabled && f.status === 'disconnected') {
+      attention.push({
+        key: `disconnected-${f.ctid_trader_account_id}`,
+        tone: 'warn',
+        message: `${accountName(f)} is not connected to its broker, so it receives no copies.`,
+        action: openAccounts,
+      })
+    }
+  }
+  const calmState = settings == null ? 'copier settings not loaded'
+    : !settings.copying_enabled ? 'copying paused'
+    : settings.dry_run ? 'dry run, copies are simulated'
+    : 'copying live'
+
+  const kpiView = (panel: KpiPanel, label: string) => (
+    <Button
+      variant="ghost"
+      size="sm"
+      className="self-start"
+      aria-expanded={expandedKpi === panel}
+      aria-controls={expandedKpi === panel ? `kpi-panel-${panel}` : undefined}
+      onClick={() => toggleKpi(panel)}
+    >
+      {label}
+    </Button>
+  )
+
+  const activeFollowers = stats?.active_slaves ?? followers.length
+  const connectedCount = stats?.accounts_connected ?? accounts.length
+  const masterCount = stats?.masters ?? (masterAccount ? 1 : 0)
+
   return (
-    <div className="space-y-6 max-w-6xl">
-      <header>
-        <h1 className="page-title">Overview</h1>
-      </header>
+    <div className="space-y-8 max-w-6xl">
+      {header}
 
       {actionError && (
         <Banner kind="error" onDismiss={() => setActionError(null)}>{actionError}</Banner>
       )}
 
-      {/* Token Refresh Failure Alert */}
-      {refreshFailedAccounts.length > 0 && (
-        <div
-          data-testid="refresh-failed-banner"
-          role="alert"
-          className="bg-loss text-on-accent p-4 rounded-lg flex items-start gap-3"
-        >
-          <svg aria-hidden="true" viewBox="0 0 20 20" className="h-6 w-6 shrink-0 mt-0.5">
-            <path d="M10 2 1.5 17h17L10 2z" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
-            <rect x="9.25" y="8" width="1.5" height="4.5" rx="0.75" fill="currentColor" />
-            <circle cx="10" cy="14.6" r="0.9" fill="currentColor" />
-          </svg>
-          <div>
-            <p className="font-bold">
-              Token refresh failed for account{refreshFailedAccounts.length > 1 ? 's' : ''}:{' '}
-              {refreshFailedAccounts.map((a) => a.trader_login).join(', ')}
-            </p>
-            <p className="text-sm mt-1 text-on-accent">
-              Copying for these accounts will stop when the token expires. Reconnect via
-              Accounts &rarr; Connect cTrader ID.
-            </p>
-          </div>
-        </div>
-      )}
-
-      {/* Portfolio stat row */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <StatTile
-          label="Portfolio value"
-          value={money(portfolioValue)}
-          tone="brand"
-          sub={vsYesterday != null ? (
-            <span className={vsYesterday < 0 ? 'text-loss' : 'text-profit'}>
-              {signed(vsYesterday * 100)}% vs yesterday
-            </span>
-          ) : 'vs yesterday: no snapshot yet'}
-          onClick={() => toggleKpi('portfolio')}
-          expanded={expandedKpi === 'portfolio'}
-        />
-        <StatTile
-          label="Accounts connected"
-          value={String(stats?.accounts_connected ?? accounts.length)}
-          sub={`${stats?.masters ?? (masterAccount ? 1 : 0)} master · ${stats?.active_slaves ?? slaveAccounts.length} active slaves`}
-          onClick={() => toggleKpi('accounts')}
-          expanded={expandedKpi === 'accounts'}
-        />
-        <StatTile
-          label="Open P&L"
-          value={signed(totalOpenPnl)}
-          tone={totalOpenPnl < 0 ? 'loss' : 'profit'}
-          sub={`${openTrades} open trade${openTrades === 1 ? '' : 's'}`}
-          onClick={() => toggleKpi('contracts')}
-          expanded={expandedKpi === 'contracts'}
-        />
-        <StatTile
-          label="Total P&L"
-          value={totalPnl == null ? '—' : signed(totalPnl.value)}
-          tone={totalPnl == null ? undefined : (totalPnl.value < 0 ? 'loss' : 'profit')}
-          sub={stats && stats.degraded > 0
-            // A degraded account has silently stopped copying. That signal
-            // used to live on "Copied today" and must not vanish with it.
-            ? <span className="text-loss">{stats.degraded} degraded</span>
-            : totalPnl == null
-              ? 'needs a full day of history'
-              // Say what was counted. A total that quietly omits accounts
-              // is how the -275,112.83 went unquestioned for a day.
-              : `${totalPnl.accounts} account${totalPnl.accounts === 1 ? '' : 's'} since yesterday`
-                + (totalPnl.skipped > 0 ? ` · ${totalPnl.skipped} too new` : '')}
-          onClick={() => toggleKpi('fills')}
-          expanded={expandedKpi === 'fills'}
-        />
-      </div>
-
-      {/* Per-account portfolio breakdown, expanded from the Portfolio tile */}
-      {expandedKpi === 'portfolio' && (
-        <section className="rounded-lg border border-line bg-card">
-          <div className="px-5 pt-4 pb-3 flex items-baseline justify-between">
-            <h2 className="desk-label">Portfolio breakdown · live</h2>
-            <Link
-              to={`/org/${orgId}/accounts`}
-              className="text-xs font-medium text-brand-deep hover:underline"
-            >
-              Manage accounts
-            </Link>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="stack-table w-full text-sm">
-              <thead>
-                <tr className="text-left border-b border-line">
-                  <th className="desk-label px-5 py-2 font-semibold">Account</th>
-                  <th className="desk-label px-3 py-2 font-semibold">Role</th>
-                  <th className="desk-label px-3 py-2 font-semibold text-right">Balance</th>
-                  <th className="desk-label px-3 py-2 font-semibold text-right">Equity</th>
-                  <th className="desk-label px-5 py-2 font-semibold text-right">Open P&L</th>
-                </tr>
-              </thead>
-              <tbody>
-                {accounts.map((a) => {
-                  const snap = state[String(a.ctid_trader_account_id)]
-                  return (
-                    <tr key={a.ctid_trader_account_id} className="border-b border-line last:border-0">
-                      <td data-label="Account" className="px-5 py-2.5">
-                        {a.nickname || `Account ${a.trader_login}`}
-                      </td>
-                      <td data-label="Role" className="px-3 py-2.5">
-                        <Badge tone={a.role === 'master' ? 'profit' : 'neutral'}>
-                          {a.role}
-                        </Badge>
-                      </td>
-                      <td data-label="Balance" className="tnum px-3 py-2.5 text-right">{money(snap?.balance)}</td>
-                      <td data-label="Equity" className="tnum px-3 py-2.5 text-right">{money(snap?.equity)}</td>
-                      <td data-label="Open P&L" className="tnum px-5 py-2.5 text-right">
-                        <span className={(snap?.open_pnl ?? 0) < 0 ? 'text-loss' : 'text-profit'}>
-                          {signed(snap?.open_pnl)}
-                        </span>
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      )}
-
-      {/* Fleet status list, expanded from the Accounts tile */}
-      {expandedKpi === 'accounts' && (
-        <section className="rounded-lg border border-line bg-card">
-          <div className="px-5 pt-4 pb-3 flex items-baseline justify-between">
-            <h2 className="desk-label">Fleet status</h2>
-            <Link
-              to={`/org/${orgId}/accounts`}
-              className="text-xs font-medium text-brand-deep hover:underline"
-            >
-              Manage accounts
-            </Link>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="stack-table w-full text-sm">
-              <thead>
-                <tr className="text-left border-b border-line">
-                  <th className="desk-label px-5 py-2 font-semibold">Account</th>
-                  <th className="desk-label px-3 py-2 font-semibold">Role</th>
-                  <th className="desk-label px-3 py-2 font-semibold">Health</th>
-                  <th className="desk-label px-5 py-2 font-semibold">Copying</th>
-                </tr>
-              </thead>
-              <tbody>
-                {accounts.map((a) => {
-                  // Anything that is not an affirmatively healthy status
-                  // reads as degraded -- 'disconnected' must never show OK.
-                  const degraded = a.status !== 'ok' && a.status !== 'connected'
-                  return (
-                    <tr key={a.ctid_trader_account_id} className="border-b border-line last:border-0">
-                      <td data-label="Account" className="px-5 py-2.5">
-                        {a.nickname || `Account ${a.trader_login}`}
-                      </td>
-                      <td data-label="Role" className="px-3 py-2.5">
-                        <Badge tone={a.role === 'master' ? 'profit' : 'neutral'}>
-                          {a.role}
-                        </Badge>
-                      </td>
-                      <td data-label="Health" className="px-3 py-2.5">
-                        <span className="inline-flex items-center gap-1.5">
-                          <StatusDot tone={degraded ? 'degraded' : 'ok'} />
-                          {degraded ? 'Degraded' : 'OK'}
-                        </span>
-                      </td>
-                      <td data-label="Copying" className="px-5 py-2.5 text-ink-soft">
-                        {a.role === 'master' ? '—' : a.enabled ? 'Enabled' : 'Paused'}
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      )}
-
-      {/* Today's copy fills, expanded from the Copied Today tile */}
-      {expandedKpi === 'fills' && (
-        <section className="rounded-lg border border-line bg-card">
-          <div className="px-5 pt-4 pb-3 flex items-baseline justify-between">
-            <h2 className="desk-label">Today's copy fills · live</h2>
-            <Link
-              to={`/org/${orgId}/logs`}
-              className="text-xs font-medium text-brand-deep hover:underline"
-            >
-              Full event log
-            </Link>
-          </div>
-          {todaysFills.length === 0 ? (
-            <p className="px-5 pb-5 text-sm text-ink-faint">
-              No copy fills yet today.
-            </p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="stack-table w-full text-sm">
-                <thead>
-                  <tr className="text-left border-b border-line">
-                    <th className="desk-label px-5 py-2 font-semibold">When</th>
-                    <th className="desk-label px-3 py-2 font-semibold">Status</th>
-                    <th className="desk-label px-3 py-2 font-semibold">Slave</th>
-                    <th className="desk-label px-3 py-2 font-semibold">Symbol</th>
-                    <th className="desk-label px-5 py-2 font-semibold text-right">Fill price</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {todaysFills.map((copy, i) => (
-                    <tr key={`${copy.slave_account_id}-${copy.master_position_id ?? copy.master_order_id}-${i}`}
-                        className="border-b border-line last:border-0">
-                      <td data-label="When" className="tnum px-5 py-2.5 text-ink-soft">
-                        {formatWhen(copy.updated_at)}
-                      </td>
-                      <td data-label="Status" className="px-3 py-2.5">
-                        <Badge tone={copyStatusTone(copy.status)}>{copy.status}</Badge>
-                      </td>
-                      <td data-label="Slave" className="px-3 py-2.5">
-                        {copy.slave_nickname || <span className="tnum">{copy.slave_login}</span>}
-                      </td>
-                      <td data-label="Symbol" className="tnum px-3 py-2.5">{copy.symbol ?? '—'}</td>
-                      <td data-label="Fill price" className="tnum px-5 py-2.5 text-right">
-                        {copy.fill_price ?? '—'}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </section>
-      )}
-
-      {/* Live open contracts, expanded in place from the Open P&L tile */}
-      {expandedKpi === 'contracts' && (
-        <section className="rounded-lg border border-line bg-card">
-          <div className="px-5 pt-4 pb-3 flex items-center justify-between gap-3 flex-wrap">
-            <h2 className="desk-label">Open contracts · live</h2>
-            <div className="flex items-center gap-3">
-              {can(role, 'trade') && openContracts.length > 0 && (
-                <Button variant="secondary" tone="loss" size="sm" onClick={() => setClosingAll(true)}>
-                  Close all shown
-                </Button>
-              )}
-              <Link
-                to={`/org/${orgId}/positions`}
-                className="text-xs font-medium text-brand-deep hover:underline"
-              >
-                Full positions view
-              </Link>
-            </div>
-          </div>
-          {openContracts.length === 0 ? (
-            <p className="px-5 pb-5 text-sm text-ink-faint">
-              No open contracts right now. Fills appear here the moment they happen.
-            </p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="stack-table w-full text-sm">
-                <thead>
-                  <tr className="text-left border-b border-line">
-                    <th className="desk-label px-5 py-2 font-semibold">Account</th>
-                    <th className="desk-label px-3 py-2 font-semibold">Symbol</th>
-                    <th className="desk-label px-3 py-2 font-semibold">Side</th>
-                    <th className="desk-label px-3 py-2 font-semibold text-right">Entry</th>
-                    <th className="desk-label px-3 py-2 font-semibold text-right">Current</th>
-                    <th className="desk-label px-3 py-2 font-semibold text-right whitespace-nowrap">SL / TP</th>
-                    <th className="desk-label px-5 py-2 font-semibold text-right">Live P&L</th>
-                    {can(role, 'trade') && <th className="px-3 py-2" />}
-                  </tr>
-                </thead>
-                <tbody>
-                  {openContracts.map((row) => (
-                    <tr key={`${row.accountId}-${row.pos.position_id}`} className="border-b border-line last:border-0">
-                      <td data-label="Account" className="px-5 py-2.5">{row.accountLabel}</td>
-                      <td data-label="Symbol" className="tnum px-3 py-2.5">{row.pos.symbol ?? row.pos.symbol_id}</td>
-                      <td data-label="Side" className={`px-3 py-2.5 font-medium ${row.pos.side === 'BUY' ? 'text-profit' : 'text-loss'}`}>
-                        {row.pos.side}
-                      </td>
-                      <td data-label="Entry" className="tnum px-3 py-2.5 text-right">{row.pos.entry_price}</td>
-                      <td data-label="Current" className={`tnum px-3 py-2.5 text-right font-medium ${
-                        row.pos.current_price != null ? 'text-brand' : 'text-ink-faint'
-                      }`}>
-                        {row.pos.current_price ?? '\u2014'}
-                      </td>
-                      {/* Each row's OWN protection. A copy whose stop never
-                          arrived is the row that matters here, and reading
-                          the master's alone would hide exactly that -- so an
-                          unprotected side shows a dash and is tinted, rather
-                          than borrowing a number from somewhere else. */}
-                      <td data-label="SL / TP" className="tnum px-3 py-2.5 text-right whitespace-nowrap">
-                        <span className={row.pos.stop_loss == null ? 'text-warn' : 'text-ink-soft'}>
-                          {row.pos.stop_loss ?? '—'}
-                        </span>
-                        <span className="text-ink-faint"> / </span>
-                        <span className={row.pos.take_profit == null ? 'text-warn' : 'text-ink-soft'}>
-                          {row.pos.take_profit ?? '—'}
-                        </span>
-                      </td>
-                      <td data-label="Live P&L" className="tnum px-5 py-2.5 text-right">
-                        <span className={(row.pos.pnl_quote ?? 0) < 0 ? 'text-loss' : 'text-profit'}>
-                          {signed(row.pos.pnl_quote)}
-                        </span>
-                      </td>
-                      {can(role, 'trade') && (
-                        <td className="px-3 py-2.5 text-right">
-                          {closingIds.has(row.pos.position_id) ? (
-                            <span className="px-3 py-1 text-xs font-semibold text-ink-faint animate-pulse motion-reduce:animate-none">
-                              Closing…
-                            </span>
-                          ) : (
-                          <Button variant="secondary" tone="loss" size="sm" onClick={() => setClosingContract(row)}>
-                            Close
-                          </Button>
-                          )}
-                        </td>
-                      )}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </section>
-      )}
-
-      {/* Kill Switch and Status Bar */}
-      <div className="bg-card p-6 rounded-lg border border-line flex items-center justify-between flex-wrap gap-4">
-        <div>
-          <h2 className="font-display text-lg font-semibold text-ink">Copying Status</h2>
-          <p className="text-sm text-ink-soft mt-1">
-            {settings?.copying_enabled ? 'Actively copying trades' : 'Copying paused'}
-          </p>
-        </div>
-        {settings && <KillSwitch settings={settings} onUpdate={handleSettingsUpdate} />}
-      </div>
-
-      {/* Copy log */}
-      <section className="rounded-lg border border-line bg-card">
-        <h2 className="desk-label px-5 pt-4 pb-3">Copy log</h2>
-        {!stats || stats.recent_copies.length === 0 ? (
-          <p className="px-5 pb-5 text-sm text-ink-faint">
-            No copies yet. They appear here the moment the master trades.
-          </p>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="stack-table w-full text-sm">
-              <thead>
-                <tr className="text-left border-b border-line">
-                  <th className="desk-label px-5 py-2 font-semibold">Status</th>
-                  <th className="desk-label px-3 py-2 font-semibold">Master</th>
-                  <th className="desk-label px-3 py-2 font-semibold">Slave</th>
-                  <th className="desk-label px-3 py-2 font-semibold">Symbol</th>
-                  <th className="desk-label px-5 py-2 font-semibold text-right">P&L</th>
-                </tr>
-              </thead>
-              <tbody>
-                {stats.recent_copies.map((copy, i) => {
-                  const master = copy.master_position_id != null
-                    ? masterPnlByPosition.get(copy.master_position_id)
-                    : undefined
-                  // Estimate the copy's live P&L from the master position's,
-                  // scaled by the volume ratio. Only possible while both
-                  // sides are open; otherwise show the failure or a dash.
-                  let pnl: number | null = null
-                  if (copy.status === 'active' && master?.pnl != null && master.volume > 0
-                      && copy.slave_volume != null) {
-                    pnl = master.pnl * (copy.slave_volume / master.volume)
-                  }
-                  return (
-                    <tr key={`${copy.slave_account_id}-${copy.master_position_id}-${copy.master_order_id}-${i}`}
-                        className="border-b border-line last:border-0">
-                      <td data-label="Status" className="px-5 py-2.5">
-                        <Badge tone={copyStatusTone(copy.status)}>{copy.status}</Badge>
-                      </td>
-                      <td data-label="Master" className="tnum px-3 py-2.5 text-ink-soft">
-                        {copy.master_position_id ?? copy.master_order_id ?? '—'}
-                      </td>
-                      <td data-label="Slave" className="px-3 py-2.5">
-                        {copy.slave_nickname || <span className="tnum">{copy.slave_login}</span>}
-                      </td>
-                      <td data-label="Symbol" className="tnum px-3 py-2.5">{copy.symbol ?? '—'}</td>
-                      <td data-label="P&L" className="tnum px-5 py-2.5 text-right">
-                        {copy.status === 'failed' && copy.error ? (
-                          <span className="text-xs text-loss" title={copy.error}>
-                            {copy.error.length > 24 ? copy.error.slice(0, 24) + '…' : copy.error}
+      {accounts.length === 0 ? (
+        <SetupChecklist orgId={orgId} accounts={accounts} settings={settings} />
+      ) : (
+        <>
+          <section aria-label="Key figures" className="space-y-4">
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+              <div className="flex flex-col gap-1">
+                <StatTile
+                  label="Master equity"
+                  value={money(masterState?.equity)}
+                  tone="brand"
+                  sub={
+                    <>
+                      Fleet <span className="num">{money(portfolioValue)}</span>
+                      {vsYesterday != null ? (
+                        <>
+                          {' · '}
+                          <span className={vsYesterday < 0 ? 'text-loss' : 'text-profit'}>
+                            {signed(vsYesterday * 100)}% vs yesterday
                           </span>
-                        ) : pnl != null ? (
-                          <span className={pnl < 0 ? 'text-loss' : 'text-profit'}>{signed(pnl)}</span>
-                        ) : (
-                          '—'
-                        )}
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
+                        </>
+                      ) : ' · vs yesterday: no snapshot yet'}
+                    </>
+                  }
+                />
+                {kpiView('portfolio', 'View all accounts')}
+              </div>
+              <div className="flex flex-col gap-1">
+                <StatTile
+                  label="Today's P&L"
+                  value={totalPnl == null ? '—' : signed(totalPnl.value)}
+                  tone={totalPnl == null ? undefined : (totalPnl.value < 0 ? 'loss' : 'profit')}
+                  sub={stats && stats.degraded > 0
+                    // A degraded account has silently stopped copying. That
+                    // signal used to live on "Copied today" and must not vanish.
+                    ? <span className="text-loss">{stats.degraded} degraded</span>
+                    : totalPnl == null
+                      ? 'needs a full day of history'
+                      // Say what was counted. A total that quietly omits
+                      // accounts is how the -275,112.83 went unquestioned.
+                      : `${totalPnl.accounts} account${totalPnl.accounts === 1 ? '' : 's'} since yesterday`
+                        + (totalPnl.skipped > 0 ? ` · ${totalPnl.skipped} too new` : '')}
+                />
+                {kpiView('fills', "View today's fills")}
+              </div>
+              <div className="flex flex-col gap-1">
+                <StatTile
+                  label="Open positions"
+                  value={String(openTrades)}
+                  sub={
+                    <>
+                      <span className={`num ${totalOpenPnl < 0 ? 'text-loss' : 'text-profit'}`}>
+                        {signed(totalOpenPnl)}
+                      </span>
+                      {' open P&L'}
+                    </>
+                  }
+                />
+                {kpiView('contracts', 'View open positions')}
+              </div>
+              <div className="flex flex-col gap-1">
+                <StatTile
+                  label="Followers copying"
+                  value={String(activeFollowers)}
+                  sub={`${connectedCount} account${connectedCount === 1 ? '' : 's'} connected · ${masterCount} master`}
+                />
+                {kpiView('accounts', 'View fleet health')}
+              </div>
+            </div>
 
-      {/* Master Card */}
-      {masterAccount && masterState && (
-        <div className="bg-card p-6 rounded-lg border border-line">
-          <div className="flex items-baseline justify-between mb-5">
-            <h3 className="font-display text-xl font-semibold text-ink">
-              Master Account ({masterAccount.trader_login})
-            </h3>
-            {masterAccount.nickname && (
-              <span className="text-sm text-ink-soft">{masterAccount.nickname}</span>
+            {expandedKpi === 'portfolio' && (
+              <div id="kpi-panel-portfolio">
+                <PortfolioPanel orgId={orgId} accounts={accounts} state={state} />
+              </div>
             )}
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <div className="rounded border border-line bg-paper p-4">
-              <div className="desk-label">Equity</div>
-              <div className="num text-2xl font-semibold mt-1 text-brand">{money(masterState.equity)}</div>
-            </div>
-            <div className="rounded border border-line bg-paper p-4">
-              <div className="desk-label">Balance</div>
-              <div className="num text-2xl font-semibold mt-1 text-ink">{money(masterState.balance)}</div>
-            </div>
-            <div className="rounded border border-line bg-paper p-4">
-              <div className={`desk-label ${masterState.open_pnl >= 0 ? 'text-profit' : 'text-loss'}`}>
-                Open P&L
+            {expandedKpi === 'accounts' && (
+              <div id="kpi-panel-accounts">
+                <FleetStatusPanel orgId={orgId} accounts={accounts} />
               </div>
-              <div className={`num text-2xl font-semibold mt-1 ${masterState.open_pnl >= 0 ? 'text-profit' : 'text-loss'}`}>
-                {signed(masterState.open_pnl)}
+            )}
+            {expandedKpi === 'fills' && (
+              <div id="kpi-panel-fills">
+                <FillsPanel orgId={orgId} fills={todaysFills} />
               </div>
-            </div>
-          </div>
-        </div>
-      )}
+            )}
+            {expandedKpi === 'contracts' && (
+              <div id="kpi-panel-contracts">
+                <ContractsPanel
+                  orgId={orgId}
+                  rows={openContracts}
+                  canTrade={can(role, 'trade')}
+                  closingIds={closingIds}
+                  onClose={setClosingContract}
+                  onCloseAll={() => setClosingAll(true)}
+                />
+              </div>
+            )}
+          </section>
 
-      {/* Slave Grid */}
-      {slaveAccounts.length > 0 && (
-        <div>
-          <h3 className="font-display text-xl font-semibold text-ink mb-4">Slave Accounts</h3>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {slaveAccounts.map((slave) => {
-              const slaveState = state[String(slave.ctid_trader_account_id)]
-              const isPaused = !slave.enabled
-              const isDegraded = slave.status === 'degraded'
-              const isRefreshFailed = slave.connection_status === 'refresh_failed'
-              // An MT5 terminal that has stopped reporting: copies queue and
-              // market opens expire after 30 s, so it is the same class of
-              // problem as a failed token refresh.
-              const isOffline = slave.connection_status === 'offline'
+          <AttentionCard items={attention} calmState={calmState} />
 
-              let statusTone: 'ok' | 'paused' | 'degraded' = 'ok'
-              let statusLabel = 'OK'
-              if (isPaused) {
-                statusTone = 'paused'
-                statusLabel = 'Paused'
-              } else if (isDegraded) {
-                statusTone = 'degraded'
-                statusLabel = 'Degraded'
-              }
+          <FleetGrid
+            orgId={orgId}
+            master={masterAccount}
+            masterState={masterState}
+            followers={followers}
+            state={state}
+            onPauseResume={handlePauseResume}
+          />
 
-              return (
-                <div
-                  key={slave.ctid_trader_account_id}
-                  data-testid="slave-tile"
-                  className={`bg-card p-5 rounded-lg border transition-colors hover:border-line-strong ${
-                    isRefreshFailed || isOffline ? 'border-warn' : 'border-line'
-                  }`}
-                >
-                  {/* Header with status */}
-                  <div className="flex items-center justify-between mb-4">
-                    <div>
-                      <h4 className="font-semibold text-ink">
-                        {slave.nickname || `Account ${slave.trader_login}`}
-                      </h4>
-                      <p className="num text-xs text-ink-faint mt-0.5">
-                        {slave.nickname ? `${slave.trader_login} · ` : ''}ID: {slave.ctid_trader_account_id}
-                      </p>
-                    </div>
-                    <div className="flex flex-col items-center gap-1">
-                      <StatusDot tone={statusTone} />
-                      <p className="desk-label">{statusLabel}</p>
-                    </div>
-                  </div>
+          {followers.length === 0 && (
+            <SetupChecklist orgId={orgId} accounts={accounts} settings={settings} />
+          )}
 
-                  {/* Reason for degraded status - the send-failure message from the backend */}
-                  {isDegraded && slave.last_error && (
-                    <p
-                      data-testid="slave-last-error"
-                      title={slave.last_error}
-                      className="mb-4 text-xs text-loss-deep bg-loss-wash border border-loss/20 rounded px-2 py-1 truncate"
-                    >
-                      {slave.last_error}
-                    </p>
-                  )}
-
-                  {/* Connection markers - distinct from the degraded badge above */}
-                  {isRefreshFailed && (
-                    <div
-                      data-testid="slave-refresh-failed-marker"
-                      className="mb-4 px-3 py-2 bg-warn-wash border border-warn/40 text-warn-deep text-xs font-semibold rounded flex items-center gap-1.5"
-                    >
-                      <StatusDot tone="warn" /> Token refresh failed — reconnect required
-                    </div>
-                  )}
-                  {isOffline && (
-                    <div
-                      data-testid="slave-offline-marker"
-                      className="mb-4 px-3 py-2 bg-warn-wash border border-warn/40 text-warn-deep text-xs font-semibold rounded flex items-center gap-1.5"
-                    >
-                      <StatusDot tone="warn" /> Terminal offline — copies wait until the EA reports again
-                    </div>
-                  )}
-
-                  {/* Stats */}
-                  {slaveState && (
-                    <div className="space-y-1.5 mb-4 text-sm">
-                      <div className="flex justify-between">
-                        <span className="text-ink-soft">Equity:</span>
-                        <span className="num text-ink">{money(slaveState.equity)}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-ink-soft">Balance:</span>
-                        <span className="num text-ink">{money(slaveState.balance)}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-ink-soft">Open Positions:</span>
-                        <span className="num text-ink">{slaveState.positions?.length || 0}</span>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Action Button */}
-                  <Button
-                    block
-                    variant={isPaused ? 'primary' : 'secondary'}
-                    tone={isPaused ? 'profit' : 'brand'}
-                    onClick={() => handlePauseResume(slave.ctid_trader_account_id, isPaused)}
-                  >
-                    {isPaused ? 'Resume' : 'Pause'}
-                  </Button>
-                </div>
-              )
-            })}
-          </div>
-        </div>
-      )}
-
-      {slaveAccounts.length === 0 && (
-        <div className="text-center py-12 text-ink-faint">No slave accounts configured</div>
+          <CopyLogCard copies={stats?.recent_copies ?? []} masterPnlByPosition={masterPnlByPosition} />
+        </>
       )}
 
       {/* Close one contract */}
@@ -878,7 +562,7 @@ export default function Overview() {
           <span className="num">{closingContract?.pos.symbol ?? closingContract?.pos.symbol_id}</span>{' '}
           on {closingContract?.accountLabel} closes at market.
           {closingContract?.accountLabel.includes('master') &&
-            ' Closing a master position also closes its copies on every slave.'}
+            ' Closing a master position also closes its copies on every follower.'}
         </p>
       </ConfirmDialog>
 
@@ -894,7 +578,7 @@ export default function Overview() {
       >
         <p>
           Every contract listed here closes at market — master positions first
-          replicate their close to their slave copies. Copying itself stays
+          replicate their close to their follower copies. Copying itself stays
           running; this does not pause the copier.
         </p>
       </ConfirmDialog>

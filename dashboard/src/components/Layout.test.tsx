@@ -675,3 +675,175 @@ test('a navigation mounts the entering page once, not twice', async () => {
   })
   expect(mounts).toHaveBeenCalledTimes(1)
 })
+
+// ---------- the kill switch (moved here from Overview in Task 6) ----------
+
+function settingsPuts(fetchMock: ReturnType<typeof mockRoutes>) {
+  return fetchMock.mock.calls.filter((call) =>
+    String(call[0]).includes('/api/orgs/1/settings') &&
+    (call[1] as RequestInit | undefined)?.method === 'PUT')
+}
+
+test('the strip kill switch confirms, then PUTs copying_enabled false', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
+  const fetchMock = mockRoutes()
+  renderLayout()
+
+  await userEvent.click(await screen.findByRole('button', { name: /stop copying/i }))
+  const dialog = await screen.findByRole('dialog')
+  expect(dialog).toHaveTextContent(/stop copying\?/i)
+  await userEvent.click(within(dialog).getByRole('button', { name: /^stop copying$/i }))
+
+  await waitFor(() => {
+    const put = settingsPuts(fetchMock)[0]
+    expect(put).toBeDefined()
+    expect(JSON.parse((put[1] as RequestInit).body as string).copying_enabled).toBe(false)
+  })
+})
+
+test('the strip kill switch does not PUT if the dialog is cancelled', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
+  const fetchMock = mockRoutes()
+  renderLayout()
+
+  await userEvent.click(await screen.findByRole('button', { name: /stop copying/i }))
+  const dialog = await screen.findByRole('dialog')
+  await userEvent.click(within(dialog).getByRole('button', { name: /cancel/i }))
+
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  expect(settingsPuts(fetchMock)).toHaveLength(0)
+})
+
+test('the strip kill switch resume: confirming PUTs copying_enabled true', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
+  const fetchMock = mockRoutes({ settings: { copying_enabled: false, dry_run: false, shards: 1 } })
+  renderLayout()
+
+  await userEvent.click(await screen.findByRole('button', { name: /resume copying/i }))
+  const dialog = await screen.findByRole('dialog')
+  expect(dialog).toHaveTextContent(/resume copying\?/i)
+  await userEvent.click(within(dialog).getByRole('button', { name: /^resume copying$/i }))
+
+  await waitFor(() => {
+    const put = settingsPuts(fetchMock)[0]
+    expect(put).toBeDefined()
+    expect(JSON.parse((put[1] as RequestInit).body as string).copying_enabled).toBe(true)
+  })
+})
+
+test('the strip kill switch resume: cancelling the dialog sends nothing', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
+  const fetchMock = mockRoutes({ settings: { copying_enabled: false, dry_run: false, shards: 1 } })
+  renderLayout()
+
+  await userEvent.click(await screen.findByRole('button', { name: /resume copying/i }))
+  const dialog = await screen.findByRole('dialog')
+  await userEvent.click(within(dialog).getByRole('button', { name: /cancel/i }))
+
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  expect(settingsPuts(fetchMock)).toHaveLength(0)
+})
+
+test('the strip dry-run toggle PUTs dry_run: true when enabling', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
+  const fetchMock = mockRoutes() // dry_run: false
+  renderLayout()
+
+  const toggle = await screen.findByTestId('dry-run-toggle')
+  expect(toggle).toHaveTextContent(/turn dry-run on/i)
+  await userEvent.click(toggle)
+
+  await waitFor(() => {
+    const put = settingsPuts(fetchMock)[0]
+    expect(put).toBeDefined()
+    // The real value must be in the body -- the dashboard half of the seam
+    // where the api once forwarded a hardcoded empty body.
+    expect(JSON.parse((put[1] as RequestInit).body as string)).toEqual({ dry_run: true })
+  })
+})
+
+test('enabling dry-run from the strip needs no confirmation (it is the safe direction)', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
+  const fetchMock = mockRoutes()
+  renderLayout()
+
+  await userEvent.click(await screen.findByTestId('dry-run-toggle'))
+
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  await waitFor(() => expect(settingsPuts(fetchMock).length).toBeGreaterThan(0))
+})
+
+test('disabling dry-run from the strip confirms first, then PUTs dry_run: false', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
+  const fetchMock = mockRoutes({ settings: { copying_enabled: true, dry_run: true, shards: 1 } })
+  renderLayout()
+
+  const toggle = await screen.findByTestId('dry-run-toggle')
+  expect(toggle).toHaveTextContent(/turn dry-run off/i)
+  await userEvent.click(toggle)
+
+  const dialog = await screen.findByRole('dialog')
+  expect(dialog).toHaveTextContent(/turn dry-run off\?/i)
+  await userEvent.click(within(dialog).getByRole('button', { name: /^turn dry-run off$/i }))
+
+  await waitFor(() => {
+    const put = settingsPuts(fetchMock)[0]
+    expect(put).toBeDefined()
+    expect(JSON.parse((put[1] as RequestInit).body as string)).toEqual({ dry_run: false })
+  })
+})
+
+test('disabling dry-run from the strip does not PUT if the dialog is cancelled', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
+  const fetchMock = mockRoutes({ settings: { copying_enabled: true, dry_run: true, shards: 1 } })
+  renderLayout()
+
+  await userEvent.click(await screen.findByTestId('dry-run-toggle'))
+  const dialog = await screen.findByRole('dialog')
+  await userEvent.click(within(dialog).getByRole('button', { name: /cancel/i }))
+
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  expect(settingsPuts(fetchMock)).toHaveLength(0)
+})
+
+test('the strip DRY RUN badge reflects the toggled state without a reload', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
+  mockRoutes() // dry_run: false -> no badge initially
+  renderLayout()
+
+  await screen.findByTestId('dry-run-toggle')
+  expect(screen.queryByText(/^DRY RUN$/)).not.toBeInTheDocument()
+
+  await userEvent.click(screen.getByTestId('dry-run-toggle'))
+
+  expect(await screen.findByText(/^DRY RUN$/)).toBeInTheDocument()
+  // One dry-run marker for an admin: the kill switch's badge, not the strip chip too.
+  expect(screen.queryByText('Dry run')).not.toBeInTheDocument()
+})
+
+test('the strip kill switch is hidden for a viewer (below control)', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('viewer'))
+  mockRoutes()
+  renderLayout()
+
+  await screen.findByText(/copying live/i)
+  expect(screen.queryByRole('button', { name: /stop copying|resume copying/i })).not.toBeInTheDocument()
+  expect(screen.queryByTestId('dry-run-toggle')).not.toBeInTheDocument()
+})
+
+test('the strip kill switch is visible for an admin (control)', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
+  mockRoutes()
+  renderLayout()
+
+  expect(await screen.findByRole('button', { name: /stop copying/i })).toBeInTheDocument()
+  expect(screen.getByTestId('dry-run-toggle')).toBeInTheDocument()
+})
+
+test('a viewer, who has no kill switch, still sees the strip dry-run chip', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('viewer'))
+  mockRoutes({ settings: { copying_enabled: true, dry_run: true, shards: 1 } })
+  renderLayout()
+
+  expect(await screen.findByText('Dry run')).toBeInTheDocument()
+})

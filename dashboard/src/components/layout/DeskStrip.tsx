@@ -8,6 +8,7 @@ import type { TicksPayload } from '../../lib/ticks'
 import type { Account, ApiState, CloseAllResult, EventResponse, Settings, WebhookSettings } from '../../lib/types'
 import Button from '../Button'
 import ConfirmDialog from '../ConfirmDialog'
+import KillSwitch from '../KillSwitch'
 import { money, signed, errorText } from '../../lib/format'
 
 function localISODate(): string {
@@ -250,10 +251,15 @@ export default function DeskStrip({ onAccounts }: { onAccounts?: (accounts: Acco
             </span>
           </Link>
         )}
-        {dryRun && (
+        {dryRun && !can(role, 'control') && (
           <span className="order-2 desk-label text-warn-deep bg-warn-wash px-2 py-0.5 rounded">
             Dry run
           </span>
+        )}
+        {settings && can(role, 'control') && (
+          <div className="order-3 ml-auto md:order-5 md:ml-0 flex items-center">
+            <KillSwitch settings={settings} onUpdate={setSettings} />
+          </div>
         )}
         {can(role, 'control') && (
           <Button

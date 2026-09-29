@@ -10,6 +10,20 @@ import { mt5Account } from '../test/mt5Fixtures'
 
 const { useOrgMock } = vi.hoisted(() => ({ useOrgMock: vi.fn() }))
 vi.mock('../lib/org', () => ({ useOrg: useOrgMock }))
+const { fakeSockets } = vi.hoisted(() => ({
+  fakeSockets: [] as Array<{ onmessage: ((e: { data: string }) => void) | null }>,
+}))
+vi.mock('../lib/api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../lib/api')>()
+  return {
+    ...actual,
+    eventsSocket: () => {
+      const ws = { onmessage: null, onclose: null, onerror: null, close: () => {} }
+      fakeSockets.push(ws as never)
+      return ws as unknown as WebSocket
+    },
+  }
+})
 
 function setRole(role: Role) {
   useOrgMock.mockReturnValue(mockUseOrg(role))
@@ -139,7 +153,7 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-test('renders master card with equity/balance/pnl', async () => {
+test('master equity sits in the KPI row; the master card keeps balance and P&L', async () => {
   setRole('admin')
   stubApi({
     '/api/orgs/1/accounts': mockAccounts,
@@ -155,7 +169,7 @@ test('renders master card with equity/balance/pnl', async () => {
 
   // Wait for master card to render (check for master account header)
   await waitFor(() => {
-    expect(screen.getByText(/Master Account \(1001\)/)).toBeInTheDocument()
+    expect(screen.getByText(/Master account \(1001\)/)).toBeInTheDocument()
   })
 
   // Check master card displays the values
@@ -210,7 +224,7 @@ test('master card renders equity/balance/P&L read from the nested accounts block
 
   // The master card only renders when the account's state block was found.
   await waitFor(() => {
-    expect(screen.getByText(/Master Account \(1001\)/)).toBeInTheDocument()
+    expect(screen.getByText(/Master account \(1001\)/)).toBeInTheDocument()
   })
 
   // Account 1 is the master; its numbers come from envelope.accounts['1'].
@@ -241,11 +255,9 @@ test('renders no account stats when the accounts block is empty, without crashin
     </MemoryRouter>
   )
 
-  await waitFor(() => {
-    expect(screen.getByText('Copying Status')).toBeInTheDocument()
-  })
+  await screen.findByTestId('attention-card')
 
-  expect(screen.queryByText(/Master Account \(1001\)/)).not.toBeInTheDocument()
+  expect(screen.queryByText(/Master account \(1001\)/)).not.toBeInTheDocument()
   expect(screen.queryByText('12,000.00')).not.toBeInTheDocument()
   // Slave tiles still render (they come from /api/orgs/1/accounts), just without stats.
   expect(screen.getAllByTestId('slave-tile').length).toBeGreaterThanOrEqual(2)
@@ -266,158 +278,17 @@ test('renders slave tiles with status icons', async () => {
   )
 
   // Wait for data to load
-  await waitFor(() => {
-    expect(screen.getByText(/1002/)).toBeInTheDocument()
-  })
+  await screen.findAllByTestId('slave-tile')
 
-  // Check slave tiles are rendered with login numbers
-  expect(screen.getByText(/1002/)).toBeInTheDocument() // Slave 1 (ok)
-  expect(screen.getByText(/1003/)).toBeInTheDocument() // Slave 2 (degraded)
+  // Check slave tiles are rendered with login numbers. Each tile's View link
+  // also names its account for screen readers, so the login is matched on
+  // the tile heading rather than on any text.
+  expect(screen.getByRole('heading', { name: 'Account 1002' })).toBeInTheDocument() // Slave 1 (ok)
+  expect(screen.getByRole('heading', { name: 'Account 1003' })).toBeInTheDocument() // Slave 2 (degraded)
 
   // Check status icons exist (use emoji checks or data-testid)
   const tiles = screen.getAllByTestId(/slave-tile/)
   expect(tiles.length).toBeGreaterThanOrEqual(2)
-})
-
-test('kill switch confirms then PUTs copying_enabled false', async () => {
-  setRole('admin')
-  const fetchMock = stubApi({
-    '/api/orgs/1/accounts': mockAccounts,
-    '/api/orgs/1/settings': mockSettings,
-    '/api/orgs/1/state': mockState,
-  })
-
-  render(
-    <MemoryRouter>
-      <Overview />
-    </MemoryRouter>
-  )
-
-  // Wait for data to load
-  await waitFor(() => {
-    expect(screen.getByRole('button', { name: /stop copying/i })).toBeInTheDocument()
-  })
-
-  const killSwitchButton = screen.getByRole('button', { name: /stop copying/i })
-  await userEvent.click(killSwitchButton)
-
-  const dialog = await screen.findByRole('dialog')
-  expect(dialog).toHaveTextContent(/stop copying\?/i)
-  await userEvent.click(within(dialog).getByRole('button', { name: /^stop copying$/i }))
-
-  // Verify PUT request was made with copying_enabled: false
-  await waitFor(() => {
-    const putCall = fetchMock.mock.calls.find(
-      (call) => call[1]?.method === 'PUT' && call[0].includes('/api/orgs/1/settings')
-    )
-    expect(putCall).toBeDefined()
-    const body = JSON.parse(putCall![1]?.body as string)
-    expect(body.copying_enabled).toBe(false)
-  })
-})
-
-test('kill switch does not PUT if the dialog is cancelled', async () => {
-  setRole('admin')
-  const fetchMock = stubApi({
-    '/api/orgs/1/accounts': mockAccounts,
-    '/api/orgs/1/settings': mockSettings,
-    '/api/orgs/1/state': mockState,
-  })
-
-  render(
-    <MemoryRouter>
-      <Overview />
-    </MemoryRouter>
-  )
-
-  await waitFor(() => {
-    expect(screen.getByRole('button', { name: /stop copying/i })).toBeInTheDocument()
-  })
-
-  const killSwitchButton = screen.getByRole('button', { name: /stop copying/i })
-  await userEvent.click(killSwitchButton)
-
-  const dialog = await screen.findByRole('dialog')
-  await userEvent.click(within(dialog).getByRole('button', { name: /cancel/i }))
-
-  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
-
-  // No PUT should be made
-  const putCall = fetchMock.mock.calls.find(
-    (call) => call[1]?.method === 'PUT' && call[0].includes('/api/orgs/1/settings')
-  )
-  expect(putCall).toBeUndefined()
-})
-
-test('kill switch resume: confirming opens the dialog and PUTs copying_enabled true', async () => {
-  setRole('admin')
-  const stoppedSettings: Settings = { copying_enabled: false, dry_run: false }
-  const fetchMock = stubApi({
-    '/api/orgs/1/accounts': mockAccounts,
-    '/api/orgs/1/settings': stoppedSettings,
-    '/api/orgs/1/state': mockState,
-  })
-
-  render(
-    <MemoryRouter>
-      <Overview />
-    </MemoryRouter>
-  )
-
-  await waitFor(() => {
-    expect(screen.getByRole('button', { name: /resume copying/i })).toBeInTheDocument()
-  })
-
-  const killSwitchButton = screen.getByRole('button', { name: /resume copying/i })
-  await userEvent.click(killSwitchButton)
-
-  const dialog = await screen.findByRole('dialog')
-  expect(dialog).toHaveTextContent(/resume copying\?/i)
-  await userEvent.click(within(dialog).getByRole('button', { name: /^resume copying$/i }))
-
-  // Verify PUT request was made with copying_enabled: true
-  await waitFor(() => {
-    const putCall = fetchMock.mock.calls.find(
-      (call) => call[1]?.method === 'PUT' && call[0].includes('/api/orgs/1/settings')
-    )
-    expect(putCall).toBeDefined()
-    const body = JSON.parse(putCall![1]?.body as string)
-    expect(body.copying_enabled).toBe(true)
-  })
-})
-
-test('kill switch resume: cancelling the dialog sends nothing', async () => {
-  setRole('admin')
-  const stoppedSettings: Settings = { copying_enabled: false, dry_run: false }
-  const fetchMock = stubApi({
-    '/api/orgs/1/accounts': mockAccounts,
-    '/api/orgs/1/settings': stoppedSettings,
-    '/api/orgs/1/state': mockState,
-  })
-
-  render(
-    <MemoryRouter>
-      <Overview />
-    </MemoryRouter>
-  )
-
-  await waitFor(() => {
-    expect(screen.getByRole('button', { name: /resume copying/i })).toBeInTheDocument()
-  })
-
-  const killSwitchButton = screen.getByRole('button', { name: /resume copying/i })
-  await userEvent.click(killSwitchButton)
-
-  const dialog = await screen.findByRole('dialog')
-  await userEvent.click(within(dialog).getByRole('button', { name: /cancel/i }))
-
-  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
-
-  // No PUT should be made
-  const putCall = fetchMock.mock.calls.find(
-    (call) => call[1]?.method === 'PUT' && call[0].includes('/api/orgs/1/settings')
-  )
-  expect(putCall).toBeUndefined()
 })
 
 test('per-slave pause posts to /api/orgs/1/control/pause with account_id', async () => {
@@ -495,6 +366,8 @@ test('shows dry-run badge when dry_run enabled', async () => {
   await waitFor(() => {
     expect(screen.getByText(/DRY RUN/i)).toBeInTheDocument()
   })
+  // The one place Overview states it: the Attention card's calm line.
+  expect(screen.getByTestId('attention-card')).toHaveTextContent('All clear — dry run, copies are simulated')
 })
 
 test('does not show refresh-failed banner when all connections are active', async () => {
@@ -518,7 +391,7 @@ test('does not show refresh-failed banner when all connections are active', asyn
   )
 
   await waitFor(() => {
-    expect(screen.getByText(/Master Account \(1001\)/)).toBeInTheDocument()
+    expect(screen.getByText(/Master account \(1001\)/)).toBeInTheDocument()
   })
 
   expect(screen.queryByTestId('refresh-failed-banner')).not.toBeInTheDocument()
@@ -586,7 +459,7 @@ test('shows refresh-failed banner above the master card when the master itself h
   expect(banner).toHaveTextContent('1001')
 
   // Banner must precede the master card in document order
-  const masterHeading = screen.getByText(/Master Account \(1001\)/)
+  const masterHeading = screen.getByText(/Master account \(1001\)/)
   // eslint-disable-next-line no-bitwise
   expect(banner.compareDocumentPosition(masterHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
 })
@@ -611,9 +484,7 @@ test('slave tile shows Degraded status from account.status, not connection_statu
     </MemoryRouter>
   )
 
-  await waitFor(() => {
-    expect(screen.getByText(/1002/)).toBeInTheDocument()
-  })
+  await screen.findAllByTestId('slave-tile')
 
   // account.status === 'degraded' must drive the degraded badge, even though
   // connection_status is 'active' (connection_status never holds 'degraded').
@@ -652,6 +523,14 @@ test('degraded slave tile shows the last_error reason', async () => {
   const errorEl = screen.getByTestId('slave-last-error')
   expect(errorEl).toHaveTextContent('Send failed: insufficient margin on EURUSD')
   expect(errorEl).toHaveAttribute('title', 'Send failed: insufficient margin on EURUSD')
+
+  // Too long for one line: a visible toggle expands it in place, so the
+  // reason is not reachable only by hovering a tooltip.
+  const toggle = within(screen.getByTestId('slave-tile-2')).getByRole('button', { name: 'Show details' })
+  expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  await userEvent.click(toggle)
+  expect(within(screen.getByTestId('slave-tile-2')).getByRole('button', { name: 'Hide details' }))
+    .toHaveAttribute('aria-expanded', 'true')
 })
 
 test('non-degraded slave tile never shows a last_error message', async () => {
@@ -679,9 +558,7 @@ test('non-degraded slave tile never shows a last_error message', async () => {
     </MemoryRouter>
   )
 
-  await waitFor(() => {
-    expect(screen.getByText(/1002/)).toBeInTheDocument()
-  })
+  await screen.findByRole('heading', { name: 'Account 1002' })
 
   expect(screen.queryByTestId('slave-last-error')).not.toBeInTheDocument()
 })
@@ -735,7 +612,7 @@ test(
 
     // Wait for initial render and data load
     await waitFor(() => {
-      expect(screen.getByText(/Master Account \(1001\)/)).toBeInTheDocument()
+      expect(screen.getByText(/Master account \(1001\)/)).toBeInTheDocument()
     })
 
     // Verify that /api/orgs/1/state was called during initial load
@@ -752,45 +629,12 @@ test(
   }
 )
 
-// ---------- N1: the dry-run toggle ----------
+// ---------- the kill switch lives in the desk strip, not on Overview ----------
+// Its stop/resume and dry-run behaviour is tested in components/Layout.test.tsx.
 
-test('dry-run toggle PUTs dry_run: true when enabling', async () => {
+test('Overview renders no kill switch for an admin: the desk strip carries it', async () => {
   setRole('admin')
-  const fetchMock = stubApi({
-    '/api/orgs/1/accounts': mockAccounts,
-    '/api/orgs/1/settings': mockSettings, // dry_run: false
-    '/api/orgs/1/state': mockState,
-  })
-
-  render(
-    <MemoryRouter>
-      <Overview />
-    </MemoryRouter>
-  )
-
-  await waitFor(() => {
-    expect(screen.getByTestId('dry-run-toggle')).toBeInTheDocument()
-  })
-
-  const toggle = screen.getByTestId('dry-run-toggle')
-  expect(toggle).toHaveTextContent(/turn dry-run on/i)
-  await userEvent.click(toggle)
-
-  await waitFor(() => {
-    const putCall = fetchMock.mock.calls.find(
-      (call) => call[1]?.method === 'PUT' && call[0].includes('/api/orgs/1/settings')
-    )
-    expect(putCall).toBeDefined()
-    // The real value must be in the body -- this is the dashboard half of
-    // the seam where the api forwarded a hardcoded empty body and the copier
-    // read the absent "enabled" as false.
-    expect(JSON.parse(putCall![1]?.body as string)).toEqual({ dry_run: true })
-  })
-})
-
-test('enabling dry-run needs no confirmation (it is the safe direction)', async () => {
-  setRole('admin')
-  const fetchMock = stubApi({
+  stubApi({
     '/api/orgs/1/accounts': mockAccounts,
     '/api/orgs/1/settings': mockSettings,
     '/api/orgs/1/state': mockState,
@@ -802,106 +646,13 @@ test('enabling dry-run needs no confirmation (it is the safe direction)', async 
     </MemoryRouter>
   )
 
-  await waitFor(() => expect(screen.getByTestId('dry-run-toggle')).toBeInTheDocument())
-  await userEvent.click(screen.getByTestId('dry-run-toggle'))
-
-  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
-  await waitFor(() => {
-    const putCall = fetchMock.mock.calls.find(
-      (call) => call[1]?.method === 'PUT' && call[0].includes('/api/orgs/1/settings')
-    )
-    expect(putCall).toBeDefined()
-  })
+  await screen.findByTestId('attention-card')
+  expect(screen.queryByRole('button', { name: /stop copying|resume copying/i })).not.toBeInTheDocument()
+  expect(screen.queryByTestId('dry-run-toggle')).not.toBeInTheDocument()
+  expect(screen.queryByText('Copying Status')).not.toBeInTheDocument()
 })
 
-test('disabling dry-run confirms first, then PUTs dry_run: false', async () => {
-  setRole('admin')
-  const dryRunSettings: Settings = { copying_enabled: true, dry_run: true }
-  const fetchMock = stubApi({
-    '/api/orgs/1/accounts': mockAccounts,
-    '/api/orgs/1/settings': dryRunSettings,
-    '/api/orgs/1/state': mockState,
-  })
-
-  render(
-    <MemoryRouter>
-      <Overview />
-    </MemoryRouter>
-  )
-
-  await waitFor(() => expect(screen.getByTestId('dry-run-toggle')).toBeInTheDocument())
-  const toggle = screen.getByTestId('dry-run-toggle')
-  expect(toggle).toHaveTextContent(/turn dry-run off/i)
-  await userEvent.click(toggle)
-
-  const dialog = await screen.findByRole('dialog')
-  expect(dialog).toHaveTextContent(/turn dry-run off\?/i)
-  await userEvent.click(within(dialog).getByRole('button', { name: /^turn dry-run off$/i }))
-
-  await waitFor(() => {
-    const putCall = fetchMock.mock.calls.find(
-      (call) => call[1]?.method === 'PUT' && call[0].includes('/api/orgs/1/settings')
-    )
-    expect(putCall).toBeDefined()
-    expect(JSON.parse(putCall![1]?.body as string)).toEqual({ dry_run: false })
-  })
-})
-
-test('disabling dry-run does not PUT if the dialog is cancelled', async () => {
-  setRole('admin')
-  const dryRunSettings: Settings = { copying_enabled: true, dry_run: true }
-  const fetchMock = stubApi({
-    '/api/orgs/1/accounts': mockAccounts,
-    '/api/orgs/1/settings': dryRunSettings,
-    '/api/orgs/1/state': mockState,
-  })
-
-  render(
-    <MemoryRouter>
-      <Overview />
-    </MemoryRouter>
-  )
-
-  await waitFor(() => expect(screen.getByTestId('dry-run-toggle')).toBeInTheDocument())
-  await userEvent.click(screen.getByTestId('dry-run-toggle'))
-
-  const dialog = await screen.findByRole('dialog')
-  await userEvent.click(within(dialog).getByRole('button', { name: /cancel/i }))
-
-  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
-  const putCall = fetchMock.mock.calls.find(
-    (call) => call[1]?.method === 'PUT' && call[0].includes('/api/orgs/1/settings')
-  )
-  expect(putCall).toBeUndefined()
-})
-
-test('the dry-run badge reflects the toggled state without a reload', async () => {
-  setRole('admin')
-  stubApi({
-    '/api/orgs/1/accounts': mockAccounts,
-    '/api/orgs/1/settings': mockSettings, // dry_run: false -> no badge initially
-    '/api/orgs/1/state': mockState,
-  })
-
-  render(
-    <MemoryRouter>
-      <Overview />
-    </MemoryRouter>
-  )
-
-  await waitFor(() => expect(screen.getByTestId('dry-run-toggle')).toBeInTheDocument())
-  expect(screen.queryByText(/^DRY RUN$/)).not.toBeInTheDocument()
-
-  await userEvent.click(screen.getByTestId('dry-run-toggle'))
-
-  await waitFor(() => {
-    expect(screen.getByText(/^DRY RUN$/)).toBeInTheDocument()
-  })
-})
-
-// ---------- Task 17: KillSwitch role gating ----------
-
-test('kill switch is hidden for a viewer (below control)', async () => {
+test('Overview renders no kill switch for a viewer either', async () => {
   setRole('viewer')
   stubApi({
     '/api/orgs/1/accounts': mockAccounts,
@@ -915,30 +666,9 @@ test('kill switch is hidden for a viewer (below control)', async () => {
     </MemoryRouter>
   )
 
-  await waitFor(() => {
-    expect(screen.getByText('Copying Status')).toBeInTheDocument()
-  })
-
+  await screen.findByTestId('attention-card')
   expect(screen.queryByRole('button', { name: /stop copying|resume copying/i })).not.toBeInTheDocument()
   expect(screen.queryByTestId('dry-run-toggle')).not.toBeInTheDocument()
-})
-
-test('kill switch is visible for an admin (control)', async () => {
-  setRole('admin')
-  stubApi({
-    '/api/orgs/1/accounts': mockAccounts,
-    '/api/orgs/1/settings': mockSettings,
-    '/api/orgs/1/state': mockState,
-  })
-
-  render(
-    <MemoryRouter>
-      <Overview />
-    </MemoryRouter>
-  )
-
-  expect(await screen.findByRole('button', { name: /stop copying/i })).toBeInTheDocument()
-  expect(screen.getByTestId('dry-run-toggle')).toBeInTheDocument()
 })
 
 // ---------- redesigned stat sections (org-scoped) ----------
@@ -1021,11 +751,10 @@ test('portfolio row aggregates equity and compares to yesterday', async () => {
   expect(await screen.findByText(formatted)).toBeInTheDocument()
   // vs yesterday: (total - 20000) / 20000, shown as a signed percentage
   expect(screen.getByText(/% vs yesterday/)).toBeInTheDocument()
-  expect(screen.getByText('Accounts connected')).toBeInTheDocument()
-  expect(screen.getByText('3')).toBeInTheDocument()
+  expect(screen.getByText(/3 accounts connected/)).toBeInTheDocument()
 })
 
-test('the Portfolio Value tile expands a per-account breakdown in place', async () => {
+test("the Master equity tile's View control expands a per-account breakdown in place", async () => {
   setRole('admin')
   stubApi(statsRoutes())
   const { within } = await import('@testing-library/react')
@@ -1036,10 +765,10 @@ test('the Portfolio Value tile expands a per-account breakdown in place', async 
     </MemoryRouter>
   )
 
-  await screen.findByText('Copying Status')
+  await screen.findByTestId('attention-card')
   expect(screen.queryByText(/portfolio breakdown/i)).not.toBeInTheDocument()
 
-  await userEvent.click(screen.getByRole('button', { name: /portfolio value/i }))
+  await userEvent.click(screen.getByRole('button', { name: /view all accounts/i }))
   const panel = screen.getByText(/portfolio breakdown/i).closest('section')!
   // One row per account with its equity from the live state
   expect(within(panel).getByText('12,000.00')).toBeInTheDocument()
@@ -1047,7 +776,7 @@ test('the Portfolio Value tile expands a per-account breakdown in place', async 
   expect(within(panel).getByText('2,900.00')).toBeInTheDocument()
 })
 
-test('the Accounts Connected tile expands a fleet status list, accordion-style', async () => {
+test('the Followers copying tile expands a fleet status list, accordion-style', async () => {
   setRole('admin')
   stubApi(statsRoutes())
   const { within } = await import('@testing-library/react')
@@ -1058,15 +787,15 @@ test('the Accounts Connected tile expands a fleet status list, accordion-style',
     </MemoryRouter>
   )
 
-  await screen.findByText('Copying Status')
+  await screen.findByTestId('attention-card')
   // Open portfolio first, then accounts — accordion closes the first panel
-  await userEvent.click(screen.getByRole('button', { name: /portfolio value/i }))
+  await userEvent.click(screen.getByRole('button', { name: /view all accounts/i }))
   expect(screen.getByText(/portfolio breakdown/i)).toBeInTheDocument()
 
-  await userEvent.click(screen.getByRole('button', { name: /accounts connected/i }))
+  await userEvent.click(screen.getByRole('button', { name: /view fleet health/i }))
   expect(screen.queryByText(/portfolio breakdown/i)).not.toBeInTheDocument()
   const panel = screen.getByText(/fleet status/i).closest('section')!
-  expect(within(panel).getAllByText(/slave/i).length).toBeGreaterThanOrEqual(2)
+  expect(within(panel).getAllByText(/follower/i).length).toBeGreaterThanOrEqual(2)
   expect(within(panel).getByText(/master/i)).toBeInTheDocument()
   expect(within(panel).getByText(/degraded/i)).toBeInTheDocument()
 })
@@ -1084,8 +813,8 @@ test('each open contract row can be closed through a confirm dialog', async () =
     </MemoryRouter>
   )
 
-  await screen.findByText('Copying Status')
-  await userEvent.click(screen.getByRole('button', { name: /open p&l/i }))
+  await screen.findByTestId('attention-card')
+  await userEvent.click(screen.getByRole('button', { name: /view open positions/i }))
   const panel = screen.getByText(/open contracts/i).closest('section')!
 
   const closeButtons = within(panel).getAllByRole('button', { name: /^close$/i })
@@ -1116,8 +845,8 @@ test('the panel close-all button closes every listed contract after confirm', as
     </MemoryRouter>
   )
 
-  await screen.findByText('Copying Status')
-  await userEvent.click(screen.getByRole('button', { name: /open p&l/i }))
+  await screen.findByTestId('attention-card')
+  await userEvent.click(screen.getByRole('button', { name: /view open positions/i }))
   const panel = screen.getByText(/open contracts/i).closest('section')!
 
   await userEvent.click(within(panel).getByRole('button', { name: /close all shown/i }))
@@ -1135,7 +864,7 @@ test('the panel close-all button closes every listed contract after confirm', as
   })
 })
 
-test("the Total P&L tile expands the list of today's copy fills", async () => {
+test("the Today's P&L tile expands the list of today's copy fills", async () => {
   // Renamed from "Copied today": the tile now leads with the fleet's P&L,
   // but it still opens the same fills panel -- that behaviour is what this
   // test protects, not the label.
@@ -1170,8 +899,8 @@ test("the Total P&L tile expands the list of today's copy fills", async () => {
     </MemoryRouter>
   )
 
-  await screen.findByText('Copying Status')
-  await userEvent.click(screen.getByRole('button', { name: /total p&l/i }))
+  await screen.findByTestId('attention-card')
+  await userEvent.click(screen.getByRole('button', { name: /view today's fills/i }))
 
   const panel = screen.getByText(/today's copy fills/i).closest('section')!
   // The fill from an hour ago is listed; the three-day-old one is not
@@ -1179,7 +908,7 @@ test("the Total P&L tile expands the list of today's copy fills", async () => {
   expect(within(panel).queryByText('1.27')).not.toBeInTheDocument()
 })
 
-test('the Open P&L tile expands a live open-contracts panel in place', async () => {
+test('the Open positions tile expands a live open-contracts panel in place', async () => {
   setRole('admin')
   stubApi(statsRoutes())
 
@@ -1189,11 +918,11 @@ test('the Open P&L tile expands a live open-contracts panel in place', async () 
     </MemoryRouter>
   )
 
-  await screen.findByText('Copying Status')
+  await screen.findByTestId('attention-card')
   // Panel hidden until the tile is toggled
   expect(screen.queryByText('+200.00')).not.toBeInTheDocument()
 
-  const tile = screen.getByRole('button', { name: /open p&l/i })
+  const tile = screen.getByRole('button', { name: /view open positions/i })
   expect(tile).toHaveAttribute('aria-expanded', 'false')
   await userEvent.click(tile)
 
@@ -1259,7 +988,7 @@ test('closing a contract acknowledges instantly and keeps refreshing', async () 
     </MemoryRouter>
   )
 
-  const openTile = await screen.findByRole('button', { name: /open p&l/i })
+  const openTile = await screen.findByRole('button', { name: /view open positions/i })
   await userEvent.click(openTile)
   const closeButtons = await screen.findAllByRole('button', { name: /^close$/i })
   await userEvent.click(closeButtons[0])
@@ -1290,7 +1019,7 @@ test('the copier-performance analytics live on Performance, not Overview', async
     </MemoryRouter>
   )
 
-  await screen.findByText(/portfolio value/i)
+  await screen.findByText('Master equity')
   // The four analytics cards and their heading moved to the Performance
   // page; Overview is the live desk, not the results review.
   expect(screen.queryByText(/copier performance/i)).not.toBeInTheDocument()
@@ -1304,7 +1033,7 @@ test('the copier-performance analytics live on Performance, not Overview', async
 })
 
 
-test('Total P&L replaces the copy counter and sums every account', async () => {
+test("Today's P&L replaces the copy counter and sums every account", async () => {
   // Operators wanted one number for the whole fleet -- master and slaves --
   // instead of a fill count that said nothing about money.
   setRole('admin')
@@ -1312,7 +1041,7 @@ test('Total P&L replaces the copy counter and sums every account', async () => {
 
   render(<MemoryRouter><Overview /></MemoryRouter>)
 
-  expect(await screen.findByText('Total P&L')).toBeInTheDocument()
+  expect(await screen.findByText("Today's P&L")).toBeInTheDocument()
   // The old tile must be gone, not merely pushed off screen.
   expect(screen.queryByText('Copied today')).not.toBeInTheDocument()
 })
@@ -1325,7 +1054,7 @@ test('Total P&L shows a dash, not zero, before there is a yesterday', async () =
 
   render(<MemoryRouter><Overview /></MemoryRouter>)
 
-  expect(await screen.findByText('Total P&L')).toBeInTheDocument()
+  expect(await screen.findByText("Today's P&L")).toBeInTheDocument()
   expect(screen.getByText('needs a full day of history')).toBeInTheDocument()
 })
 
@@ -1364,7 +1093,7 @@ test('Total P&L ignores accounts that were not here yesterday', async () => {
 
   render(<MemoryRouter><Overview /></MemoryRouter>)
 
-  await screen.findByText('Total P&L')
+  await screen.findByText("Today's P&L")
   // Account 999 vanished; its 290,000 must not surface as a loss anywhere.
   expect(screen.queryByText(/290,000|-290,000|275,112/)).not.toBeInTheDocument()
   // And the tile must state how many accounts it actually compared, so a
@@ -1389,7 +1118,7 @@ test('Total P&L reports a dash when nothing is comparable', async () => {
 
   render(<MemoryRouter><Overview /></MemoryRouter>)
 
-  await screen.findByText('Total P&L')
+  await screen.findByText("Today's P&L")
   // "cannot say" reads as needing history, never as a number.
   expect(screen.getByText('needs a full day of history')).toBeInTheDocument()
 })
@@ -1429,7 +1158,7 @@ test('the live contracts table shows the protection on each position itself', as
   render(<MemoryRouter><Overview /></MemoryRouter>)
 
   // Open the contracts panel from the Open P&L tile.
-  await userEvent.click(await screen.findByRole('button', { name: /open p&l/i }))
+  await userEvent.click(await screen.findByRole('button', { name: /view open positions/i }))
 
   // The protected position states its own levels...
   expect(await screen.findByText('4600.5')).toBeInTheDocument()
@@ -1467,4 +1196,279 @@ test('an MT5 slave whose terminal is offline gets the warn marker, like a failed
   // cTrader token banner stays down.
   expect(screen.queryByText('Degraded')).not.toBeInTheDocument()
   expect(screen.queryByTestId('refresh-failed-banner')).not.toBeInTheDocument()
+})
+
+// ---------- Task 6: triage-first Overview ----------
+
+const quietRoutes = {
+  '/api/orgs/1/accounts': mockAccounts,
+  '/api/orgs/1/settings': mockSettings,
+  '/api/orgs/1/state': mockState,
+}
+
+test('the page header names the page and the org, and sets the document title', async () => {
+  setRole('admin')
+  stubApi(quietRoutes)
+
+  render(<MemoryRouter><Overview /></MemoryRouter>)
+
+  await screen.findByTestId('attention-card')
+  expect(screen.getByRole('heading', { level: 1, name: 'Overview' })).toBeInTheDocument()
+  expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1)
+  expect(screen.getByText('Acme')).toBeInTheDocument()
+  expect(document.title).toBe('Overview · MirrorFleet')
+})
+
+test('while loading, Overview shows the Loading primitive, never "Loading..." text', () => {
+  setRole('admin')
+  // Never resolves: the page stays in its loading state.
+  vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => {})))
+
+  render(<MemoryRouter><Overview /></MemoryRouter>)
+
+  expect(screen.getByRole('status')).toHaveAttribute('aria-busy', 'true')
+  expect(screen.queryByText('Loading...')).not.toBeInTheDocument()
+})
+
+test('the Attention card says all clear, and nothing else, when nothing is wrong', async () => {
+  setRole('admin')
+  stubApi(quietRoutes)
+
+  render(<MemoryRouter><Overview /></MemoryRouter>)
+
+  const card = await screen.findByTestId('attention-card')
+  expect(card).toHaveTextContent('All clear — copying live')
+  expect(within(card).queryAllByRole('listitem')).toHaveLength(0)
+})
+
+test('the all-clear line names the real state when copying is paused', async () => {
+  setRole('admin')
+  stubApi({ ...quietRoutes, '/api/orgs/1/settings': { copying_enabled: false, dry_run: false } })
+
+  render(<MemoryRouter><Overview /></MemoryRouter>)
+
+  expect(await screen.findByTestId('attention-card')).toHaveTextContent('All clear — copying paused')
+})
+
+test('a degraded follower is listed on the Attention card with an action', async () => {
+  setRole('admin')
+  stubApi({
+    ...quietRoutes,
+    '/api/orgs/1/accounts': [
+      mockAccounts[0],
+      { ...mockAccounts[1], status: 'degraded' },
+      mockAccounts[2],
+    ],
+  })
+
+  render(<MemoryRouter><Overview /></MemoryRouter>)
+
+  const card = await screen.findByTestId('attention-card')
+  const rows = within(card).getAllByRole('listitem')
+  expect(rows).toHaveLength(1)
+  expect(rows[0]).toHaveTextContent('Account 1002 is degraded: copies to it are failing.')
+  expect(within(rows[0]).getByRole('link', { name: 'Open Accounts' }))
+    .toHaveAttribute('href', '/org/1/accounts')
+  expect(card).not.toHaveTextContent(/all clear/i)
+})
+
+test('a failed token refresh is an Attention row that links to Accounts', async () => {
+  setRole('admin')
+  stubApi({
+    ...quietRoutes,
+    '/api/orgs/1/accounts': [
+      mockAccounts[0],
+      { ...mockAccounts[1], connection_status: 'refresh_failed' },
+      mockAccounts[2],
+    ],
+  })
+
+  render(<MemoryRouter><Overview /></MemoryRouter>)
+
+  const row = await screen.findByTestId('refresh-failed-banner')
+  expect(within(screen.getByTestId('attention-card')).getAllByRole('listitem')).toContain(row)
+  expect(within(row).getByRole('link', { name: 'Open Accounts' })).toHaveAttribute('href', '/org/1/accounts')
+})
+
+test('an offline terminal and a disconnected enabled follower are both listed', async () => {
+  setRole('admin')
+  stubApi({
+    ...quietRoutes,
+    '/api/orgs/1/accounts': [
+      mockAccounts[0],
+      { ...mockAccounts[1], status: 'disconnected' },
+      { ...mt5Account, connection_status: 'offline', mt5: { ...mt5Account.mt5!, connected: false } },
+    ],
+  })
+
+  render(<MemoryRouter><Overview /></MemoryRouter>)
+
+  const card = await screen.findByTestId('attention-card')
+  await waitFor(() => expect(within(card).getAllByRole('listitem')).toHaveLength(2))
+  expect(card).toHaveTextContent("VPS desk's terminal is offline, so copies wait until the EA reports again.")
+  expect(card).toHaveTextContent('Account 1002 is not connected to its broker, so it receives no copies.')
+})
+
+test('a failed live-state read is listed with a Retry that refetches', async () => {
+  setRole('admin')
+  let stateCalls = 0
+  const json = (body: unknown, status = 200) => Promise.resolve(
+    new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } }))
+  const fetchMock = vi.fn((path: string) => {
+    if (path === '/api/orgs/1/accounts') return json(mockAccounts)
+    if (path === '/api/orgs/1/settings') return json(mockSettings)
+    if (path === '/api/orgs/1/state') {
+      stateCalls += 1
+      return stateCalls === 1 ? json({ detail: 'copier unreachable' }, 503) : json(mockState)
+    }
+    return Promise.resolve(new Response(null, { status: 404 }))
+  })
+  vi.stubGlobal('fetch', fetchMock)
+
+  render(<MemoryRouter><Overview /></MemoryRouter>)
+
+  const row = await screen.findByTestId('attention-state-error')
+  expect(row).toHaveTextContent(
+    'Live figures stopped refreshing (copier unreachable), so the numbers on this page may be stale.')
+  await userEvent.click(within(row).getByRole('button', { name: 'Retry' }))
+
+  await waitFor(() => expect(screen.queryByTestId('attention-state-error')).not.toBeInTheDocument())
+  expect(stateCalls).toBeGreaterThanOrEqual(2)
+  expect(screen.getByTestId('attention-card')).toHaveTextContent('All clear — copying live')
+})
+
+test('a margin call streamed over the socket is listed, links to Positions and can be dismissed', async () => {
+  setRole('admin')
+  stubApi(quietRoutes)
+
+  render(<MemoryRouter><Overview /></MemoryRouter>)
+
+  await screen.findByTestId('attention-card')
+  const ws = fakeSockets[fakeSockets.length - 1]
+  act(() => {
+    ws.onmessage?.({
+      data: JSON.stringify({
+        id: 7, ts: new Date().toISOString(), category: 'risk', severity: 'error',
+        account_id: 2, payload: { action: 'margin_call', margin_level_threshold: 50 },
+      }),
+    })
+  })
+
+  const row = await screen.findByTestId('attention-margin-call')
+  expect(row).toHaveTextContent(/Margin call on Account 1002/)
+  expect(within(row).getByRole('link', { name: 'Open Positions' })).toHaveAttribute('href', '/org/1/positions')
+  await userEvent.click(within(row).getByRole('button', { name: 'Dismiss' }))
+  expect(screen.queryByTestId('attention-margin-call')).not.toBeInTheDocument()
+})
+
+test('master equity appears exactly once on Overview', async () => {
+  setRole('admin')
+  stubApi(quietRoutes)
+
+  render(<MemoryRouter><Overview /></MemoryRouter>)
+
+  await screen.findByText(/Master account \(1001\)/)
+  expect(screen.getAllByText('12,000.00')).toHaveLength(1)
+  expect(screen.getByText('Master equity')).toBeInTheDocument()
+})
+
+test('drill-downs are visible View controls, and every tile footer links onward', async () => {
+  setRole('admin')
+  stubApi(statsRoutes())
+
+  render(<MemoryRouter><Overview /></MemoryRouter>)
+
+  await screen.findByTestId('attention-card')
+  for (const name of [/view all accounts/i, /view today's fills/i, /view open positions/i, /view fleet health/i]) {
+    expect(screen.getByRole('button', { name })).toHaveAttribute('aria-expanded', 'false')
+  }
+  for (const tile of screen.getAllByTestId('slave-tile')) {
+    expect(within(tile).getByRole('link', { name: /^view/i })).toHaveAttribute('href', '/org/1/accounts')
+  }
+  expect(screen.getByRole('link', { name: 'View positions' })).toHaveAttribute('href', '/org/1/positions')
+})
+
+test('user-visible copy says follower, never slave', async () => {
+  setRole('admin')
+  stubApi(statsRoutes())
+
+  const { container } = render(<MemoryRouter><Overview /></MemoryRouter>)
+
+  await screen.findByText('Copy log')
+  await userEvent.click(screen.getByRole('button', { name: /view fleet health/i }))
+  expect(container.textContent ?? '').not.toMatch(/slave/i)
+  expect(screen.getByText('Followers')).toBeInTheDocument()
+})
+
+test('a long copy failure expands in place instead of hiding in a tooltip', async () => {
+  setRole('admin')
+  const longError = 'TRADING_BAD_VOLUME: volume 0.001 is below the symbol minimum of 0.01'
+  stubApi({
+    ...statsRoutes(),
+    '/api/orgs/1/overview': {
+      ...overviewStats,
+      recent_copies: [{
+        status: 'failed', master_position_id: 44, master_order_id: null,
+        slave_account_id: 2, slave_login: 1002, slave_nickname: null,
+        symbol: 'EURUSD', slave_volume: null, fill_price: null,
+        error: longError, updated_at: '2026-08-18T09:00:00+00:00',
+      }],
+    },
+  })
+
+  render(<MemoryRouter><Overview /></MemoryRouter>)
+
+  const toggle = await screen.findByRole('button', { name: 'Show details' })
+  // The whole reason is in the page, not cut at 24 characters.
+  expect(screen.getByText(longError)).toBeInTheDocument()
+  expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  await userEvent.click(toggle)
+  expect(screen.getByRole('button', { name: 'Hide details' })).toHaveAttribute('aria-expanded', 'true')
+})
+
+test('an empty org gets a four-step setup checklist instead of "no followers" text', async () => {
+  setRole('admin')
+  stubApi({
+    '/api/orgs/1/accounts': [],
+    '/api/orgs/1/settings': mockSettings,
+    '/api/orgs/1/state': { accounts: {}, master_positions: [], pending_orders: [], drift: [] },
+  })
+
+  render(<MemoryRouter><Overview /></MemoryRouter>)
+
+  const card = await screen.findByTestId('setup-checklist')
+  const steps = within(card).getAllByRole('listitem')
+  expect(steps).toHaveLength(4)
+  expect(steps[0]).toHaveTextContent('Connect the master')
+  expect(steps[1]).toHaveTextContent('Add followers')
+  expect(steps[2]).toHaveTextContent('Run a dry run')
+  expect(steps[3]).toHaveTextContent('Go live')
+  for (const step of steps) expect(step).toHaveTextContent('To do')
+
+  expect(within(steps[0]).getByRole('link', { name: 'Open Accounts' })).toHaveAttribute('href', '/org/1/accounts')
+  expect(within(steps[1]).getByRole('link', { name: 'Open Accounts' })).toHaveAttribute('href', '/org/1/accounts')
+  expect(within(steps[2]).getByRole('link', { name: 'Open Automation' })).toHaveAttribute('href', '/org/1/automation')
+
+  expect(screen.queryByText(/no slave accounts configured/i)).not.toBeInTheDocument()
+  // An empty desk has nothing to triage yet.
+  expect(screen.queryByTestId('attention-card')).not.toBeInTheDocument()
+})
+
+test('the setup checklist marks steps done from real state', async () => {
+  setRole('admin')
+  stubApi({
+    '/api/orgs/1/accounts': [mockAccounts[0]], // a master, no followers yet
+    '/api/orgs/1/settings': { copying_enabled: true, dry_run: true },
+    '/api/orgs/1/state': mockState,
+  })
+
+  render(<MemoryRouter><Overview /></MemoryRouter>)
+
+  const steps = within(await screen.findByTestId('setup-checklist')).getAllByRole('listitem')
+  expect(steps[0]).toHaveTextContent('Done')   // master connected
+  expect(steps[1]).toHaveTextContent('To do')  // no follower
+  expect(steps[2]).toHaveTextContent('Done')   // dry-run is on
+  expect(steps[3]).toHaveTextContent('To do')  // not live
+  // The master card still renders beside the checklist.
+  expect(screen.getByText(/Master account \(1001\)/)).toBeInTheDocument()
 })
