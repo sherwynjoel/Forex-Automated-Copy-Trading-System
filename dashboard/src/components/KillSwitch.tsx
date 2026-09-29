@@ -35,7 +35,7 @@ export default function KillSwitch({ settings, onUpdate }: KillSwitchProps) {
       onUpdate({ ...settings, dry_run: newState })
     } catch (err) {
       setError(
-        `Dry-run is still ${settings.dry_run ? 'ON' : 'OFF'} — the change failed: ` +
+        `Dry-run is still ${settings.dry_run ? 'on' : 'off'} — the change failed: ` +
         `${err instanceof Error ? err.message : 'the copier did not respond'}`)
     } finally {
       setBusy(false)
@@ -69,7 +69,7 @@ export default function KillSwitch({ settings, onUpdate }: KillSwitchProps) {
       onUpdate({ ...settings, copying_enabled: newState })
     } catch (err) {
       setError(
-        `Copying is still ${settings.copying_enabled ? 'RUNNING' : 'stopped'} — the change failed: ` +
+        `Copying is still ${settings.copying_enabled ? 'running' : 'stopped'} — the change failed: ` +
         `${err instanceof Error ? err.message : 'the copier did not respond'}`)
     } finally {
       setBusy(false)
@@ -100,7 +100,7 @@ export default function KillSwitch({ settings, onUpdate }: KillSwitchProps) {
         </p>
       )}
       {settings.dry_run && (
-        <Badge tone="warn" pill>DRY RUN</Badge>
+        <Badge tone="warn" pill>Dry run</Badge>
       )}
       <Button
         data-testid="dry-run-toggle"

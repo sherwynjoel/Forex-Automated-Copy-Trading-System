@@ -102,12 +102,12 @@ export default function Automation() {
       setConfirmEnable(true)
       return
     }
-    await put({ enabled: false }, 'Automation is OFF.')
+    await put({ enabled: false }, 'Automation is off.')
   }
 
   const confirmEnableAutomation = async () => {
     setConfirmEnable(false)
-    await put({ enabled: true }, 'Automation is ON.')
+    await put({ enabled: true }, 'Automation is on.')
   }
 
   const rotate = async () => {

@@ -2,6 +2,7 @@ import { useState, useEffect, useId, useRef } from 'react'
 import { orgApi, eventsSocket } from '../lib/api'
 import { useOrg } from '../lib/org'
 import { formatWhen } from '../lib/format'
+import { accountWho } from '../lib/platform'
 import type { Account, EventResponse } from '../lib/types'
 import Button from '../components/Button'
 import Card from '../components/Card'
@@ -211,7 +212,7 @@ export default function Logs() {
               <option value="">All accounts</option>
               {accounts.map((a) => (
                 <option key={a.ctid_trader_account_id} value={String(a.ctid_trader_account_id)}>
-                  {a.nickname ?? a.trader_login}
+                  {accountWho(a)}
                 </option>
               ))}
             </Select>
@@ -254,11 +255,13 @@ export default function Logs() {
         </div>
       </Card>
 
-      {loading ? (
+      {/* The skeleton only stands in for an empty list: once rows are on
+          screen a refetch (a filter keystroke) keeps them, marked busy. */}
+      {loading && events.length === 0 ? (
         <Loading lines={6} label="Loading events" />
       ) : (
       <Card inset>
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto" aria-busy={loading} data-testid="events-table">
           <table className="stack-table min-w-full divide-y divide-line">
             <thead className="bg-paper">
               <tr>

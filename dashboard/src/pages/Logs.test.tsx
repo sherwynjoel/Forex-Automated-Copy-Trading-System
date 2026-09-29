@@ -45,22 +45,23 @@ afterEach(() => {
 const ACCOUNTS = [
   { ctid_trader_account_id: 123, trader_login: 9001, nickname: 'Gold master' },
   { ctid_trader_account_id: 124, trader_login: 9002, nickname: null },
+  { ctid_trader_account_id: 125, trader_login: 9003, nickname: '' },
 ]
 
 // Route by URL so each request gets its own fresh Response: the page loads
 // the org's accounts (for the Account filter) alongside the events, and a
 // Response body can only be read once. `events` is read per call, so a test
 // can change what the next events request returns.
-function stubFetch(routes: { events: unknown[] }) {
-  const fetchMock = vi.fn((input: RequestInfo | URL) => {
+// `hold`, when set, keeps events requests in flight until it resolves.
+function stubFetch(routes: { events: unknown[]; hold?: Promise<void> }) {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input)
+    if (url.includes('/events') && routes.hold) await routes.hold
     const body = url.includes('/accounts') ? ACCOUNTS : url.includes('/events') ? routes.events : []
-    return Promise.resolve(
-      new Response(JSON.stringify(body), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      }),
-    )
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
   })
   vi.stubGlobal('fetch', fetchMock)
   return fetchMock
@@ -341,10 +342,12 @@ test('every filter has an accessible name, and the account filter lists the org 
   expect(screen.getByLabelText('Category')).toBeInTheDocument()
   expect(screen.getByLabelText('Since')).toBeInTheDocument()
 
-  // Options are the accounts by nickname, falling back to the login; the
+  // Options name the account as the rest of the desk does (nickname and
+  // login, else "Account <login>", never blank for an empty nickname); the
   // value stays the account id, so the events request is unchanged.
-  expect(await screen.findByRole('option', { name: 'Gold master' })).toHaveValue('123')
-  expect(screen.getByRole('option', { name: '9002' })).toHaveValue('124')
+  expect(await screen.findByRole('option', { name: 'Gold master · 9001' })).toHaveValue('123')
+  expect(screen.getByRole('option', { name: 'Account 9002' })).toHaveValue('124')
+  expect(screen.getByRole('option', { name: 'Account 9003' })).toHaveValue('125')
   expect(screen.getByRole('option', { name: 'All accounts' })).toHaveValue('')
   // Severity options read as words, their values unchanged.
   expect(screen.getByRole('option', { name: 'Warning' })).toHaveValue('warning')
@@ -359,7 +362,7 @@ test('choosing an account filters the events request by its id', async () => {
     </MemoryRouter>
   )
 
-  await screen.findByRole('option', { name: 'Gold master' })
+  await screen.findByRole('option', { name: 'Gold master · 9001' })
   fetchMock.mockClear()
   await userEvent.selectOptions(screen.getByLabelText('Account'), '123')
 
@@ -405,4 +408,41 @@ test('the live list keeps the newest 500 events', async () => {
   expect(screen.getByText('cat_2')).toBeInTheDocument()
   const bodyRows = screen.getAllByRole('row').filter((r) => r.closest('tbody'))
   expect(bodyRows).toHaveLength(500)
+})
+
+test('a filter change keeps the rows on screen while the list refetches', async () => {
+  const routes: { events: unknown[]; hold?: Promise<void> } = {
+    events: [
+      {
+        id: 1, ts: '2024-01-01T10:00:00Z', account_id: 123,
+        category: 'position_open', severity: 'info', latency_ms: 50, payload: {},
+      },
+    ],
+  }
+  stubFetch(routes)
+
+  render(
+    <MemoryRouter>
+      <Logs />
+    </MemoryRouter>
+  )
+
+  expect(await screen.findByText('position_open')).toBeInTheDocument()
+
+  // Every keystroke refetches; while that request is in flight the table
+  // stays, marked busy, instead of blanking to a skeleton.
+  let release: () => void = () => {}
+  routes.hold = new Promise<void>((resolve) => { release = resolve })
+  await userEvent.type(screen.getByLabelText('Category'), 'pos')
+  await waitFor(() => {
+    expect(screen.getByTestId('events-table')).toHaveAttribute('aria-busy', 'true')
+  })
+  expect(screen.getByText('position_open')).toBeInTheDocument()
+  expect(screen.queryByRole('status', { name: 'Loading events' })).not.toBeInTheDocument()
+
+  release()
+  await waitFor(() => {
+    expect(screen.getByTestId('events-table')).toHaveAttribute('aria-busy', 'false')
+  })
+  expect(screen.getByText('position_open')).toBeInTheDocument()
 })

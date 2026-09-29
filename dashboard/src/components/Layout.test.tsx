@@ -807,19 +807,19 @@ test('disabling dry-run from the strip does not PUT if the dialog is cancelled',
   expect(settingsPuts(fetchMock)).toHaveLength(0)
 })
 
-test('the strip DRY RUN badge reflects the toggled state without a reload', async () => {
+test('the strip Dry run badge reflects the toggled state without a reload', async () => {
   useOrgMock.mockReturnValue(makeOrgValue('admin'))
   mockRoutes() // dry_run: false -> no badge initially
   renderLayout()
 
   await screen.findByTestId('dry-run-toggle')
-  expect(screen.queryByText(/^DRY RUN$/)).not.toBeInTheDocument()
+  expect(screen.queryByText('Dry run')).not.toBeInTheDocument()
 
   await userEvent.click(screen.getByTestId('dry-run-toggle'))
 
-  expect(await screen.findByText(/^DRY RUN$/)).toBeInTheDocument()
-  // One dry-run marker for an admin: the kill switch's badge, not the strip chip too.
-  expect(screen.queryByText('Dry run')).not.toBeInTheDocument()
+  // One dry-run marker for an admin: the kill switch's badge, not the strip
+  // chip too (both read "Dry run", so exactly one must be on screen).
+  expect(await screen.findAllByText('Dry run')).toHaveLength(1)
 })
 
 test('the strip kill switch is hidden for a viewer (below control)', async () => {
@@ -871,4 +871,40 @@ test('stopping copying from the strip updates Overview without a reload', async 
 
   await waitFor(() =>
     expect(screen.getByTestId('attention-card')).toHaveTextContent('All clear — copying paused'))
+})
+
+/** Fails every settings PUT with a 500; everything else keeps its route. */
+function failSettingsPuts(fetchMock: ReturnType<typeof mockRoutes>) {
+  const base = fetchMock.getMockImplementation()!
+  fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input).includes('/settings') && init?.method === 'PUT') {
+      return new Response(JSON.stringify({ detail: 'copier down' }), {
+        status: 500, headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    return base(input)
+  })
+}
+
+test('a failed stop says, in sentence case, that copying is still running', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
+  failSettingsPuts(mockRoutes())
+  renderLayout()
+
+  await userEvent.click(await screen.findByRole('button', { name: 'Stop copying' }))
+  const dialog = await screen.findByRole('dialog')
+  await userEvent.click(within(dialog).getByRole('button', { name: 'Stop copying' }))
+
+  expect(await screen.findByText(/^Copying is still running — the change failed: /)).toHaveAttribute('role', 'alert')
+})
+
+test('a failed dry-run switch says, in sentence case, that dry-run is still off', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
+  failSettingsPuts(mockRoutes())
+  renderLayout()
+
+  // Turning dry-run ON is never gated behind a dialog.
+  await userEvent.click(await screen.findByTestId('dry-run-toggle'))
+
+  expect(await screen.findByText(/^Dry-run is still off — the change failed: /)).toHaveAttribute('role', 'alert')
 })
