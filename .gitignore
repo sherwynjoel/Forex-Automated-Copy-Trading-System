@@ -6,6 +6,9 @@ __pycache__/
 *.pyc
 .pytest_cache/
 node_modules/
+# Local upload store (UPLOAD_DIR default ./data/uploads; the api tests
+# create api/data/uploads).
+data/
 dashboard/dist/
 docker-compose.override.yml
 .impeccable/

@@ -27,6 +27,11 @@ class ApiConfig:
     # Self-service signup. Off by default: this platform moves real money
     # and every account is created by an operator or an invite.
     registration_enabled: bool
+    # Where uploaded receipts and proofs are written (routes/portal_files.py).
+    # The api image sets /data/uploads, a named compose volume; a bare
+    # `uvicorn` run gets ./data/uploads. An empty value means "default" so
+    # an `UPLOAD_DIR=` line in .env cannot point the store at the cwd.
+    upload_dir: str
 
     @classmethod
     def from_env(cls) -> "ApiConfig":
@@ -71,4 +76,5 @@ class ApiConfig:
             public_origin=os.environ.get("PUBLIC_ORIGIN", "").rstrip("/"),
             registration_enabled=os.environ.get(
                 "REGISTRATION_ENABLED", "false").lower() in ("true", "1", "yes"),
+            upload_dir=os.environ.get("UPLOAD_DIR") or "./data/uploads",
         )

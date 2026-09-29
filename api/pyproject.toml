@@ -10,6 +10,10 @@ dependencies = [
     "itsdangerous>=2.2",
     "httpx>=0.27",
     "cryptography>=42",
+    # Multipart form parsing for the client portal's receipt and proof
+    # uploads (routes/portal_files.py). FastAPI imports it lazily and
+    # refuses to define a Form/File route without it.
+    "python-multipart>=0.0.18",
 ]
 
 [project.optional-dependencies]

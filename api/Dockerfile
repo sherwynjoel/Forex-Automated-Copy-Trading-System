@@ -16,9 +16,15 @@ COPY --from=dashboard /dash/dist /app/static
 # the operator types into the terminal.
 COPY mt5/MirrorFleet.mq5 /app/static/downloads/MirrorFleet.mq5
 ENV STATIC_DIR=/app/static
+# Uploaded receipts and proofs (routes/portal_files.py). The directory is
+# created in the image, owned by appuser, so the named volume compose
+# mounts here inherits that ownership when it is first created.
+ENV UPLOAD_DIR=/data/uploads
 # Unprivileged runtime user: the api binds 8000 (not a privileged port) and
-# writes nothing to disk, so root buys nothing and costs blast radius.
+# writes only under /data/uploads, so root buys nothing and costs blast
+# radius.
 RUN useradd --system --no-create-home --uid 10001 appuser \
-    && chown -R appuser:appuser /app
+    && mkdir -p /data/uploads \
+    && chown -R appuser:appuser /app /data/uploads
 USER appuser
 CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]

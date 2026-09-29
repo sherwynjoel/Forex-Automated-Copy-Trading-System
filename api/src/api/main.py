@@ -3,6 +3,7 @@ import asyncio
 import httpx
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI
@@ -24,6 +25,7 @@ from .routes.trading import create_trading_router
 from .routes.insights import create_insights_router
 from .alerts import EmailAlerter
 from .telegram import TelegramNotifier
+from .uploads import UploadStore
 from .ws import create_ws_router, broadcaster
 
 
@@ -136,6 +138,17 @@ def create_app(http_transport: Optional[httpx.BaseTransport] = None) -> FastAPI:
     # Store rate limiter in app state
     app.state.rate_limiter = rate_limiter
 
+    # Uploaded receipts and proofs live on disk under UPLOAD_DIR (a named
+    # volume in compose). Created here rather than in lifespan so a
+    # TestClient app, which skips lifespan, has it too; tests swap it for
+    # a temp directory. The one value is read straight from the env
+    # (mirroring ApiConfig.upload_dir, same default and same "empty means
+    # default" rule) rather than through ApiConfig.from_env(): create_app
+    # runs at import time (`app = create_app()` below) and from_env would
+    # make importing api.main demand SESSION_SECRET, FERNET_KEY and the
+    # rest -- test_events_ws.py builds an app with only STATIC_DIR set.
+    app.state.uploads = UploadStore(Path(os.environ.get("UPLOAD_DIR") or "./data/uploads"))
+
     # Add CSRF middleware
     app.add_middleware(CSRFMiddleware)
     app.add_middleware(SecurityHeadersMiddleware)
@@ -191,6 +204,11 @@ def create_app(http_transport: Optional[httpx.BaseTransport] = None) -> FastAPI:
     # Include insights router (margin, candles, analytics, overview stats)
     insights_router = create_insights_router()
     app.include_router(insights_router)
+
+    # Client portal files: receipts and proofs (multipart upload; owner and
+    # admin reads). The bytes live in app.state.uploads.
+    from .routes.portal_files import create_portal_files_router
+    app.include_router(create_portal_files_router())
 
     # Investor portal: a sub-viewer role that sees only its own linked
     # account, plus the admin queues that decide its deposits/withdrawals.

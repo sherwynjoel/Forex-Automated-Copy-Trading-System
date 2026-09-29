@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Nightly Postgres backup for MirrorFleet.
+# Nightly Postgres backup for MirrorFleet, plus the uploads volume.
 #
-# The database is the only irreplaceable state on the host: broker OAuth
-# grants (encrypted), account roles and multipliers, position mappings, and
-# the audit trail. Container images rebuild from git; this does not.
+# Two things on the host cannot be rebuilt from git: the database (broker
+# OAuth grants, encrypted; account roles and multipliers; position
+# mappings; the wallet ledger; the audit trail) and the uploads volume
+# (the receipts and proofs investors attached to their requests). Each
+# nightly run writes one .sql.gz and one uploads .tar.gz.
 #
 # Install on the host (as the deploy user):
 #   crontab -e
@@ -15,9 +17,12 @@
 # classic failures here (no docker permission, missing compose plugin,
 # unwritable BACKUP_DIR) are silent inside cron.
 #
-# Restore:
-#   gunzip -c mirrorfleet-YYYY-MM-DD.sql.gz \
+# Restore the database:
+#   gunzip -c mirrorfleet-YYYY-MM-DD_HHMM.sql.gz \
 #     | sudo docker compose exec -T postgres psql -U copytrader -d copytrader
+# Restore the uploads (into the running api container's volume):
+#   gunzip -c mirrorfleet-uploads-YYYY-MM-DD_HHMM.tar.gz \
+#     | sudo docker compose exec -T api tar -C /data -xf -
 #
 # Note the dump contains encrypted broker tokens; it is only as safe as the
 # FERNET_KEY, which lives in .env and is NOT in this dump. Keep a copy of
@@ -71,8 +76,21 @@ fi
 mv "$partial" "$out"
 trap - EXIT
 
+# The uploads volume, tarred from inside the running api container (it is
+# the one that owns the mount). An empty directory still yields a valid
+# small archive, so there is no size floor here. If the api container is
+# not running this fails loudly (set -e) AFTER the dump is already safe.
+uploads_out="$BACKUP_DIR/mirrorfleet-uploads-$stamp.tar.gz"
+uploads_partial="$uploads_out.part"
+trap 'rm -f "$uploads_partial"' EXIT
+$DOCKER compose exec -T api tar -C /data -cf - uploads | gzip -9 > "$uploads_partial"
+mv "$uploads_partial" "$uploads_out"
+trap - EXIT
+
 # Keep the newest N by COUNT, never by age: pruning on age alone would
 # delete every backup after KEEP_DAYS of silent failures.
 ls -1t "$BACKUP_DIR"/mirrorfleet-*.sql.gz 2>/dev/null \
     | tail -n "+$((KEEP_DAYS + 1))" | xargs -r rm -f
-echo "ok: $out ($size bytes), keeping the newest $KEEP_DAYS"
+ls -1t "$BACKUP_DIR"/mirrorfleet-uploads-*.tar.gz 2>/dev/null \
+    | tail -n "+$((KEEP_DAYS + 1))" | xargs -r rm -f
+echo "ok: $out ($size bytes) and $uploads_out, keeping the newest $KEEP_DAYS of each"

@@ -62,8 +62,13 @@ services:
       # and never a login path of its own: it just creates a normal user.
       BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
       BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
+    volumes:
+      # Uploaded receipts and proofs (the image's UPLOAD_DIR). Backed up by
+      # ops/backup.sh next to the nightly dump; created on first `up`.
+      - uploads:/data/uploads
     depends_on:
       migrate: { condition: service_completed_successfully }
 
 volumes:
   pgdata: {}
+  uploads: {}
