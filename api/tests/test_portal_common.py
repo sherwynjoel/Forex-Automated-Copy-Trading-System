@@ -1,0 +1,331 @@
+# api/tests/test_portal_common.py
+"""portal_common: the figures every portal router reads, the one settlement
+writer, audit and email plumbing, the settings row and the serialisers.
+Real Postgres; the copier's /state is faked through the app's mock
+transport only where equity_for needs it."""
+import asyncio
+from datetime import datetime, timezone
+from decimal import Decimal
+from types import SimpleNamespace
+
+import httpx
+import psycopg
+import pytest
+from conftest import default_mock_callback
+from portal_helpers import approved_destination, credit
+
+from api import portal_common as pc
+from api import ws as ws_module
+
+
+@pytest.fixture
+def org_user(db, make_user, make_org):
+    user = make_user(email="inv@example.com")
+    org_id = make_org(name="Desk", members=[(user, "investor")])
+    return org_id, user["id"]
+
+
+def _fake_state(client, accounts=None, down=False):
+    """Fake the copier's /state. `accounts` is {account_id: {equity, ...}}
+    exactly as the copier serialises it (string keys)."""
+    def callback(request):
+        url = str(request.url)
+        if "copier.test" in url and "/state" in url:
+            if down:
+                return httpx.Response(502, json={"detail": "down"})
+            return httpx.Response(200, json={
+                "status": "ok",
+                "accounts": {str(k): v for k, v in (accounts or {}).items()},
+                "master_positions": [], "pending_orders": [], "drift": []})
+        return default_mock_callback(request)
+    client.app.state.mock_transport.set_callback(callback)
+
+
+# ------------------------------------------------------------ re-exports
+
+
+def test_the_ledger_rules_are_reachable_through_portal_common():
+    assert pc.parse_amount("1.50") == Decimal("1.50")
+    assert pc.WALLETS == ("main", "credit", "pamm", "social")
+    assert pc.can_transition("deposits", "pending", "cancelled") is True
+    assert pc.money(Decimal("2.005")) == 2.01
+    assert pc.CURRENCY == "USD"
+
+
+# ------------------------------------------------------------ settlement
+
+
+def test_settle_writes_once_per_reference(db, org_user):
+    org_id, user_id = org_user
+    with psycopg.connect(db, autocommit=True) as conn:
+        first = pc.settle(conn, org_id=org_id, user_id=user_id, wallet="main",
+                          amount=Decimal("100.00"), kind="deposit",
+                          ref_table="deposits", ref_id=7)
+        replay = pc.settle(conn, org_id=org_id, user_id=user_id, wallet="main",
+                           amount=Decimal("100.00"), kind="deposit",
+                           ref_table="deposits", ref_id=7)
+        # An adjustment has no reference, so two of them are two rows.
+        adj1 = pc.settle(conn, org_id=org_id, user_id=user_id, wallet="credit",
+                         amount=Decimal("-5.00"), kind="adjustment",
+                         ref_table=None, ref_id=None, note="fix", created_by=user_id)
+        adj2 = pc.settle(conn, org_id=org_id, user_id=user_id, wallet="credit",
+                         amount=Decimal("-5.00"), kind="adjustment",
+                         ref_table=None, ref_id=None, note="fix", created_by=user_id)
+        rows = conn.execute(
+            "SELECT wallet, amount, kind, ref_table, ref_id, note, created_by "
+            "FROM wallet_entries WHERE org_id = %s ORDER BY id", (org_id,)).fetchall()
+    assert (first, replay, adj1, adj2) == (True, False, True, True)
+    assert rows == [("main", Decimal("100.00"), "deposit", "deposits", 7, None, None),
+                    ("credit", Decimal("-5.00"), "adjustment", None, None, "fix", user_id),
+                    ("credit", Decimal("-5.00"), "adjustment", None, None, "fix", user_id)]
+    with psycopg.connect(db, autocommit=True) as conn:
+        assert pc.wallet_balances(conn, org_id, user_id) == {
+            "main": Decimal("100.00"), "credit": Decimal("-10.00"),
+            "pamm": Decimal("0"), "social": Decimal("0")}
+
+
+# ------------------------------------------------------------ figures
+
+
+def test_wallet_figures_hold_open_requests_and_floor_available(db, org_user):
+    org_id, user_id = org_user
+    credit(db, org_id, user_id, "5120.50")
+    credit(db, org_id, user_id, "10", wallet="pamm")
+    dest = approved_destination(db, org_id, user_id)
+    with psycopg.connect(db, autocommit=True) as conn:
+        for amount, status in (("100", "requested"), ("30", "approved"),
+                               ("999", "rejected"), ("999", "paid"), ("999", "cancelled")):
+            conn.execute(
+                "INSERT INTO withdrawals (org_id, user_id, destination_id, destination_kind, "
+                "destination_summary, amount, fee, net_amount, status) "
+                "VALUES (%s, %s, %s, 'crypto', 'TRC20 T…23', %s, 0, %s, %s)",
+                (org_id, user_id, dest, amount, amount, status))
+        for src, tgt, amount, status in (("main", "pamm", "20.25", "requested"),
+                                         ("pamm", "main", "4", "approved"),
+                                         ("main", "pamm", "999", "done"),
+                                         ("main", "pamm", "999", "rejected")):
+            conn.execute(
+                "INSERT INTO transfers (org_id, user_id, source_kind, source_wallet, "
+                "target_kind, target_wallet, amount, status) "
+                "VALUES (%s, %s, 'wallet', %s, 'wallet', %s, %s, %s)",
+                (org_id, user_id, src, tgt, amount, status))
+        holds = pc.wallet_holds(conn, org_id, user_id)
+        figures = pc.wallet_figures(conn, org_id, user_id)
+    assert holds == {"main": Decimal("150.25"), "credit": Decimal("0"),
+                     "pamm": Decimal("4"), "social": Decimal("0")}
+    assert figures["main"] == {"balance": Decimal("5120.50"), "on_hold": Decimal("150.25"),
+                               "available": Decimal("4970.25")}
+    assert figures["pamm"] == {"balance": Decimal("10.00"), "on_hold": Decimal("4"),
+                               "available": Decimal("6.00")}
+    assert figures["credit"]["available"] == Decimal("0.00")
+    assert set(figures) == set(pc.WALLETS)
+    # available is floored, never rounded up: the pure rule the figures use.
+    assert pc.available(Decimal("5120.506"), Decimal("0")) == Decimal("5120.50")
+
+
+def test_net_funded_and_open_account_transfers_out(org_client, make_user, db):
+    client, org_id, seed = org_client
+    seed(1001, role="slave")
+    investor = make_user(email="inv@example.com")
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute("INSERT INTO org_memberships (org_id, user_id, role) VALUES (%s, %s, 'investor')",
+                     (org_id, investor["id"]))
+        conn.execute("UPDATE accounts SET investor_user_id = %s WHERE ctid_trader_account_id = 1001",
+                     (investor["id"],))
+        rows = [("wallet", "main", None, "account", None, 1001, "500", "done"),
+                ("account", None, 1001, "wallet", "main", None, "120", "done"),
+                ("account", None, 1001, "wallet", "main", None, "30", "requested"),
+                ("account", None, 1001, "wallet", "main", None, "12.50", "approved"),
+                ("account", None, 1001, "wallet", "main", None, "999", "rejected"),
+                ("wallet", "main", None, "account", None, 1001, "999", "cancelled")]
+        for sk, sw, sa, tk, tw, ta, amount, status in rows:
+            conn.execute(
+                "INSERT INTO transfers (org_id, user_id, source_kind, source_wallet, "
+                "source_account_id, target_kind, target_wallet, target_account_id, amount, status) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (org_id, investor["id"], sk, sw, sa, tk, tw, ta, amount, status))
+        assert pc.linked_account(conn, org_id, investor["id"]) == 1001
+        assert pc.linked_account(conn, org_id, 999999) is None
+        assert pc.net_funded(conn, org_id, investor["id"], 1001) == Decimal("380.00")
+        assert pc.open_account_transfers_out(conn, org_id, investor["id"], 1001) == Decimal("42.50")
+        card = pc.account_card(conn, org_id, 1001)
+    assert card == {"account_id": 1001, "nickname": None, "platform": "ctrader",
+                    "status": "ok", "last_error": None, "connected": True}
+
+
+def test_equity_for_prefers_live_then_last_known_then_unknown(org_client, make_user, db):
+    client, org_id, seed = org_client
+    seed(1001, role="slave")
+    request = SimpleNamespace(app=client.app)
+    with psycopg.connect(db, autocommit=True) as conn:
+        (mt5_id,) = conn.execute(
+            "INSERT INTO accounts (ctid_trader_account_id, ctid_connection_id, org_id, "
+            "platform, trader_login, is_live, role, enabled, nickname) "
+            "VALUES (nextval('mt5_account_id_seq'), NULL, %s, 'mt5', 0, false, 'slave', "
+            "true, 'Inv') RETURNING ctid_trader_account_id", (org_id,)).fetchone()
+        conn.execute("INSERT INTO mt5_links (account_id, key_hash, equity, balance) "
+                     "VALUES (%s, 'h', 4990.25, 4990.25)", (mt5_id,))
+        _fake_state(client, {1001: {"balance": 5000.0, "equity": 5120.5, "open_pnl": 120.5,
+                                    "positions": [{"position_id": 7}]}})
+        live = asyncio.run(pc.equity_for(request, conn, org_id, 1001))
+        _fake_state(client, down=True)
+        last_known = asyncio.run(pc.equity_for(request, conn, org_id, int(mt5_id)))
+        unknown = asyncio.run(pc.equity_for(request, conn, org_id, 1001))
+        none = asyncio.run(pc.equity_for(request, conn, org_id, None))
+    assert live == (Decimal("5120.5"), "live", [{"position_id": 7}])
+    assert last_known == (Decimal("4990.25"), "last known", [])
+    assert unknown == (None, "unknown", [])
+    assert none == (None, "unknown", [])
+
+
+# ------------------------------------------------------------ settings
+
+
+def test_portal_settings_creates_the_default_row_once(db, org_user):
+    org_id, _user_id = org_user
+    with psycopg.connect(db, autocommit=True) as conn:
+        first = pc.portal_settings(conn, org_id)
+        conn.execute("UPDATE portal_settings SET withdrawal_min = 50, withdrawal_fee_pct = 1.5 "
+                     "WHERE org_id = %s", (org_id,))
+        second = pc.portal_settings(conn, org_id)
+        (count,) = conn.execute("SELECT count(*) FROM portal_settings WHERE org_id = %s",
+                                (org_id,)).fetchone()
+    assert first == {"withdrawal_min": Decimal("0.00"), "withdrawal_fee_pct": Decimal("0.000")}
+    assert second == {"withdrawal_min": Decimal("50.00"), "withdrawal_fee_pct": Decimal("1.500")}
+    assert count == 1
+
+
+# ------------------------------------------------------------ text helpers
+
+
+def test_destination_summary_and_short_address():
+    assert pc.short_address("TAddr123") == "TAddr123"
+    assert pc.short_address("TQn9Y2khEsLJW1ChVWFMSMeRDow5KcbLSE") == "T…SE"
+    assert pc.destination_summary("bank", {"bank_name": "ICICI Bank", "holder": "S",
+                                           "account_number": "000401234543", "code": "X"}) \
+        == "ICICI Bank ••4543"
+    assert pc.destination_summary("crypto", {"coin": "USDT", "network": "TRC20",
+                                             "address": "TQn9Y2khEsLJW1ChVWFMSMeRDow5KcbLSE"}) \
+        == "TRC20 T…SE"
+    assert pc.qualify("id, user_id", "d") == "d.id, d.user_id"
+
+
+def test_require_note_on_reject():
+    assert pc.require_note_on_reject("confirmed", None) is None
+    assert pc.require_note_on_reject("confirmed", " ok ") == "ok"
+    assert pc.require_note_on_reject("rejected", "no such tx") == "no such tx"
+    with pytest.raises(pc.LedgerError, match="note is required"):
+        pc.require_note_on_reject("rejected", "  ")
+    with pytest.raises(pc.LedgerError, match="at most 500"):
+        pc.require_note_on_reject("rejected", "x" * 501)
+
+
+# ------------------------------------------------------------ serialisers
+
+
+_TS = datetime(2026, 9, 29, 12, 0, tzinfo=timezone.utc)
+
+
+def test_deposit_json_rounds_to_cents_and_carries_the_currency():
+    row = (12, 5, 3, "crypto", "USDT on TRC20", Decimal("5000.00"), Decimal("50.00"), None,
+           "tx-1", None, "wallet", None, "sent", "pending", None, None, None, _TS)
+    out = pc.deposit_json(row)
+    assert out == {"id": 12, "user_id": 5, "method_id": 3, "method_kind": "crypto",
+                   "method_label": "USDT on TRC20", "amount": 5000.0, "fee": 50.0,
+                   "credited_amount": None, "reference": "tx-1", "receipt_file_id": None,
+                   "target": "wallet", "target_account_id": None, "note": "sent",
+                   "status": "pending", "decided_by": None, "decided_at": None,
+                   "decision_note": None, "created_at": _TS.isoformat(), "currency": "USD"}
+    admin = pc.deposit_json(row + ("inv@example.com", "Inv"))
+    assert admin["email"] == "inv@example.com" and admin["display_name"] == "Inv"
+
+
+def test_withdrawal_transfer_entry_and_method_json():
+    wd = pc.withdrawal_json((4, 5, 9, "bank", "ICICI Bank ••4543", Decimal("250.00"),
+                             Decimal("2.50"), Decimal("247.50"), "requested", None, None, None,
+                             None, None, None, _TS))
+    assert wd["net_amount"] == 247.5 and wd["destination_summary"] == "ICICI Bank ••4543"
+    assert wd["currency"] == "USD" and wd["paid_at"] is None and wd["created_at"] == _TS.isoformat()
+    tr = pc.transfer_json((9, 5, "wallet", "main", None, "account", None, 1001, Decimal("100.00"),
+                           "requested", Decimal("5120.50"), True, None, None, None, None, None,
+                           None, _TS, "inv@example.com", "Inv"))
+    assert tr["source"] == {"kind": "wallet", "wallet": "main"}
+    assert tr["target"] == {"kind": "account", "account_id": 1001}
+    assert tr["equity_at_request"] == 5120.5 and tr["equity_verified"] is True
+    assert tr["email"] == "inv@example.com" and tr["currency"] == "USD"
+    entry = pc.entry_json((1, "main", Decimal("-100.00"), "withdrawal", "withdrawals", 4, None, _TS))
+    assert entry == {"id": 1, "wallet": "main", "amount": -100.0, "kind": "withdrawal",
+                     "ref_table": "withdrawals", "ref_id": 4, "note": None,
+                     "created_at": _TS.isoformat(), "currency": "USD"}
+    method = pc.method_json((3, "crypto", "USDT on TRC20", True, "USD",
+                             {"coin": "USDT", "network": "TRC20", "address": "T1"},
+                             Decimal("50.00"), Decimal("1.500"), None, 2), public=True)
+    assert method == {"id": 3, "kind": "crypto", "label": "USDT on TRC20", "enabled": True,
+                      "currency": "USD", "details": {"coin": "USDT", "network": "TRC20",
+                                                     "address": "T1"},
+                      "min_amount": 50.0, "fee_pct": 1.5, "instructions": None, "sort_order": 2}
+
+
+def test_destination_json_masks_bank_account_numbers_unless_full():
+    details = {"bank_name": "ICICI Bank", "holder": "S", "account_number": "000401234543",
+               "code": "ICIC0000004"}
+    row = (9, 5, "bank", "Salary account", details, None, "approved", 1, _TS, None, _TS)
+    masked = pc.destination_json(row, full=False)
+    assert masked["details"]["account_number"] == "••4543"
+    assert masked["summary"] == "ICICI Bank ••4543" and masked["nickname"] == "Salary account"
+    assert masked["decided_at"] == _TS.isoformat() and "email" not in masked
+    full = pc.destination_json(row + ("inv@example.com", "Inv"), full=True)
+    assert full["details"]["account_number"] == "000401234543"
+    assert full["email"] == "inv@example.com"
+    assert details["account_number"] == "000401234543", "the caller's dict is not mutated"
+
+
+# ------------------------------------------------------------ audit + email
+
+
+def test_audit_control_writes_one_control_event(db, org_user):
+    org_id, user_id = org_user
+    with psycopg.connect(db, autocommit=True) as conn:
+        asyncio.run(pc.audit_control(
+            conn, org_id=org_id, action="investor_deposit_noticed", actor_email="inv@example.com",
+            user_id=user_id, severity="warning", account_id=None, deposit_id=12,
+            summary="Deposit notice: 5000.00 USD via USDT on TRC20 from inv@example.com"))
+        asyncio.run(pc.audit_control(
+            conn, org_id=org_id, action="investor_deposit_decided", actor_email="admin@example.com",
+            user_id=user_id, account_id=1001, deposit_id=12, status="confirmed"))
+        rows = conn.execute(
+            "SELECT category, severity, account_id, actor_email, payload FROM events "
+            "WHERE org_id = %s ORDER BY id", (org_id,)).fetchall()
+    assert rows[0][:4] == ("control", "warning", None, "inv@example.com")
+    assert rows[0][4] == {"action": "investor_deposit_noticed", "user_id": user_id,
+                          "deposit_id": 12,
+                          "summary": "Deposit notice: 5000.00 USD via USDT on TRC20 from inv@example.com"}
+    assert rows[1][:4] == ("control", "info", 1001, "admin@example.com")
+    assert rows[1][4]["status"] == "confirmed" and rows[1][4]["user_id"] == user_id
+
+
+class _FakeAlerter:
+    def __init__(self, fail=False):
+        self.sent = []
+        self.fail = fail
+
+    async def send_to(self, to_addr, subject, text):
+        if self.fail:
+            raise RuntimeError("resend down")
+        self.sent.append((to_addr, subject, text))
+        return True
+
+
+def test_notify_investor_is_best_effort(db, org_user, monkeypatch):
+    org_id, user_id = org_user
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    fake = _FakeAlerter()
+    with psycopg.connect(db, autocommit=True) as conn:
+        monkeypatch.setattr(ws_module.broadcaster, "alerter", fake, raising=False)
+        asyncio.run(pc.notify_investor(conn, request, user_id, "Subject", "Body"))
+        asyncio.run(pc.notify_investor(conn, request, 999999, "Nobody", "Body"))
+        monkeypatch.setattr(ws_module.broadcaster, "alerter", _FakeAlerter(fail=True), raising=False)
+        asyncio.run(pc.notify_investor(conn, request, user_id, "Fails quietly", "Body"))
+        monkeypatch.setattr(ws_module.broadcaster, "alerter", None, raising=False)
+        asyncio.run(pc.notify_investor(conn, request, user_id, "No alerter", "Body"))
+    assert fake.sent == [("inv@example.com", "Subject", "Body")]
