@@ -210,6 +210,17 @@ def create_app(http_transport: Optional[httpx.BaseTransport] = None) -> FastAPI:
     from .routes.portal_files import create_portal_files_router
     app.include_router(create_portal_files_router())
 
+    # Client portal (phase 1): wallets, payment methods, deposits, payout
+    # destinations, withdrawals, transfers and the Requests desk. Mounted
+    # BEFORE the 2026-09-23 investor routers on purpose: until Task 10 of
+    # the phase-1 plan deletes those, a path both declare (investor/deposits,
+    # investors, ...) must resolve to the new handler -- FastAPI matches the
+    # first route registered.
+    from .routes.portal_admin import create_portal_admin_router
+    from .routes.portal_investor import create_portal_investor_router
+    app.include_router(create_portal_investor_router())
+    app.include_router(create_portal_admin_router())
+
     # Investor portal: a sub-viewer role that sees only its own linked
     # account, plus the admin queues that decide its deposits/withdrawals.
     from .routes.investor import create_investor_admin_router, create_investor_router
