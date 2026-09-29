@@ -4,7 +4,7 @@ export type Theme = 'light' | 'dark'
 
 const STORAGE_KEY = 'mf.theme'
 // Keep in sync with --color-paper in index.css for both themes.
-const PAPER = { light: '#f8f8fa', dark: '#131118' } as const
+const PAPER = { light: '#f4fafb', dark: '#0e1a1f' } as const
 
 function systemTheme(): Theme {
   try {

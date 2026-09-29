@@ -1,77 +1,89 @@
 @import "tailwindcss";
 
 /* ---------------------------------------------------------------------------
-   MirrorFleet design tokens — "insights console" direction.
+   MirrorFleet design tokens — "luminous glass".
 
-   Modeled on the modern observability look: soft gray page ground, flat
-   white cards with hairline purple-gray borders, violet as the single
-   primary (buttons, links, active states), and amber / teal / pink as the
-   supporting data colors.  Ink is a purple-tinted near-black.  Type is
-   Rubik throughout; numbers stay IBM Plex Mono, always tabular.
+   A very light page over a slow colour wash; frosted glass for the layers
+   that float (rail, desk strip, page headers, cards, drawer and dialog
+   headers, popovers); crisp opaque insets for data. One accent: aqua.
+   Type is Rubik throughout; numbers tabular. Every text/surface pair in
+   BOTH themes is proven by scripts/palette_check.mjs, which npm test runs
+   first. The dim theme is the same vocabulary on a deep teal-black ground.
 --------------------------------------------------------------------------- */
 
 @theme {
-  --color-paper: #f8f8fa;
+  --color-paper: #f4fafb;
   --color-card: #ffffff;
-  --color-ink: #2b2233;
-  --color-ink-soft: #6e6379;
-  --color-ink-faint: #756982;
-  --color-line: #e7e4ee;
-  --color-line-strong: #cfc9dc;
+  --color-ink: #14303a;
+  --color-ink-soft: #496670;
+  --color-ink-faint: #557480;
+  --color-line: #dbe9ed;
+  --color-line-strong: #bcd3da;
   /* Edge of a control (inputs, selects, outlined buttons): 3:1 against both
      surfaces per WCAG 1.4.11. Decorative hairlines keep --color-line. */
-  --color-field-line: #8c8399;
-  --color-brand: #6c5fc7;
-  --color-brand-deep: #5648a8;
-  --color-brand-wash: #efecfb;
+  --color-field-line: #6a8893;
+  --color-brand: #0b7c80;
+  --color-brand-deep: #075d61;
+  --color-brand-wash: #e0f5f4;
   --color-profit: #15803d;
   --color-profit-deep: #116230;
-  --color-profit-wash: #e8f5ee;
-  --color-loss: #cc2f45;
-  --color-loss-deep: #a82333;
-  --color-loss-wash: #fceceb;
+  --color-profit-wash: #e6f6ec;
+  --color-loss: #c92e45;
+  --color-loss-deep: #a52333;
+  --color-loss-wash: #fdecec;
   --color-warn: #9a6700;
   --color-warn-deep: #7a5200;
-  --color-warn-wash: #fbf0da;
-  /* Text on accent-colored surfaces (buttons, chips): white in day mode,
-     near-black ink in dark mode where the accents lighten. */
+  --color-warn-wash: #fbf1d9;
+  /* Text on accent-coloured fills (buttons, chips): white by day, ink in
+     the dim theme where the accents lighten. */
   --color-on-accent: #ffffff;
-  /* Glass: the floating layers (desk strip, drawers, popovers) frost what
-     scrolls beneath them. The fill stays high so ink text keeps AA over
-     any underlay; data surfaces (tables, tickets, tiles) stay opaque. */
-  --color-glass: rgb(255 255 255 / 0.95);
-  --color-glass-line: rgb(43 34 51 / 0.10);
+  /* The deepest stop of the wash: the darkest thing glass ever floats
+     over, and therefore the prover's glass underlay. */
+  --color-wash-deep: #c6e7ec;
+  /* Glass: frosted fill and edge for the floating layers. Data never sits
+     directly on glass (see .inset). */
+  --color-glass: rgb(255 255 255 / 0.72);
+  --color-glass-line: rgb(20 48 58 / 0.10);
+
+  --radius-card: 1rem;
+  --radius-inset: 0.75rem;
+  --radius-control: 0.625rem;
+
+  --shadow-card: 0 8px 30px rgb(11 124 128 / 0.08);
+  --shadow-float: 0 16px 48px rgb(20 48 58 / 0.14);
+
+  --ease-out-quint: cubic-bezier(0.23, 1, 0.32, 1);
 
   --font-sans: "Rubik", "Helvetica Neue", Arial, sans-serif;
   --font-mono: "JetBrains Mono", "SFMono-Regular", Menlo, monospace;
   --font-display: "Rubik", "Helvetica Neue", Arial, sans-serif;
 }
 
-/* Native widgets follow the light ground. */
+/* The wash: three soft radial gradients, defined per theme. */
 :root {
   color-scheme: light;
+  --wash-a: rgb(11 124 128 / 0.16);
+  --wash-b: rgb(96 165 250 / 0.12);
+  --wash-c: rgb(139 127 215 / 0.10);
 }
 
 /* ---------------------------------------------------------------------------
-   Dark theme.  Same token vocabulary, night values — every pair in BOTH
-   themes is proven by scripts/palette_check.mjs, which npm test runs first
-   (accents lighten at night, so text on them flips to ink via
-   --color-on-accent).  Applied via data-theme on
-   <html>, set pre-paint by index.html and toggled from the sidebar.
+   Dim theme.  Same token vocabulary, night values.  Applied via data-theme
+   on <html>, set pre-paint by index.html and toggled from the rail.
 --------------------------------------------------------------------------- */
 [data-theme="dark"] {
   color-scheme: dark;
-  --color-paper: #131118;
-  --color-card: #1c1926;
-  --color-ink: #eeeaf4;
-  --color-ink-soft: #aca3bf;
-  --color-ink-faint: #8b81a0;
-  --color-line: #332e42;
-  --color-line-strong: #443e57;
-  --color-field-line: #857c98;
-  --color-brand: #9d90ec;
-  --color-brand-deep: #bcb2f6;
-  --color-brand-wash: #2b2542;
+  --color-paper: #0e1a1f;
+  --color-card: #152329;
+  --color-ink: #e6f2f4;
+  --color-ink-soft: #a8c0c6;
+  --color-ink-faint: #8fa9b0;
+  --color-line: #243740;
+  --color-line-strong: #31474f;
+  --color-field-line: #7d979f;
+  --color-brand: #5fd0d3;
+  --color-brand-deep: #8fe3e5;
+  --color-brand-wash: #173538;
   --color-profit: #43c07a;
   --color-profit-deep: #7edfa6;
   --color-profit-wash: #152b1e;
@@ -81,14 +93,20 @@
   --color-warn: #d09a3e;
   --color-warn-deep: #e9c37c;
   --color-warn-wash: #332708;
-  --color-on-accent: #17141f;
-  --color-glass: rgb(28 25 38 / 0.90);
-  --color-glass-line: rgb(238 234 244 / 0.10);
+  --color-on-accent: #0e1a1f;
+  --color-wash-deep: #0a1418;
+  --color-glass: rgb(21 35 41 / 0.72);
+  --color-glass-line: rgb(230 242 244 / 0.10);
+  --shadow-card: 0 8px 30px rgb(0 0 0 / 0.45);
+  --shadow-float: 0 16px 48px rgb(0 0 0 / 0.60);
+  --wash-a: rgb(95 208 211 / 0.14);
+  --wash-b: rgb(96 165 250 / 0.10);
+  --wash-c: rgb(139 127 215 / 0.08);
 }
 
 /* The select chevron follows the brand tone per theme. */
 [data-theme="dark"] select.bg-card {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 6l4 4 4-4' fill='none' stroke='%239d90ec' stroke-width='1.5'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 6l4 4 4-4' fill='none' stroke='%235fd0d3' stroke-width='1.5'/%3E%3C/svg%3E");
 }
 
 /* Hints never drop below AA: the browser default is ~50% of the text colour. */
@@ -97,11 +115,42 @@
   opacity: 1;
 }
 
-body {
+html {
   background-color: var(--color-paper);
+}
+
+body {
+  min-height: 100vh;
   color: var(--color-ink);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
+}
+
+/* ---------------------------------------------------------------------------
+   The luminous wash.  A fixed layer behind everything: three large soft
+   radial gradients over the page ground, drifting once a minute.  Oversized
+   (inset -10%) so the drift never reveals an edge.  It is the only
+   decoration on the page.  Reduced motion freezes it through the global
+   block below; it is not glass, so reduced transparency leaves it painted.
+--------------------------------------------------------------------------- */
+body::before {
+  content: "";
+  position: fixed;
+  inset: -10%;
+  z-index: -1;
+  pointer-events: none;
+  background-color: var(--color-paper);
+  background-image:
+    radial-gradient(60% 55% at 12% 8%, var(--wash-a), transparent 70%),
+    radial-gradient(55% 50% at 92% 25%, var(--wash-b), transparent 70%),
+    radial-gradient(70% 60% at 50% 100%, var(--wash-c), transparent 70%);
+  animation: wash-drift 60s var(--ease-out-quint) infinite alternate;
+  will-change: transform;
+}
+
+@keyframes wash-drift {
+  from { transform: translate3d(0, 0, 0) rotate(0deg); }
+  to   { transform: translate3d(-3%, 2%, 0) rotate(1.5deg); }
 }
 
 /* Every number in the product: Rubik digits, tabular so columns align,
@@ -120,18 +169,30 @@ body {
   font-weight: 600;
 }
 
-/* Page headings — Rubik bold, console-sized. */
+/* Page headings. */
 .page-title {
   font-family: var(--font-display);
-  font-size: 1.5rem;
+  font-size: 1.75rem;
   font-weight: 700;
-  letter-spacing: -0.01em;
-  line-height: 1.2;
+  letter-spacing: -0.015em;
+  line-height: 1.15;
   color: var(--color-ink);
   text-wrap: balance;
 }
 
-/* Small-caps section labels — the quiet structural voice of the desk. */
+/* The landing hero only. */
+.hero-title {
+  font-family: var(--font-display);
+  font-size: clamp(2.25rem, 5vw, 4rem);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.05;
+  color: var(--color-ink);
+  text-wrap: balance;
+}
+
+/* Small-caps labels for table headers and field labels only — never a
+   section kicker. */
 .desk-label {
   font-size: 0.6875rem;
   font-weight: 600;
@@ -140,11 +201,11 @@ body {
   color: var(--color-ink-soft);
 }
 
-/* Selects paint their own chrome, with the violet chevron. */
+/* Selects paint their own chrome, with the aqua chevron. */
 select.bg-card {
   appearance: none;
   -webkit-appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 6l4 4 4-4' fill='none' stroke='%236c5fc7' stroke-width='1.5'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 6l4 4 4-4' fill='none' stroke='%230b7c80' stroke-width='1.5'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 0.55rem center;
   background-size: 0.85rem;
@@ -152,38 +213,49 @@ select.bg-card {
 }
 
 /* ---------------------------------------------------------------------------
-   Glass surface.  Used only for chrome that floats over the desk: the
-   landing header, drawer headers, the symbol popover.  Modal and drawer
-   scrims frost the desk with backdrop-blur instead.  The fill is opaque
-   enough that every text token stays AA over the worst underlay
-   (scripts/palette_check.mjs proves it); no data table, ticket or drawer
-   body ever sits on glass.  Falls back to the solid card when blur is
-   unsupported or the user asked for reduced transparency.
+   Glass.  For layers that float over the wash: the rail and phone tab bar,
+   the desk strip and page headers, Card panels, drawer and dialog headers,
+   popovers.  Data never sits directly on glass: inside a glass card,
+   tables, forms and figures sit on an .inset.  The prover proves ink,
+   ink-soft, ink-faint, brand and brand-deep on glass mixed over wash-deep.
+   Falls back to the solid card when blur is unsupported or the user asked
+   for reduced transparency.
 
    Layer scale (Tailwind z-*): 10 sticky chrome and popovers, 40 drawers and
-   the phone nav, 50 modals.
+   the phone nav, 50 dialogs.
 --------------------------------------------------------------------------- */
-.glass {
-  background-color: var(--color-glass);
-  border-color: var(--color-glass-line);
-  -webkit-backdrop-filter: blur(14px) saturate(1.4);
-  backdrop-filter: blur(14px) saturate(1.4);
-}
-
-@supports not (backdrop-filter: blur(1px)) {
+/* In the components layer so a utility such as border-loss or shadow-float
+   on the same element still wins over the defaults set here. */
+@layer components {
   .glass {
-    background-color: var(--color-card);
+    background-color: var(--color-glass);
+    border-color: var(--color-glass-line);
+    -webkit-backdrop-filter: blur(16px) saturate(1.3);
+    backdrop-filter: blur(16px) saturate(1.3);
   }
-}
 
-@media (prefers-reduced-transparency: reduce) {
-  .glass {
+  /* Crisp data surface inside glass. */
+  .inset {
     background-color: var(--color-card);
+    border: 1px solid var(--color-line);
+    border-radius: var(--radius-inset);
   }
-  .glass,
-  [class*="backdrop-blur"] {
-    -webkit-backdrop-filter: none !important;
-    backdrop-filter: none !important;
+
+  @supports not (backdrop-filter: blur(1px)) {
+    .glass {
+      background-color: var(--color-card);
+    }
+  }
+
+  @media (prefers-reduced-transparency: reduce) {
+    .glass {
+      background-color: var(--color-card);
+    }
+    .glass,
+    [class*="backdrop-blur"] {
+      -webkit-backdrop-filter: none !important;
+      backdrop-filter: none !important;
+    }
   }
 }
 
@@ -211,7 +283,7 @@ select.bg-card {
   }
   .stack-table tr {
     border: 1px solid var(--color-line) !important;
-    border-radius: 0.5rem;
+    border-radius: var(--radius-inset);
     margin: 0.75rem;
     width: auto;
     padding: 0.35rem 0.85rem;
@@ -241,7 +313,7 @@ select.bg-card {
   }
 }
 
-/* Visible keyboard focus everywhere, in violet. */
+/* Visible keyboard focus everywhere, in aqua (3:1 on every ground, proven). */
 :focus-visible {
   outline: 2px solid var(--color-brand);
   outline-offset: 2px;
@@ -258,7 +330,8 @@ select.bg-card {
 }
 
 /* Reduced motion stops every animation and transition in one place, so no
-   component has to remember its own motion-reduce: variant. */
+   component has to remember its own motion-reduce: variant. The wash is
+   frozen at its rest position. */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -271,17 +344,10 @@ select.bg-card {
 }
 
 /* ---------------------------------------------------------------------------
-   Stop iOS Safari zooming the page on every tap into a field.
-
-   Safari zooms in whenever a focused form control has a font smaller than
-   16px -- and it does NOT zoom back out afterwards, so the desk is left
-   magnified until the operator pinches it back. The ticket's inputs are
-   text-sm (14px), which trips it on every symbol, volume and price field.
-
-   Raising them to 16px on phones removes the trigger entirely. Left at
-   14px on wider screens, where the density is wanted and no auto-zoom
-   exists to provoke. !important because these have to beat Tailwind's
-   utility classes, which are what set the 14px in the first place.
+   Stop iOS Safari zooming the page on every tap into a field.  Safari zooms
+   whenever a focused control has a font smaller than 16px and does not zoom
+   back.  Raising controls to 16px on phones removes the trigger; wider
+   screens keep the 14px density.  !important beats the utility classes.
 --------------------------------------------------------------------------- */
 @media (max-width: 640px) {
   input,

@@ -96,15 +96,15 @@ test('a toggle in another tab syncs through the storage event', () => {
 test('toggling keeps the browser-chrome theme-color meta in step', () => {
   const meta = document.createElement('meta')
   meta.setAttribute('name', 'theme-color')
-  meta.setAttribute('content', '#f8f8fa')
+  meta.setAttribute('content', '#f4fafb')
   document.head.appendChild(meta)
   const { result } = renderHook(() => useTheme())
   act(() => {
     result.current.toggle()
   })
-  expect(meta.getAttribute('content')).toBe('#131118')
+  expect(meta.getAttribute('content')).toBe('#0e1a1f')
   act(() => {
     result.current.toggle()
   })
-  expect(meta.getAttribute('content')).toBe('#f8f8fa')
+  expect(meta.getAttribute('content')).toBe('#f4fafb')
 })

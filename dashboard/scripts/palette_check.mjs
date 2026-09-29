@@ -58,6 +58,10 @@ const pairs = [
   ['ink-soft', 'glass-solid', TEXT, 'secondary text on glass over the worst underlay'],
   ['brand', 'glass-solid', TEXT, 'brand text on glass over the worst underlay (the wordmark)'],
   ['brand-deep', 'glass-solid', TEXT, 'brand-deep text on glass over the worst underlay'],
+  ['ink-faint', 'glass-solid', TEXT, 'faint text on glass over the deepest wash'],
+  ['field-line', 'glass-solid', CONTROL, 'control edge drawn directly on glass (popover items)'],
+  ['brand', 'wash-deep', CONTROL, 'focus ring over the deepest wash'],
+  ['ink-soft', 'wash-deep', TEXT, 'labels over the deepest wash (page header on scroll)'],
   // Only chrome sits on glass: ink, soft ink and brand. Faint text and every
   // profit/loss figure live on opaque surfaces by rule, so they are not proven here.
   // brand
@@ -92,10 +96,8 @@ const pairs = [
   ['card', 'paper', 1.05, 'cards distinguishable from the page ground'],
 ]
 
-// The glass fill is translucent. Text on it is at its weakest when the
-// underlay pulls the fill toward the text colour: for dark text (day) that
-// is the darkest surface, for light text (night) the LIGHTEST one. Ink is
-// the extreme in both palettes.
+// The glass fill is translucent. Glass floats only over the wash (never
+// over data), so the worst underlay is the wash's deepest stop.
 function glassSolid(pal, under) {
   const m = /--color-glass:\s*rgb\((\d+)\s+(\d+)\s+(\d+)\s*\/\s*([\d.]+)\)/.exec(pal.raw)
   if (!m) throw new Error('glass token not found')
@@ -106,8 +108,8 @@ function glassSolid(pal, under) {
 }
 light.raw = block(css, /@theme\s*\{/)
 dark.raw = block(css, /\[data-theme="dark"\]\s*\{/)
-light['glass-solid'] = glassSolid(light, light.ink)
-dark['glass-solid'] = glassSolid(dark, dark.ink)
+light['glass-solid'] = glassSolid(light, light['wash-deep'])
+dark['glass-solid'] = glassSolid(dark, dark['wash-deep'])
 
 let failures = 0
 for (const [name, pal] of [['LIGHT', light], ['DARK', dark]]) {
