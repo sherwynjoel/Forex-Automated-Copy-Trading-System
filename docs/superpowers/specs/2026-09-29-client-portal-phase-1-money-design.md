@@ -1,7 +1,7 @@
 # Client portal, phase 1: wallets, money movement and the Requests desk
 
 **Date:** 2026-09-29
-**Status:** implemented on branch `client-portal` on 2026-09-30 (Tasks 1–20 of `docs/superpowers/plans/2026-09-29-client-portal-phase-1.md`, API and dashboard suites green locally); deploy follows the "Upgrading with a migration" sequence in README.md.
+**Status:** implemented and deployed to mirrorfleet.com on 2026-09-30 (main 63a1099; migration 022 applied; Tasks 1–20 of `docs/superpowers/plans/2026-09-29-client-portal-phase-1.md`, final whole-branch review and fix wave done).
 **Reference material:** `docs/reference/aiprime-portal-survey.md` (the portal being
 reproduced, screen by screen) and `docs/reference/mirrorfleet-subsystem-maps.md`
 (what MirrorFleet has today, read by eight code readers). This spec supersedes the
