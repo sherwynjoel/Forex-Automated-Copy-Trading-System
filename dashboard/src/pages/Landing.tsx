@@ -130,7 +130,7 @@ function Ctas({ large = false, compact = false }: { large?: boolean; compact?: b
 
 function FleetPanel() {
   return (
-    <Card as="article" className="md:col-span-2 md:self-start">
+    <Card as="article" className="md:col-span-2 md:row-span-2 md:self-start">
       <div className="space-y-4">
         <div className="space-y-1">
           <h3 className="text-lg font-semibold text-ink">Every follower on one screen</h3>

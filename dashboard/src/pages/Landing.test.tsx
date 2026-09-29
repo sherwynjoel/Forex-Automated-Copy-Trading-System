@@ -46,8 +46,10 @@ test('three asymmetric panels each show a piece of the product, marked as exampl
   expect(log).not.toBeNull()
   expect(risk).not.toBeNull()
 
-  // One wide panel, two narrow ones.
+  // One wide panel, two narrow ones: the wide panel spans both rows so the
+  // two narrow panels auto-place stacked in the remaining column.
   expect(fleet).toHaveClass('md:col-span-2')
+  expect(fleet).toHaveClass('md:row-span-2')
   expect(log).not.toHaveClass('md:col-span-2')
   expect(risk).not.toHaveClass('md:col-span-2')
 
