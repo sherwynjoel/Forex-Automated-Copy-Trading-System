@@ -46,7 +46,9 @@ const notice: PortalDeposit = depositFixture({
   decided_by: null, decided_at: null, decision_note: null, created_at: '2026-09-23T10:00:00Z', currency: 'USD',
 })
 
-function mockRoutes(opts: { open?: boolean; linked?: boolean; rows?: PortalDeposit[]; fail?: boolean } = {}) {
+function mockRoutes(opts: {
+  open?: boolean; linked?: boolean; rows?: PortalDeposit[]; fail?: boolean; methods?: PaymentMethod[]
+} = {}) {
   const deposits: PortalDeposit[] = [...(opts.rows ?? [])]
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
@@ -57,7 +59,9 @@ function mockRoutes(opts: { open?: boolean; linked?: boolean; rows?: PortalDepos
         ...(opts.linked === false ? { link_state: 'unlinked', account: null } : {}),
       })
     }
-    if (url.endsWith('/investor/payment-methods')) return jsonResponse(opts.open === false ? [] : [crypto, bank])
+    if (url.endsWith('/investor/payment-methods')) {
+      return jsonResponse(opts.open === false ? [] : (opts.methods ?? [crypto, bank]))
+    }
     if (url.endsWith('/investor/files') && init?.method === 'POST') {
       return jsonResponse({ id: 77, purpose: 'deposit_receipt', content_type: 'image/png', size_bytes: 3,
                             created_at: '2026-09-23T10:00:00Z' }, 201)
@@ -152,6 +156,35 @@ test('the Bank tab lists bank details with a Copy button each, needs a receipt, 
     method_id: 6, amount: '500.00', reference: 'UTR123', receipt_file_id: 77,
     target: 'wallet', target_account_id: null, note: null,
   })
+})
+
+test('switching kind or method clears a stale bank-receipt error', async () => {
+  const bank2: PaymentMethod = methodFixture({
+    id: 7, kind: 'bank', label: 'HDFC Bank', enabled: true, currency: 'USD',
+    details: { bank_name: 'HDFC Bank', holder: 'MirrorFleet Ltd', account_number: '000998877665', code: 'HDFC0001' },
+    min_amount: 100, fee_pct: 1, instructions: null, sort_order: 2,
+  })
+  mockRoutes({ methods: [crypto, bank, bank2] })
+  render(<MemoryRouter><InvestorDeposit /></MemoryRouter>)
+  await screen.findByText('TAddr123')
+  await userEvent.click(screen.getByRole('tab', { name: 'Bank' }))
+  await screen.findByText('000112344543')
+  await userEvent.type(screen.getByLabelText('Amount in USD'), '500')
+  await userEvent.type(screen.getByLabelText('Bank transaction ID'), 'UTR1')
+  await userEvent.click(screen.getByRole('button', { name: 'File deposit notice' }))
+  expect(await screen.findByText('A receipt is required for bank deposits')).toBeInTheDocument()
+
+  // Picking a different method of the same kind clears it too.
+  await userEvent.click(screen.getByRole('button', { name: /HDFC Bank/ }))
+  expect(screen.queryByText('A receipt is required for bank deposits')).not.toBeInTheDocument()
+
+  // Trigger it again, then switch kind: the label goes back to optional and
+  // the stale "required" text does not survive onto it.
+  await userEvent.click(screen.getByRole('button', { name: 'File deposit notice' }))
+  expect(await screen.findByText('A receipt is required for bank deposits')).toBeInTheDocument()
+  await userEvent.click(screen.getByRole('tab', { name: 'Crypto' }))
+  expect(screen.queryByText('A receipt is required for bank deposits')).not.toBeInTheDocument()
+  expect(screen.getByText('Receipt (optional)')).toBeInTheDocument()
 })
 
 test('Trading account is offered as the target when an account is linked, and is posted with its id', async () => {

@@ -136,7 +136,13 @@ export default function InvestorDeposit() {
     selectValue(key, label)
   }
 
-  const chooseKind = (k: string) => { setKind(k as Kind); setMethodId(null); setCopied(null) }
+  // Switching kind or method drops any validation message the previous
+  // choice earned (a bank-only "receipt required" would otherwise survive
+  // onto an optional receipt on the next method); a success notice from a
+  // completed submission is left alone.
+  const chooseKind = (k: string) => {
+    setKind(k as Kind); setMethodId(null); setCopied(null); setReceiptError(null); setError(null)
+  }
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -229,7 +235,7 @@ export default function InvestorDeposit() {
                     <li key={m.id}>
                       <Button variant={on ? 'primary' : 'secondary'} block aria-pressed={on}
                               className="justify-start text-left"
-                              onClick={() => { setMethodId(m.id); setCopied(null) }}>
+                              onClick={() => { setMethodId(m.id); setCopied(null); setReceiptError(null); setError(null) }}>
                         <span className="flex flex-col items-start">
                           <span>{m.label}</span>
                           <span className="text-xs font-normal">
