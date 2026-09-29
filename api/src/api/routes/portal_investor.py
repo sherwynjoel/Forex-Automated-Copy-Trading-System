@@ -103,8 +103,18 @@ def create_portal_investor_router() -> APIRouter:
             # section 9, enforced there for every other caller too), so
             # checking it first would only ever surface the generic
             # "not found" message and this one would be unreachable.
-            used = conn.execute("SELECT 1 FROM deposits WHERE receipt_file_id = %s",
-                                (body.receipt_file_id,)).fetchone()
+            #
+            # The probe is scoped to the CALLER'S OWN file (org, user,
+            # purpose): an unscoped "does this id belong to any deposit
+            # anywhere" query would be a yes/no oracle any investor could
+            # run over sequential file ids across every org's receipts, so
+            # a foreign or another investor's file must fall through to the
+            # generic "not found" message just like a nonexistent one.
+            used = conn.execute(
+                "SELECT 1 FROM deposits d JOIN files f ON f.id = d.receipt_file_id "
+                "WHERE d.receipt_file_id = %s AND f.org_id = %s AND f.user_id = %s "
+                "AND f.purpose = %s",
+                (body.receipt_file_id, ctx.org_id, ctx.user_id, "deposit_receipt")).fetchone()
             if used:
                 raise HTTPException(
                     status_code=400, detail="receipt file is already attached to another notice")

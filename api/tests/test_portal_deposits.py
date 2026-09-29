@@ -171,6 +171,25 @@ def test_bank_deposits_need_a_receipt_that_is_the_investors_own(
     assert r.json()["detail"] == "receipt file is already attached to another notice"
 
 
+def test_the_already_attached_check_never_leaks_another_investors_receipt(
+        org_client, make_user, login_as, db):
+    """The 'already attached' probe must not become a yes/no oracle over
+    every other investor's (or org's) receipts: a caller who names a file
+    id that IS already attached, but to someone else's notice, learns only
+    'not found' -- exactly what a foreign or nonexistent id also returns."""
+    client, org_id, investor, method_id = _investor(org_client, make_user, login_as, db)
+    other = make_user(email="other2@example.com")
+    _member(db, org_id, other, "investor")
+    login_as(client, other)
+    other_file = seed_file(db, org_id, other["id"])
+    r = _notice(client, org_id, method_id, reference="other-tx", receipt_file_id=other_file)
+    assert r.status_code == 201 and r.json()["receipt_file_id"] == other_file
+
+    login_as(client, investor)
+    r = _notice(client, org_id, method_id, reference="mine-tx", receipt_file_id=other_file)
+    assert r.status_code == 400 and r.json()["detail"] == "receipt file not found"
+
+
 def test_a_notice_may_target_the_linked_trading_account(org_client, make_user, login_as, db):
     client, org_id, investor, method_id = _investor(org_client, make_user, login_as, db,
                                                     link_to=1001)
