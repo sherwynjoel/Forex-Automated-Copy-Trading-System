@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi, afterEach, beforeEach } from 'vitest'
@@ -28,10 +28,11 @@ const notice = { id: 1, user_id: 1, account_id: null, amount: 5000, coin: 'USDT'
                  note: null, status: 'pending', decided_by: null, decided_at: null,
                  decision_note: null, created_at: '2026-09-23T10:00:00Z' }
 
-function mockRoutes(opts: { wallet?: boolean } = {}) {
-  const deposits: unknown[] = []
+function mockRoutes(opts: { wallet?: boolean; rows?: unknown[]; fail?: boolean } = {}) {
+  const deposits: unknown[] = [...(opts.rows ?? [])]
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
+    if (opts.fail) return jsonResponse({ detail: 'database unavailable' }, 500)
     if (url.endsWith('/investor/wallet')) {
       return opts.wallet === false
         ? jsonResponse({ detail: 'Deposits are not open yet' }, 404)
@@ -133,4 +134,22 @@ test('the QR encoder is loaded on demand, not in the main bundle', () => {
   const source = readFileSync('src/pages/investor/InvestorDeposit.tsx', 'utf8')
   expect(source).not.toMatch(/^import .* from 'qrcode'/m)
   expect(source).toContain("await import('qrcode')")
+})
+
+test("a row keeps its own coin even when the wallet's coin has since changed", async () => {
+  mockRoutes({ rows: [{ ...notice, id: 9, amount: 0.5, coin: 'BTC', status: 'confirmed' }] })
+  render(<MemoryRouter><InvestorDeposit /></MemoryRouter>)
+  await screen.findByText('TAddr123')
+  expect(screen.getByText('0.50 BTC')).toBeInTheDocument()
+  expect(screen.queryByText('0.50 USDT')).not.toBeInTheDocument()
+})
+
+test('dismissing a load error shows the empty state, not an endless skeleton', async () => {
+  mockRoutes({ fail: true })
+  render(<MemoryRouter><InvestorDeposit /></MemoryRouter>)
+  const alert = await screen.findByRole('alert')
+  await userEvent.click(within(alert).getByRole('button', { name: 'Dismiss' }))
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  expect(screen.getByText('No notices yet')).toBeInTheDocument()
 })

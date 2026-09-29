@@ -30,13 +30,15 @@ const request = { id: 3, user_id: 1, account_id: 1001, amount: 1000, destination
                   paid_by: null, paid_at: null, txid: null, created_at: '2026-09-23T10:00:00Z' }
 
 function mockRoutes(opts: { refuse?: string; unlinked?: boolean; noWallet?: boolean;
-                            rows?: unknown[] } = {}) {
+                            rows?: unknown[]; fail?: boolean; available?: number | null } = {}) {
   const rows: unknown[] = [...(opts.rows ?? [])]
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
+    if (opts.fail) return jsonResponse({ detail: 'database unavailable' }, 500)
     if (url.endsWith('/investor/summary')) {
       return jsonResponse(opts.unlinked
-        ? { ...summary, link_state: 'unlinked', account: null, available: null } : summary)
+        ? { ...summary, link_state: 'unlinked', account: null, available: null }
+        : opts.available !== undefined ? { ...summary, available: opts.available } : summary)
     }
     if (url.endsWith('/investor/wallet')) {
       return opts.noWallet
@@ -174,4 +176,47 @@ test('unlinked investors cannot request yet, and are told what happens next', as
   expect(screen.getByText('Withdrawals open once your admin links your trading account.')).toBeInTheDocument()
   expect(screen.getByRole('link', { name: 'help@desk.example' })).toHaveAttribute('href', 'mailto:help@desk.example')
   expect(screen.queryByRole('button', { name: 'Request withdrawal' })).not.toBeInTheDocument()
+})
+
+const TWO_DECIMALS = 'Enter an amount with at most two decimals, digits only (for example 250.00).'
+
+test.each(['1000.005', '1,000'])('%s is refused before the review, and nothing is posted', async (amount) => {
+  const fetchMock = mockRoutes()
+  render(<MemoryRouter><InvestorWithdraw /></MemoryRouter>)
+  await userEvent.type(await screen.findByLabelText('Amount in USDT'), amount)
+  await userEvent.type(screen.getByLabelText('Destination address'), 'TDest')
+  await userEvent.click(screen.getByRole('button', { name: 'Request withdrawal' }))
+  expect(await screen.findByText(TWO_DECIMALS)).toBeInTheDocument()
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  expect(posts(fetchMock)).toHaveLength(0)
+})
+
+test('one decimal is fine: the review shows two, the post carries what was typed', async () => {
+  const fetchMock = mockRoutes()
+  render(<MemoryRouter><InvestorWithdraw /></MemoryRouter>)
+  await userEvent.type(await screen.findByLabelText('Amount in USDT'), '250.5')
+  await userEvent.type(screen.getByLabelText('Destination address'), 'TDest')
+  await userEvent.click(screen.getByRole('button', { name: 'Request withdrawal' }))
+  const dialog = await screen.findByRole('dialog', { name: 'Send 250.50 USDT to TDest?' })
+  await userEvent.click(within(dialog).getByRole('button', { name: 'Send request' }))
+  await waitFor(() => expect(posts(fetchMock)).toHaveLength(1))
+  expect(JSON.parse((posts(fetchMock)[0][1] as RequestInit).body as string))
+    .toEqual({ amount: '250.5', destination: 'TDest' })
+})
+
+test.each([null, 0])('Use max is disabled when available is %s', async (available) => {
+  mockRoutes({ available })
+  render(<MemoryRouter><InvestorWithdraw /></MemoryRouter>)
+  await screen.findByLabelText('Amount in USDT')
+  expect(screen.getByRole('button', { name: 'Use max' })).toBeDisabled()
+})
+
+test('dismissing a load error shows the empty state, not an endless skeleton', async () => {
+  mockRoutes({ fail: true })
+  render(<MemoryRouter><InvestorWithdraw /></MemoryRouter>)
+  const alert = await screen.findByRole('alert')
+  await userEvent.click(within(alert).getByRole('button', { name: 'Dismiss' }))
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  expect(screen.getByText('No requests yet')).toBeInTheDocument()
 })

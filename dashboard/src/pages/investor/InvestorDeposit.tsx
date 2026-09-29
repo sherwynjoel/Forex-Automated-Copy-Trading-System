@@ -30,6 +30,9 @@ export default function InvestorDeposit() {
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [copy, setCopy] = useState<'idle' | 'copied' | 'selected'>('idle')
+  // True once the first load has settled, success or failure: the skeleton
+  // is for "not asked yet", never for "asked and failed".
+  const [loaded, setLoaded] = useState(false)
   const addressRef = useRef<HTMLDivElement>(null)
 
   const refresh = useCallback(async () => {
@@ -46,6 +49,7 @@ export default function InvestorDeposit() {
       if (err instanceof Error && err.message.startsWith('404')) setWallet('closed')
       else setError(errorText(err, 'Could not load the deposit address'))
     }
+    setLoaded(true)
     if (!w) return
     try {
       // Loaded on demand so the QR encoder stays out of the main bundle.
@@ -112,10 +116,6 @@ export default function InvestorDeposit() {
     }
   }
 
-  // Rows are shown in the wallet's coin when it is known, else in the coin
-  // stored on the row itself.
-  const walletCoin = wallet !== null && wallet !== 'closed' ? wallet.coin : null
-
   return (
     <div className="space-y-6 max-w-4xl">
       <PageHeader
@@ -125,7 +125,7 @@ export default function InvestorDeposit() {
       {error && <Banner kind="error" onDismiss={() => setError(null)}>{error}</Banner>}
       {notice && <Banner kind="notice" onDismiss={() => setNotice(null)}>{notice}</Banner>}
 
-      {wallet === null && !error && <Loading lines={4} />}
+      {!loaded && <Loading lines={4} />}
 
       {wallet === 'closed' && (
         <NextStep title="Deposits are not open yet">
@@ -222,7 +222,7 @@ export default function InvestorDeposit() {
               {deposits.map((d) => (
                 <tr key={d.id} className="border-b border-line last:border-0">
                   <td data-label="Filed" className="num px-4 py-2.5">{formatWhen(d.created_at)}</td>
-                  <td data-label="Amount" className="tnum px-4 py-2.5 text-right">{money(d.amount, walletCoin ?? d.coin)}</td>
+                  <td data-label="Amount" className="tnum px-4 py-2.5 text-right">{money(d.amount, d.coin)}</td>
                   <td data-label="Transaction" className="num px-4 py-2.5 break-all">{d.txid}</td>
                   <td data-label="Status" className="px-4 py-2.5">
                     <Badge tone={BADGE_TONE[statusTone(d.status)]}>{statusLabel(d.status)}</Badge>

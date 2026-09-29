@@ -48,6 +48,9 @@ export default function InvestorWithdraw() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  // True once the first load has settled, success or failure: the skeleton
+  // is for "not asked yet", never for "asked and failed".
+  const [loaded, setLoaded] = useState(false)
 
   const refresh = useCallback(async () => {
     try {
@@ -66,6 +69,7 @@ export default function InvestorWithdraw() {
     } catch {
       setCoin(null)
     }
+    setLoaded(true)
   }, [orgId])
 
   useEffect(() => { refresh() }, [refresh])
@@ -78,6 +82,12 @@ export default function InvestorWithdraw() {
   const review = (e: React.FormEvent) => {
     e.preventDefault()
     setError(null); setNotice(null)
+    // Digits with at most two decimals, so the review shows exactly the
+    // number that will be posted ("1000.005" would read as 1,000.01).
+    if (!/^\d+(\.\d{1,2})?$/.test(form.amount.trim())) {
+      setError('Enter an amount with at most two decimals, digits only (for example 250.00).')
+      return
+    }
     if (!(Number(form.amount) > 0)) {
       setError('Enter an amount above zero')
       return
@@ -112,7 +122,7 @@ export default function InvestorWithdraw() {
       />
       {error && <Banner kind="error" onDismiss={() => setError(null)}>{error}</Banner>}
       {notice && <Banner kind="notice" onDismiss={() => setNotice(null)}>{notice}</Banner>}
-      {!summary && !error && <Loading lines={3} />}
+      {!loaded && <Loading lines={3} />}
 
       {summary && !linked && (
         <NextStep title="Your account is being set up">
@@ -135,7 +145,7 @@ export default function InvestorWithdraw() {
                 <Input aria-label={`Amount in ${unit}`} num value={form.amount} required
                        onChange={(e) => setForm({ ...form, amount: e.target.value })} />
               </label>
-              <Button variant="ghost" size="sm" disabled={available == null}
+              <Button variant="ghost" size="sm" disabled={available == null || available <= 0}
                       onClick={() => { if (available != null) setForm({ ...form, amount: available.toFixed(2) }) }}>
                 Use max
               </Button>
