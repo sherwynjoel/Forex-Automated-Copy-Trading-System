@@ -58,3 +58,16 @@ test('links to the registration page', () => {
     '/register'
   )
 })
+
+test('names the page in its one h1 and in the document title', () => {
+  renderLogin()
+  expect(screen.getByRole('heading', { level: 1, name: 'Sign in' })).toBeInTheDocument()
+  expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1)
+  expect(document.title).toBe('Sign in · MirrorFleet')
+})
+
+test('explains what to do about a forgotten password', () => {
+  renderLogin()
+  const line = screen.getByText(/ask an admin of your workspace to reset it/i)
+  expect(line).toHaveTextContent(/^Forgot password\?\s+Ask an admin of your workspace to reset it\.$/)
+})

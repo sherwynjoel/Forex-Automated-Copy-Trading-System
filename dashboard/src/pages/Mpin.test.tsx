@@ -166,3 +166,46 @@ test('next must be a same-origin path; anything else falls back to /', async () 
     view.unmount()
   }
 })
+
+test('each mode names itself in the one h1 and in the page title', async () => {
+  stub({ mpin: { pending: true, set: false } })
+  const view = renderMpin()
+  expect(await screen.findByRole('heading', { level: 1, name: 'Choose your MPIN' })).toBeInTheDocument()
+  expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1)
+  await waitFor(() => expect(document.title).toBe('Choose your MPIN · MirrorFleet'))
+  view.unmount()
+
+  stub({ mpin: { pending: true, set: true } })
+  renderMpin()
+  expect(await screen.findByRole('heading', { level: 1, name: 'Enter your MPIN' })).toBeInTheDocument()
+  expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1)
+  await waitFor(() => expect(document.title).toBe('Enter your MPIN · MirrorFleet'))
+
+  await userEvent.click(screen.getByRole('button', { name: /forgot mpin/i }))
+  expect(screen.getByRole('heading', { level: 1, name: 'Reset your MPIN' })).toBeInTheDocument()
+  expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1)
+  await waitFor(() => expect(document.title).toBe('Reset your MPIN · MirrorFleet'))
+})
+
+test('Forgot mode asks to confirm the password, and Reset MPIN is a brand action', async () => {
+  stub({ mpin: { pending: true, set: true } })
+  renderMpin()
+  await screen.findByRole('heading', { name: 'Enter your MPIN' })
+  await userEvent.click(screen.getByRole('button', { name: /forgot mpin/i }))
+
+  expect(screen.getByText('Confirm your password to choose a new MPIN.')).toBeInTheDocument()
+  expect(screen.queryByText(/prove your password/i)).not.toBeInTheDocument()
+  const reset = screen.getByRole('button', { name: /reset mpin/i })
+  expect(reset).toHaveClass('bg-brand')
+  expect(reset).not.toHaveClass('bg-loss')
+})
+
+test('while the session is checked the page shows a loading status, not bare text', async () => {
+  let release: (r: Response) => void = () => {}
+  vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((resolve) => { release = resolve })))
+  renderMpin()
+  expect(screen.getByRole('status', { name: 'Checking your sign-in' })).toBeInTheDocument()
+  expect(screen.queryByText('Loading...')).not.toBeInTheDocument()
+  release(json({ mpin: { pending: true, set: true } }))
+  expect(await screen.findByRole('heading', { level: 1, name: 'Enter your MPIN' })).toBeInTheDocument()
+})

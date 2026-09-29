@@ -120,3 +120,21 @@ test('a half session is sent to /mpin carrying the join path', async () => {
   renderJoin('tok9')
   expect(await screen.findByText('mpin next /join/tok9')).toBeInTheDocument()
 })
+
+test('names the page in its one h1 and in the document title', async () => {
+  stubFetch({ join: new Response('Gone', { status: 410 }) })
+  renderJoin('deadtoken')
+
+  expect(await screen.findByText(/invalid.*expired/i)).toBeInTheDocument()
+  expect(screen.getByRole('heading', { level: 1, name: 'Join the workspace' })).toBeInTheDocument()
+  expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1)
+  expect(document.title).toBe('Join the workspace · MirrorFleet')
+})
+
+test('a dead invite is announced as an error with a way to sign in', async () => {
+  stubFetch({ join: new Response('Gone', { status: 410 }) })
+  renderJoin('deadtoken')
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(/fresh link/i)
+  expect(screen.getByRole('link', { name: /sign in/i })).toHaveAttribute('href', '/login')
+})

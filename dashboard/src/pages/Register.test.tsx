@@ -97,3 +97,58 @@ test('with an invite, registration goes to /mpin carrying the join path', async 
     expect(screen.getByText('mpin next /join/tok123')).toBeInTheDocument()
   })
 })
+
+const CLOSED = 'Self-service registration is disabled; ask an administrator for an invite link'
+
+async function fillAndSubmit() {
+  await userEvent.type(screen.getByLabelText(/display name/i), 'Ada Trader')
+  await userEvent.type(screen.getByLabelText(/email/i), 'ada@example.com')
+  await userEvent.type(screen.getByLabelText(/^password$/i), 'correcthorsebattery')
+  await userEvent.click(screen.getByRole('button', { name: /create account/i }))
+}
+
+test('names the page in its one h1 and in the document title', () => {
+  renderRegister()
+  expect(screen.getByRole('heading', { level: 1, name: 'Create your account' })).toBeInTheDocument()
+  expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1)
+  expect(document.title).toBe('Create your account · MirrorFleet')
+})
+
+test('closed registration says invite only at once and keeps what was typed', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+    new Response(JSON.stringify({ detail: CLOSED }), { status: 403 })
+  ))
+  renderRegister()
+  await fillAndSubmit()
+
+  expect(await screen.findByText(/registration is by invite only/i)).toBeInTheDocument()
+  expect(screen.getByRole('status')).toHaveTextContent(/invite only/i)
+  // The notice replaces the raw server error; it is not shown twice.
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  expect(screen.getByLabelText(/display name/i)).toHaveValue('Ada Trader')
+  expect(screen.getByLabelText(/email/i)).toHaveValue('ada@example.com')
+  expect(screen.getByLabelText(/^password$/i)).toHaveValue('correcthorsebattery')
+  expect(screen.queryByText(/mpin next/)).not.toBeInTheDocument()
+})
+
+test('closed registration with a stale invite asks for a fresh link', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+    new Response(JSON.stringify({ detail: CLOSED }), { status: 403 })
+  ))
+  renderRegister('/register?invite=stale')
+  await fillAndSubmit()
+
+  expect(await screen.findByText(/invite link is invalid or expired/i)).toBeInTheDocument()
+  expect(screen.getByLabelText(/email/i)).toHaveValue('ada@example.com')
+})
+
+test('any other 403 still shows its own detail as an error', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+    new Response(JSON.stringify({ detail: 'CSRF token missing' }), { status: 403 })
+  ))
+  renderRegister()
+  await fillAndSubmit()
+
+  expect(await screen.findByRole('alert')).toHaveTextContent('CSRF token missing')
+  expect(screen.queryByText(/invite only/i)).not.toBeInTheDocument()
+})

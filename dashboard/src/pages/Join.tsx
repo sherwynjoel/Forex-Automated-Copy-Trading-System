@@ -3,13 +3,22 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { api } from '../lib/api'
 import { isMpinPending } from '../lib/types'
 import type { Me, MpinPending } from '../lib/types'
+import AuthCard from '../components/AuthCard'
+import Banner from '../components/Banner'
 import Button from '../components/Button'
-import Logo from '../components/Logo'
+import Loading from '../components/Loading'
 
 type Outcome =
   | { kind: 'joining' }
   | { kind: 'already' }
   | { kind: 'dead'; message: string }
+
+/**
+ * Nothing on this page can name the organization: POST /api/orgs/join
+ * answers { org_id, role } and the page leaves at once, and there is no
+ * invite preview endpoint. So the title is the generic one.
+ */
+const TITLE = 'Join the workspace'
 
 /**
  * Accept an invite.
@@ -79,12 +88,12 @@ export default function Join() {
   }, [token, navigate])
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-paper px-4">
-      <div className="max-w-md w-full text-center space-y-4">
-        <h2 className="flex justify-center"><Logo size={38} textClass="text-3xl" /></h2>
-        {outcome.kind === 'joining' && (
-          <p className="text-sm text-ink-soft">Joining organization…</p>
-        )}
+    <AuthCard
+      title={TITLE}
+      lead={outcome.kind === 'joining' ? 'Checking your invite.' : undefined}
+    >
+      <div className="space-y-4 text-center">
+        {outcome.kind === 'joining' && <Loading lines={2} label="Joining the workspace" />}
         {outcome.kind === 'already' && (
           <>
             <p className="text-sm text-ink">
@@ -95,13 +104,13 @@ export default function Join() {
         )}
         {outcome.kind === 'dead' && (
           <>
-            <p className="text-sm font-medium text-loss-deep">{outcome.message}</p>
-            <Link to="/login" className="text-sm text-brand hover:underline">
+            <Banner kind="error">{outcome.message}</Banner>
+            <Link to="/login" className="inline-block text-sm font-medium text-brand hover:text-brand-deep">
               Sign in
             </Link>
           </>
         )}
       </div>
-    </div>
+    </AuthCard>
   )
 }

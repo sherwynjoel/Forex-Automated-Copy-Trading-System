@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Routes, Route, useParams } from 'react-router-dom'
 import { expect, test, vi, afterEach } from 'vitest'
@@ -120,4 +120,46 @@ test('a pending MPIN sends /welcome to /mpin', async () => {
   renderWelcome()
 
   expect(await screen.findByText('mpin screen')).toBeInTheDocument()
+})
+
+function stubNewAccount() {
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    if (String(input) === '/api/me') {
+      return new Response(JSON.stringify({
+        user: { id: 2, email: 'new@example.com', display_name: 'N' }, orgs: [],
+      }), { status: 200, headers: { 'content-type': 'application/json' } })
+    }
+    return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } })
+  }))
+}
+
+test('names the page in its one h1 and in the document title, and says what an organization is', async () => {
+  stubNewAccount()
+  renderWelcome()
+
+  expect(screen.getByRole('heading', { level: 1, name: 'Welcome' })).toBeInTheDocument()
+  expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1)
+  expect(document.title).toBe('Welcome · MirrorFleet')
+  expect(screen.getByText(/an organization is the workspace/i)).toBeInTheDocument()
+  // Let the /api/me effect settle before the test ends.
+  await waitFor(() => expect(screen.queryByText(/your workspaces/i)).not.toBeInTheDocument())
+})
+
+test('create and join are two labelled choices with visible field labels', async () => {
+  stubNewAccount()
+  renderWelcome()
+
+  const create = screen.getByRole('region', { name: 'Create an organization' })
+  const join = screen.getByRole('region', { name: 'Join with an invite' })
+
+  expect(within(create).getByText('Organization name', { selector: 'label' })).toBeVisible()
+  const orgName = within(create).getByLabelText('Organization name')
+  expect(orgName).not.toHaveAttribute('aria-label')
+  expect(within(create).getByRole('button', { name: /create organization/i })).toBeInTheDocument()
+
+  expect(within(join).getByText('Invite link or code', { selector: 'label' })).toBeVisible()
+  const code = within(join).getByLabelText('Invite link or code')
+  expect(code).not.toHaveAttribute('aria-label')
+  expect(within(join).getByRole('button', { name: /join organization/i })).toBeInTheDocument()
+  await waitFor(() => expect(screen.queryByText(/your workspaces/i)).not.toBeInTheDocument())
 })
