@@ -221,7 +221,27 @@ def lock_investor_ledger(conn: psycopg.Connection, org_id: int, user_id: int) ->
     (namespace, hashtext("<org_id>:<user_id>")), which never overlaps the
     single-key org locks the webhook routes take. Must be called inside
     ``with conn.transaction():`` -- in autocommit the lock would be
-    released when the SELECT ends and protect nothing, so that is refused."""
+    released when the SELECT ends and protect nothing, so that is refused.
+
+    Every transaction that writes wallet_entries -- every settle() call,
+    and any direct ledger INSERT -- must take this lock as the FIRST
+    statement inside its `with conn.transaction():` block, not just the
+    request that is doing the capping. Otherwise the SIDE THAT COMMITS
+    LATER can still read a stale balance/hold snapshot (wallet_figures
+    reads balances and holds as two separate statements; at READ
+    COMMITTED each sees whatever was committed at the moment it runs) and
+    let a second request pass its cap against money this transaction is
+    about to move.
+
+    While the lock is held, the caller must not `await` anything --
+    every route here is `async def` on top of a synchronous psycopg
+    connection, so an `await` between taking the lock and the transaction
+    ending would suspend this worker mid-transaction. That freezes every
+    OTHER request this worker could otherwise serve, and a second
+    connection blocked on the SAME (org_id, user_id) lock in the database
+    has no way to make progress until this worker is rescheduled and
+    finishes -- the one situation this helper exists to prevent would
+    then just move from "unlocked" to "deadlocked"."""
     if conn.info.transaction_status != psycopg.pq.TransactionStatus.INTRANS:
         raise RuntimeError("lock_investor_ledger must run inside a transaction")
     conn.execute("SELECT pg_advisory_xact_lock(%s, hashtext(%s))",

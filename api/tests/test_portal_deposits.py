@@ -400,6 +400,34 @@ def test_an_account_deposit_whose_link_is_gone_is_credited_to_the_wallet(
         "balance": Decimal("4950.00"), "on_hold": Decimal("0"), "available": Decimal("4950.00")}
 
 
+def test_deposit_decisions_take_the_investors_ledger_lock(
+        org_client, make_user, login_as, db, monkeypatch):
+    """The controller's widened lock ruling: decide_deposit's transaction
+    also writes wallet_entries (via settle on confirm), so it must take
+    the per-investor lock as the FIRST statement in its transaction --
+    keyed on the DEPOSIT'S INVESTOR, not the admin -- and does so
+    unconditionally (including on reject, which settles nothing), so
+    every ledger-writing transaction follows one uniform rule ahead of
+    Tasks 9-10. Call-through spy, as in test_portal_withdrawals.py."""
+    client, org_id, investor, method_id = _investor(org_client, make_user, login_as, db)
+    confirm_dep = _notice(client, org_id, method_id, reference="confirm-tx").json()
+    reject_dep = _notice(client, org_id, method_id, reference="reject-tx").json()
+    login_as(client, ADMIN)
+
+    calls = []
+    real_lock = pc.lock_investor_ledger
+
+    def spy(conn, org_id_, user_id_):
+        calls.append((org_id_, user_id_))
+        return real_lock(conn, org_id_, user_id_)
+
+    monkeypatch.setattr(pc, "lock_investor_ledger", spy)
+    assert _decide(client, org_id, confirm_dep["id"], status="confirmed").status_code == 200
+    assert _decide(client, org_id, reject_dep["id"], status="rejected",
+                   note="no such transaction").status_code == 200
+    assert calls == [(org_id, investor["id"]), (org_id, investor["id"])]
+
+
 def test_the_queue_lists_open_notices_first_and_refuses_investors(
         org_client, make_user, login_as, db):
     client, org_id, investor, method_id = _investor(org_client, make_user, login_as, db)

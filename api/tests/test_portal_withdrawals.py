@@ -475,3 +475,39 @@ def test_request_withdrawal_takes_the_per_investor_ledger_lock(
     r = _withdraw(client, org_id, dest_id, "100")
     assert r.status_code == 201, r.text
     assert calls == [(org_id, investor["id"])]
+
+
+def test_mark_withdrawal_paid_takes_the_investors_ledger_lock(
+        org_client, make_user, login_as, db, monkeypatch):
+    """The controller's widened ruling: `paid` also writes wallet_entries
+    (via settle), so it must take the SAME per-investor lock as the FIRST
+    statement in its own transaction -- keyed on the withdrawal's
+    INVESTOR, not the admin who is marking it paid. Without this, a
+    concurrent withdrawal request's cap check (locked or not) could still
+    read a pre-debit balance and a post-release hold across this commit
+    and over-commit the wallet, per the review finding. Same call-through
+    spy approach as the request-side wiring test above, and for the same
+    reason (no window for a genuine two-connection race through the
+    synchronous TestClient); true serialisation is proven at the
+    portal_common level in test_portal_common.py."""
+    from api import portal_common as pc
+
+    client, org_id, investor = _investor(org_client, make_user, login_as, db)
+    dest_id = approved_destination(db, org_id, investor["id"])
+    credit(db, org_id, investor["id"], Decimal("1000"))
+    wd = _withdraw(client, org_id, dest_id, "250").json()
+    login_as(client, ADMIN)
+    assert _decide_withdrawal(client, org_id, wd["id"], "approved").status_code == 200
+
+    calls = []
+    real_lock = pc.lock_investor_ledger
+
+    def spy(conn, org_id_, user_id_):
+        calls.append((org_id_, user_id_))
+        return real_lock(conn, org_id_, user_id_)
+
+    monkeypatch.setattr(pc, "lock_investor_ledger", spy)
+    r = client.post(f"/api/orgs/{org_id}/withdrawals/{wd['id']}/paid",
+                    json={"txid": "chain-tx-1"}, headers=csrf(client))
+    assert r.status_code == 200, r.text
+    assert calls == [(org_id, investor["id"])], "locked on the investor, not the admin"

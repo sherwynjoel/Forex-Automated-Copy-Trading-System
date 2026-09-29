@@ -326,6 +326,11 @@ def create_portal_admin_router() -> APIRouter:
         linked: Optional[int] = None
         transfer_id: Optional[int] = None
         with conn.transaction():
+            # First statement in the transaction, uniformly, whether this
+            # decision settles money or not: keeps every ledger-writing
+            # transaction on the same rule for Tasks 9-10 rather than
+            # special-casing "only when new_status == confirmed".
+            pc.lock_investor_ledger(conn, ctx.org_id, investor_id)
             if new_status == "confirmed" and target == "account":
                 # The link as it is NOW, not as it was when the notice was
                 # filed: the admin funds the account the investor has today.
@@ -446,8 +451,14 @@ def create_portal_admin_router() -> APIRouter:
             raise HTTPException(status_code=409,
                                 detail=f"withdrawal is {status_now}, not approved")
         # Status change and ledger debit in ONE transaction; the unique
-        # index on (ref_table, ref_id, wallet) makes a replay a no-op.
+        # index on (ref_table, ref_id, wallet) makes a replay a no-op. The
+        # investor's ledger lock is taken FIRST, before the UPDATE: without
+        # it, a concurrent withdrawal request could read a pre-debit
+        # balance and a post-release hold (two separate SELECTs at READ
+        # COMMITTED straddling this commit) and pass its cap against money
+        # this transaction is about to remove from `main`.
         with conn.transaction():
+            pc.lock_investor_ledger(conn, ctx.org_id, user_id)
             row = conn.execute(
                 "UPDATE withdrawals SET status = 'paid', paid_by = %s, paid_at = now(), "
                 "txid = %s WHERE id = %s AND org_id = %s AND status = 'approved' "
