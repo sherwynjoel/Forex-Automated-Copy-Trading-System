@@ -309,8 +309,10 @@ stubbing — the plan's Task 11 must say exactly which).
 export const ACCOUNT_CURRENCY = 'USD'
 export const WALLETS: WalletKind[] = ['main', 'credit', 'pamm', 'social']
 export function walletLabel(kind: WalletKind): string   // 'My wallet' | 'Credit wallet' | 'PAMM wallet' | 'Social wallet'
-export function statusLabel(status: string): string     // adds cancelled→'Cancelled', done→'Done', removed→'Removed', approved→'Approved, in progress' (transfers use approvedLabel below)
-export function statusTone(status: string): 'ok'|'warn'|'bad'|'quiet'   // done|confirmed|paid|approved(destination)→ok … cancelled|removed→quiet
+export type RequestKind = 'deposit' | 'withdrawal' | 'transfer' | 'destination'
+export function approvedLabel(kind: RequestKind): string   // transfer→'Approved, in progress', destination→'Approved', else 'Approved, payment pending'
+export function statusLabel(status: string, kind?: RequestKind): string     // adds cancelled→'Cancelled', done→'Done', removed→'Removed'; bare approved keeps 'Approved, payment pending'; pass kind ('transfer' / 'destination') to get approvedLabel(kind)
+export function statusTone(status: string, kind?: RequestKind): 'ok'|'warn'|'bad'|'quiet'   // done|confirmed|paid→ok; approved→warn, or ok when kind === 'destination'; cancelled|removed→quiet
 export const BADGE_TONE: Record<'ok'|'warn'|'bad'|'quiet', BadgeTone>
 export function moneyOrDash(v: number | null | undefined, unit?: string): string
 export function shortAddress(a: string): string
@@ -336,6 +338,8 @@ export function HideBalancesToggle(): JSX.Element   // ghost Button, aria-presse
 export async function apiUpload<T>(path: string, form: FormData, opts?: { redirectOn401?: boolean }): Promise<T>
 // same as api() but never sets Content-Type and passes the FormData as body; CSRF header included
 export function orgUpload<T>(orgId: number, tail: string, form: FormData): Promise<T>
+export function orgApi<T>(orgId: number, tail: string, init?: RequestInit, opts?: { redirectOn401?: boolean }): Promise<T>
+// existing helper; gains api()'s opts so step-up POSTs pass { redirectOn401: false } (spec section 10)
 ```
 
 ### `src/components/FileInput.tsx` (Task 11)
