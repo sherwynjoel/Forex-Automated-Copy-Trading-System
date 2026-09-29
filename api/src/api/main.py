@@ -67,7 +67,9 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             "script-src 'self' 'unsafe-inline'",
             "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
             "font-src 'self' https://fonts.gstatic.com data:",
-            "img-src 'self' data:",
+            # blob: is the FileInput preview (URL.createObjectURL of the
+            # image the investor picked, before it is uploaded).
+            "img-src 'self' data: blob:",
             # 'self' covering a same-host wss:// is a CSP3 refinement; say
             # it outright rather than bet the live feed on browser support.
             "connect-src 'self' wss: ws:",

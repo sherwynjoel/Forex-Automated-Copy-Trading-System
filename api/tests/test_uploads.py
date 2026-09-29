@@ -289,3 +289,15 @@ def test_the_store_lays_files_out_by_org_and_refuses_escaping_keys(tmp_path):
     for bad in ["../x.png", "7/../../x.png", "/etc/passwd", "C:/Windows/x", "", "7\\..\\x.png"]:
         with pytest.raises(ValueError):
             store.path(bad)
+
+
+# ---------- the preview's CSP ----------
+
+def test_the_csp_lets_the_upload_preview_show_its_object_url(app_client):
+    """FileInput previews a chosen image through URL.createObjectURL, a
+    blob: URL; img-src must allow it or the thumbnail is blank in
+    production. Nothing else about the policy loosens."""
+    r = app_client.get("/api/me")
+    directives = [d.strip() for d in r.headers["content-security-policy"].split(";")]
+    assert "img-src 'self' data: blob:" in directives
+    assert "default-src 'self'" in directives and "object-src 'none'" in directives
