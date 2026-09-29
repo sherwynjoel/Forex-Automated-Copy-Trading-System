@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { orgApi } from '../../lib/api'
 import { errorText, formatWhen, signed } from '../../lib/format'
 import { WALLETS, entryLabel, walletLabel } from '../../lib/investor'
@@ -30,24 +30,33 @@ export default function LedgerDrawer({ orgId, investor, onClose }: {
   const [loading, setLoading] = useState(false)
   const [loaded, setLoaded] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Bumped on every load(): changing the wallet filter or opening a fresh
+  // investor fires a new request while an earlier one (that filter's own
+  // Load more, say) can still be in flight. If the earlier one's answer
+  // lands after the newer request started, it is a stale filter's page and
+  // must not overwrite what the current filter actually returned.
+  const requestSeq = useRef(0)
 
   const load = useCallback(async (before: number | null) => {
     if (userId == null) return
+    const seq = ++requestSeq.current
     const q = new URLSearchParams({ limit: String(PAGE) })
     if (wallet) q.set('wallet', wallet)
     if (before != null) q.set('before', String(before))
     setLoading(true)
     try {
       const page = await orgApi<WalletEntriesPage>(orgId, `investors/${userId}/wallet-entries?${q.toString()}`)
+      if (seq !== requestSeq.current) return
       setEntries((cur) => (before == null ? page.entries : [...cur, ...page.entries]))
       setHasMore(page.has_more)
       setNextBefore(page.next_before)
       setError(null)
       setLoaded(true)
     } catch (err) {
+      if (seq !== requestSeq.current) return
       setError(errorText(err, 'Could not load the ledger'))
     } finally {
-      setLoading(false)
+      if (seq === requestSeq.current) setLoading(false)
     }
   }, [orgId, userId, wallet])
 

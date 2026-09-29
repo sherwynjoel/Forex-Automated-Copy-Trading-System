@@ -134,7 +134,7 @@ export default function PaymentMethodsTab({ orgId, control, methods, settings, b
   const patchDetail = (key: string, value: string) =>
     setForm((f) => ({ ...f, details: { ...f.details, [key]: value } }))
 
-  const payload = () => {
+  const payload = (mode: Editing['mode']) => {
     const details: Record<string, string> = {}
     for (const f of DETAIL_FIELDS[form.kind]) {
       const v = (form.details[f.key] ?? '').trim()
@@ -146,7 +146,12 @@ export default function PaymentMethodsTab({ orgId, control, methods, settings, b
       details,
       min_amount: form.min_amount.trim() || '0',
       fee_pct: form.fee_pct.trim() || '0',
-      instructions: form.instructions.trim() || null,
+      // The server's MethodPatch treats a missing/null `instructions` as
+      // "leave unchanged" and "" as "clear" (portal_admin.py's
+      // update_method). On add there is nothing to leave unchanged, so an
+      // empty box means "no instructions" (null); on edit an empty box
+      // must reach the server as "" so clearing it actually clears it.
+      instructions: mode === 'edit' ? form.instructions.trim() : (form.instructions.trim() || null),
       sort_order: Number(form.sort_order) || 0,
     }
   }
@@ -154,7 +159,7 @@ export default function PaymentMethodsTab({ orgId, control, methods, settings, b
   const save = async (e: FormEvent) => {
     e.preventDefault()
     if (!editing) return
-    const body = payload()
+    const body = payload(editing.mode)
     if (!body.label) { setFormError('Label is required'); return }
     const missing = DETAIL_FIELDS[form.kind].find((f) => !f.optional && !body.details[f.key])
     if (missing) { setFormError(`${missing.label} is required`); return }

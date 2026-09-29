@@ -43,12 +43,46 @@ const older = entryFixture({
   id: 899, wallet: 'main', amount: -25, kind: 'adjustment', ref_table: null, ref_id: null,
   note: 'Correction', created_at: '2026-09-19T10:00:00Z', currency: 'USD',
 })
+const pammEntry = entryFixture({
+  id: 700, wallet: 'pamm', amount: 12.5, kind: 'bonus', ref_table: null, ref_id: null,
+  note: 'pamm bonus', created_at: '2026-09-18T10:00:00Z', currency: 'USD',
+})
+const staleRow = entryFixture({
+  id: 601, wallet: 'main', amount: 77, kind: 'fee', ref_table: null, ref_id: null,
+  note: 'stale load-more row', created_at: '2026-09-17T10:00:00Z', currency: 'USD',
+})
+
+/** A `wallet-entries` response under the test's own control, so two
+ *  requests can be made to settle out of order. */
+function deferredResponse() {
+  let resolve!: (payload: unknown) => void
+  const promise = new Promise<Response>((res) => {
+    resolve = (payload: unknown) => res(jsonResponse(payload))
+  })
+  return { promise, resolve }
+}
+
+/** All pending microtasks (a resolved fetch's `.json()` chain, the
+ *  component's `await orgApi(...)`) have had a chance to run, wrapped so a
+ *  state update this flush causes -- if the stale-response guard were
+ *  missing -- is still act()-safe. */
+async function flush() {
+  await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+}
 
 function mockRoutes(options: {
   settings?: unknown[]
   refuseAdjustment?: { status: number; body: unknown }
   refuseDelete?: { status: number; body: unknown }
+  refuseAdd?: { status: number; body: unknown }
+  /** Overrides what `GET .../payment-methods` returns; defaults to `[usdt]`. */
+  methods?: unknown[]
+  /** Serves `/investors/5/wallet-entries` calls from this queue, in call
+   *  order, instead of the default logic -- lets a test control exactly
+   *  when and with what each of several concurrent ledger loads answers. */
+  walletEntries?: Array<Promise<Response>>
 } = {}) {
+  let walletEntriesCall = 0
   const queue = options.settings ? [...options.settings] : [{ withdrawal_min: 0, withdrawal_fee_pct: 0 }]
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
@@ -61,8 +95,9 @@ function mockRoutes(options: {
         { ctid_trader_account_id: 1002, trader_login: 1002, is_live: false, role: 'slave',
           enabled: true, multiplier: 1, status: 'ok', connection_status: 'active' }])
     }
-    if (path.endsWith('/payment-methods') && method === 'GET') return jsonResponse([usdt])
+    if (path.endsWith('/payment-methods') && method === 'GET') return jsonResponse(options.methods ?? [usdt])
     if (path.endsWith('/payment-methods') && method === 'POST') {
+      if (options.refuseAdd) return jsonResponse(options.refuseAdd.body, options.refuseAdd.status)
       return jsonResponse({ ...usdt, id: 4, ...JSON.parse(init!.body as string) }, 201)
     }
     if (path.includes('/payment-methods/') && method === 'PATCH') {
@@ -77,6 +112,11 @@ function mockRoutes(options: {
     }
     if (path.endsWith('/portal-settings')) return jsonResponse(JSON.parse(init!.body as string))
     if (path.endsWith('/investors/5/wallet-entries')) {
+      if (options.walletEntries) {
+        const p = options.walletEntries[walletEntriesCall]
+        walletEntriesCall += 1
+        return p
+      }
       if (url.includes('before=')) return jsonResponse({ entries: [older], has_more: false, next_before: null })
       return jsonResponse({ entries: [entry], has_more: true, next_before: 900 })
     }
@@ -163,6 +203,76 @@ test('View ledger opens the drawer, loads more and filters by wallet', async () 
   await userEvent.selectOptions(within(drawer).getByLabelText('Wallet'), 'pamm')
   await waitFor(() => expect(fetchMock.mock.calls.some(([u]) =>
     String(u).endsWith('/investors/5/wallet-entries?limit=50&wallet=pamm'))).toBe(true))
+})
+
+function walletEntriesCalls(fetchMock: ReturnType<typeof vi.fn>) {
+  return fetchMock.mock.calls.filter(([u]) => String(u).includes('/investors/5/wallet-entries'))
+}
+
+test('a stale wallet-filter load never overwrites the request that superseded it', async () => {
+  // The initial "All wallets" request and the PAMM-filter request both go
+  // out; PAMM's answer lands first, then the stale initial answer finally
+  // arrives too, with entirely different rows.
+  const initial = deferredResponse()
+  const pamm = deferredResponse()
+  const fetchMock = mockRoutes({ walletEntries: [initial.promise, pamm.promise] })
+  render(<MemoryRouter><Investors /></MemoryRouter>)
+  await screen.findByText('Ada Investor')
+  await chooseFromMenu('Ada Investor', 'View ledger')
+  const drawer = await screen.findByRole('dialog', { name: "Ada Investor's ledger" })
+  await waitFor(() => expect(walletEntriesCalls(fetchMock)).toHaveLength(1))
+
+  await userEvent.selectOptions(within(drawer).getByLabelText('Wallet'), 'pamm')
+  await waitFor(() => expect(walletEntriesCalls(fetchMock)).toHaveLength(2))
+
+  // The newer (PAMM) request settles first ...
+  pamm.resolve({ entries: [pammEntry], has_more: false, next_before: null })
+  expect(await within(drawer).findByText('pamm bonus')).toBeInTheDocument()
+
+  // ... then the superseded "All wallets" request finally answers. Its
+  // answer must be dropped, not overwrite PAMM's rows or its has_more.
+  initial.resolve({ entries: [entry], has_more: true, next_before: 900 })
+  await flush()
+  expect(within(drawer).getByText('pamm bonus')).toBeInTheDocument()
+  expect(within(drawer).queryByText('Deposit #11')).not.toBeInTheDocument()
+  expect(within(drawer).queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument()
+})
+
+test('a superseded Load more never overwrites the request that came after it', async () => {
+  // The initial load lands normally (has_more true); Load more is clicked
+  // but kept pending; before it answers, the wallet filter changes to
+  // PAMM, firing a third request.
+  const loadMore = deferredResponse()
+  const pamm = deferredResponse()
+  const fetchMock = mockRoutes({
+    walletEntries: [
+      Promise.resolve(jsonResponse({ entries: [entry], has_more: true, next_before: 900 })),
+      loadMore.promise,
+      pamm.promise,
+    ],
+  })
+  render(<MemoryRouter><Investors /></MemoryRouter>)
+  await screen.findByText('Ada Investor')
+  await chooseFromMenu('Ada Investor', 'View ledger')
+  const drawer = await screen.findByRole('dialog', { name: "Ada Investor's ledger" })
+  await within(drawer).findByText('Deposit #11')
+
+  await userEvent.click(within(drawer).getByRole('button', { name: 'Load more' }))
+  await waitFor(() => expect(walletEntriesCalls(fetchMock)).toHaveLength(2))
+
+  await userEvent.selectOptions(within(drawer).getByLabelText('Wallet'), 'pamm')
+  await waitFor(() => expect(walletEntriesCalls(fetchMock)).toHaveLength(3))
+
+  // PAMM's fresh load settles first ...
+  pamm.resolve({ entries: [pammEntry], has_more: false, next_before: null })
+  expect(await within(drawer).findByText('pamm bonus')).toBeInTheDocument()
+
+  // ... then the superseded Load more finally answers. It must not append
+  // its row onto what PAMM's load replaced the table with.
+  loadMore.resolve({ entries: [staleRow], has_more: false, next_before: null })
+  await flush()
+  expect(within(drawer).getByText('pamm bonus')).toBeInTheDocument()
+  expect(within(drawer).queryByText('stale load-more row')).not.toBeInTheDocument()
 })
 
 test('Adjust balance posts a signed entry with the admin MPIN', async () => {
@@ -262,6 +372,34 @@ test('adds a bank method from the drawer', async () => {
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
 })
 
+test('editing clears the instructions field by sending an empty string, not null', async () => {
+  const withInstructions = methodFixture({
+    id: 3, kind: 'crypto', label: 'USDT on TRC20', enabled: true, currency: 'USD',
+    details: { coin: 'USDT', network: 'TRC20', address: 'TXYZ1234567890abcdef' },
+    min_amount: 10, fee_pct: 0, instructions: 'Please double-check the memo field.', sort_order: 0,
+  })
+  const fetchMock = mockRoutes({ methods: [withInstructions] })
+  render(<MemoryRouter><Investors /></MemoryRouter>)
+  await screen.findByText('Ada Investor')
+  await userEvent.click(screen.getByRole('tab', { name: 'Payment methods' }))
+  await userEvent.click(screen.getByRole('button', { name: 'Edit USDT on TRC20' }))
+  const drawer = await screen.findByRole('dialog', { name: 'Edit USDT on TRC20' })
+  const instructions = within(drawer).getByLabelText('Instructions')
+  expect(instructions).toHaveValue('Please double-check the memo field.')
+
+  // The server treats a missing/null `instructions` on PATCH as "leave
+  // unchanged" and "" as "clear" -- an emptied textarea must reach the
+  // server as "", or the admin's clear silently does nothing.
+  await userEvent.clear(instructions)
+  await userEvent.click(within(drawer).getByRole('button', { name: 'Save method' }))
+  await waitFor(() => expect(bodyOf(fetchMock, '/payment-methods/3', 'PATCH')).toEqual({
+    label: 'USDT on TRC20', currency: 'USD',
+    details: { coin: 'USDT', network: 'TRC20', address: 'TXYZ1234567890abcdef' },
+    min_amount: '10', fee_pct: '0', instructions: '', sort_order: 0,
+  }))
+  expect(await screen.findByText('Payment method saved')).toBeInTheDocument()
+})
+
 test('a missing required detail is refused before anything is sent', async () => {
   const fetchMock = mockRoutes()
   render(<MemoryRouter><Investors /></MemoryRouter>)
@@ -273,6 +411,29 @@ test('a missing required detail is refused before anything is sent', async () =>
   await userEvent.click(within(drawer).getByRole('button', { name: 'Save method' }))
   expect(await within(drawer).findByRole('alert')).toHaveTextContent('Coin is required')
   expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit)?.method === 'POST')).toBe(false)
+})
+
+test("the server's refusal is shown inside the open Drawer, not the page banner", async () => {
+  const fetchMock = mockRoutes({ refuseAdd: { status: 400, body: { detail: 'address is required' } } })
+  render(<MemoryRouter><Investors /></MemoryRouter>)
+  await screen.findByText('Ada Investor')
+  await userEvent.click(screen.getByRole('tab', { name: 'Payment methods' }))
+  await userEvent.click(screen.getByRole('button', { name: 'Add method' }))
+  const drawer = await screen.findByRole('dialog', { name: 'Add payment method' })
+  // Every client-side-required field is filled in; only the server refuses.
+  await userEvent.type(within(drawer).getByLabelText('Label'), 'USDT on BEP20')
+  await userEvent.type(within(drawer).getByLabelText('Coin'), 'USDT')
+  await userEvent.type(within(drawer).getByLabelText('Network'), 'BEP20')
+  await userEvent.type(within(drawer).getByLabelText('Address'), '0xabc123')
+  await userEvent.click(within(drawer).getByRole('button', { name: 'Save method' }))
+  expect(await within(drawer).findByRole('alert')).toHaveTextContent('address is required')
+  // The Drawer stays open with the refusal inside it; nothing landed on the
+  // page-level banner, and the request really was sent (unlike the
+  // client-side-refusal test above).
+  expect(screen.getByRole('dialog', { name: 'Add payment method' })).toBeInTheDocument()
+  expect(screen.queryByText('Payment method added')).not.toBeInTheDocument()
+  expect(fetchMock.mock.calls.some(([u, init]) =>
+    String(u).endsWith('/payment-methods') && (init as RequestInit)?.method === 'POST')).toBe(true)
 })
 
 test('deleting a method asks first', async () => {
@@ -331,6 +492,30 @@ test('the withdrawal settings follow the server while the form is untouched', as
   await act(async () => { await vi.advanceTimersByTimeAsync(10000) })
   await waitFor(() => expect(screen.getByLabelText('Minimum withdrawal')).toHaveValue('50'))
   expect(screen.getByLabelText('Withdrawal fee %')).toHaveValue('1')
+})
+
+test('a touched settings form survives a poll tick with different server values', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  mockRoutes({ settings: [
+    { withdrawal_min: 0, withdrawal_fee_pct: 0 },
+    { withdrawal_min: 50, withdrawal_fee_pct: 1 },
+  ] })
+  render(<MemoryRouter><Investors /></MemoryRouter>)
+  await screen.findByText('Ada Investor')
+  fireEvent.click(screen.getByRole('tab', { name: 'Payment methods' }))
+  const minField = screen.getByLabelText('Minimum withdrawal')
+  expect(minField).toHaveValue('0')
+
+  // The admin starts editing before the next poll tick lands.
+  fireEvent.change(minField, { target: { value: '99' } })
+  expect(minField).toHaveValue('99')
+
+  // The poll fires with the server's different values while the edit is
+  // still unsaved -- the dirty guard must leave the form exactly as typed,
+  // not just "not yet the new server value" but genuinely untouched.
+  await act(async () => { await vi.advanceTimersByTimeAsync(10000) })
+  expect(minField).toHaveValue('99')
+  expect(screen.getByLabelText('Withdrawal fee %')).toHaveValue('0')
 })
 
 test('a viewer sees the figures but no actions', async () => {
