@@ -22,7 +22,8 @@ const MPIN_LENGTH = 6
 /**
  * The words for a refused MPIN step-up, the same ones AccountSecurity uses
  * for a refused MPIN change: 401 with attempts_left, 423 with locked_until,
- * 409 when no MPIN is set, otherwise the server's detail without its code.
+ * 409 "MPIN not set", otherwise the server's detail without its code -- a
+ * route's own 409 (a transfer's "no account linked yet") reads as itself.
  */
 export function mpinErrorText(err: unknown, fallback: string): string {
   const res = (err as ApiError | undefined)?.response
@@ -35,7 +36,7 @@ export function mpinErrorText(err: unknown, fallback: string): string {
     const minutes = Math.max(1, Math.ceil((Date.parse(until) - Date.now()) / 60000))
     return `MPIN locked. Try again in about ${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`
   }
-  if (res?.status === 409) return 'Set your MPIN first'
+  if (res?.status === 409 && res.body?.detail === 'MPIN not set') return 'Set your MPIN first'
   return errorText(err, fallback)
 }
 

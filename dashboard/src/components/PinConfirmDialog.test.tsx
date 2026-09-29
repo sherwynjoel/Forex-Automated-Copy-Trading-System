@@ -88,6 +88,22 @@ test('an unset MPIN and any other refusal read plainly', async () => {
   expect(await screen.findByRole('alert')).toHaveTextContent('minimum withdrawal is 50.00')
 })
 
+test('only the MPIN-not-set 409 asks for an MPIN; any other 409 reads as the server says', async () => {
+  expect(mpinErrorText(apiError(409, { detail: 'MPIN not set' }, 'MPIN not set'), 'x')).toBe('Set your MPIN first')
+  // A transfer to the trading account before one is linked is also a 409.
+  expect(mpinErrorText(apiError(409, { detail: 'no account linked yet' }, 'no account linked yet'), 'x'))
+    .toBe('no account linked yet')
+  expect(mpinErrorText(apiError(409, {}, 'refused'), 'x')).toBe('refused')
+
+  const onConfirm = vi.fn().mockRejectedValue(apiError(409, { detail: 'no account linked yet' }, 'no account linked yet'))
+  renderDialog(onConfirm)
+  await typePin('123456')
+  await userEvent.click(screen.getByRole('button', { name: 'Send 250.00 USD' }))
+  const alert = await screen.findByRole('alert')
+  expect(alert).toHaveTextContent('no account linked yet')
+  expect(alert).not.toHaveTextContent('Set your MPIN first')
+})
+
 test('Cancel is the first focus and reports to the caller; closing forgets the PIN and the error', async () => {
   const onConfirm = vi.fn().mockRejectedValue(apiError(401, { attempts_left: 4 }))
   const { onCancel, rerender } = renderDialog(onConfirm)
