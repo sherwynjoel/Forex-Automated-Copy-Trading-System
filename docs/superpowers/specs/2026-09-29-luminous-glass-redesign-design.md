@@ -1,6 +1,6 @@
 # Luminous Glass — MirrorFleet frontend redesign
 
-**Status:** approved in discussion 2026-09-29 (Approach C: token re-skin plus a
+**Status:** implemented and deployed to mirrorfleet.com on 2026-09-29 (main 731334c; Approach C: token re-skin plus a
 six-screen page pass), awaiting review of this document.
 **Owner decisions:** direction "luminous glass"; accent aqua/teal; light first
 with a dim mode kept; Rubik only, committed scale.
