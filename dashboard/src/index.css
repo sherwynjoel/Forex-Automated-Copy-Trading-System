@@ -51,6 +51,8 @@
 
   --shadow-card: 0 8px 30px rgb(11 124 128 / 0.08);
   --shadow-float: 0 16px 48px rgb(20 48 58 / 0.14);
+  /* Inner top highlight on solid buttons: the light catching the edge. */
+  --shadow-lift: inset 0 1px 0 rgb(255 255 255 / 0.25);
 
   --ease-out-quint: cubic-bezier(0.23, 1, 0.32, 1);
 
@@ -99,6 +101,7 @@
   --color-glass-line: rgb(230 242 244 / 0.10);
   --shadow-card: 0 8px 30px rgb(0 0 0 / 0.45);
   --shadow-float: 0 16px 48px rgb(0 0 0 / 0.60);
+  --shadow-lift: inset 0 1px 0 rgb(255 255 255 / 0.08);
   --wash-a: rgb(95 208 211 / 0.14);
   --wash-b: rgb(96 165 250 / 0.10);
   --wash-c: rgb(139 127 215 / 0.08);

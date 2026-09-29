@@ -15,9 +15,9 @@ const TONE: Record<BadgeTone, string> = {
   neutral: 'bg-line text-ink-soft',
 }
 
-export default function Badge({ tone, pill, className, title, children }: {
+export default function Badge({ tone, className, title, children }: {
   tone: BadgeTone
-  /** Fully rounded, for status pills such as DRY RUN. */
+  /** Accepted for compatibility; every badge is a pill in the luminous system. */
   pill?: boolean
   className?: string
   /** Hover text for a chip that abbreviates something longer (an error). */
@@ -25,8 +25,7 @@ export default function Badge({ tone, pill, className, title, children }: {
   children: ReactNode
 }) {
   const classes = [
-    'inline-flex items-center px-2 py-0.5 text-xs font-semibold',
-    pill ? 'rounded-full' : 'rounded',
+    'inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold',
     TONE[tone],
     className ?? '',
   ].filter(Boolean).join(' ')

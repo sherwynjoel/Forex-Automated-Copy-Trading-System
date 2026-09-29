@@ -30,7 +30,7 @@ test('the light theme defines every token, the radii, the shadows and the easing
   const theme = blockOf('@theme')
   for (const t of TOKENS) expect(theme, `--color-${t} in @theme`).toContain(`--color-${t}:`)
   for (const v of ['--radius-card:', '--radius-inset:', '--radius-control:',
-                   '--shadow-card:', '--shadow-float:', '--ease-out-quint:']) {
+                   '--shadow-card:', '--shadow-float:', '--shadow-lift:', '--ease-out-quint:']) {
     expect(theme, `${v} in @theme`).toContain(v)
   }
 })

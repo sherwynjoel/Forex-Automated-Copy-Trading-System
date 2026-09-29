@@ -19,7 +19,7 @@ export default function Banner({ kind, children, onDismiss, announce = true }: {
   return (
     <div
       role={announce ? (kind === 'error' ? 'alert' : 'status') : undefined}
-      className={`rounded border px-4 py-3 text-sm flex justify-between items-start gap-3 ${styles}`}
+      className={`rounded-inset border px-4 py-3 text-sm flex justify-between items-start gap-3 ${styles}`}
     >
       <div className="min-w-0">{children}</div>
       {onDismiss && (

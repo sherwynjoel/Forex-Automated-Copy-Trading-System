@@ -41,9 +41,9 @@ export default function Drawer({ open, title, onClose, children, headerExtra, bu
         aria-modal="true"
         aria-labelledby={titleId}
         tabIndex={-1}
-        className="relative h-full w-full max-w-md flex flex-col bg-card shadow-xl outline-none"
+        className="relative h-full w-full max-w-md flex flex-col bg-card shadow-float sm:rounded-l-card outline-none"
       >
-        <div className="glass flex items-center justify-between gap-3 px-5 py-4 border-b">
+        <div className="glass flex items-center justify-between gap-3 px-5 py-4 border-b sm:rounded-tl-card">
           <div className="flex items-center gap-2 min-w-0">
             <h2 id={titleId} className="font-display text-lg text-ink truncate">{title}</h2>
             {headerExtra}

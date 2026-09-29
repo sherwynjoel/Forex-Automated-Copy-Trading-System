@@ -21,7 +21,7 @@ test('each tone pairs its wash background with its deep text (the pairs the pale
 
 test('is an inline chip: small, semibold, rounded', () => {
   render(<Badge tone="warn">DRY RUN</Badge>)
-  expect(screen.getByText('DRY RUN')).toHaveClass('inline-flex', 'rounded', 'text-xs', 'font-semibold')
+  expect(screen.getByText('DRY RUN')).toHaveClass('inline-flex', 'rounded-full', 'text-xs', 'font-semibold')
 })
 
 test('pill rounds fully for status pills', () => {

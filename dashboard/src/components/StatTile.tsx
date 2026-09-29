@@ -38,7 +38,7 @@ export default function StatTile({ label, value, tone, sub, to, onClick, expande
       {sub != null && sub !== '' && <div className="text-xs text-ink-soft mt-0.5">{sub}</div>}
     </>
   )
-  const frame = 'rounded-lg border border-line bg-card p-4'
+  const frame = 'glass rounded-card shadow-card border p-4'
   if (onClick) {
     return (
       <button

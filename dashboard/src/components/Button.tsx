@@ -16,8 +16,8 @@ export type ButtonSize = 'sm' | 'md' | 'lg'
  * Class strings are spelled out per variant × tone so Tailwind can see them.
  */
 const BASE =
-  'inline-flex items-center justify-center gap-2 rounded font-semibold transition-colors ' +
-  'min-h-11 md:min-h-0 disabled:opacity-50 disabled:cursor-not-allowed'
+  'inline-flex items-center justify-center gap-2 rounded-control font-semibold transition-colors ' +
+  'duration-150 ease-out-quint min-h-11 md:min-h-0 disabled:opacity-50 disabled:cursor-not-allowed'
 
 const SIZE: Record<ButtonSize, string> = {
   sm: 'px-3 py-1.5 text-xs',
@@ -27,22 +27,22 @@ const SIZE: Record<ButtonSize, string> = {
 }
 
 const PRIMARY: Record<ButtonTone, string> = {
-  brand: 'bg-brand text-on-accent hover:bg-brand-deep',
-  profit: 'bg-profit text-on-accent hover:bg-profit-deep',
-  loss: 'bg-loss text-on-accent hover:bg-loss-deep',
-  warn: 'bg-warn text-on-accent hover:bg-warn-deep',
+  brand: 'bg-brand text-on-accent shadow-lift hover:bg-brand-deep',
+  profit: 'bg-profit text-on-accent shadow-lift hover:bg-profit-deep',
+  loss: 'bg-loss text-on-accent shadow-lift hover:bg-loss-deep',
+  warn: 'bg-warn text-on-accent shadow-lift hover:bg-warn-deep',
   // A filled neutral is ink on paper: the rare "dark" button.
   neutral: 'bg-ink text-paper hover:bg-ink-soft',
   inverse: 'bg-on-accent text-ink hover:bg-paper',
 }
 
+// Secondary buttons are glass: they float with the panel they sit on.
 const SECONDARY: Record<ButtonTone, string> = {
-  // Plain outlined control; brand tone is the "quiet primary" used beside a filled one.
-  brand: 'border border-brand bg-card text-brand hover:bg-brand-wash hover:text-brand-deep',
-  profit: 'border border-profit bg-card text-profit-deep hover:bg-profit-wash',
-  loss: 'border border-loss bg-card text-loss hover:bg-loss hover:text-on-accent',
-  warn: 'border border-warn bg-card text-warn-deep hover:bg-warn-wash',
-  neutral: 'border border-field-line bg-card text-ink hover:bg-line',
+  brand: 'glass border text-brand hover:bg-brand-wash hover:text-brand-deep',
+  profit: 'glass border border-profit text-profit-deep hover:bg-profit-wash',
+  loss: 'glass border border-loss text-loss hover:bg-loss hover:text-on-accent',
+  warn: 'glass border border-warn text-warn-deep hover:bg-warn-wash',
+  neutral: 'glass border text-ink hover:bg-brand-wash',
   inverse: 'border border-on-accent text-on-accent hover:bg-on-accent/15',
 }
 const SECONDARY_NEUTRAL = SECONDARY.neutral
@@ -52,7 +52,7 @@ const GHOST: Record<ButtonTone, string> = {
   profit: 'text-profit hover:text-profit-deep hover:underline',
   loss: 'text-loss hover:text-loss-deep hover:underline',
   warn: 'text-warn-deep hover:underline',
-  neutral: 'text-ink-soft hover:text-ink hover:bg-line',
+  neutral: 'text-ink-soft hover:text-ink hover:bg-brand-wash',
   inverse: 'text-on-accent hover:underline',
 }
 

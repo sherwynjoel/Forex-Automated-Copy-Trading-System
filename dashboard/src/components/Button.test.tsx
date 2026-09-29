@@ -31,8 +31,8 @@ test('secondary is an outlined control on the card surface; brand tone outlines 
       <Button variant="secondary" tone="brand">Connect</Button>
     </>
   )
-  expect(screen.getByRole('button', { name: 'Cancel' })).toHaveClass('border', 'border-field-line', 'text-ink', 'bg-card')
-  expect(screen.getByRole('button', { name: 'Connect' })).toHaveClass('border-brand', 'text-brand', 'hover:bg-brand-wash')
+  expect(screen.getByRole('button', { name: 'Cancel' })).toHaveClass('glass', 'border', 'text-ink')
+  expect(screen.getByRole('button', { name: 'Connect' })).toHaveClass('glass', 'border', 'text-brand', 'hover:bg-brand-wash')
 })
 
 test('ghost is text-only and still keeps the touch-height floor on phones', () => {
@@ -75,7 +75,7 @@ test('neutral tone is quiet chrome: ghost reads in soft ink, secondary is the pl
     </>
   )
   expect(screen.getByRole('button', { name: 'Dismiss' })).toHaveClass('text-ink-soft', 'hover:text-ink')
-  expect(screen.getByRole('button', { name: 'Plain' })).toHaveClass('border-field-line', 'text-ink')
+  expect(screen.getByRole('button', { name: 'Plain' })).toHaveClass('glass', 'border', 'text-ink')
 })
 
 test('block stretches to the container', () => {
@@ -103,7 +103,7 @@ test('to renders a router Link with the same visual recipe', () => {
   )
   const link = screen.getByRole('link', { name: 'Open ticket' })
   expect(link).toHaveAttribute('href', '/org/1/trade')
-  expect(link).toHaveClass('border-brand', 'text-brand')
+  expect(link).toHaveClass('glass', 'border', 'text-brand')
 })
 
 test('forwards a ref so dialogs can focus it', () => {

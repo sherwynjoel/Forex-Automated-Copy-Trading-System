@@ -7,7 +7,7 @@ test('renders the one text-field recipe: card surface, strong hairline, ink text
   render(<Input aria-label="Symbol" placeholder="EURUSD" />)
   const input = screen.getByLabelText('Symbol')
   expect(input).toHaveClass(
-    'w-full', 'rounded', 'border', 'border-field-line', 'bg-card', 'text-ink', 'text-sm',
+    'w-full', 'rounded-control', 'border', 'border-field-line', 'bg-card', 'text-ink', 'text-sm',
     'placeholder:text-ink-faint',
   )
 })

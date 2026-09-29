@@ -57,8 +57,8 @@ export default function ConfirmDialog({
       aria-modal="true"
       aria-labelledby={titleId}
     >
-      <div ref={panelRef} tabIndex={-1} className="w-full max-w-md rounded-lg bg-card shadow-xl border border-line outline-none">
-        <div className="px-6 pt-5 pb-4 border-b border-line">
+      <div ref={panelRef} tabIndex={-1} className="w-full max-w-md rounded-card bg-card shadow-float border border-line outline-none overflow-hidden">
+        <div className="glass px-6 pt-5 pb-4 border-b">
           <h2 id={titleId} className="font-display text-lg text-ink">{title}</h2>
         </div>
         <div className="px-6 py-4 text-sm text-ink-soft space-y-3">
@@ -79,7 +79,7 @@ export default function ConfirmDialog({
             </div>
           )}
         </div>
-        <div className="px-6 py-4 flex justify-end gap-3 border-t border-line bg-paper rounded-b-lg">
+        <div className="px-6 py-4 flex justify-end gap-3 border-t border-line bg-paper">
           <Button ref={cancelRef} variant="secondary" onClick={onCancel} disabled={busy}>
             Cancel
           </Button>
