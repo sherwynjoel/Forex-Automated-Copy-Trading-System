@@ -105,6 +105,17 @@ function mockRoutes() {
   return fetchMock
 }
 
+/** A `deposits`-list response under the test's own control, so two
+ *  refreshes can be made to settle out of order (see
+ *  InvestorTransactions.test.tsx's `deferredResponse`). */
+function deferredResponse() {
+  let resolve!: (payload: unknown) => void
+  const promise = new Promise<Response>((res) => {
+    resolve = (payload: unknown) => res(jsonResponse(payload))
+  })
+  return { promise, resolve }
+}
+
 const bodyOf = (fetchMock: ReturnType<typeof vi.fn>, fragment: string) => {
   const call = fetchMock.mock.calls.find(([u, init]) =>
     String(u).includes(fragment) && (init as RequestInit)?.method === 'POST')
@@ -290,6 +301,52 @@ test('a control event refetches the queues', async () => {
   })
   await act(async () => { await vi.advanceTimersByTimeAsync(300) })
   await waitFor(() => expect(summaryCalls()).toBeGreaterThan(before))
+})
+
+test('a stale refresh never overwrites the poll that superseded it', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  const staleDeposit = depositFixture({ ...who, id: 91, reference: 'STALE-OLD', status: 'pending' })
+  const freshDeposit = depositFixture({ ...who, id: 92, reference: 'FRESH-NEW', status: 'pending' })
+  const initial = deferredResponse()
+  const polled = deferredResponse()
+  const depositsQueue = [initial, polled]
+  let depositsCalls = 0
+  const emptySummary = { deposits: 1, withdrawals: 0, transfers: 0, payout_destinations: 0, total: 1 }
+  const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input)
+    const method = init?.method || 'GET'
+    if (url.endsWith('/requests/summary')) return Promise.resolve(jsonResponse(emptySummary))
+    if (url.endsWith('/withdrawals') && method === 'GET') return Promise.resolve(jsonResponse([]))
+    if (url.endsWith('/transfers') && method === 'GET') return Promise.resolve(jsonResponse([]))
+    if (url.endsWith('/payout-destinations') && method === 'GET') return Promise.resolve(jsonResponse([]))
+    if (url.endsWith('/deposits') && method === 'GET') {
+      const d = depositsQueue[depositsCalls]
+      depositsCalls += 1
+      return d.promise
+    }
+    return Promise.resolve(jsonResponse({}))
+  })
+  vi.stubGlobal('fetch', fetchMock)
+
+  renderPage()
+  await waitFor(() => expect(depositsCalls).toBe(1))
+
+  // The 10s poll fires a second refresh while the first (the initial load)
+  // is still pending.
+  await act(async () => { await vi.advanceTimersByTimeAsync(10000) })
+  await waitFor(() => expect(depositsCalls).toBe(2))
+
+  // The newer (polled) request settles first ...
+  polled.resolve([freshDeposit])
+  expect(await screen.findByText('FRESH-NEW')).toBeInTheDocument()
+
+  // ... then the superseded initial request finally answers, with a
+  // different row entirely. Its answer must be dropped, not overwrite the
+  // poll's rows.
+  initial.resolve([staleDeposit])
+  await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+  expect(screen.getByText('FRESH-NEW')).toBeInTheDocument()
+  expect(screen.queryByText('STALE-OLD')).not.toBeInTheDocument()
 })
 
 test('a viewer sees the queues and the details but no decisions', async () => {
