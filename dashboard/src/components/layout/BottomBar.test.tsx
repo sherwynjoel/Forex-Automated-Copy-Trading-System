@@ -23,7 +23,7 @@ test('admins get four links and More; More opens the menu', async () => {
   expect(onMore).toHaveBeenCalledTimes(1)
 })
 
-test('viewers get History instead of Trade; investors get their five pages and no More', () => {
+test('viewers get History instead of Trade; investors get Dashboard, Deposit, Withdraw, Transactions and More too', async () => {
   const { unmount } = render(
     <MemoryRouter initialEntries={['/org/7']}>
       <BottomBar orgId={7} role="viewer" onMore={() => {}} />
@@ -31,11 +31,14 @@ test('viewers get History instead of Trade; investors get their five pages and n
   )
   expect(screen.getAllByRole('link').map((l) => l.textContent)).toEqual(['Overview', 'Positions', 'History', 'Accounts'])
   unmount()
+  const onMore = vi.fn()
   render(
     <MemoryRouter initialEntries={['/org/7/invest']}>
-      <BottomBar orgId={7} role="investor" onMore={() => {}} />
+      <BottomBar orgId={7} role="investor" onMore={onMore} />
     </MemoryRouter>
   )
-  expect(screen.getAllByRole('link').map((l) => l.textContent)).toEqual(['Overview', 'Deposit', 'Withdraw', 'History', 'Account'])
-  expect(screen.queryByRole('button', { name: 'More' })).toBeNull()
+  expect(screen.getAllByRole('link').map((l) => l.textContent)).toEqual(['Dashboard', 'Deposit', 'Withdraw', 'Transactions'])
+  expect(screen.getByRole('link', { name: 'Dashboard' })).toHaveAttribute('aria-current', 'page')
+  await userEvent.click(screen.getByRole('button', { name: 'More' }))
+  expect(onMore).toHaveBeenCalledTimes(1)
 })

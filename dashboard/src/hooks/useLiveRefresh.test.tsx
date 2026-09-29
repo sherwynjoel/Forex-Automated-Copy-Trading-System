@@ -26,7 +26,7 @@ class MockWebSocket {
   }
 }
 
-function Probe({ onRefetch, orgId = 1 }: { onRefetch: () => void; orgId?: number }) {
+function Probe({ onRefetch, orgId = 1 }: { onRefetch: () => void; orgId?: number | null }) {
   useLiveRefresh(onRefetch, orgId)
   return null
 }
@@ -89,5 +89,13 @@ test('irrelevant and malformed events are ignored', () => {
   act(() => {
     vi.advanceTimersByTime(3000)
   })
+  expect(refetch).not.toHaveBeenCalled()
+})
+
+test('a null org opens no socket and never refetches', () => {
+  const refetch = vi.fn()
+  render(<Probe onRefetch={refetch} orgId={null} />)
+  expect(apiModule.eventsSocket).not.toHaveBeenCalled()
+  act(() => { vi.advanceTimersByTime(5000) })
   expect(refetch).not.toHaveBeenCalled()
 })

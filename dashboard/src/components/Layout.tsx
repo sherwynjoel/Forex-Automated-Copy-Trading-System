@@ -3,6 +3,7 @@ import { Navigate, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { api } from '../lib/api'
 import { useOrg } from '../lib/org'
 import { useTheme } from '../hooks/useTheme'
+import { useRequestsBadge } from '../hooks/useRequestsBadge'
 import type { Account } from '../lib/types'
 import Button from './Button'
 import Drawer from './Drawer'
@@ -22,7 +23,8 @@ import { platformCaption } from '../lib/platform'
  * The authenticated shell: a floating glass rail from lg up, a glass
  * bottom tab bar plus a menu drawer below it, the desk strip for admins
  * and viewers, and the page in a main region that fades in on route
- * change (a CSS enter animation, .page-enter). Investors are held inside their portal.
+ * change (a CSS enter animation, .page-enter). Investors are held inside
+ * their portal; admins see the open-request count on the Requests link.
  */
 export default function Layout() {
   const { theme, toggle: toggleTheme } = useTheme()
@@ -45,7 +47,9 @@ export default function Layout() {
   }
 
   const investor = role === 'investor'
-  const groups = investor ? investorNav(orgId) : adminNav(orgId, role)
+  // Open requests behind the Requests link; undefined for everyone below admin.
+  const requestsBadge = useRequestsBadge(orgId, role)
+  const groups = investor ? investorNav(orgId) : adminNav(orgId, role, requestsBadge)
   const portalRoot = `/org/${orgId}/invest`
   const strayed = investor
     && location.pathname !== portalRoot

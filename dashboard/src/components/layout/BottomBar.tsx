@@ -4,8 +4,9 @@ import { bottomBarItems } from './nav'
 
 /**
  * The phone tab bar: glass, fixed to the bottom edge in thumb reach, hidden
- * from lg up where the rail takes over. Admins get four links plus More
- * (which opens the full menu drawer); investors get their five pages.
+ * from lg up where the rail takes over. Every role gets four links plus
+ * More, which opens the full menu drawer with every group (the investor
+ * portal has nine pages; four fit a thumb).
  */
 export default function BottomBar({ orgId, role, onMore }: {
   orgId: number
@@ -29,11 +30,9 @@ export default function BottomBar({ orgId, role, onMore }: {
           {item.label}
         </NavLink>
       ))}
-      {role !== 'investor' && (
-        <button type="button" onClick={onMore} className={`${cell} text-ink-soft`}>
-          More
-        </button>
-      )}
+      <button type="button" onClick={onMore} className={`${cell} text-ink-soft`}>
+        More
+      </button>
     </nav>
   )
 }

@@ -78,6 +78,10 @@ function mockRoutes(overrides: Record<string, unknown> = {}) {
       new Response(JSON.stringify(payload), {
         status: 200, headers: { 'Content-Type': 'application/json' },
       })
+    if (url.includes('/requests/summary')) {
+      return respond(overrides['requests']
+        ?? { deposits: 0, withdrawals: 0, transfers: 0, payout_destinations: 0, total: 0 })
+    }
     if (url.includes('category=reminder')) return respond(overrides['reminderEvents'] ?? [])
     if (url.includes('/events')) return respond(overrides['events'] ?? [])
     if (url.includes('/webhook')) {
@@ -540,29 +544,30 @@ test('the desk strip shows each open contract with its live price', async () => 
       master_positions: [], pending_orders: [], drift: [],
     },
   })
+  const socketsBefore = fakeSockets.length
   renderLayout()
 
   expect(await screen.findByText('BTCUSD')).toBeInTheDocument()
   expect(screen.getByText('77717.95')).toBeInTheDocument()
 
-  // A quotes frame moves the strip price live, no refetch involved.
-  const ws = fakeSockets[fakeSockets.length - 1]
-  act(() => {
-    ws.onmessage?.({
-      data: JSON.stringify({
-        category: 'quotes',
-        payload: {
-          quotes: {},
-          accounts: {
-            '1': {
-              equity: 9999.9, open_pnl: 0.1,
-              positions: [{ position_id: 42, symbol: 'BTCUSD',
-                            current_price: 77801.5, pnl_quote: 0.1 }],
-            },
-          },
+  // A quotes frame moves the strip price live, no refetch involved. The
+  // frame goes to every socket this render opened (the strip's and the
+  // Requests badge's); only the strip acts on quotes.
+  const frame = JSON.stringify({
+    category: 'quotes',
+    payload: {
+      quotes: {},
+      accounts: {
+        '1': {
+          equity: 9999.9, open_pnl: 0.1,
+          positions: [{ position_id: 42, symbol: 'BTCUSD',
+                        current_price: 77801.5, pnl_quote: 0.1 }],
         },
-      }),
-    })
+      },
+    },
+  })
+  act(() => {
+    for (const ws of fakeSockets.slice(socketsBefore)) ws.onmessage?.({ data: frame })
   })
 
   expect(await screen.findByText('77801.5')).toBeInTheDocument()
@@ -605,17 +610,24 @@ function renderShell(path: string) {
   )
 }
 
-test('an investor sees the portal nav and no desk strip', async () => {
+test('an investor sees the grouped portal nav, no desk strip and no requests poll', async () => {
   useOrgMock.mockReturnValue(makeOrgValue('investor'))
   const fetchMock = mockRoutes()
   renderShell('/org/1/invest')
   expect(await screen.findByText('investor home')).toBeInTheDocument()
-  for (const label of ['Overview', 'Deposit', 'Withdraw', 'History', 'Account']) {
+  for (const label of ['Dashboard', 'Wallet', 'Deposit', 'Withdraw', 'Transfer', 'Transactions',
+                       'Payout accounts', 'Account', 'History']) {
     expect(screen.getAllByRole('link', { name: label }).length).toBeGreaterThan(0)
   }
+  expect(screen.getByText('Money')).toBeInTheDocument()
+  expect(screen.getByText('Trading')).toBeInTheDocument()
+  expect(screen.queryByRole('link', { name: 'Overview' })).not.toBeInTheDocument()
   expect(screen.queryByRole('link', { name: 'Accounts' })).not.toBeInTheDocument()
   expect(screen.queryByText(/Close all positions/)).not.toBeInTheDocument()
   expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/state'))).toBe(false)
+  expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/requests/summary'))).toBe(false)
+  // The phone tab bar has More for investors too.
+  expect(screen.getByRole('button', { name: 'More' })).toBeInTheDocument()
 })
 
 test('an investor opening a desk path is sent to the portal', async () => {
@@ -645,6 +657,52 @@ test('an investor opening the admin Investors path is sent to the portal', async
   renderShell('/org/1/investors')
   expect(await screen.findByText('investor home')).toBeInTheDocument()
   expect(screen.queryByText('admin investors')).not.toBeInTheDocument()
+})
+
+test('admins get a Requests nav link that carries the open count from requests/summary', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
+  const fetchMock = mockRoutes({
+    requests: { deposits: 2, withdrawals: 1, transfers: 0, payout_destinations: 0, total: 3 },
+  })
+  renderShell('/org/1')
+  const links = await screen.findAllByRole('link', { name: 'Requests, 3 open' })
+  expect(links[0]).toHaveAttribute('href', '/org/1/requests')
+  expect(fetchMock.mock.calls.some(([u]) => String(u) === '/api/orgs/1/requests/summary')).toBe(true)
+})
+
+test('viewers get no Requests link and the summary is never asked for', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('viewer'))
+  const fetchMock = mockRoutes()
+  renderShell('/org/1')
+  expect(await screen.findByText('desk home')).toBeInTheDocument()
+  expect(screen.queryByRole('link', { name: /^Requests/ })).toBeNull()
+  expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/requests/summary'))).toBe(false)
+})
+
+test('a control event refreshes the Requests count without waiting for the poll', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
+  let total = 1
+  const fetchMock = mockRoutes()
+  const base = fetchMock.getMockImplementation()!
+  fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+    if (String(input).includes('/requests/summary')) {
+      return new Response(JSON.stringify({ deposits: total, withdrawals: 0, transfers: 0, payout_destinations: 0, total }), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    return base(input)
+  })
+  const socketsBefore = fakeSockets.length
+  renderShell('/org/1')
+  await screen.findAllByRole('link', { name: 'Requests, 1 open' })
+
+  total = 4
+  act(() => {
+    for (const ws of fakeSockets.slice(socketsBefore)) {
+      ws.onmessage?.({ data: JSON.stringify({ category: 'control', payload: { action: 'investor_deposit_noticed' } }) })
+    }
+  })
+  expect((await screen.findAllByRole('link', { name: 'Requests, 4 open' }))[0]).toHaveAttribute('href', '/org/1/requests')
 })
 
 function renderTwoPages(path: string, onSecondMount?: () => void) {
@@ -730,12 +788,17 @@ test("switching org never shows, or lets a late answer restore, the previous org
       </Routes>
     </MemoryRouter>
   )
+  const socketsBefore = fakeSockets.length
   const { rerender } = render(tree())
   expect(await screen.findByRole('button', { name: 'Stop copying' })).toBeInTheDocument()
 
-  // A live event starts a second org-1 refresh whose settings answer is held.
-  const ws = fakeSockets[fakeSockets.length - 1]
-  act(() => { ws.onmessage?.({ data: JSON.stringify({ category: 'control' }) }) })
+  // A live event starts a second org-1 refresh whose settings answer is held
+  // (sent to every socket this render opened: the strip's and the badge's).
+  act(() => {
+    for (const ws of fakeSockets.slice(socketsBefore)) {
+      ws.onmessage?.({ data: JSON.stringify({ category: 'control' }) })
+    }
+  })
   await waitFor(() => expect(org1SettingsCalls).toBe(2))
 
   // Switch to org 2: org 1's state is gone at once, nothing to act on yet.

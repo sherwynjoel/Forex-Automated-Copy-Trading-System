@@ -22,7 +22,9 @@ export interface LiveEvent {
 
 export function useLiveRefresh(
   refetch: () => void,
-  orgId: number,
+  /** null opens no socket at all: the caller has no org to watch, or is an
+   *  investor, whom the events feed refuses (it is the whole org's feed). */
+  orgId: number | null,
   onEvent?: (evt: LiveEvent) => void,
 ) {
   const refetchRef = useRef(refetch)
@@ -31,6 +33,8 @@ export function useLiveRefresh(
   onEventRef.current = onEvent
 
   useEffect(() => {
+    const id = orgId
+    if (id === null) return
     let ws: WebSocket | null = null
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null
     let burstTimers: ReturnType<typeof setTimeout>[] = []
@@ -49,7 +53,7 @@ export function useLiveRefresh(
 
     const connect = () => {
       try {
-        ws = eventsSocket(orgId)
+        ws = eventsSocket(id)
       } catch {
         // No WebSocket support (or construction failed): the 5s poll
         // still keeps the page current, just without instant refresh.
