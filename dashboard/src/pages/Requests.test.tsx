@@ -386,3 +386,66 @@ test('a 409 on confirming a deposit is shown inside the dialog, not the page ban
   expect(screen.queryByText('Deposit confirmed')).not.toBeInTheDocument()
   expect(screen.getAllByText('deposit is already confirmed')).toHaveLength(1)
 })
+
+test('an approved payout account reads Approved with the ok tone in the All view', async () => {
+  // A payout account's "approved" just means it is usable -- unlike a
+  // withdrawal or transfer, nothing is still owed -- so it must read
+  // "Approved" at the ok (profit) tone, not the generic "Approved, payment
+  // pending" at warn that the kindless call used to produce.
+  const approvedDestination = destinationFixture({
+    ...who, id: 42, kind: 'bank', nickname: 'Approved account',
+    details: { bank_name: 'HDFC', holder: 'Ada Investor', account_number: '000987656789', code: 'HDFC0000002' },
+    proof_file_id: null, status: 'approved', decided_by: 1, decided_at: '2026-09-24T09:00:00Z',
+    decision_note: null, created_at: '2026-09-24T08:00:00Z', summary: 'HDFC ••6789',
+  })
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input)
+    const method = init?.method || 'GET'
+    if (url.endsWith('/requests/summary')) {
+      return jsonResponse({ deposits: 0, withdrawals: 0, transfers: 0, payout_destinations: 0, total: 0 })
+    }
+    if (url.endsWith('/deposits') && method === 'GET') return jsonResponse([])
+    if (url.endsWith('/withdrawals') && method === 'GET') return jsonResponse([])
+    if (url.endsWith('/transfers') && method === 'GET') return jsonResponse([])
+    if (url.endsWith('/payout-destinations') && method === 'GET') return jsonResponse([approvedDestination])
+    return jsonResponse({})
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  renderPage('/org/1/requests?tab=payout_destinations')
+  // The row is 'approved', not 'pending', so the Open view (the default)
+  // shows none -- confirms the load has landed before switching to All.
+  await screen.findByRole('tab', { name: 'Payout accounts (0)' })
+  await userEvent.selectOptions(screen.getByLabelText('Show'), 'all')
+  const badge = await screen.findByText('Approved')
+  expect(badge).toHaveClass('bg-profit-wash')
+})
+
+test('the drawer header badge for an approved transfer reads Approved, in progress', async () => {
+  // A transfer's "approved" means acknowledged and being funded, not idle --
+  // the drawer header must say so, not the generic "Approved, payment
+  // pending" the kindless call used to produce.
+  const approvedTransfer = transferFixture({
+    ...who, id: 33, source: { kind: 'wallet', wallet: 'main' }, target: { kind: 'account', account_id: 1001 },
+    amount: 300, status: 'approved', equity_at_request: null, equity_verified: true,
+    decided_by: 1, decided_at: '2026-09-24T09:00:00Z', decision_note: null, done_by: null, done_at: null,
+    note: null, created_at: '2026-09-24T08:00:00Z',
+  })
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input)
+    const method = init?.method || 'GET'
+    if (url.endsWith('/requests/summary')) {
+      return jsonResponse({ deposits: 0, withdrawals: 0, transfers: 1, payout_destinations: 0, total: 1 })
+    }
+    if (url.endsWith('/deposits') && method === 'GET') return jsonResponse([])
+    if (url.endsWith('/withdrawals') && method === 'GET') return jsonResponse([])
+    if (url.endsWith('/transfers') && method === 'GET') return jsonResponse([approvedTransfer])
+    if (url.endsWith('/payout-destinations') && method === 'GET') return jsonResponse([])
+    return jsonResponse({})
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  renderPage('/org/1/requests?tab=transfers')
+  await screen.findByText('My wallet → Trading account 1001')
+  await userEvent.click(screen.getByRole('button', { name: 'Details of transfer 33' }))
+  const drawer = await screen.findByRole('dialog', { name: 'Transfer #33' })
+  expect(within(drawer).getByText('Approved, in progress')).toBeInTheDocument()
+})

@@ -4,12 +4,27 @@ import Button from '../../components/Button'
 import type { TabItem } from '../../components/Tabs'
 import { formatWhen, money } from '../../lib/format'
 import { BADGE_TONE, statusLabel, statusTone, walletLabel } from '../../lib/investor'
+import type { RequestKind as StatusKind } from '../../lib/investor'
 import type {
   MoneyRef, PayoutDestination, PortalDeposit, PortalTransfer, PortalWithdrawal, RequestsSummary,
 } from '../../lib/types'
 
 export type RequestKind = 'deposits' | 'withdrawals' | 'transfers' | 'payout_destinations'
 export const REQUEST_KINDS: RequestKind[] = ['deposits', 'withdrawals', 'transfers', 'payout_destinations']
+
+/** Task 11's `statusLabel`/`statusTone` take their own singular `RequestKind`
+ *  (`lib/investor.ts`) -- an "approved" transfer reads "Approved, in
+ *  progress" and an "approved" payout account reads "Approved" at ok tone,
+ *  neither of which the generic `approved` label/tone gets right. This maps
+ *  the desk's plural, per-endpoint kind onto that contract's kind so every
+ *  status chip on this page -- table row and drawer header alike -- goes
+ *  through the one function instead of a hand-coded override. */
+export const STATUS_KIND: Record<RequestKind, StatusKind> = {
+  deposits: 'deposit',
+  withdrawals: 'withdrawal',
+  transfers: 'transfer',
+  payout_destinations: 'destination',
+}
 
 /** Statuses that still need an admin: what the Open view shows and what
  *  requests/summary counts (withdrawals and transfers count approved too,
@@ -88,12 +103,15 @@ function Who({ name, email }: { name?: string; email?: string }) {
 }
 
 /** The status chip plus the admin's note under it. A transfer's `approved`
- *  means "acknowledged, funding in progress", not "payment pending". */
+ *  means "acknowledged, funding in progress", not "payment pending"; a
+ *  payout account's `approved` is simply usable, so it reads "Approved" at
+ *  ok tone rather than "payment pending" at warn -- both come from
+ *  `statusLabel`/`statusTone` once the kind is passed through. */
 function Status({ kind, status, note }: { kind: RequestKind; status: string; note: string | null }) {
-  const label = kind === 'transfers' && status === 'approved' ? 'Approved, in progress' : statusLabel(status)
+  const statusKind = STATUS_KIND[kind]
   return (
     <div className="min-w-0">
-      <Badge tone={BADGE_TONE[statusTone(status)]}>{label}</Badge>
+      <Badge tone={BADGE_TONE[statusTone(status, statusKind)]}>{statusLabel(status, statusKind)}</Badge>
       {note && <div className="text-xs text-ink-soft mt-1">{note}</div>}
     </div>
   )

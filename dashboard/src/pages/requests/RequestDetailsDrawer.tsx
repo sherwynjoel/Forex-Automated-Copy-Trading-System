@@ -4,7 +4,7 @@ import Drawer from '../../components/Drawer'
 import { formatWhen, money } from '../../lib/format'
 import { BADGE_TONE, moneyOrDash, statusLabel, statusTone } from '../../lib/investor'
 import type { PayoutDestination, PortalDeposit, PortalTransfer, PortalWithdrawal } from '../../lib/types'
-import { KIND_WORD, moneyRefLabel } from './RequestTabs'
+import { KIND_WORD, STATUS_KIND, moneyRefLabel } from './RequestTabs'
 
 export type Details =
   | { kind: 'deposits'; row: PortalDeposit }
@@ -243,7 +243,9 @@ export default function RequestDetailsDrawer({ orgId, details, destinations, onC
       title={title}
       onClose={onClose}
       headerExtra={details && (
-        <Badge tone={BADGE_TONE[statusTone(details.row.status)]}>{statusLabel(details.row.status)}</Badge>
+        <Badge tone={BADGE_TONE[statusTone(details.row.status, STATUS_KIND[details.kind])]}>
+          {statusLabel(details.row.status, STATUS_KIND[details.kind])}
+        </Badge>
       )}
     >
       {details && (
