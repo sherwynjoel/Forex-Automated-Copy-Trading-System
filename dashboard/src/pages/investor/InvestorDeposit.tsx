@@ -1,5 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
-import QRCode from 'qrcode'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { orgApi } from '../../lib/api'
 import { useOrg } from '../../lib/org'
 import { errorText, formatWhen, money } from '../../lib/format'
@@ -7,13 +6,19 @@ import { statusLabel, statusTone } from '../../lib/investor'
 import Badge, { type BadgeTone } from '../../components/Badge'
 import Banner from '../../components/Banner'
 import Button from '../../components/Button'
+import Card from '../../components/Card'
 import Input from '../../components/Input'
+import Loading from '../../components/Loading'
+import PageHeader from '../../components/PageHeader'
+import NextStep from './NextStep'
 import type { InvestorDeposit as Deposit, InvestorWallet } from '../../lib/types'
 
 // statusTone's four states, mapped onto the desk's one chip.
 const BADGE_TONE: Record<ReturnType<typeof statusTone>, BadgeTone> = {
   ok: 'profit', warn: 'warn', bad: 'loss', quiet: 'neutral',
 }
+
+const COPIED_MS = 2000
 
 export default function InvestorDeposit() {
   const { orgId } = useOrg()
@@ -24,6 +29,8 @@ export default function InvestorDeposit() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  const [copy, setCopy] = useState<'idle' | 'copied' | 'selected'>('idle')
+  const addressRef = useRef<HTMLDivElement>(null)
 
   const refresh = useCallback(async () => {
     try {
@@ -31,17 +38,59 @@ export default function InvestorDeposit() {
     } catch (err) {
       setError(errorText(err, 'Could not load your deposits'))
     }
+    let w: InvestorWallet | null = null
     try {
-      const w = await orgApi<InvestorWallet>(orgId, 'investor/wallet')
+      w = await orgApi<InvestorWallet>(orgId, 'investor/wallet')
       setWallet(w)
-      setQr(await QRCode.toDataURL(w.address, { width: 192, margin: 1 }))
     } catch (err) {
       if (err instanceof Error && err.message.startsWith('404')) setWallet('closed')
       else setError(errorText(err, 'Could not load the deposit address'))
     }
+    if (!w) return
+    try {
+      // Loaded on demand so the QR encoder stays out of the main bundle.
+      const { toDataURL } = await import('qrcode')
+      setQr(await toDataURL(w.address, { width: 192, margin: 1 }))
+    } catch {
+      // The address and the Copy button still work without the picture.
+      setQr(null)
+    }
   }, [orgId])
 
   useEffect(() => { refresh() }, [refresh])
+
+  useEffect(() => {
+    if (copy !== 'copied') return
+    const id = window.setTimeout(() => setCopy('idle'), COPIED_MS)
+    return () => window.clearTimeout(id)
+  }, [copy])
+
+  // Fallback when there is no clipboard API (plain http, some in-app
+  // browsers) or the browser refuses it: select the address so the
+  // investor's own copy command takes it.
+  const selectAddress = () => {
+    const node = addressRef.current
+    const selection = window.getSelection()
+    if (!node || !selection) return
+    const range = document.createRange()
+    range.selectNodeContents(node)
+    selection.removeAllRanges()
+    selection.addRange(range)
+    setCopy('selected')
+  }
+
+  const copyAddress = async (address: string) => {
+    if (navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(address)
+        setCopy('copied')
+        return
+      } catch {
+        // Permission refused: fall through to selecting the text.
+      }
+    }
+    selectAddress()
+  }
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -63,87 +112,107 @@ export default function InvestorDeposit() {
     }
   }
 
+  // Rows are shown in the wallet's coin when it is known, else in the coin
+  // stored on the row itself.
+  const walletCoin = wallet !== null && wallet !== 'closed' ? wallet.coin : null
+
   return (
     <div className="space-y-6 max-w-4xl">
-      <header>
-        <h1 className="page-title">Deposit</h1>
-        <p className="text-sm text-ink-soft mt-1">
-          Send crypto to the address below, then tell us the amount and the transaction ID.
-        </p>
-      </header>
+      <PageHeader
+        title="Deposit"
+        subtitle="Send crypto to the address below, then tell us the amount and the transaction ID."
+      />
       {error && <Banner kind="error" onDismiss={() => setError(null)}>{error}</Banner>}
       {notice && <Banner kind="notice" onDismiss={() => setNotice(null)}>{notice}</Banner>}
 
+      {wallet === null && !error && <Loading lines={4} />}
+
       {wallet === 'closed' && (
-        <section className="rounded-lg border border-line bg-card p-5">
-          <p className="text-sm text-ink">Deposits are not open yet. Please check back later.</p>
-        </section>
+        <NextStep title="Deposits are not open yet">
+          Your admin links your trading account; deposits open once the workspace's wallet is set.
+        </NextStep>
       )}
 
       {wallet !== null && wallet !== 'closed' && (
         <>
-          <section className="rounded-lg border border-line bg-card p-5 grid gap-5 md:grid-cols-[192px_1fr]">
-            {qr && <img src={qr} alt="QR code of the deposit address" width={192} height={192} />}
-            <div className="space-y-3">
-              <div>
-                <div className="desk-label">Send only</div>
-                <div className="text-lg font-semibold text-ink">{wallet.coin} on {wallet.network}</div>
-              </div>
-              <div>
-                <div className="desk-label">Address</div>
-                <div className="num text-sm text-ink break-all">{wallet.address}</div>
-              </div>
-              {wallet.memo && (
-                <div>
-                  <div className="desk-label">Memo / tag</div>
-                  <div className="num text-sm text-ink">{wallet.memo}</div>
-                </div>
+          <Card>
+            <div className="grid gap-5 md:grid-cols-[192px_1fr]">
+              {qr && (
+                <img src={qr} alt="QR code of the deposit address" width={192} height={192}
+                     className="rounded-inset border border-line bg-card" />
               )}
-              <p className="text-xs text-warn-deep bg-warn-wash rounded px-2 py-1">
-                Sending any other coin or network to this address will lose the funds.
-              </p>
+              <div className="space-y-3 min-w-0">
+                <div>
+                  <div className="desk-label">Send only</div>
+                  <div className="text-lg font-semibold text-ink">{wallet.coin} on {wallet.network}</div>
+                </div>
+                <div>
+                  <div className="desk-label">Address</div>
+                  <div className="flex flex-wrap items-start gap-3">
+                    <div ref={addressRef} className="num text-sm text-ink break-all min-w-0 flex-1">
+                      {wallet.address}
+                    </div>
+                    <Button variant="secondary" size="sm" onClick={() => copyAddress(wallet.address)}>
+                      {copy === 'copied' ? 'Copied' : 'Copy address'}
+                    </Button>
+                  </div>
+                  {/* Always mounted so screen readers hear the change. */}
+                  <p role="status" className="text-xs text-ink-soft mt-1 min-h-4">
+                    {copy === 'copied' ? 'Address copied to the clipboard.'
+                      : copy === 'selected' ? 'Address selected. Copy it with Ctrl+C, or long-press on a phone.'
+                      : ''}
+                  </p>
+                </div>
+                {wallet.memo && (
+                  <div>
+                    <div className="desk-label">Memo / tag</div>
+                    <div className="num text-sm text-ink">{wallet.memo}</div>
+                  </div>
+                )}
+                <Banner kind="warn" announce={false}>
+                  Sending any other coin or network to this address will lose the funds.
+                </Banner>
+              </div>
             </div>
-          </section>
+          </Card>
 
-          <form onSubmit={submit} className="rounded-lg border border-line bg-card p-5 space-y-4">
-            <h2 className="desk-label">I have sent it</h2>
-            <div className="flex gap-3 flex-wrap items-end">
-              <label className="block w-40">
-                <span className="desk-label block mb-1">Amount</span>
-                <Input aria-label="Amount" num value={form.amount} required
-                       onChange={(e) => setForm({ ...form, amount: e.target.value })} />
+          <Card title="Tell us about your transfer">
+            <form onSubmit={submit} className="space-y-4">
+              <div className="flex gap-3 flex-wrap items-end">
+                <label className="block w-40">
+                  <span className="desk-label block mb-1">Amount ({wallet.coin})</span>
+                  <Input aria-label={`Amount in ${wallet.coin}`} num value={form.amount} required
+                         onChange={(e) => setForm({ ...form, amount: e.target.value })} />
+                </label>
+                <label className="block flex-1 min-w-56">
+                  <span className="desk-label block mb-1">Transaction ID</span>
+                  <Input aria-label="Transaction ID" num value={form.txid} required
+                         onChange={(e) => setForm({ ...form, txid: e.target.value })} />
+                </label>
+              </div>
+              <label className="block">
+                <span className="desk-label block mb-1">Note (optional)</span>
+                <Input aria-label="Note" value={form.note}
+                       onChange={(e) => setForm({ ...form, note: e.target.value })} />
               </label>
-              <label className="block flex-1 min-w-56">
-                <span className="desk-label block mb-1">Transaction ID</span>
-                <Input aria-label="Transaction ID" num value={form.txid} required
-                       onChange={(e) => setForm({ ...form, txid: e.target.value })} />
-              </label>
-            </div>
-            <label className="block">
-              <span className="desk-label block mb-1">Note (optional)</span>
-              <Input aria-label="Note" value={form.note}
-                     onChange={(e) => setForm({ ...form, note: e.target.value })} />
-            </label>
-            <Button type="submit" disabled={busy}>
-              I have sent it
-            </Button>
-          </form>
+              <Button type="submit" disabled={busy}>
+                I have sent it
+              </Button>
+            </form>
+          </Card>
         </>
       )}
 
-      <section className="rounded-lg border border-line bg-card overflow-hidden">
-        <div className="px-5 pt-4 pb-3 flex items-baseline justify-between">
-          <h2 className="desk-label">Your deposit notices</h2>
-        </div>
+      <Card title="Your deposit notices" inset>
         <div className="overflow-x-auto">
           <table className="stack-table w-full text-sm">
             <thead>
               <tr className="text-left border-b border-line">
-                <th className="desk-label px-5 py-2 font-semibold">Filed</th>
-                <th className="desk-label px-5 py-2 font-semibold text-right">Amount</th>
-                <th className="desk-label px-5 py-2 font-semibold">Transaction</th>
-                <th className="desk-label px-5 py-2 font-semibold">Status</th>
-                <th className="desk-label px-5 py-2 font-semibold">Admin note</th>
+                <th className="desk-label px-4 py-2 font-semibold">Filed</th>
+                <th className="desk-label px-4 py-2 font-semibold text-right">Amount</th>
+                <th className="desk-label px-4 py-2 font-semibold">Transaction</th>
+                <th className="desk-label px-4 py-2 font-semibold">Status</th>
+                <th className="desk-label px-4 py-2 font-semibold">Admin note</th>
               </tr>
             </thead>
             <tbody>
@@ -152,19 +221,19 @@ export default function InvestorDeposit() {
               )}
               {deposits.map((d) => (
                 <tr key={d.id} className="border-b border-line last:border-0">
-                  <td data-label="Filed" className="num px-5 py-2.5">{formatWhen(d.created_at)}</td>
-                  <td data-label="Amount" className="tnum px-5 py-2.5 text-right">{money(d.amount)} {d.coin}</td>
-                  <td data-label="Transaction" className="num px-5 py-2.5 break-all">{d.txid}</td>
-                  <td data-label="Status" className="px-5 py-2.5">
+                  <td data-label="Filed" className="num px-4 py-2.5">{formatWhen(d.created_at)}</td>
+                  <td data-label="Amount" className="tnum px-4 py-2.5 text-right">{money(d.amount, walletCoin ?? d.coin)}</td>
+                  <td data-label="Transaction" className="num px-4 py-2.5 break-all">{d.txid}</td>
+                  <td data-label="Status" className="px-4 py-2.5">
                     <Badge tone={BADGE_TONE[statusTone(d.status)]}>{statusLabel(d.status)}</Badge>
                   </td>
-                  <td data-label="Admin note" className="px-5 py-2.5 text-ink-soft">{d.decision_note ?? '—'}</td>
+                  <td data-label="Admin note" className="px-4 py-2.5 text-ink-soft">{d.decision_note ?? '—'}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
-      </section>
+      </Card>
     </div>
   )
 }

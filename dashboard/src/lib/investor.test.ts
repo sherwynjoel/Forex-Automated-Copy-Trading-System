@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { moneyOrDash, statusLabel, statusTone } from './investor'
+import { ACCOUNT_CURRENCY, moneyOrDash, shortAddress, statusLabel, statusTone } from './investor'
 
 describe('investor helpers', () => {
   test('statuses read as plain words with a tone', () => {
@@ -22,5 +22,17 @@ describe('investor helpers', () => {
     expect(moneyOrDash(null)).toBe('—')
     expect(moneyOrDash(undefined)).toBe('—')
     expect(moneyOrDash(1234.5)).toBe('1,234.50')
+  })
+
+  test('money carries its unit, and the dash never does', () => {
+    expect(moneyOrDash(1234.5, 'USD')).toBe('1,234.50 USD')
+    expect(moneyOrDash(null, 'USD')).toBe('—')
+    expect(ACCOUNT_CURRENCY).toBe('USD')
+  })
+
+  test('long addresses shorten to first character and last two; short ones stay whole', () => {
+    expect(shortAddress('TQn9Y2khEsLJW1ChVWFMSMeRDow5KcbLSE9f')).toBe('T…9f')
+    expect(shortAddress('TDest')).toBe('TDest')
+    expect(shortAddress('  TDest  ')).toBe('TDest')
   })
 })

@@ -2,8 +2,12 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { orgApi } from '../../lib/api'
 import { useOrg } from '../../lib/org'
 import { errorText, formatWhen, money } from '../../lib/format'
+import { ACCOUNT_CURRENCY } from '../../lib/investor'
 import Banner from '../../components/Banner'
 import Button from '../../components/Button'
+import Card from '../../components/Card'
+import Loading from '../../components/Loading'
+import PageHeader from '../../components/PageHeader'
 import type { Deal } from '../../lib/types'
 
 const WEEK_MS = 7 * 24 * 3600 * 1000
@@ -54,74 +58,79 @@ export default function InvestorHistory() {
     if (next >= now) { setWindowEnd(now); setAtNow(true) } else { setWindowEnd(next) }
   }
 
+  // The window is a rolling seven days ending at windowEnd, not a calendar
+  // week, so the copy says which seven days rather than "this week".
+  const range = `${formatWhen(windowEnd - WEEK_MS)} – ${formatWhen(windowEnd)}`
+  const windowLabel = atNow ? 'last 7 days' : range
+
   return (
     <div className="space-y-6 max-w-6xl">
-      <header className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="page-title">History</h1>
-          <p className="text-sm text-ink-soft mt-1">
-            Closed trades on your account, one week at a time, straight from the broker.
-          </p>
-        </div>
-        <div className="flex items-center gap-2 text-sm">
-          <Button variant="secondary" size="sm" onClick={goEarlier}>
-            Earlier
-          </Button>
-          <span className="num text-ink-soft">
-            {formatWhen(windowEnd - WEEK_MS)} – {formatWhen(windowEnd)}
-          </span>
-          <Button variant="secondary" size="sm" onClick={goLater} disabled={atNow}>
-            Later
-          </Button>
-        </div>
-      </header>
+      <PageHeader
+        title="History"
+        subtitle="Closed trades on your account, seven days at a time, straight from the broker."
+        actions={
+          <div className="flex flex-wrap items-center gap-2 text-sm">
+            <Button variant="secondary" size="sm" onClick={goEarlier}>
+              Earlier
+            </Button>
+            <span className="num text-ink-soft">{range}</span>
+            <Button variant="secondary" size="sm" onClick={goLater} disabled={atNow}>
+              Later
+            </Button>
+          </div>
+        }
+      />
       {error && <Banner kind="error" onDismiss={() => setError(null)}>{error}</Banner>}
 
-      <section className="rounded-lg border border-line bg-card overflow-hidden">
-        <div className="px-5 pt-4 pb-3 flex items-baseline justify-between">
-          <h2 className="desk-label">Closed trades</h2>
-          <span className={`tnum text-sm font-semibold ${total < 0 ? 'text-loss' : 'text-profit'}`}>
-            {money(total)} this week
-          </span>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="stack-table w-full text-sm">
-            <thead>
-              <tr className="text-left border-b border-line">
-                <th className="desk-label px-5 py-2 font-semibold">Closed</th>
-                <th className="desk-label px-5 py-2 font-semibold">Symbol</th>
-                <th className="desk-label px-5 py-2 font-semibold">Side</th>
-                <th className="desk-label px-5 py-2 font-semibold text-right">Lots</th>
-                <th className="desk-label px-5 py-2 font-semibold text-right">Entry → Exit</th>
-                <th className="desk-label px-5 py-2 font-semibold text-right">Gross</th>
-                <th className="desk-label px-5 py-2 font-semibold text-right">Swap + fees</th>
-                <th className="desk-label px-5 py-2 font-semibold text-right">Net</th>
-              </tr>
-            </thead>
-            <tbody>
-              {loading && <tr><td colSpan={8} className="text-center py-8 text-ink-faint">Loading...</td></tr>}
-              {!loading && deals.length === 0 && (
-                <tr><td colSpan={8} className="text-center py-8 text-ink-faint">No closed trades in this week</td></tr>
-              )}
-              {!loading && deals.map((d) => {
-                const net = netOf(d) ?? 0
-                return (
-                  <tr key={d.deal_id} className="border-b border-line last:border-0">
-                    <td data-label="Closed" className="num px-5 py-2.5">{formatWhen(d.execution_timestamp)}</td>
-                    <td data-label="Symbol" className="px-5 py-2.5 text-ink">{d.symbol ?? d.symbol_id}</td>
-                    <td data-label="Side" className="px-5 py-2.5">{d.side}</td>
-                    <td data-label="Lots" className="tnum px-5 py-2.5 text-right">{d.close?.closed_volume_lots ?? d.volume_lots ?? '—'}</td>
-                    <td data-label="Entry → Exit" className="tnum px-5 py-2.5 text-right">{d.close?.entry_price} → {d.execution_price ?? '—'}</td>
-                    <td data-label="Gross" className="tnum px-5 py-2.5 text-right">{money(d.close!.gross_profit)}</td>
-                    <td data-label="Swap + fees" className="tnum px-5 py-2.5 text-right">{money(d.close!.swap + d.close!.commission)}</td>
-                    <td data-label="Net" className={`tnum px-5 py-2.5 text-right font-semibold ${net < 0 ? 'text-loss' : 'text-profit'}`}>{money(net)}</td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
-        </div>
-      </section>
+      {/* Deal figures are in the account's deposit currency; the summary
+          names none, so the labelled default applies (lib/investor.ts). */}
+      <Card title="Closed trades" inset
+            actions={
+              <span className={`tnum text-sm font-semibold ${total < 0 ? 'text-loss' : 'text-profit'}`}>
+                {`${money(total, ACCOUNT_CURRENCY)} net, ${windowLabel}`}
+              </span>
+            }>
+        {loading ? <Loading lines={3} /> : (
+          <div className="overflow-x-auto">
+            <table className="stack-table w-full text-sm">
+              <thead>
+                <tr className="text-left border-b border-line">
+                  <th className="desk-label px-4 py-2 font-semibold">Closed</th>
+                  <th className="desk-label px-4 py-2 font-semibold">Symbol</th>
+                  <th className="desk-label px-4 py-2 font-semibold">Side</th>
+                  <th className="desk-label px-4 py-2 font-semibold text-right">Lots</th>
+                  <th className="desk-label px-4 py-2 font-semibold text-right">Entry → Exit</th>
+                  <th className="desk-label px-4 py-2 font-semibold text-right">Gross</th>
+                  <th className="desk-label px-4 py-2 font-semibold text-right">Swap + fees</th>
+                  <th className="desk-label px-4 py-2 font-semibold text-right">Net</th>
+                </tr>
+              </thead>
+              <tbody>
+                {deals.length === 0 && (
+                  <tr><td colSpan={8} className="text-center py-8 text-ink-faint">
+                    {atNow ? 'No closed trades in the last 7 days' : `No closed trades between ${formatWhen(windowEnd - WEEK_MS)} and ${formatWhen(windowEnd)}`}
+                  </td></tr>
+                )}
+                {deals.map((d) => {
+                  const net = netOf(d) ?? 0
+                  return (
+                    <tr key={d.deal_id} className="border-b border-line last:border-0">
+                      <td data-label="Closed" className="num px-4 py-2.5">{formatWhen(d.execution_timestamp)}</td>
+                      <td data-label="Symbol" className="px-4 py-2.5 text-ink">{d.symbol ?? d.symbol_id}</td>
+                      <td data-label="Side" className="px-4 py-2.5">{d.side}</td>
+                      <td data-label="Lots" className="tnum px-4 py-2.5 text-right">{d.close?.closed_volume_lots ?? d.volume_lots ?? '—'}</td>
+                      <td data-label="Entry → Exit" className="tnum px-4 py-2.5 text-right">{d.close?.entry_price} → {d.execution_price ?? '—'}</td>
+                      <td data-label="Gross" className="tnum px-4 py-2.5 text-right">{money(d.close!.gross_profit, ACCOUNT_CURRENCY)}</td>
+                      <td data-label="Swap + fees" className="tnum px-4 py-2.5 text-right">{money(d.close!.swap + d.close!.commission, ACCOUNT_CURRENCY)}</td>
+                      <td data-label="Net" className={`tnum px-4 py-2.5 text-right font-semibold ${net < 0 ? 'text-loss' : 'text-profit'}`}>{money(net, ACCOUNT_CURRENCY)}</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
     </div>
   )
 }

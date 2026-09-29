@@ -34,13 +34,25 @@ afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
 test('lists closed deals for the last week and pages earlier', async () => {
   render(<MemoryRouter><InvestorHistory /></MemoryRouter>)
   expect(await screen.findByText('XAUUSD')).toBeInTheDocument()
-  expect(screen.getByText('9.83')).toBeInTheDocument()
+  expect(screen.getByText('9.83 USD')).toBeInTheDocument()
+  expect(screen.getByText('10.00 USD')).toBeInTheDocument()
+  expect(screen.getByRole('heading', { level: 1, name: 'History' })).toBeInTheDocument()
+  expect(document.title).toBe('History · MirrorFleet')
   const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>
   const first = String(fetchMock.mock.calls[0][0])
   await userEvent.click(screen.getByRole('button', { name: 'Earlier' }))
   const second = String(fetchMock.mock.calls[fetchMock.mock.calls.length - 1][0])
   const toOf = (u: string) => Number(new URL(u, 'http://x').searchParams.get('to'))
   expect(toOf(first) - toOf(second)).toBe(7 * 24 * 3600 * 1000)
+})
+
+test('the total names the real window, not "this week", once paged back', async () => {
+  render(<MemoryRouter><InvestorHistory /></MemoryRouter>)
+  expect(await screen.findByText('9.83 USD net, last 7 days')).toBeInTheDocument()
+  expect(screen.queryByText(/this week/i)).not.toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: 'Earlier' }))
+  expect(await screen.findByText(/^9\.83 USD net, .+ – .+$/)).toBeInTheDocument()
+  expect(screen.queryByText(/last 7 days/)).not.toBeInTheDocument()
 })
 
 test('Later is disabled at the current week and comes back after paging earlier', async () => {
