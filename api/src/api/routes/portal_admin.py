@@ -10,6 +10,7 @@ added by Tasks 7-10.
 from __future__ import annotations
 
 import logging
+import re
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional
 
@@ -31,6 +32,10 @@ from .. import portal_common as pc
 from ..portal_common import org_state as _org_state, equity_from as _equity_from
 
 logger = logging.getLogger(__name__)
+
+# A hand-posted adjustment: one optional sign, digits, at most two decimals.
+# ASCII digits only (re's \d would also take other scripts' digits).
+SIGNED_AMOUNT = re.compile(r"[+-]?[0-9]+(\.[0-9]{1,2})?")
 
 METHOD_KINDS = ("crypto", "bank")
 # The detail keys each kind must carry (400 "<field> is required" when
@@ -761,11 +766,14 @@ def create_portal_admin_router() -> APIRouter:
             raise HTTPException(status_code=400,
                                 detail="wallet must be one of main, credit, pamm, social")
         raw = "" if body.amount is None or isinstance(body.amount, bool) else str(body.amount).strip()
-        try:
-            if raw and Decimal(raw) == 0:
-                raise HTTPException(status_code=400, detail="amount must not be zero")
-        except InvalidOperation:
-            pass  # parse_amount below names the problem
+        # One optional sign, then the number: a run of signs ('+-5', '--5')
+        # must never be read as either sign. An empty amount falls through
+        # to parse_amount's "is required".
+        if raw and not SIGNED_AMOUNT.fullmatch(raw):
+            raise HTTPException(status_code=400, detail=(
+                "amount must be a signed number with at most two decimals, e.g. -25.00"))
+        if raw and Decimal(raw) == 0:
+            raise HTTPException(status_code=400, detail="amount must not be zero")
         negative = raw.startswith("-")
         try:
             magnitude = pc.parse_amount(raw.lstrip("+-") if raw else body.amount)

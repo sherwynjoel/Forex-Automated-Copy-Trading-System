@@ -398,6 +398,42 @@ def test_admin_posts_an_adjustment_with_their_own_mpin(org_client, make_user, lo
     assert r.status_code == 404 and r.json()["detail"] == "Investor not found"
 
 
+def test_an_adjustment_amount_carries_at_most_one_sign(org_client, make_user, db):
+    """'+-5' used to post +5 and '--5' -5 (the signs were stripped as a
+    run). The raw string must be one optional sign, digits, and at most two
+    decimals; nothing is posted for a refused one."""
+    client, org_id, seed = org_client
+    investor = make_user(email="inv@example.com")
+    _member(db, org_id, investor, "investor")
+    url = f"/api/orgs/{org_id}/investors/{investor['id']}/adjustments"
+
+    def post(amount):
+        return client.post(url, json={"wallet": "main", "amount": amount, "note": "n",
+                                      "mpin": "123456"}, headers=csrf(client))
+
+    for bad in ("+-5", "--5", "-+5", "++5", "- 5", "+ 5", "5-", "1.234", "1e3", ".5"):
+        r = post(bad)
+        assert r.status_code == 400, bad
+        assert r.json()["detail"] == ("amount must be a signed number with at most two "
+                                      "decimals, e.g. -25.00"), bad
+    for zero in ("0", "-0", "+0.00"):
+        r = post(zero)
+        assert r.status_code == 400 and r.json()["detail"] == "amount must not be zero", zero
+    r = post("+5")
+    assert r.status_code == 201 and r.json()["amount"] == 5.0
+    r = post("-5.25")
+    assert r.status_code == 201 and r.json()["amount"] == -5.25
+    r = post(" 7.5 ")
+    assert r.status_code == 201 and r.json()["amount"] == 7.5
+    r = post(-2)  # a JSON number, not a string
+    assert r.status_code == 201 and r.json()["amount"] == -2.0
+    with psycopg.connect(db, autocommit=True) as conn:
+        amounts = [a for (a,) in conn.execute(
+            "SELECT amount FROM wallet_entries WHERE user_id = %s ORDER BY id",
+            (investor["id"],)).fetchall()]
+    assert amounts == [Decimal("5.00"), Decimal("-5.25"), Decimal("7.50"), Decimal("-2.00")]
+
+
 def test_adjustment_takes_the_ledger_lock_for_the_investor_not_the_admin(
         org_client, make_user, db, monkeypatch):
     """Controller ruling: the INSERT runs inside `with conn.transaction():`
