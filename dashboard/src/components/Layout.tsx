@@ -1,5 +1,5 @@
 import { Suspense, useCallback, useEffect, useRef, useState } from 'react'
-import { Navigate, Outlet, useLocation, useNavigate } from 'react-router-dom'
+import { Navigate, useLocation, useNavigate } from 'react-router-dom'
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { api } from '../lib/api'
 import { useOrg } from '../lib/org'
@@ -14,6 +14,8 @@ import Loading from './Loading'
 import NavRail from './layout/NavRail'
 import BottomBar from './layout/BottomBar'
 import DeskStrip from './layout/DeskStrip'
+import FrozenOutlet from './layout/FrozenOutlet'
+import { consumePendingFocus, markNavigated } from '../lib/navigationFocus'
 import { adminNav, investorNav } from './layout/nav'
 import { platformCaption } from '../lib/platform'
 
@@ -67,14 +69,20 @@ export default function Layout() {
     return () => mq.removeEventListener('change', onChange)
   }, [menuOpen])
 
-  // After a navigation (not on first load) focus the page heading so
-  // keyboard and screen-reader users land on the new page's name.
+  // After a navigation (not on first load) the new page's heading takes
+  // focus when it mounts, so keyboard and screen-reader users land on its
+  // name. The entering page mounts only after the exit animation, so the
+  // heading claims the flag itself rather than Layout guessing a moment.
   const firstPath = useRef(location.pathname)
+  // A flag left by an earlier navigation that no heading claimed (a page
+  // without PageHeader, a previous shell) must not steal focus on this
+  // shell's first load. Cleared at first render, because the first page's
+  // heading mounts -- and runs its effect -- before this component's effects.
+  useState(consumePendingFocus)
   useEffect(() => {
     if (location.pathname === firstPath.current) return
     firstPath.current = ''
-    const id = window.setTimeout(() => document.getElementById('page-title')?.focus(), 0)
-    return () => window.clearTimeout(id)
+    markNavigated()
   }, [location.pathname])
 
   const railChrome = (
@@ -134,7 +142,7 @@ export default function Layout() {
           <Logo size={22} textClass="text-base" />
         </div>
         {!investor && <DeskStrip onAccounts={handleAccounts} />}
-        <main id="main" tabIndex={-1} className="flex-1 overflow-y-auto p-4 md:p-6 pb-24 lg:pb-6 outline-none">
+        <main id="main" tabIndex={-1} className="flex-1 overflow-y-auto p-4 md:px-6 md:pt-6 pb-24 lg:pb-6 outline-none">
           {strayed ? (
             <Navigate to={portalRoot} replace />
           ) : (
@@ -147,7 +155,7 @@ export default function Layout() {
                 transition={reduced ? { duration: 0 } : { duration: 0.18, ease: EASE }}
               >
                 <Suspense fallback={<Loading lines={6} />}>
-                  <Outlet />
+                  <FrozenOutlet />
                 </Suspense>
               </motion.div>
             </AnimatePresence>

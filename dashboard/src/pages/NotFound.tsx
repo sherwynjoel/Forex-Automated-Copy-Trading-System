@@ -1,10 +1,14 @@
+import { useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import Card from '../components/Card'
 import { usePageTitle } from '../hooks/usePageTitle'
+import { consumePendingFocus } from '../lib/navigationFocus'
 
 /** The catch-all route: says what happened and offers the one way back. */
 export default function NotFound() {
   usePageTitle('Page not found')
+  // After a client-side navigation, the new page's heading claims focus.
+  useEffect(() => { if (consumePendingFocus()) document.getElementById('page-title')?.focus() }, [])
   return (
     <div className="mx-auto max-w-md pt-12">
       <Card>

@@ -145,7 +145,12 @@ test('an unknown URL inside the org shell renders NotFound inside the shell, wit
   render(<App />)
   expect(await screen.findByRole('heading', { level: 1, name: 'That page is not here' })).toBeInTheDocument()
   expect(screen.getByRole('link', { name: 'Skip to content' })).toHaveAttribute('href', '#main')
-  expect(screen.getByRole('main')).toHaveAttribute('id', 'main')
+  const main = screen.getByRole('main')
+  expect(main).toHaveAttribute('id', 'main')
+  // 96px of bottom padding under the tab bar at every width below lg.
+  expect(main.className).toContain('pb-24')
+  expect(main.className).toContain('lg:pb-6')
+  expect(main.className).not.toContain('md:p-6')
   expect(screen.getByRole('navigation', { name: 'Main' })).toBeInTheDocument()
   expect(screen.getByRole('navigation', { name: 'Quick navigation' })).toBeInTheDocument()
 })

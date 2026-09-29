@@ -1,6 +1,7 @@
-import type { ReactNode } from 'react'
+import { useEffect, type ReactNode } from 'react'
 import Logo from './Logo'
 import { usePageTitle } from '../hooks/usePageTitle'
+import { consumePendingFocus } from '../lib/navigationFocus'
 
 /**
  * The glass card every auth screen lives in: logo, a real h1 naming the
@@ -14,6 +15,8 @@ export default function AuthCard({ title, lead, children, footer }: {
   footer?: ReactNode
 }) {
   usePageTitle(title)
+  // After a client-side navigation, the new page's heading claims focus.
+  useEffect(() => { if (consumePendingFocus()) document.getElementById('page-title')?.focus() }, [])
   return (
     <main id="main" className="min-h-screen flex items-center justify-center p-4">
       <div className="glass rounded-card shadow-float border w-full max-w-md p-8">

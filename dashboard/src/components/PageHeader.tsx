@@ -1,5 +1,6 @@
-import type { ReactNode } from 'react'
+import { useEffect, type ReactNode } from 'react'
 import { usePageTitle } from '../hooks/usePageTitle'
+import { consumePendingFocus } from '../lib/navigationFocus'
 
 /**
  * The one page heading: the single h1 (focus target after a route change),
@@ -13,6 +14,8 @@ export default function PageHeader({ title, subtitle, actions, children }: {
   children?: ReactNode
 }) {
   usePageTitle(title)
+  // After a client-side navigation, the new page's heading claims focus.
+  useEffect(() => { if (consumePendingFocus()) document.getElementById('page-title')?.focus() }, [])
   return (
     <header className="mb-6">
       <div className="flex flex-wrap items-end justify-between gap-3">

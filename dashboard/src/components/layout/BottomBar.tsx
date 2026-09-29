@@ -17,7 +17,7 @@ export default function BottomBar({ orgId, role, onMore }: {
   return (
     <nav
       aria-label="Quick navigation"
-      className="glass fixed inset-x-0 bottom-0 z-40 flex border-t pb-[env(safe-area-inset-bottom)] lg:hidden"
+      className="glass fixed inset-x-0 bottom-0 z-30 flex border-t pb-[env(safe-area-inset-bottom)] lg:hidden"
     >
       {items.map((item) => (
         <NavLink

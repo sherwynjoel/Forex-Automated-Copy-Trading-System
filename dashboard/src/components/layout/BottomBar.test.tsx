@@ -13,6 +13,9 @@ test('admins get four links and More; More opens the menu', async () => {
   )
   const nav = screen.getByRole('navigation', { name: 'Quick navigation' })
   expect(nav.className).toContain('glass')
+  // Below drawers (z-40) and dialogs (z-50), so an open drawer covers it.
+  expect(nav.className).toContain('z-30')
+  expect(nav.className).not.toContain('z-40')
   const links = screen.getAllByRole('link')
   expect(links.map((l) => l.textContent)).toEqual(['Overview', 'Positions', 'Trade', 'Accounts'])
   expect(screen.getByRole('link', { name: 'Positions' })).toHaveAttribute('aria-current', 'page')

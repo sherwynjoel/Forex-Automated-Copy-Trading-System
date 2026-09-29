@@ -1,8 +1,10 @@
-import { act, render, screen, waitFor, cleanup } from '@testing-library/react'
+import { act, render, screen, waitFor, within, cleanup } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
 import { expect, test, vi, afterEach } from 'vitest'
+import { useEffect } from 'react'
 import Layout from './Layout'
+import PageHeader from './PageHeader'
 import type { Role } from '../lib/roles'
 import { mt5Account } from '../test/mt5Fixtures'
 
@@ -623,4 +625,53 @@ test('an investor opening the admin Investors path is sent to the portal', async
   renderShell('/org/1/investors')
   expect(await screen.findByText('investor home')).toBeInTheDocument()
   expect(screen.queryByText('admin investors')).not.toBeInTheDocument()
+})
+
+function renderTwoPages(path: string, onSecondMount?: () => void) {
+  function Second() {
+    useEffect(() => { onSecondMount?.() }, [])
+    return <PageHeader title="Second" />
+  }
+  return render(
+    <MemoryRouter initialEntries={[path]}>
+      <Routes>
+        <Route path="/org/:orgId" element={<Layout />}>
+          <Route index element={<PageHeader title="First" />} />
+          <Route path="positions" element={<Second />} />
+        </Route>
+      </Routes>
+    </MemoryRouter>,
+  )
+}
+
+test('after a nav click the new page heading takes focus; on first load nothing is focused', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
+  mockRoutes()
+  renderTwoPages('/org/1')
+
+  const first = await screen.findByRole('heading', { level: 1, name: 'First' })
+  expect(first).not.toHaveFocus()
+  expect(document.activeElement).toBe(document.body)
+
+  const rail = within(screen.getByRole('navigation', { name: 'Main' }))
+  await userEvent.click(rail.getByRole('link', { name: 'Positions' }))
+  await waitFor(() => {
+    expect(screen.getByRole('heading', { level: 1, name: 'Second' })).toHaveFocus()
+  })
+})
+
+test('a navigation mounts the entering page once, not twice', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
+  mockRoutes()
+  const mounts = vi.fn()
+  renderTwoPages('/org/1', mounts)
+
+  await screen.findByRole('heading', { level: 1, name: 'First' })
+  const rail = within(screen.getByRole('navigation', { name: 'Main' }))
+  await userEvent.click(rail.getByRole('link', { name: 'Positions' }))
+  await screen.findByRole('heading', { level: 1, name: 'Second' })
+  await waitFor(() => {
+    expect(screen.queryByRole('heading', { level: 1, name: 'First' })).toBeNull()
+  })
+  expect(mounts).toHaveBeenCalledTimes(1)
 })
