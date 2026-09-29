@@ -15,9 +15,8 @@ import Card from '../components/Card'
 import Loading from '../components/Loading'
 import PageHeader from '../components/PageHeader'
 import Tabs from '../components/Tabs'
-import type {
-  Account, InvestorDeposit, InvestorRow, InvestorWallet, InvestorWithdrawal,
-} from '../lib/types'
+import type { Account } from '../lib/types'
+import type { InvestorDeposit, InvestorRow, InvestorWallet, InvestorWithdrawal } from '../lib/legacyInvestorTypes'
 
 const POLL_MS = 10000
 

@@ -1,5 +1,5 @@
 import { afterEach, expect, test, vi, beforeEach } from 'vitest'
-import { api, type ApiError } from './api'
+import { api, apiUpload, orgApi, orgUpload, type ApiError } from './api'
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -104,4 +104,61 @@ test('a failed response exposes its status and JSON body on the error', async ()
   const err = await api('/api/mpin/verify', { method: 'POST', body: '{}' }).catch((e) => e as ApiError)
   expect(err.response?.status).toBe(423)
   expect(err.response?.body?.locked_until).toBe('2026-09-26T10:00:00Z')
+})
+
+test('apiUpload posts FormData with the CSRF header and never sets a Content-Type', async () => {
+  document.cookie = 'csrf=tok123'
+  const fetchMock = vi.fn().mockResolvedValue(
+    new Response(JSON.stringify({ id: 5, purpose: 'deposit_receipt', content_type: 'image/png', size_bytes: 10 }), {
+      status: 201, headers: { 'Content-Type': 'application/json' },
+    }),
+  )
+  vi.stubGlobal('fetch', fetchMock)
+  const form = new FormData()
+  form.append('purpose', 'deposit_receipt')
+  const result = await apiUpload<{ id: number }>('/api/orgs/1/investor/files', form)
+  expect(result.id).toBe(5)
+  const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+  expect(url).toBe('/api/orgs/1/investor/files')
+  expect(init.method).toBe('POST')
+  expect(init.body).toBe(form)
+  expect(init.credentials).toBe('same-origin')
+  const headers = init.headers as Record<string, string>
+  expect(headers['X-CSRF-Token']).toBe('tok123')
+  expect(headers['Content-Type']).toBeUndefined()
+})
+
+test('apiUpload surfaces the server detail with the status prefix', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+    new Response(JSON.stringify({ detail: 'file too large (5 MB max)' }), {
+      status: 400, headers: { 'Content-Type': 'application/json' },
+    }),
+  ))
+  await expect(apiUpload('/api/orgs/1/investor/files', new FormData())).rejects.toThrow('400: file too large (5 MB max)')
+})
+
+test('orgUpload posts to the org-scoped tail', async () => {
+  const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }))
+  vi.stubGlobal('fetch', fetchMock)
+  await orgUpload(7, 'investor/files', new FormData())
+  expect(fetchMock.mock.calls[0][0]).toBe('/api/orgs/7/investor/files')
+})
+
+test('orgApi passes redirectOn401 through so a step-up 401 stays inline', async () => {
+  // A wrong MPIN on a step-up POST (withdrawal, transfer, destination,
+  // adjustment) answers 401 and must surface as an inline error on the
+  // page that asked, never as a bounce to /login (spec section 10).
+  Object.defineProperty(window, 'location', {
+    value: { href: '/org/1/invest/withdraw' },
+    writable: true,
+  })
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+    new Response(JSON.stringify({ detail: 'Invalid MPIN', attempts_left: 3 }), {
+      status: 401, headers: { 'content-type': 'application/json' },
+    }),
+  ))
+  await expect(
+    orgApi(1, 'investor/withdrawals', { method: 'POST', body: '{}' }, { redirectOn401: false }),
+  ).rejects.toThrow('401: Invalid MPIN')
+  expect(window.location.href).toBe('/org/1/invest/withdraw')
 })

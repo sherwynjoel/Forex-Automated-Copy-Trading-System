@@ -11,9 +11,8 @@ import PageHeader from '../../components/PageHeader'
 import StatTile from '../../components/StatTile'
 import { EquityCurve } from '../../components/charts'
 import NextStep from './NextStep'
-import type {
-  Analytics, InvestorDeposit, InvestorPositions, InvestorSummary, InvestorWithdrawal,
-} from '../../lib/types'
+import type { Analytics, InvestorPositions } from '../../lib/types'
+import type { InvestorDeposit, InvestorSummary, InvestorWithdrawal } from '../../lib/legacyInvestorTypes'
 
 const POLL_MS = 10000
 

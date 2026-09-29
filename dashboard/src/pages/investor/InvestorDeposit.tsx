@@ -11,7 +11,7 @@ import Input from '../../components/Input'
 import Loading from '../../components/Loading'
 import PageHeader from '../../components/PageHeader'
 import NextStep from './NextStep'
-import type { InvestorDeposit as Deposit, InvestorWallet } from '../../lib/types'
+import type { InvestorDeposit as Deposit, InvestorWallet } from '../../lib/legacyInvestorTypes'
 
 // statusTone's four states, mapped onto the desk's one chip.
 const BADGE_TONE: Record<ReturnType<typeof statusTone>, BadgeTone> = {

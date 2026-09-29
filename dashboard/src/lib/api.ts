@@ -15,8 +15,19 @@ function getCsrfToken(): string | null {
   return null
 }
 
+/** Mutations carry the CSRF token; GET and HEAD never need it. */
+function addCsrf(headers: Record<string, string>, method: string | undefined): void {
+  const m = (method || 'GET').toUpperCase()
+  if (m !== 'GET' && m !== 'HEAD') {
+    const csrfToken = getCsrfToken()
+    if (csrfToken) headers['X-CSRF-Token'] = csrfToken
+  }
+}
+
 /**
- * Make an API request with CSRF protection and automatic redirect on 401.
+ * What every request does with its answer: the 401 redirect rules, the
+ * ApiError on non-2xx, and JSON parsing.
+ *
  * A 401 sends the browser to /login, except: /api/login propagates its own
  * 401 as an inline error; a half session's 401 (server detail "MPIN
  * required") goes to /mpin instead of /login; and the MPIN routes
@@ -24,33 +35,11 @@ function getCsrfToken(): string | null {
  * inline errors, never a redirect. Callers that pass
  * `opts.redirectOn401: false` handle every 401 themselves.
  */
-export async function api<T>(
+async function finish<T>(
   path: string,
-  init?: RequestInit,
+  response: Response,
   opts?: { redirectOn401?: boolean },
 ): Promise<T> {
-  const headers = { ...init?.headers } as Record<string, string>
-
-  // Add CSRF token for mutations
-  const method = (init?.method || 'GET').toUpperCase()
-  if (method !== 'GET' && method !== 'HEAD') {
-    const csrfToken = getCsrfToken()
-    if (csrfToken) {
-      headers['X-CSRF-Token'] = csrfToken
-    }
-  }
-
-  // Add default Content-Type for requests with body
-  if (init?.body && !headers['Content-Type']) {
-    headers['Content-Type'] = 'application/json'
-  }
-
-  const response = await fetch(path, {
-    ...init,
-    credentials: 'same-origin',
-    headers,
-  })
-
   // A 401 means "go sign in" -- except when it means "finish signing in":
   // a half session (email+password done, MPIN owed) is told exactly that by
   // the server, and belongs on /mpin. The MPIN routes (/api/mpin/* and
@@ -100,11 +89,69 @@ export async function api<T>(
 }
 
 /**
- * Make an org-scoped API request: GET/POST/etc. against
- * /api/orgs/{orgId}/{tail}.
+ * Make an API request with CSRF protection and automatic redirect on 401
+ * (see `finish` for the redirect rules). A body defaults to JSON.
  */
-export function orgApi<T>(orgId: number, tail: string, init?: RequestInit): Promise<T> {
-  return api<T>(`/api/orgs/${orgId}/${tail}`, init)
+export async function api<T>(
+  path: string,
+  init?: RequestInit,
+  opts?: { redirectOn401?: boolean },
+): Promise<T> {
+  const headers = { ...init?.headers } as Record<string, string>
+  addCsrf(headers, init?.method)
+
+  // Add default Content-Type for requests with body
+  if (init?.body && !headers['Content-Type']) {
+    headers['Content-Type'] = 'application/json'
+  }
+
+  const response = await fetch(path, {
+    ...init,
+    credentials: 'same-origin',
+    headers,
+  })
+  return finish<T>(path, response, opts)
+}
+
+/**
+ * POST a multipart form (a receipt or proof upload). Same CSRF, 401 and
+ * error rules as api(); never sets Content-Type, so the browser writes
+ * multipart/form-data with its own boundary.
+ */
+export async function apiUpload<T>(
+  path: string,
+  form: FormData,
+  opts?: { redirectOn401?: boolean },
+): Promise<T> {
+  const headers: Record<string, string> = {}
+  addCsrf(headers, 'POST')
+  const response = await fetch(path, {
+    method: 'POST',
+    body: form,
+    credentials: 'same-origin',
+    headers,
+  })
+  return finish<T>(path, response, opts)
+}
+
+/**
+ * Make an org-scoped API request: GET/POST/etc. against
+ * /api/orgs/{orgId}/{tail}. `opts` is api()'s: step-up POSTs (withdrawal,
+ * transfer, destination, adjustment) pass `{ redirectOn401: false }` so a
+ * wrong MPIN stays an inline error instead of a bounce to /login.
+ */
+export function orgApi<T>(
+  orgId: number,
+  tail: string,
+  init?: RequestInit,
+  opts?: { redirectOn401?: boolean },
+): Promise<T> {
+  return api<T>(`/api/orgs/${orgId}/${tail}`, init, opts)
+}
+
+/** Org-scoped multipart upload: POST /api/orgs/{orgId}/{tail}. */
+export function orgUpload<T>(orgId: number, tail: string, form: FormData): Promise<T> {
+  return apiUpload<T>(`/api/orgs/${orgId}/${tail}`, form)
 }
 
 /**

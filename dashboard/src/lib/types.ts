@@ -494,85 +494,6 @@ export interface OverviewStats {
   recent_copies: RecentCopy[]
 }
 
-/** What the investor portal shows on its Overview; every figure is money
- *  in the workspace's account currency, `null` when not knowable. */
-export interface InvestorSummary {
-  org: { id: number; name: string }
-  link_state: 'linked' | 'unlinked'
-  account: {
-    account_id: number; nickname: string | null; platform: 'ctrader' | 'mt5' | string
-    status: string; last_error: string | null; connected: boolean
-  } | null
-  equity_source: 'live' | 'last known' | 'unknown'
-  wallet_configured: boolean
-  total_deposited: number
-  total_withdrawn: number
-  net_deposits: number
-  pending_withdrawn: number
-  equity: number | null
-  profit: number | null
-  available: number | null
-}
-
-export interface InvestorWallet {
-  coin: string
-  network: string
-  address: string
-  memo: string | null
-}
-
-export interface InvestorDeposit {
-  id: number
-  user_id: number
-  account_id: number | null
-  amount: number
-  coin: string
-  txid: string
-  note: string | null
-  status: 'pending' | 'confirmed' | 'rejected' | string
-  decided_by: number | null
-  decided_at: string | null
-  decision_note: string | null
-  created_at: string
-  /** Present in the admin queue only. */
-  email?: string
-  display_name?: string
-}
-
-export interface InvestorWithdrawal {
-  id: number
-  user_id: number
-  account_id: number
-  amount: number
-  destination: string
-  status: 'requested' | 'approved' | 'paid' | 'rejected' | string
-  equity_at_request: number | null
-  equity_verified: boolean
-  decided_by: number | null
-  decided_at: string | null
-  decision_note: string | null
-  paid_by: number | null
-  paid_at: string | null
-  txid: string | null
-  created_at: string
-  email?: string
-  display_name?: string
-}
-
-/** One row of the admin's Investors table. */
-export interface InvestorRow {
-  user_id: number
-  email: string
-  display_name: string
-  account_id: number | null
-  nickname: string | null
-  equity: number | null
-  net_deposits: number
-  profit: number | null
-  pending_deposits: number
-  pending_withdrawals: number
-}
-
 export interface InvestorPositions {
   equity_source: 'live' | 'last known' | 'unknown'
   positions: Array<{
@@ -581,3 +502,181 @@ export interface InvestorPositions {
     stop_loss: number | null; take_profit: number | null; pnl_quote: number | null
   }>
 }
+
+// ---------------------------------------------------------------------------
+// Client portal, phase 1 (spec docs/superpowers/specs/2026-09-29-client-portal-
+// phase-1-money-design.md, section 8). Every money figure is a float rounded
+// to cents; every row and summary carries `currency` ("USD" in phase 1).
+// ---------------------------------------------------------------------------
+
+export type WalletKind = 'main' | 'credit' | 'pamm' | 'social'
+
+export type RequestStatus =
+  | 'pending' | 'confirmed' | 'rejected' | 'cancelled'
+  | 'requested' | 'approved' | 'paid' | 'done' | 'removed'
+
+/** One end of a transfer: a wallet or the linked trading account. */
+export interface MoneyRef { kind: 'wallet' | 'account'; wallet?: WalletKind; account_id?: number }
+
+export interface PaymentMethod {
+  id: number
+  kind: 'crypto' | 'bank'
+  label: string
+  enabled: boolean
+  currency: string
+  details: Record<string, string>
+  min_amount: number
+  fee_pct: number
+  instructions: string | null
+  sort_order: number
+}
+
+export interface PortalDeposit {
+  id: number
+  user_id: number
+  method_id: number | null
+  method_kind: 'crypto' | 'bank'
+  method_label: string
+  amount: number
+  fee: number
+  credited_amount: number | null
+  reference: string
+  receipt_file_id: number | null
+  target: 'wallet' | 'account'
+  target_account_id: number | null
+  note: string | null
+  status: RequestStatus
+  decided_by: number | null
+  decided_at: string | null
+  decision_note: string | null
+  created_at: string
+  currency: string
+  /** Present in the admin queue only. */
+  email?: string
+  display_name?: string
+}
+
+export interface PortalWithdrawal {
+  id: number
+  user_id: number
+  destination_id: number
+  destination_kind: 'bank' | 'crypto'
+  destination_summary: string
+  amount: number
+  fee: number
+  net_amount: number
+  status: RequestStatus
+  decided_by: number | null
+  decided_at: string | null
+  decision_note: string | null
+  paid_by: number | null
+  paid_at: string | null
+  txid: string | null
+  created_at: string
+  currency: string
+  email?: string
+  display_name?: string
+}
+
+export interface PortalTransfer {
+  id: number
+  user_id: number
+  source: MoneyRef
+  target: MoneyRef
+  amount: number
+  status: RequestStatus
+  equity_at_request: number | null
+  equity_verified: boolean
+  decided_by: number | null
+  decided_at: string | null
+  decision_note: string | null
+  done_by: number | null
+  done_at: string | null
+  note: string | null
+  created_at: string
+  currency: string
+  email?: string
+  display_name?: string
+}
+
+export interface PayoutDestination {
+  id: number
+  user_id: number
+  kind: 'bank' | 'crypto'
+  nickname: string
+  details: Record<string, string>
+  proof_file_id: number | null
+  status: RequestStatus
+  decided_by: number | null
+  decided_at: string | null
+  decision_note: string | null
+  created_at: string
+  /** Built server-side: "ICICI Bank ••4543" or "TRC20 T…9f". */
+  summary: string
+  email?: string
+  display_name?: string
+}
+
+export interface WalletEntry {
+  id: number
+  wallet: WalletKind
+  /** Signed: credits positive, debits negative. */
+  amount: number
+  kind: 'deposit' | 'withdrawal' | 'transfer' | 'adjustment' | 'bonus' | 'commission' | 'fee'
+  ref_table: string | null
+  ref_id: number | null
+  note: string | null
+  created_at: string
+  currency: string
+}
+
+export interface WalletEntriesPage { entries: WalletEntry[]; has_more: boolean; next_before: number | null }
+
+export interface WalletFigures { balance: number; on_hold: number; available: number }
+
+/** GET investor/summary. `available` figures are floored to cents server-side. */
+export interface InvestorSummary {
+  org: { id: number; name: string }
+  currency: string
+  investor: { display_name: string; first_name: string; member_since: string }
+  wallets: Record<WalletKind, WalletFigures>
+  totals: { deposited: number; withdrawn: number; transferred_in: number; transferred_out: number }
+  cash_flow: { date: string; deposits: number; withdrawals: number }[]
+  pending: { deposits: number; withdrawals: number; transfers: number; payout_destinations: number }
+  deposits_open: boolean
+  withdrawal_rules: { min: number; fee_pct: number }
+  link_state: 'linked' | 'unlinked'
+  account: {
+    account_id: number; nickname: string | null; platform: string
+    status: string; last_error: string | null; connected: boolean
+  } | null
+  equity_source: 'live' | 'last known' | 'unknown'
+  equity: number | null
+  net_funded: number
+  profit: number | null
+  account_available: number | null
+  open_positions: number
+}
+
+/** One row of the admin's Investors table (GET investors). */
+export interface InvestorRow {
+  user_id: number
+  email: string
+  display_name: string
+  joined_at: string
+  account_id: number | null
+  nickname: string | null
+  equity: number | null
+  equity_source: string
+  balances: Record<WalletKind, number>
+  on_hold: number
+  available: number
+  pending: { deposits: number; withdrawals: number; transfers: number; payout_destinations: number }
+}
+
+export interface PortalSettings { withdrawal_min: number; withdrawal_fee_pct: number }
+
+export interface RequestsSummary { deposits: number; withdrawals: number; transfers: number; payout_destinations: number; total: number }
+
+/** What POST investor/files answers. */
+export interface UploadedFile { id: number; purpose: string; content_type: string; size_bytes: number; created_at: string }

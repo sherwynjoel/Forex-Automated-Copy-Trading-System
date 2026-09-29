@@ -1,16 +1,40 @@
+import type { BadgeTone } from '../components/Badge'
 import { money } from './format'
+import type { WalletEntry, WalletKind } from './types'
 
 export type StatusTone = 'ok' | 'warn' | 'bad' | 'quiet'
 
 /**
- * The unit for account-currency figures: equity, profit, available, trade
- * P&L. The investor summary carries NO currency field -- `summary_json` in
- * api/src/api/investor_ledger.py returns bare numbers for total_deposited,
- * total_withdrawn, net_deposits, pending_withdrawn, equity, profit and
- * available -- so this is a labelled default, not something the API said.
- * Ledger figures (deposits, withdrawals) use the wallet's coin instead.
+ * The unit of every wallet and account figure in phase 1: the portal is
+ * USD-only (spec section 3). Every API row and summary also carries a
+ * `currency` field; pages prefer the row's value and fall back to this.
  */
 export const ACCOUNT_CURRENCY = 'USD'
+
+/** The four wallets in display order. Only `main` moves in phase 1. */
+export const WALLETS: WalletKind[] = ['main', 'credit', 'pamm', 'social']
+
+const WALLET_LABELS: Record<WalletKind, string> = {
+  main: 'My wallet',
+  credit: 'Credit wallet',
+  pamm: 'PAMM wallet',
+  social: 'Social wallet',
+}
+
+export function walletLabel(kind: WalletKind): string {
+  return WALLET_LABELS[kind]
+}
+
+/** Which request table a status belongs to; only `approved` reads differently per table. */
+export type RequestKind = 'deposit' | 'withdrawal' | 'transfer' | 'destination'
+
+/** An approved withdrawal still has to be paid; an approved transfer is
+ *  being funded at the broker; an approved payout account is just usable. */
+export function approvedLabel(kind: RequestKind): string {
+  if (kind === 'transfer') return 'Approved, in progress'
+  if (kind === 'destination') return 'Approved'
+  return 'Approved, payment pending'
+}
 
 const LABELS: Record<string, string> = {
   pending: 'Pending review',
@@ -19,17 +43,30 @@ const LABELS: Record<string, string> = {
   approved: 'Approved, payment pending',
   paid: 'Paid',
   rejected: 'Rejected',
+  cancelled: 'Cancelled',
+  done: 'Done',
+  removed: 'Removed',
 }
 
-export function statusLabel(status: string): string {
+export function statusLabel(status: string, kind?: RequestKind): string {
+  if (status === 'approved' && kind) return approvedLabel(kind)
   return LABELS[status] ?? status
 }
 
-export function statusTone(status: string): StatusTone {
-  if (status === 'confirmed' || status === 'paid') return 'ok'
-  if (status === 'pending' || status === 'requested' || status === 'approved') return 'warn'
+export function statusTone(status: string, kind?: RequestKind): StatusTone {
+  if (status === 'confirmed' || status === 'paid' || status === 'done') return 'ok'
+  if (status === 'approved') return kind === 'destination' ? 'ok' : 'warn'
+  if (status === 'pending' || status === 'requested') return 'warn'
   if (status === 'rejected') return 'bad'
   return 'quiet'
+}
+
+/** The status tones on the desk's one chip. */
+export const BADGE_TONE: Record<StatusTone, BadgeTone> = {
+  ok: 'profit',
+  warn: 'warn',
+  bad: 'loss',
+  quiet: 'neutral',
 }
 
 export function moneyOrDash(n: number | null | undefined, unit?: string): string {
@@ -46,7 +83,25 @@ export function shortAddress(address: string): string {
   return a.length <= 8 ? a : `${a.slice(0, 1)}…${a.slice(-2)}`
 }
 
-/** Tailwind classes for a status pill, matching Automation's OutcomePill. */
+const ENTRY_KINDS: Record<WalletEntry['kind'], string> = {
+  deposit: 'Deposit',
+  withdrawal: 'Withdrawal',
+  transfer: 'Transfer',
+  adjustment: 'Adjustment',
+  bonus: 'Bonus',
+  commission: 'Commission',
+  fee: 'Fee',
+}
+
+/** "Deposit #12", "Withdrawal #4", "Transfer #9", "Adjustment" -- what a ledger row was for. */
+export function entryLabel(e: WalletEntry): string {
+  const word = ENTRY_KINDS[e.kind] ?? e.kind
+  return e.ref_id != null ? `${word} #${e.ref_id}` : word
+}
+
+/** Tailwind classes for a status pill, matching Automation's OutcomePill.
+ *  Used by the Withdraw Timeline until Task 15 rewrites that page; new code
+ *  uses <Badge tone={BADGE_TONE[statusTone(s)]}>. */
 export function pillClass(status: string): string {
   const tone = statusTone(status)
   return tone === 'ok' ? 'bg-profit-wash text-profit-deep'

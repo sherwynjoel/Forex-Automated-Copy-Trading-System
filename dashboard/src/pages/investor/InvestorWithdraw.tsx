@@ -12,7 +12,7 @@ import Input from '../../components/Input'
 import Loading from '../../components/Loading'
 import PageHeader from '../../components/PageHeader'
 import NextStep from './NextStep'
-import type { InvestorSummary, InvestorWallet, InvestorWithdrawal } from '../../lib/types'
+import type { InvestorSummary, InvestorWallet, InvestorWithdrawal } from '../../lib/legacyInvestorTypes'
 
 const STEPS = ['requested', 'approved', 'paid'] as const
 
