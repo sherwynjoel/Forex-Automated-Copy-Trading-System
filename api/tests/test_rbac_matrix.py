@@ -7,13 +7,11 @@ nonexistent account, 409 for a row whose state forbids the change, 502
 copier). 401/403/404-membership are the denials under test. Endpoints listed
 with a seeded account id 100 where needed.
 
-The mutating investor rows aim at the seeded deposit 1 and withdrawal 1
-(ids are deterministic: the db fixture TRUNCATEs with RESTART IDENTITY, and
-every parametrised case gets its own fixture). They are written so that the
-FIRST allowed role really performs the change and the later ones get a 409
-from the row's state — never a 403/404 — so what the row proves is
-authorization, never business rules. `{investor}` in a path is the investor
-member's user id, substituted per test.
+The client-portal rows (investor/*, investors, payment-methods, requests,
+deposits, withdrawals, transfers, payout-destinations, files) are added in
+Task 10 of the client-portal plan once their routers exist; migration 022
+dropped the tables the 2026-09-23 rows seeded. `{investor}` in a path is
+the investor member's user id, substituted per test.
 """
 import psycopg
 import pytest
@@ -59,25 +57,6 @@ MATRIX = [
     ("GET",    "invites",                        None,                           "admin"),
     ("PATCH",  "",                               {"name": "Renamed"},            "admin"),
     ("DELETE", "",                               None,                           "admin"),
-    ("GET",    "investor/summary",                None,                          "investor"),
-    ("GET",    "investor/deposits",               None,                          "investor"),
-    ("GET",    "investor/withdrawals",            None,                          "investor"),
-    ("GET",    "investor-wallet",                 None,                          "admin"),
-    ("GET",    "investors",                       None,                          "admin"),
-    ("GET",    "investor-deposits",               None,                          "admin"),
-    ("GET",    "investor-withdrawals",            None,                          "admin"),
-    ("POST",   "investor/deposits",               {"amount": "10", "coin": "USDT",
-                                                   "txid": "matrix-filed"},      "investor"),
-    ("POST",   "investor/withdrawals",            {"amount": "10",
-                                                   "destination": "TDest"},      "investor"),
-    ("PUT",    "investor-wallet",                 {"coin": "USDT", "network": "TRC20",
-                                                   "address": "TAddr456"},       "admin"),
-    ("PUT",    "investors/{investor}/account",    {"account_id": None},           "admin"),
-    ("POST",   "investor-deposits/1/decision",    {"status": "rejected",
-                                                   "note": "matrix"},            "admin"),
-    ("POST",   "investor-withdrawals/1/decision", {"status": "rejected",
-                                                   "note": "matrix"},            "admin"),
-    ("POST",   "investor-withdrawals/1/paid",     {"txid": "matrix"},             "admin"),
 ]
 
 RANK = {"investor": -1, "viewer": 0, "admin": 1}
@@ -100,29 +79,6 @@ def matrix_org(app_client, make_user, make_org, db, login_as):
                    org_id, trader_login, is_live, role)
                VALUES (100, %s, %s, 100, false, 'master')""",
             (connection_id, org_id))
-        conn.execute(
-            "INSERT INTO org_investor_wallets (org_id, coin, network, address) "
-            "VALUES (%s, 'USDT', 'TRC20', 'TAddr123')", (org_id,))
-        # A pending notice and a requested withdrawal belonging to the
-        # investor member, so the decision/paid rows of the matrix have a
-        # real row to aim at. RESTART IDENTITY makes both ids 1. The
-        # withdrawal hangs off an MT5-style account (no cTrader connection)
-        # rather than account 100: investor_withdrawals.account_id is ON
-        # DELETE RESTRICT, and account 100 is the one
-        # `DELETE accounts/100/connection` cascades away.
-        (mt5_id,) = conn.execute(
-            "INSERT INTO accounts (ctid_trader_account_id, ctid_connection_id, org_id, "
-            "platform, trader_login, is_live, role, enabled) "
-            "VALUES (nextval('mt5_account_id_seq'), NULL, %s, 'mt5', 0, false, 'slave', true) "
-            "RETURNING ctid_trader_account_id", (org_id,)).fetchone()
-        conn.execute(
-            "INSERT INTO investor_deposits (org_id, user_id, amount, coin, txid) "
-            "VALUES (%s, %s, 100, 'USDT', 'matrix-seeded')",
-            (org_id, users["investor"]["id"]))
-        conn.execute(
-            "INSERT INTO investor_withdrawals (org_id, user_id, account_id, amount, destination) "
-            "VALUES (%s, %s, %s, 50, 'TDest')",
-            (org_id, users["investor"]["id"], mt5_id))
     return app_client, org_id, users, outsider
 
 
