@@ -27,14 +27,22 @@ const STEP_LABELS: Record<Step, string> = {
 const AMOUNT_RE = /^\d+(\.\d{1,2})?$/
 const TWO_DECIMALS = 'Enter an amount with at most two decimals, digits only (for example 250.00).'
 
-/** Fee and net for the typed amount, rounded half-up to cents like the
- *  server's fee_for; null while the amount is not a valid figure. The
- *  server's figures rule; this only previews them. */
+/** Fee and net for the typed amount, matching the server's fee_for exactly:
+ *  half-up to the cent, computed with exact integer (BigInt) arithmetic so
+ *  it never drifts the way floating point does (1.15% of 250.00 must read
+ *  2.88, not the 2.87 that `Math.round(cents * feePct / 100)` gives when
+ *  `cents * feePct` lands a hair under its true value, e.g. 28749.999999999996
+ *  instead of 28750). `feePct` carries at most three decimals
+ *  (withdrawal_fee_pct is NUMERIC(6,3)), so scaling it by 1000 is exact; the
+ *  fee is then an exact integer division rounded half-up. Null while the
+ *  amount is not a valid figure. The server's figures rule; this only
+ *  previews them. */
 export function feePreview(amount: string, feePct: number): { fee: number; net: number } | null {
   if (!AMOUNT_RE.test(amount.trim())) return null
   const cents = Math.round(Number(amount) * 100)
-  const fee = Math.round((cents * feePct) / 100)
-  return { fee: fee / 100, net: (cents - fee) / 100 }
+  const milli = Math.round(feePct * 1000)
+  const feeCents = Number((BigInt(cents) * BigInt(milli) + 50_000n) / 100_000n)
+  return { fee: feeCents / 100, net: (cents - feeCents) / 100 }
 }
 
 function Timeline({ w }: { w: PortalWithdrawal }) {
@@ -253,7 +261,7 @@ export default function InvestorWithdraw() {
                   </Button>
                 )}
               </div>
-              <p className="text-xs text-ink-soft">{`Fee ${money(w.fee, w.currency)} · Net ${money(w.net_amount, w.currency)}`}</p>
+              <p className="text-xs text-ink-soft">Fee <Money value={w.fee} unit={w.currency} /> · Net <Money value={w.net_amount} unit={w.currency} /></p>
               <Timeline w={w} />
               {w.decision_note && <p className="text-xs text-ink-soft">Admin: {w.decision_note}</p>}
               {w.txid && <p className="num text-xs text-ink-soft break-all">Transaction: {w.txid}</p>}

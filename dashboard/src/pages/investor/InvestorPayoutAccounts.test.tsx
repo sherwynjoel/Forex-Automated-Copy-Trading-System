@@ -28,8 +28,13 @@ const tron: PayoutDestination = destinationFixture({
   decided_by: null, decided_at: null,
 })
 
-function mockRoutes(opts: { rows?: PayoutDestination[]; fail?: boolean; removeRefused?: string } = {}) {
+function mockRoutes(opts: {
+  rows?: PayoutDestination[]; fail?: boolean; removeRefused?: string
+  /** The FIRST destination POST answers a wrong MPIN (401); every later one succeeds. */
+  wrongMpinOnce?: boolean
+} = {}) {
   const rows: PayoutDestination[] = [...(opts.rows ?? [salary, tron])]
+  let destinationPosts = 0
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
     if (opts.fail) return jsonResponse({ detail: 'database unavailable' }, 500)
@@ -38,6 +43,10 @@ function mockRoutes(opts: { rows?: PayoutDestination[]; fail?: boolean; removeRe
                             created_at: '2026-09-23T10:00:00Z' }, 201)
     }
     if (url.endsWith('/investor/payout-destinations') && init?.method === 'POST') {
+      destinationPosts += 1
+      if (opts.wrongMpinOnce && destinationPosts === 1) {
+        return jsonResponse({ detail: 'Invalid MPIN', attempts_left: 2 }, 401)
+      }
       const body = JSON.parse(init.body as string) as { kind: 'bank' | 'crypto'; nickname: string; details: Record<string, string> }
       const created: PayoutDestination = destinationFixture({
         ...salary, id: 20, kind: body.kind, nickname: body.nickname, details: body.details, status: 'pending',
@@ -66,7 +75,7 @@ function posts(fetchMock: ReturnType<typeof mockRoutes>) {
 }
 
 async function enterPin(dialog: HTMLElement, pin: string) {
-  within(dialog).getByLabelText('Your MPIN digit 1 of 6').focus()
+  await userEvent.click(within(dialog).getByLabelText('Your MPIN digit 1 of 6'))
   await userEvent.keyboard(pin)
 }
 
@@ -142,6 +151,48 @@ test('adding a crypto address uploads the proof first and posts its file id', as
   await userEvent.click(within(confirm).getByRole('button', { name: 'Confirm' }))
   await waitFor(() => expect(posts(fetchMock)).toHaveLength(2))
   expect(JSON.parse((posts(fetchMock)[1][1] as RequestInit).body as string)).toEqual({
+    kind: 'crypto', nickname: 'Tron',
+    details: { coin: 'USDT', network: 'TRC20', address: 'TQn9Y2khEsLJW1ChVWFMSMeRDow5KcbLSE9f' },
+    proof_file_id: 78, mpin: '123456',
+  })
+})
+
+test('a wrong MPIN stays in the dialog without navigating, and the retry reuses the already-uploaded proof', async () => {
+  const fetchMock = mockRoutes({ rows: [], wrongMpinOnce: true })
+  render(<MemoryRouter><InvestorPayoutAccounts /></MemoryRouter>)
+  await screen.findByText('No crypto addresses yet')
+  await userEvent.click(screen.getByRole('button', { name: 'Add crypto address' }))
+  const drawer = await screen.findByRole('dialog', { name: 'Add crypto address' })
+  await userEvent.type(within(drawer).getByLabelText('Nickname'), 'Tron')
+  await userEvent.type(within(drawer).getByLabelText('Coin'), 'USDT')
+  await userEvent.type(within(drawer).getByLabelText('Network'), 'TRC20')
+  await userEvent.type(within(drawer).getByLabelText('Address'), 'TQn9Y2khEsLJW1ChVWFMSMeRDow5KcbLSE9f')
+  await userEvent.upload(within(drawer).getByLabelText(/^Proof/), new File(['png'], 'wallet.png', { type: 'image/png' }))
+  await userEvent.click(within(drawer).getByRole('button', { name: 'Save payout account' }))
+
+  const confirm = await screen.findByRole('dialog', { name: 'Save Tron as a payout account?' })
+  await enterPin(confirm, '111111')
+  await userEvent.click(within(confirm).getByRole('button', { name: 'Confirm' }))
+  expect(await within(confirm).findByText('Wrong MPIN, 2 tries left')).toBeInTheDocument()
+  // Still the same dialog, not a bounce to /login: this fails if
+  // `{ redirectOn401: false }` were ever dropped from the destination POST.
+  expect(screen.getByRole('dialog', { name: 'Save Tron as a payout account?' })).toBeInTheDocument()
+  expect(screen.queryByText('Unauthorized')).not.toBeInTheDocument()
+
+  await enterPin(confirm, '123456')
+  await userEvent.click(within(confirm).getByRole('button', { name: 'Confirm' }))
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+
+  const filePosts = posts(fetchMock).filter(([url]) => String(url).endsWith('/investor/files'))
+  const destinationPosts = posts(fetchMock).filter(([url]) => String(url).endsWith('/investor/payout-destinations'))
+  // One upload across both attempts: this fails if the upload were moved
+  // into confirm() and so re-ran on the retry.
+  expect(filePosts).toHaveLength(1)
+  expect(destinationPosts).toHaveLength(2)
+  const firstBody = JSON.parse((destinationPosts[0][1] as RequestInit).body as string)
+  const secondBody = JSON.parse((destinationPosts[1][1] as RequestInit).body as string)
+  expect(firstBody.proof_file_id).toBe(78)
+  expect(secondBody).toEqual({
     kind: 'crypto', nickname: 'Tron',
     details: { coin: 'USDT', network: 'TRC20', address: 'TQn9Y2khEsLJW1ChVWFMSMeRDow5KcbLSE9f' },
     proof_file_id: 78, mpin: '123456',

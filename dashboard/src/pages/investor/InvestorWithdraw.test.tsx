@@ -5,6 +5,7 @@ import { expect, test, vi, afterEach, beforeEach } from 'vitest'
 import InvestorWithdraw, { feePreview } from './InvestorWithdraw'
 import { mockUseOrg } from '../../test/orgMock'
 import { destinationFixture, summaryFixture, withdrawalFixture } from '../../test/portalFixtures'
+import { setHidden } from '../../lib/hideBalances'
 import type { InvestorSummary, PayoutDestination, PortalWithdrawal } from '../../lib/types'
 
 const { useOrgMock } = vi.hoisted(() => ({ useOrgMock: vi.fn() }))
@@ -77,18 +78,26 @@ function posts(fetchMock: ReturnType<typeof mockRoutes>) {
 }
 
 async function enterPin(dialog: HTMLElement, pin: string) {
-  within(dialog).getByLabelText('Your MPIN digit 1 of 6').focus()
+  await userEvent.click(within(dialog).getByLabelText('Your MPIN digit 1 of 6'))
   await userEvent.keyboard(pin)
 }
 
 beforeEach(() => { useOrgMock.mockReturnValue(mockUseOrg('investor')) })
-afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); setHidden(false) })
 
-test('feePreview rounds the fee half-up to cents and nets it off', () => {
+test('feePreview rounds the fee half-up to cents and nets it off, exactly like the server', () => {
   expect(feePreview('1000', 1.5)).toEqual({ fee: 15, net: 985 })
   expect(feePreview('333.33', 1.5)).toEqual({ fee: 5, net: 328.33 })
   expect(feePreview('250', 0)).toEqual({ fee: 0, net: 250 })
   expect(feePreview('1,000', 1.5)).toBeNull()
+  // Regression: floating-point `cents * feePct / 100` reads 1.15% of 250.00
+  // as 28749.999999999996, one cent short of the server's Decimal result.
+  expect(feePreview('250.00', 1.15)).toEqual({ fee: 2.88, net: 247.12 })
+  // Exact half-cent boundaries, checked against the half-up rule: 5.00 at
+  // 0.7% is precisely 0.035 (rounds up to 0.04); at 2.3% precisely 0.115
+  // (rounds up to 0.12).
+  expect(feePreview('5.00', 0.7)).toEqual({ fee: 0.04, net: 4.96 })
+  expect(feePreview('5.00', 2.3)).toEqual({ fee: 0.12, net: 4.88 })
 })
 
 test('shows what is available, previews the fee, and files a request only after the MPIN', async () => {
@@ -197,7 +206,21 @@ test('the timeline names the current step in words and with aria-current', async
   expect(steps[1]).toHaveTextContent('current')
   expect(steps[2]).not.toHaveAttribute('aria-current')
   expect(steps[2]).not.toHaveTextContent('current')
-  expect(screen.getByText(/Fee 15\.00 USD · Net 985\.00 USD/)).toBeInTheDocument()
+  // Fee and Net each render through <Money>, so they are separate nodes;
+  // toHaveTextContent reads the row's full (deep) text, unlike getByText
+  // which only ever looks at a single node's own text.
+  const row = screen.getByText('1,000.00 USD').closest('li')!
+  expect(row).toHaveTextContent(/Fee 15\.00 USD · Net 985\.00 USD/)
+})
+
+test('hiding balances masks the history row\'s fee and net too, not just the amount', async () => {
+  mockRoutes({ rows: [request] })
+  setHidden(true)
+  render(<MemoryRouter><InvestorWithdraw /></MemoryRouter>)
+  await screen.findByRole('list', { name: 'Withdrawal progress' })
+  expect(screen.queryByText(/15\.00/)).not.toBeInTheDocument()
+  expect(screen.queryByText(/985\.00/)).not.toBeInTheDocument()
+  expect(screen.queryByText(/1,000\.00/)).not.toBeInTheDocument()
 })
 
 test('with no approved payout account the form is replaced by a link to add one', async () => {
