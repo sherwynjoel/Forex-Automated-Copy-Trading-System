@@ -156,6 +156,38 @@ function mockMt5Routes(extra: Record<string, (init?: RequestInit) => Response> =
   })
 }
 
+/** The table row whose text contains `text` (a login, a nickname, a broker). */
+function rowFor(text: string): HTMLElement {
+  const row = screen.getAllByRole('row').find((r) => r.textContent?.includes(text))
+  if (!row) throw new Error(`no row contains ${text}`)
+  return row
+}
+
+/** Opens the row's one actions menu and returns it. */
+async function openMenu(text: string): Promise<HTMLElement> {
+  await userEvent.click(within(rowFor(text)).getByRole('button', { name: /^actions for/i }))
+  return screen.findByRole('menu')
+}
+
+async function chooseFromMenu(text: string, item: RegExp) {
+  const menu = await openMenu(text)
+  await userEvent.click(within(menu).getByRole('menuitem', { name: item }))
+}
+
+function menuItemNames(menu: HTMLElement): string[] {
+  return within(menu).getAllByRole('menuitem').map((el) => el.textContent?.trim() ?? '')
+}
+
+/** Opens the row's Details drawer -- the only dialog on screen at that point. */
+async function openDrawer(text: string): Promise<HTMLElement> {
+  await userEvent.click(within(rowFor(text)).getByRole('button', { name: /^details$/i }))
+  return screen.findByRole('dialog')
+}
+
+function patchCalls(fetchMock: ReturnType<typeof mockRoutes>) {
+  return fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'PATCH')
+}
+
 test('loads and displays accounts with nicknames on mount', async () => {
   setRole('admin')
   mockRoutes()
@@ -165,7 +197,16 @@ test('loads and displays accounts with nicknames on mount', async () => {
     expect(screen.getByText('12345')).toBeInTheDocument()
     expect(screen.getByText('12346')).toBeInTheDocument()
   })
-  expect(screen.getByDisplayValue('Second desk')).toBeInTheDocument()
+  expect(screen.getByText('Second desk')).toBeInTheDocument()
+})
+
+test('the page sets the document title', async () => {
+  setRole('admin')
+  mockRoutes()
+  renderAccounts()
+
+  await screen.findByText('12345')
+  await waitFor(() => expect(document.title).toBe('Accounts · MirrorFleet'))
 })
 
 test('connect navigates THIS tab to the org-scoped route, never a popup', async () => {
@@ -205,7 +246,21 @@ test('window-focus refetch: refetches accounts after OAuth popup closes', async 
   })
 })
 
-test('role select PATCHes role', async () => {
+test('rows are read-only: no text field, select or checkbox inside the table', async () => {
+  setRole('admin')
+  mockMt5Routes()
+  renderAccounts()
+
+  const table = await screen.findByRole('table')
+  await within(table).findByText('12345')
+  expect(within(table).queryAllByRole('textbox')).toHaveLength(0)
+  expect(within(table).queryAllByRole('combobox')).toHaveLength(0)
+  expect(within(table).queryAllByRole('checkbox')).toHaveLength(0)
+})
+
+// ---------- The drawer's edit form ----------
+
+test('role select in the drawer PATCHes role on Save changes', async () => {
   setRole('admin')
   const fetchMock = mockRoutes()
   renderAccounts()
@@ -214,13 +269,16 @@ test('role select PATCHes role', async () => {
     expect(screen.getByText('12345')).toBeInTheDocument()
   })
 
-  const masterSelect = screen.getByLabelText(/role for account 12345/i)
-  await userEvent.selectOptions(masterSelect, 'slave')
+  const drawer = await openDrawer('12345')
+  await userEvent.selectOptions(within(drawer).getByLabelText('Role'), 'slave')
+  // Nothing is sent until Save: the old select saved on change.
+  expect(patchCalls(fetchMock)).toHaveLength(0)
+  await userEvent.click(within(drawer).getByRole('button', { name: /save changes/i }))
 
   await waitFor(() => {
     expect(fetchMock).toHaveBeenCalledWith(
       '/api/orgs/1/accounts/1',
-      expect.objectContaining({ method: 'PATCH' })
+      expect.objectContaining({ method: 'PATCH', body: JSON.stringify({ role: 'slave' }) })
     )
   })
 })
@@ -234,12 +292,13 @@ test('choosing Master confirms, then promotes (old master demoted server-side)',
     expect(screen.getByText('12346')).toBeInTheDocument()
   })
 
-  const slaveSelect = screen.getByLabelText(/role for account 12346/i)
-  await userEvent.selectOptions(slaveSelect, 'master')
+  const drawer = await openDrawer('12346')
+  await userEvent.selectOptions(within(drawer).getByLabelText('Role'), 'master')
+  await userEvent.click(within(drawer).getByRole('button', { name: /save changes/i }))
 
   // No PATCH yet: promoting a master re-shapes the whole fleet, so it asks.
-  const dialog = await screen.findByRole('dialog')
-  expect(dialog).toHaveTextContent(/becomes a slave/i)
+  const dialog = await screen.findByRole('dialog', { name: /make account 12346 the master/i })
+  expect(dialog).toHaveTextContent(/becomes a follower/i)
   expect(fetchMock.mock.calls.some(([u, init]) =>
     String(u).includes('/accounts/2') && (init as RequestInit)?.method === 'PATCH')).toBe(false)
 
@@ -262,14 +321,18 @@ test('cancelling the master confirmation changes nothing', async () => {
     expect(screen.getByText('12346')).toBeInTheDocument()
   })
 
-  await userEvent.selectOptions(screen.getByLabelText(/role for account 12346/i), 'master')
-  const dialog = await screen.findByRole('dialog')
+  const drawer = await openDrawer('12346')
+  await userEvent.selectOptions(within(drawer).getByLabelText('Role'), 'master')
+  await userEvent.click(within(drawer).getByRole('button', { name: /save changes/i }))
+  const dialog = await screen.findByRole('dialog', { name: /make account 12346 the master/i })
   await userEvent.click(within(dialog).getByRole('button', { name: /^cancel$/i }))
 
-  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  expect(screen.queryByRole('dialog', { name: /make account 12346 the master/i })).not.toBeInTheDocument()
   expect(fetchMock.mock.calls.some(([u, init]) =>
     String(u).includes('/accounts/2') && (init as RequestInit)?.method === 'PATCH')).toBe(false)
-  expect((screen.getByLabelText(/role for account 12346/i) as HTMLSelectElement).value).toBe('slave')
+  await waitFor(() => {
+    expect((within(drawer).getByLabelText('Role') as HTMLSelectElement).value).toBe('slave')
+  })
 })
 
 test('enabled toggle PATCHes enabled field (not role)', async () => {
@@ -281,8 +344,9 @@ test('enabled toggle PATCHes enabled field (not role)', async () => {
     expect(screen.getByText('12345')).toBeInTheDocument()
   })
 
-  const checkbox = screen.getByLabelText(/copying enabled for account 12345/i)
-  await userEvent.click(checkbox)
+  const drawer = await openDrawer('12345')
+  await userEvent.click(within(drawer).getByLabelText('Copying enabled'))
+  await userEvent.click(within(drawer).getByRole('button', { name: /save changes/i }))
 
   await waitFor(() => {
     expect(fetchMock).toHaveBeenCalledWith(
@@ -294,12 +358,12 @@ test('enabled toggle PATCHes enabled field (not role)', async () => {
     )
   })
 
-  const patchCalls = fetchMock.mock.calls.filter(([, init]) => (init as RequestInit)?.method === 'PATCH')
-  expect(patchCalls).toHaveLength(1)
-  expect(String(patchCalls[0][1]!.body)).not.toContain('role')
+  const patches = patchCalls(fetchMock)
+  expect(patches).toHaveLength(1)
+  expect(String(patches[0][1]!.body)).not.toContain('role')
 })
 
-test('nickname edit PATCHes nickname', async () => {
+test('nickname edit PATCHes nickname on Save changes, the same body the blur-save sent', async () => {
   setRole('admin')
   const fetchMock = mockRoutes()
   renderAccounts()
@@ -308,9 +372,12 @@ test('nickname edit PATCHes nickname', async () => {
     expect(screen.getByText('12345')).toBeInTheDocument()
   })
 
-  const nicknameInput = screen.getByLabelText(/nickname for account 12345/i)
-  await userEvent.type(nicknameInput, 'Main live')
+  const drawer = await openDrawer('12345')
+  await userEvent.type(within(drawer).getByLabelText('Nickname'), 'Main live')
+  // Leaving the field no longer saves: only Save does.
   await userEvent.tab()
+  expect(patchCalls(fetchMock)).toHaveLength(0)
+  await userEvent.click(within(drawer).getByRole('button', { name: /save changes/i }))
 
   await waitFor(() => {
     expect(fetchMock).toHaveBeenCalledWith(
@@ -332,9 +399,9 @@ test('cutoff date edit PATCHes cutoff_date', async () => {
     expect(screen.getByText('12345')).toBeInTheDocument()
   })
 
-  const cutoffInput = screen.getByLabelText(/cutoff date for account 12345/i)
-  fireEvent.change(cutoffInput, { target: { value: '2026-09-16' } })
-  fireEvent.blur(cutoffInput)
+  const drawer = await openDrawer('12345')
+  fireEvent.change(within(drawer).getByLabelText('Cutoff date'), { target: { value: '2026-09-16' } })
+  await userEvent.click(within(drawer).getByRole('button', { name: /save changes/i }))
 
   await waitFor(() => {
     expect(fetchMock).toHaveBeenCalledWith(
@@ -356,10 +423,11 @@ test('clearing the cutoff date PATCHes an empty cutoff_date', async () => {
     expect(screen.getByText('12346')).toBeInTheDocument()
   })
 
-  const cutoffInput = screen.getByLabelText(/cutoff date for account 12346/i)
+  const drawer = await openDrawer('12346')
+  const cutoffInput = within(drawer).getByLabelText('Cutoff date')
   expect((cutoffInput as HTMLInputElement).value).toBe('2026-12-01')
   fireEvent.change(cutoffInput, { target: { value: '' } })
-  fireEvent.blur(cutoffInput)
+  await userEvent.click(within(drawer).getByRole('button', { name: /save changes/i }))
 
   await waitFor(() => {
     expect(fetchMock).toHaveBeenCalledWith(
@@ -372,6 +440,47 @@ test('clearing the cutoff date PATCHes an empty cutoff_date', async () => {
   })
 })
 
+test('one Save with several changes sends one PATCH per field, each with its old single-key body', async () => {
+  setRole('admin')
+  const fetchMock = mockRoutes()
+  renderAccounts()
+
+  await screen.findByText('12345')
+  const drawer = await openDrawer('12345')
+  await userEvent.type(within(drawer).getByLabelText('Nickname'), 'Main live')
+  fireEvent.change(within(drawer).getByLabelText('Cutoff date'), { target: { value: '2026-09-16' } })
+  await userEvent.click(within(drawer).getByLabelText('Copying enabled'))
+  await userEvent.click(within(drawer).getByRole('button', { name: /save changes/i }))
+
+  await waitFor(() => {
+    expect(patchCalls(fetchMock).map(([u, init]) => [String(u), String(init!.body)])).toEqual([
+      ['/api/orgs/1/accounts/1', JSON.stringify({ nickname: 'Main live' })],
+      ['/api/orgs/1/accounts/1', JSON.stringify({ cutoff_date: '2026-09-16' })],
+      ['/api/orgs/1/accounts/1', JSON.stringify({ enabled: false })],
+    ])
+  })
+})
+
+test('Cancel discards the drawer edits and sends nothing', async () => {
+  setRole('admin')
+  const fetchMock = mockRoutes()
+  renderAccounts()
+
+  await screen.findByText('12345')
+  const drawer = await openDrawer('12345')
+  const nickname = within(drawer).getByLabelText('Nickname') as HTMLInputElement
+  const save = within(drawer).getByRole('button', { name: /save changes/i })
+  expect(save).toBeDisabled()
+
+  await userEvent.type(nickname, 'Scratch')
+  expect(save).toBeEnabled()
+  await userEvent.click(within(drawer).getByRole('button', { name: /^cancel$/i }))
+
+  expect(nickname.value).toBe('')
+  expect(save).toBeDisabled()
+  expect(patchCalls(fetchMock)).toHaveLength(0)
+})
+
 test('viewer sees the cutoff date read-only', async () => {
   setRole('viewer')
   mockRoutes()
@@ -381,9 +490,12 @@ test('viewer sees the cutoff date read-only', async () => {
     expect(screen.getByText('12346')).toBeInTheDocument()
   })
 
-  expect(screen.getByText('2026-12-01')).toBeInTheDocument()
-  expect(screen.queryByLabelText(/cutoff date for account/i)).not.toBeInTheDocument()
+  const drawer = await openDrawer('12346')
+  expect(within(drawer).getByText('2026-12-01')).toBeInTheDocument()
+  expect(within(drawer).queryByLabelText(/cutoff date/i)).not.toBeInTheDocument()
 })
+
+// ---------- Row menu actions ----------
 
 test('disconnect confirms then DELETEs the ACCOUNT-scoped connection route', async () => {
   setRole('admin')
@@ -397,8 +509,7 @@ test('disconnect confirms then DELETEs the ACCOUNT-scoped connection route', asy
     expect(screen.getByText('12346')).toBeInTheDocument()
   })
 
-  const disconnectButtons = screen.getAllByRole('button', { name: /disconnect/i })
-  await userEvent.click(disconnectButtons[disconnectButtons.length - 1])
+  await chooseFromMenu('12346', /^disconnect$/i)
 
   // ConfirmDialog explains the whole-grant consequence, then confirms.
   const dialog = await screen.findByRole('dialog')
@@ -456,7 +567,7 @@ test("Escape closes the details drawer and returns focus to the row's Details bu
   expect(detailsButton).toHaveFocus()
 })
 
-test('flatten button confirms then POSTs the per-account kill switch', async () => {
+test('flatten confirms then POSTs the per-account kill switch', async () => {
   setRole('admin')
   const fetchMock = mockRoutes({
     'POST /api/orgs/1/control/close-all': () =>
@@ -471,8 +582,7 @@ test('flatten button confirms then POSTs the per-account kill switch', async () 
     expect(screen.getByText('12346')).toBeInTheDocument()
   })
 
-  const flattenButtons = screen.getAllByRole('button', { name: /flatten/i })
-  await userEvent.click(flattenButtons[flattenButtons.length - 1])
+  await chooseFromMenu('12346', /^flatten$/i)
 
   const dialog = await screen.findByRole('dialog')
   await userEvent.click(within(dialog).getByRole('button', { name: /close everything here/i }))
@@ -486,7 +596,7 @@ test('flatten button confirms then POSTs the per-account kill switch', async () 
   expect(await screen.findByText(/closed 3 position/i)).toBeInTheDocument()
 })
 
-test('flatten closes the dialog immediately and marks the row button Flattening… while in flight', async () => {
+test('flatten closes the dialog immediately and marks the row Flattening… while in flight', async () => {
   setRole('admin')
   let resolveCloseAll!: (value: Response) => void
   const pendingCloseAll = new Promise<Response>((res) => { resolveCloseAll = res })
@@ -499,21 +609,20 @@ test('flatten closes the dialog immediately and marks the row button Flattening�
     expect(screen.getByText('12346')).toBeInTheDocument()
   })
 
-  const flattenButtons = screen.getAllByRole('button', { name: /^flatten$/i })
-  await userEvent.click(flattenButtons[flattenButtons.length - 1])
+  await chooseFromMenu('12346', /^flatten$/i)
   const dialog = await screen.findByRole('dialog')
   await userEvent.click(within(dialog).getByRole('button', { name: /close everything here/i }))
 
-  // The dialog goes away at once; progress lives on the row button instead.
+  // The dialog goes away at once; progress lives on the row instead.
   await waitFor(() => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
-  const busyButton = screen.getByRole('button', { name: /flattening/i })
+  const busyButton = within(rowFor('12346')).getByRole('button', { name: /flattening/i })
   // aria-disabled (not disabled) keeps the button focusable so keyboard focus
   // is not stranded when the dialog closes.
   expect(busyButton).toHaveAttribute('aria-disabled', 'true')
-  // The other row's button is untouched.
-  expect(screen.getAllByRole('button', { name: /^flatten$/i })).toHaveLength(1)
+  // The other row is untouched.
+  expect(within(rowFor('12345')).queryByRole('button', { name: /flatten/i })).not.toBeInTheDocument()
 
   resolveCloseAll(jsonResponse({
     status: 'flattened', paused: false,
@@ -524,7 +633,7 @@ test('flatten closes the dialog immediately and marks the row button Flattening�
   expect(screen.getByRole('status')).toHaveTextContent(/on account 12346/i)
 })
 
-test('the Flattened ✓ confirmation reverts to Flatten after a few seconds', async () => {
+test('the Flattened ✓ confirmation reverts to the idle row after a few seconds', async () => {
   vi.useFakeTimers({ shouldAdvanceTime: true })
   try {
     setRole('admin')
@@ -541,8 +650,7 @@ test('the Flattened ✓ confirmation reverts to Flatten after a few seconds', as
       expect(screen.getByText('12346')).toBeInTheDocument()
     })
 
-    const flattenButtons = screen.getAllByRole('button', { name: /^flatten$/i })
-    await userEvent.click(flattenButtons[flattenButtons.length - 1])
+    await chooseFromMenu('12346', /^flatten$/i)
     const dialog = await screen.findByRole('dialog')
     await userEvent.click(within(dialog).getByRole('button', { name: /close everything here/i }))
     expect(await screen.findByRole('button', { name: /flattened/i })).toBeInTheDocument()
@@ -551,7 +659,8 @@ test('the Flattened ✓ confirmation reverts to Flatten after a few seconds', as
       vi.advanceTimersByTime(6000)
     })
     expect(screen.queryByRole('button', { name: /flattened/i })).not.toBeInTheDocument()
-    expect(screen.getAllByRole('button', { name: /^flatten$/i })).toHaveLength(2)
+    // Back to idle: no flatten status on any row; Flatten lives in the menu again.
+    expect(screen.queryByRole('button', { name: /flatten/i })).not.toBeInTheDocument()
   } finally {
     vi.useRealTimers()
   }
@@ -589,8 +698,7 @@ test('a successful retry clears the earlier flatten failure banner', async () =>
     expect(screen.getByText('12346')).toBeInTheDocument()
   })
 
-  const flattenButtons = screen.getAllByRole('button', { name: /^flatten$/i })
-  await userEvent.click(flattenButtons[flattenButtons.length - 1])
+  await chooseFromMenu('12346', /^flatten$/i)
   await userEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: /close everything here/i }))
 
   const retryButton = await screen.findByRole('button', { name: /failed/i })
@@ -604,7 +712,7 @@ test('a successful retry clears the earlier flatten failure banner', async () =>
   expect(screen.queryByText(/flatten failed on account 12346/i)).not.toBeInTheDocument()
 })
 
-test('flatten failure flags the row button and names the account in the error', async () => {
+test('flatten failure flags the row and names the account in the error', async () => {
   setRole('admin')
   mockRoutes({
     'POST /api/orgs/1/control/close-all': () => jsonResponse({ detail: 'copier unreachable' }, 502),
@@ -615,12 +723,11 @@ test('flatten failure flags the row button and names the account in the error', 
     expect(screen.getByText('12346')).toBeInTheDocument()
   })
 
-  const flattenButtons = screen.getAllByRole('button', { name: /^flatten$/i })
-  await userEvent.click(flattenButtons[flattenButtons.length - 1])
+  await chooseFromMenu('12346', /^flatten$/i)
   const dialog = await screen.findByRole('dialog')
   await userEvent.click(within(dialog).getByRole('button', { name: /close everything here/i }))
 
-  const retryButton = await screen.findByRole('button', { name: /failed/i })
+  const retryButton = await within(rowFor('12346')).findByRole('button', { name: /failed/i })
   expect(screen.getByText(/flatten failed on account 12346/i)).toBeInTheDocument()
 
   // The failed button is a retry: clicking it reopens the confirmation.
@@ -628,9 +735,9 @@ test('flatten failure flags the row button and names the account in the error', 
   expect(await screen.findByRole('dialog')).toBeInTheDocument()
 })
 
-// ---------- Task 17: role gating ----------
+// ---------- Role gating ----------
 
-test('viewer (below control) gets read-only rows: no editors, no disconnect, no connect link', async () => {
+test('viewer (below control) gets read-only rows and a read-only drawer: no menu, no editors, no connect', async () => {
   setRole('viewer')
   mockRoutes()
   renderAccounts()
@@ -639,14 +746,11 @@ test('viewer (below control) gets read-only rows: no editors, no disconnect, no 
     expect(screen.getByText('12345')).toBeInTheDocument()
   })
 
-  // Role, enabled and nickname editors are all gone.
-  expect(screen.queryByLabelText(/role for account/i)).not.toBeInTheDocument()
-  expect(screen.queryByLabelText(/multiplier for account/i)).not.toBeInTheDocument()
-  expect(screen.queryByLabelText(/copying enabled for account/i)).not.toBeInTheDocument()
-  expect(screen.queryByLabelText(/nickname for account/i)).not.toBeInTheDocument()
-  // ...but the read-only values are still shown.
-  expect(screen.getByText('master')).toBeInTheDocument()
-  expect(screen.getByText('slave')).toBeInTheDocument()
+  // No actions menu on any row.
+  expect(screen.queryByRole('button', { name: /^actions for/i })).not.toBeInTheDocument()
+  // ...but the read-only values are still shown, in the product's words.
+  expect(screen.getByText('Master')).toBeInTheDocument()
+  expect(screen.getByText('Follower')).toBeInTheDocument()
   expect(screen.getByText('Second desk')).toBeInTheDocument()
 
   expect(screen.queryByRole('button', { name: /disconnect/i })).not.toBeInTheDocument()
@@ -655,9 +759,17 @@ test('viewer (below control) gets read-only rows: no editors, no disconnect, no 
   // gated controls above and must be hidden below control too.
   expect(screen.queryByRole('button', { name: /^flatten$/i })).not.toBeInTheDocument()
   expect(screen.queryByRole('button', { name: /re-grant access/i })).not.toBeInTheDocument()
+
+  // The drawer shows the settings but offers no editor.
+  const drawer = await openDrawer('12345')
+  expect(within(drawer).queryByLabelText('Role')).not.toBeInTheDocument()
+  expect(within(drawer).queryByLabelText(/multiplier/i)).not.toBeInTheDocument()
+  expect(within(drawer).queryByLabelText('Copying enabled')).not.toBeInTheDocument()
+  expect(within(drawer).queryByLabelText('Nickname')).not.toBeInTheDocument()
+  expect(within(drawer).queryByRole('button', { name: /save changes/i })).not.toBeInTheDocument()
 })
 
-test('admin (control) sees editors, disconnect, the connect link, flatten, and re-grant access', async () => {
+test('admin (control) edits in the drawer, acts from the row menu, and has connect and re-grant in the header', async () => {
   setRole('admin')
   mockRoutes()
   renderAccounts()
@@ -666,20 +778,110 @@ test('admin (control) sees editors, disconnect, the connect link, flatten, and r
     expect(screen.getByText('12345')).toBeInTheDocument()
   })
 
-  expect(screen.getByLabelText(/role for account 12345/i)).toBeInTheDocument()
-  expect(screen.getByLabelText(/copying enabled for account 12345/i)).toBeInTheDocument()
-  expect(screen.getByLabelText(/nickname for account 12345/i)).toBeInTheDocument()
-  expect(screen.getAllByRole('button', { name: /disconnect/i }).length).toBeGreaterThan(0)
   expect(screen.getByRole('button', { name: /connect ctrader id/i })).toBeInTheDocument()
-  expect(screen.getAllByRole('button', { name: /^flatten$/i }).length).toBeGreaterThan(0)
-  expect(screen.getAllByRole('button', { name: /re-grant access/i }).length).toBeGreaterThan(0)
+  expect(screen.getByRole('button', { name: /re-grant access/i })).toBeInTheDocument()
+
+  const drawer = await openDrawer('12345')
+  expect(within(drawer).getByLabelText('Role')).toBeInTheDocument()
+  expect(within(drawer).getByLabelText('Copying enabled')).toBeInTheDocument()
+  expect(within(drawer).getByLabelText('Nickname')).toBeInTheDocument()
+  expect(within(drawer).getByLabelText('Cutoff date')).toBeInTheDocument()
+  expect(within(drawer).getByRole('button', { name: /save changes/i })).toBeInTheDocument()
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+
+  const menu = await openMenu('12346')
+  expect(within(menu).getByRole('menuitem', { name: /^flatten$/i })).toBeInTheDocument()
+  expect(within(menu).getByRole('menuitem', { name: /^disconnect$/i })).toBeInTheDocument()
 })
 
+test('each row has one actions menu that opens from the keyboard and lists what applies to its platform', async () => {
+  setRole('admin')
+  const lapsed = {
+    ...mockAccounts[1], ctid_trader_account_id: 3, trader_login: 12347,
+    nickname: 'Lapsed desk', connection_status: 'expired',
+  }
+  const mt5Master = {
+    ...mt5Account, ctid_trader_account_id: 1000000000004, nickname: 'Master terminal',
+    role: 'master', mt5: { ...mt5Account.mt5!, login: 777, broker: 'ABC Ltd' },
+  }
+  mockRoutes({
+    '/api/orgs/1/accounts': () => jsonResponse([mockAccounts[0], lapsed, mt5Account, mt5Master]),
+  })
+  renderAccounts()
+  await screen.findByText('12345')
+
+  const expectations: Array<[string, string[]]> = [
+    ['12345', ['Flatten', 'Disconnect']],
+    // A lapsed cTrader grant is the one place Re-grant appears on a row.
+    ['Lapsed desk', ['Flatten', 'Re-grant access', 'Disconnect']],
+    ['XYZ Ltd', ['Flatten', 'Rotate key', 'Remove']],
+    // The master is never offered Remove.
+    ['ABC Ltd', ['Flatten', 'Rotate key']],
+  ]
+  for (const [text, items] of expectations) {
+    const trigger = within(rowFor(text)).getByRole('button', { name: /^actions for/i })
+    act(() => trigger.focus())
+    await userEvent.keyboard('{Enter}')
+    const menu = await screen.findByRole('menu')
+    expect(menuItemNames(menu)).toEqual(items)
+    await userEvent.keyboard('{Escape}')
+    await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument())
+    expect(trigger).toHaveFocus()
+  }
+})
+
+test('Re-grant access lives in the page header, disabled until a cTrader grant needs it', async () => {
+  setRole('admin')
+  mockRoutes()
+  const { unmount } = renderAccounts()
+
+  await screen.findByText('12345')
+  // Every grant is active: nothing to re-grant (Connect cTrader ID still is).
+  expect(screen.getByRole('button', { name: /re-grant access/i })).toBeDisabled()
+  expect(within(screen.getByRole('table')).queryByRole('button', { name: /re-grant access/i }))
+    .not.toBeInTheDocument()
+  unmount()
+
+  const lapsed = { ...mockAccounts[1], connection_status: 'expired' }
+  mockRoutes({ '/api/orgs/1/accounts': () => jsonResponse([mockAccounts[0], lapsed]) })
+  renderAccounts()
+
+  await screen.findByText('12346')
+  expect(within(rowFor('12346')).getByText('Expired')).toBeInTheDocument()
+  const regrant = screen.getByRole('button', { name: /re-grant access/i })
+  expect(regrant).toBeEnabled()
+  await userEvent.click(regrant)
+  expect(mockLocationAssign).toHaveBeenCalledWith('/api/orgs/1/oauth/connect')
+})
+
+test('an empty workspace shows one sentence and a Connect cTrader ID button', async () => {
+  setRole('admin')
+  mockRoutes({ '/api/orgs/1/accounts': () => jsonResponse([]) })
+  renderAccounts()
+
+  expect(await screen.findByText(/no accounts yet/i)).toBeInTheDocument()
+  expect(screen.queryByRole('table')).not.toBeInTheDocument()
+  // One in the header, one in the empty state.
+  const connects = screen.getAllByRole('button', { name: /connect ctrader id/i })
+  expect(connects).toHaveLength(2)
+  await userEvent.click(connects[1])
+  expect(mockLocationAssign).toHaveBeenCalledWith('/api/orgs/1/oauth/connect')
+})
+
+test('a viewer sees the empty sentence without a Connect button', async () => {
+  setRole('viewer')
+  mockRoutes({ '/api/orgs/1/accounts': () => jsonResponse([]) })
+  renderAccounts()
+
+  expect(await screen.findByText(/no accounts yet/i)).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /connect ctrader id/i })).not.toBeInTheDocument()
+})
 
 test('shows each account\'s live equity, and a dash when the engine has no reading', async () => {
   // Operators asked for per-account equity on this screen: the header only
   // ever showed the MASTER's, so there was no way to see at a glance that a
-  // slave had drifted far from the others, or been drained by a margin call.
+  // follower had drifted far from the others, or been drained by a margin call.
   setRole('admin')
   mockRoutes()
   renderAccounts()
@@ -753,14 +955,17 @@ test('an MT5 row has no Re-grant access or Disconnect: there is no OAuth grant b
   mockMt5Routes()
   renderAccounts()
 
-  const rows = await screen.findAllByRole('row')
-  const mt5Row = rows.find((r) => r.textContent?.includes('XYZ Ltd'))!
-  expect(within(mt5Row).queryByRole('button', { name: /re-grant access/i })).not.toBeInTheDocument()
-  expect(within(mt5Row).queryByRole('button', { name: /disconnect/i })).not.toBeInTheDocument()
+  await screen.findAllByRole('row')
+  const menu = await openMenu('XYZ Ltd')
+  expect(within(menu).queryByRole('menuitem', { name: /re-grant access/i })).not.toBeInTheDocument()
+  expect(within(menu).queryByRole('menuitem', { name: /disconnect/i })).not.toBeInTheDocument()
   // The per-account kill switch still applies: Close all covers MT5 too.
-  expect(within(mt5Row).getByRole('button', { name: /^flatten$/i })).toBeInTheDocument()
-  // cTrader rows keep both.
-  expect(screen.getAllByRole('button', { name: /re-grant access/i })).toHaveLength(2)
+  expect(within(menu).getByRole('menuitem', { name: /^flatten$/i })).toBeInTheDocument()
+  await userEvent.keyboard('{Escape}')
+  // Re-grant is one header action, never a row button.
+  expect(screen.getAllByRole('button', { name: /re-grant access/i })).toHaveLength(1)
+  expect(within(screen.getByRole('table')).queryByRole('button', { name: /re-grant access/i }))
+    .not.toBeInTheDocument()
 })
 
 // ---------- Add MT5 account ----------
@@ -789,6 +994,7 @@ test('Add MT5 account asks for a nickname, POSTs it, then shows the key once wit
   const dialog = await screen.findByRole('dialog')
   // A nameless MT5 row would be unidentifiable until its terminal connects.
   expect(within(dialog).getByRole('button', { name: /create account/i })).toBeDisabled()
+  expect(dialog).toHaveTextContent(/disabled follower/i)
   await userEvent.type(within(dialog).getByLabelText(/nickname/i), 'VPS desk')
   await userEvent.click(within(dialog).getByRole('button', { name: /create account/i }))
 
@@ -851,7 +1057,8 @@ test('Rotate key confirms, POSTs the rotation, and shows the new key once', asyn
   })
   renderAccounts()
 
-  await userEvent.click(await screen.findByRole('button', { name: /rotate key/i }))
+  await screen.findByText('MT5 · login 555 · XYZ Ltd')
+  await chooseFromMenu('XYZ Ltd', /^rotate key$/i)
   const dialog = await screen.findByRole('dialog')
   expect(dialog).toHaveTextContent(/stops working/i)
   // Nothing sent until confirmed: the running EA goes dark the moment it is.
@@ -879,6 +1086,7 @@ test('below control, an MT5 row shows no Rotate key', async () => {
 
   await screen.findByText('MT5 · login 555 · XYZ Ltd')
   expect(screen.queryByRole('button', { name: /rotate key/i })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /^actions for/i })).not.toBeInTheDocument()
 })
 
 // ---------- MT5 details drawer ----------
@@ -929,7 +1137,7 @@ test("an MT5 account's details show a Terminal section instead of the OAuth gran
   expect(within(mapping).getByText('manual')).toBeInTheDocument()
 
   // The spec puts Rotate key in the Terminal section: it opens the same
-  // confirm dialog as the row button, stacked above the drawer.
+  // confirm dialog as the row menu, stacked above the drawer.
   await userEvent.click(within(terminal).getByRole('button', { name: /rotate key/i }))
   expect(await screen.findByRole('dialog', { name: /rotate the key for vps desk/i })).toBeInTheDocument()
 })
@@ -1010,12 +1218,15 @@ test('Remove appears only on MT5 non-master rows, confirms, then DELETEs', async
   const rows = await screen.findAllByRole('row')
   expect(rows.some((r) => r.textContent?.includes('XYZ Ltd'))).toBe(true)
 
-  // Exactly one Remove button: the MT5 slave. cTrader rows never get one
-  // (they disconnect their grant instead).
-  const removeButtons = screen.getAllByRole('button', { name: /^remove$/i })
-  expect(removeButtons).toHaveLength(1)
+  // cTrader rows never offer Remove (they disconnect their grant instead).
+  for (const text of ['12345', '12346']) {
+    const menu = await openMenu(text)
+    expect(within(menu).queryByRole('menuitem', { name: /^remove$/i })).not.toBeInTheDocument()
+    await userEvent.keyboard('{Escape}')
+    await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument())
+  }
 
-  await userEvent.click(removeButtons[0])
+  await chooseFromMenu('XYZ Ltd', /^remove$/i)
 
   // No DELETE yet: removal is permanent, so it asks first.
   const dialog = await screen.findByRole('dialog')
