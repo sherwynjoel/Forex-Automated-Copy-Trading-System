@@ -1,0 +1,5 @@
+export { default as InvestorOverview } from '../investor/InvestorOverview'
+export { default as InvestorDeposit } from '../investor/InvestorDeposit'
+export { default as InvestorWithdraw } from '../investor/InvestorWithdraw'
+export { default as InvestorHistory } from '../investor/InvestorHistory'
+export { default as InvestorAccount } from '../investor/InvestorAccount'

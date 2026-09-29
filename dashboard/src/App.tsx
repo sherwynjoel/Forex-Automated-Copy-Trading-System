@@ -1,31 +1,44 @@
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
+import type { ComponentType } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { api } from './lib/api'
 import { LAST_ORG_KEY, OrgProvider } from './lib/org'
 import { isMpinPending } from './lib/types'
 import type { Me, MpinPending } from './lib/types'
 import Layout from './components/Layout'
-import Login from './pages/Login'
-import Mpin from './pages/Mpin'
-import Register from './pages/Register'
-import Welcome from './pages/Welcome'
-import Join from './pages/Join'
-import Members from './pages/Members'
-import Overview from './pages/Overview'
-import Accounts from './pages/Accounts'
-import Positions from './pages/Positions'
-import Trade from './pages/Trade'
-import Automation from './pages/Automation'
-import History from './pages/History'
-import Performance from './pages/Performance'
-import Logs from './pages/Logs'
+import Loading from './components/Loading'
 import Landing from './pages/Landing'
-import Investors from './pages/Investors'
-import InvestorOverview from './pages/investor/InvestorOverview'
-import InvestorDeposit from './pages/investor/InvestorDeposit'
-import InvestorWithdraw from './pages/investor/InvestorWithdraw'
-import InvestorHistory from './pages/investor/InvestorHistory'
-import InvestorAccount from './pages/investor/InvestorAccount'
+import NotFound from './pages/NotFound'
+
+// Three lazy groups: the desk, the investor portal, the auth screens. A
+// signed-in investor never downloads the desk; a visitor never downloads
+// either. Landing stays eager because `/` renders it for signed-out visitors.
+const admin = () => import('./pages/groups/admin')
+const investor = () => import('./pages/groups/investor')
+const auth = () => import('./pages/groups/auth')
+const pick = <M, K extends keyof M>(load: () => Promise<M>, key: K) =>
+  lazy(() => load().then((m) => ({ default: m[key] as ComponentType })))
+
+const Login = pick(auth, 'Login')
+const Mpin = pick(auth, 'Mpin')
+const Register = pick(auth, 'Register')
+const Join = pick(auth, 'Join')
+const Welcome = pick(auth, 'Welcome')
+const Overview = pick(admin, 'Overview')
+const Accounts = pick(admin, 'Accounts')
+const Positions = pick(admin, 'Positions')
+const Trade = pick(admin, 'Trade')
+const Automation = pick(admin, 'Automation')
+const History = pick(admin, 'History')
+const Performance = pick(admin, 'Performance')
+const Logs = pick(admin, 'Logs')
+const Members = pick(admin, 'Members')
+const Investors = pick(admin, 'Investors')
+const InvestorOverview = pick(investor, 'InvestorOverview')
+const InvestorDeposit = pick(investor, 'InvestorDeposit')
+const InvestorWithdraw = pick(investor, 'InvestorWithdraw')
+const InvestorHistory = pick(investor, 'InvestorHistory')
+const InvestorAccount = pick(investor, 'InvestorAccount')
 
 /** `/` → the last-used org, else the first org, else /welcome; signed-out
  *  visitors get the public front page instead of the login screen. */
@@ -36,10 +49,7 @@ function RootRedirect() {
     const resolve = async () => {
       try {
         const me = await api<Me | MpinPending>('/api/me', undefined, { redirectOn401: false })
-        if (isMpinPending(me)) {
-          setTarget('/mpin')
-          return
-        }
+        if (isMpinPending(me)) { setTarget('/mpin'); return }
         const last = Number(localStorage.getItem(LAST_ORG_KEY))
         const org = me.orgs.find((o) => o.id === last) ?? me.orgs[0]
         setTarget(org ? `/org/${org.id}` : '/welcome')
@@ -51,47 +61,53 @@ function RootRedirect() {
   }, [])
 
   if (!target) {
-    return <div className="flex items-center justify-center h-screen">Loading...</div>
+    return <div className="mx-auto max-w-md pt-24"><Loading lines={4} /></div>
   }
   if (target === 'landing') return <Landing />
   return <Navigate to={target} replace />
 }
 
+const fullPage = <div className="mx-auto max-w-md pt-24"><Loading lines={4} /></div>
+
 export default function App() {
   return (
     <BrowserRouter>
-      <Routes>
-        <Route path="/login" element={<Login />} />
-        <Route path="/mpin" element={<Mpin />} />
-        <Route path="/register" element={<Register />} />
-        <Route path="/join/:token" element={<Join />} />
-        <Route path="/welcome" element={<Welcome />} />
-        <Route
-          path="/org/:orgId"
-          element={
-            <OrgProvider>
-              <Layout />
-            </OrgProvider>
-          }
-        >
-          <Route index element={<Overview />} />
-          <Route path="accounts" element={<Accounts />} />
-          <Route path="positions" element={<Positions />} />
-          <Route path="trade" element={<Trade />} />
-          <Route path="automation" element={<Automation />} />
-          <Route path="history" element={<History />} />
-          <Route path="performance" element={<Performance />} />
-          <Route path="logs" element={<Logs />} />
-          <Route path="members" element={<Members />} />
-          <Route path="investors" element={<Investors />} />
-          <Route path="invest" element={<InvestorOverview />} />
-          <Route path="invest/deposit" element={<InvestorDeposit />} />
-          <Route path="invest/withdraw" element={<InvestorWithdraw />} />
-          <Route path="invest/history" element={<InvestorHistory />} />
-          <Route path="invest/account" element={<InvestorAccount />} />
-        </Route>
-        <Route path="/" element={<RootRedirect />} />
-      </Routes>
+      <Suspense fallback={fullPage}>
+        <Routes>
+          <Route path="/login" element={<Login />} />
+          <Route path="/mpin" element={<Mpin />} />
+          <Route path="/register" element={<Register />} />
+          <Route path="/join/:token" element={<Join />} />
+          <Route path="/welcome" element={<Welcome />} />
+          <Route
+            path="/org/:orgId"
+            element={
+              <OrgProvider>
+                <Layout />
+              </OrgProvider>
+            }
+          >
+            <Route index element={<Overview />} />
+            <Route path="accounts" element={<Accounts />} />
+            <Route path="positions" element={<Positions />} />
+            <Route path="trade" element={<Trade />} />
+            <Route path="automation" element={<Automation />} />
+            <Route path="history" element={<History />} />
+            <Route path="performance" element={<Performance />} />
+            <Route path="logs" element={<Logs />} />
+            <Route path="members" element={<Members />} />
+            <Route path="investors" element={<Investors />} />
+            <Route path="invest" element={<InvestorOverview />} />
+            <Route path="invest/deposit" element={<InvestorDeposit />} />
+            <Route path="invest/withdraw" element={<InvestorWithdraw />} />
+            <Route path="invest/history" element={<InvestorHistory />} />
+            <Route path="invest/account" element={<InvestorAccount />} />
+            <Route path="*" element={<NotFound />} />
+          </Route>
+          <Route path="/" element={<RootRedirect />} />
+          <Route path="*" element={<NotFound />} />
+        </Routes>
+      </Suspense>
     </BrowserRouter>
   )
 }

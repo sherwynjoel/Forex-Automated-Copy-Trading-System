@@ -3,6 +3,7 @@ import { Navigate, useParams } from 'react-router-dom'
 import { api } from './api'
 import { isMpinPending } from './types'
 import type { Me, MpinPending, OrgSummary } from './types'
+import Loading from '../components/Loading'
 
 export const LAST_ORG_KEY = 'copydesk.lastOrg'
 
@@ -57,7 +58,7 @@ export function OrgProvider({ children }: { children: React.ReactNode }) {
   if (mpinPending) return <Navigate to="/mpin" replace />
   if (failed) return <Navigate to="/login" replace />
   if (!me) {
-    return <div className="flex items-center justify-center h-screen">Loading...</div>
+    return <div className="mx-auto max-w-md pt-24"><Loading lines={4} /></div>
   }
   if (!org) return <Navigate to="/welcome" replace />
   return (

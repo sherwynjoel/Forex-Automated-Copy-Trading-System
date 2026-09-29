@@ -1,0 +1,38 @@
+import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { MemoryRouter } from 'react-router-dom'
+import { expect, test, vi } from 'vitest'
+import BottomBar from './BottomBar'
+
+test('admins get four links and More; More opens the menu', async () => {
+  const onMore = vi.fn()
+  render(
+    <MemoryRouter initialEntries={['/org/7/positions']}>
+      <BottomBar orgId={7} role="admin" onMore={onMore} />
+    </MemoryRouter>
+  )
+  const nav = screen.getByRole('navigation', { name: 'Quick navigation' })
+  expect(nav.className).toContain('glass')
+  const links = screen.getAllByRole('link')
+  expect(links.map((l) => l.textContent)).toEqual(['Overview', 'Positions', 'Trade', 'Accounts'])
+  expect(screen.getByRole('link', { name: 'Positions' })).toHaveAttribute('aria-current', 'page')
+  await userEvent.click(screen.getByRole('button', { name: 'More' }))
+  expect(onMore).toHaveBeenCalledTimes(1)
+})
+
+test('viewers get History instead of Trade; investors get their five pages and no More', () => {
+  const { unmount } = render(
+    <MemoryRouter initialEntries={['/org/7']}>
+      <BottomBar orgId={7} role="viewer" onMore={() => {}} />
+    </MemoryRouter>
+  )
+  expect(screen.getAllByRole('link').map((l) => l.textContent)).toEqual(['Overview', 'Positions', 'History', 'Accounts'])
+  unmount()
+  render(
+    <MemoryRouter initialEntries={['/org/7/invest']}>
+      <BottomBar orgId={7} role="investor" onMore={() => {}} />
+    </MemoryRouter>
+  )
+  expect(screen.getAllByRole('link').map((l) => l.textContent)).toEqual(['Overview', 'Deposit', 'Withdraw', 'History', 'Account'])
+  expect(screen.queryByRole('button', { name: 'More' })).toBeNull()
+})

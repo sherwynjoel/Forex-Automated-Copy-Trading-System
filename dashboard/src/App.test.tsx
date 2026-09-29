@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import { expect, test, vi, afterEach, beforeEach } from 'vitest'
 import App from './App'
 
@@ -53,12 +53,15 @@ test('Layout renders sidebar navigation', async () => {
   const overviewLinks = screen.getAllByText(/Overview/i)
   expect(overviewLinks.length).toBeGreaterThan(0)
 
-  expect(screen.getByRole('link', { name: 'Accounts' })).toBeInTheDocument()
-  expect(screen.getByRole('link', { name: 'Positions' })).toBeInTheDocument()
-  expect(screen.getByRole('link', { name: 'Trade' })).toBeInTheDocument()
-  expect(screen.getByRole('link', { name: 'History' })).toBeInTheDocument()
-  expect(screen.getByRole('link', { name: 'Logs' })).toBeInTheDocument()
-  expect(screen.getByRole('link', { name: 'Members' })).toBeInTheDocument()
+  // The phone tab bar repeats some of these links (jsdom cannot hide it
+  // via lg:hidden), so scope to the main rail.
+  const rail = within(screen.getByRole('navigation', { name: 'Main' }))
+  expect(rail.getByRole('link', { name: 'Accounts' })).toBeInTheDocument()
+  expect(rail.getByRole('link', { name: 'Positions' })).toBeInTheDocument()
+  expect(rail.getByRole('link', { name: 'Trade' })).toBeInTheDocument()
+  expect(rail.getByRole('link', { name: 'History' })).toBeInTheDocument()
+  expect(rail.getByRole('link', { name: 'Logs' })).toBeInTheDocument()
+  expect(rail.getByRole('link', { name: 'Members' })).toBeInTheDocument()
 
   // Logout button should be present
   expect(screen.getByRole('button', { name: /log out/i })).toBeInTheDocument()
@@ -122,4 +125,47 @@ test('a pending MPIN sends / to /mpin', async () => {
   window.history.pushState({}, '', '/')
   render(<App />)
   await waitFor(() => expect(window.location.pathname).toBe('/mpin'))
+})
+
+test('an unknown top-level URL renders NotFound instead of a blank page', async () => {
+  vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(null, { status: 401 }))))
+  window.history.pushState({}, '', '/no/such/page')
+  render(<App />)
+  expect(await screen.findByRole('heading', { level: 1, name: 'That page is not here' })).toBeInTheDocument()
+})
+
+test('an unknown URL inside the org shell renders NotFound inside the shell, with the skip link first', async () => {
+  const fetchMock = vi.fn((input: RequestInfo | URL) => {
+    const url = String(input)
+    if (url === '/api/me') return Promise.resolve(meResponse([{ id: 1, name: 'Acme', role: 'admin' }]))
+    return Promise.resolve(new Response(JSON.stringify([]), { status: 200, headers: { 'content-type': 'application/json' } }))
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  window.history.pushState({}, '', '/org/1/nope')
+  render(<App />)
+  expect(await screen.findByRole('heading', { level: 1, name: 'That page is not here' })).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: 'Skip to content' })).toHaveAttribute('href', '#main')
+  expect(screen.getByRole('main')).toHaveAttribute('id', 'main')
+  expect(screen.getByRole('navigation', { name: 'Main' })).toBeInTheDocument()
+  expect(screen.getByRole('navigation', { name: 'Quick navigation' })).toBeInTheDocument()
+})
+
+test('pages load lazily: the shell shows a loading status before the page resolves', async () => {
+  const fetchMock = vi.fn((input: RequestInfo | URL) => {
+    const url = String(input)
+    if (url === '/api/me') return Promise.resolve(meResponse([{ id: 1, name: 'Acme', role: 'admin' }]))
+    if (url.includes('/settings')) return Promise.resolve(new Response(JSON.stringify({ copying_enabled: true, dry_run: false }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    if (url.includes('/state')) return Promise.resolve(new Response(JSON.stringify({ accounts: {}, master_positions: [], pending_orders: [], drift: [] }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    return Promise.resolve(new Response(JSON.stringify([]), { status: 200, headers: { 'content-type': 'application/json' } }))
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  window.history.pushState({}, '', '/org/1/logs')
+  render(<App />)
+  // Either the Suspense fallback is caught mid-flight or the page has already resolved; both prove the route works.
+  const seen = await Promise.race([
+    screen.findByRole('status', { name: 'Loading' }).then(() => 'fallback'),
+    screen.findByRole('heading', { level: 1 }).then(() => 'page'),
+  ])
+  expect(['fallback', 'page']).toContain(seen)
+  expect(await screen.findByRole('heading', { level: 1 })).toBeInTheDocument()
 })

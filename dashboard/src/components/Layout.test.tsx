@@ -490,7 +490,7 @@ test('the phone Menu drawer closes itself when the viewport crosses into desktop
 
 test('the sidebar theme toggle names what it will do and flips after a click', async () => {
   renderLayout()
-  const toggle = await screen.findAllByRole('button', { name: /switch to dark theme/i })
+  const toggle = await screen.findAllByRole('button', { name: /switch to dim theme/i })
   await userEvent.click(toggle[0])
   expect(document.documentElement.dataset.theme).toBe('dark')
   expect(await screen.findAllByRole('button', { name: /switch to light theme/i })).not.toHaveLength(0)

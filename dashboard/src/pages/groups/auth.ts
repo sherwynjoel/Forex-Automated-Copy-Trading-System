@@ -1,0 +1,5 @@
+export { default as Login } from '../Login'
+export { default as Mpin } from '../Mpin'
+export { default as Register } from '../Register'
+export { default as Join } from '../Join'
+export { default as Welcome } from '../Welcome'
