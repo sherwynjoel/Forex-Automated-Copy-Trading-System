@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { orgApi } from '../../lib/api'
 import { useOrg } from '../../lib/org'
-import { errorText, formatWhen, money } from '../../lib/format'
+import { errorText, formatWhen } from '../../lib/format'
 import { ACCOUNT_CURRENCY } from '../../lib/investor'
 import Banner from '../../components/Banner'
 import Button from '../../components/Button'
 import Card from '../../components/Card'
 import Loading from '../../components/Loading'
+import Money from '../../components/Money'
 import PageHeader from '../../components/PageHeader'
 import type { Deal } from '../../lib/types'
 
@@ -83,11 +84,16 @@ export default function InvestorHistory() {
       {error && <Banner kind="error" onDismiss={() => setError(null)}>{error}</Banner>}
 
       {/* Deal figures are in the account's deposit currency; the summary
-          names none, so the labelled default applies (lib/investor.ts). */}
+          names none, so the labelled default applies (lib/investor.ts).
+          Every figure is a Money so hide-balances masks it, and the
+          profit/loss tone rides on the Money itself -- never on a wrapper,
+          which would keep its colour (and so the sign) while hidden. */}
       <Card title="Closed trades" inset
             actions={
-              <span className={`tnum text-sm font-semibold ${total < 0 ? 'text-loss' : 'text-profit'}`}>
-                {`${money(total, ACCOUNT_CURRENCY)} net, ${windowLabel}`}
+              <span className="tnum text-sm font-semibold">
+                <Money value={total} unit={ACCOUNT_CURRENCY}
+                       className={total < 0 ? 'text-loss' : 'text-profit'} />
+                {` net, ${windowLabel}`}
               </span>
             }>
         {loading ? <Loading lines={3} /> : (
@@ -120,9 +126,11 @@ export default function InvestorHistory() {
                       <td data-label="Side" className="px-4 py-2.5">{d.side}</td>
                       <td data-label="Lots" className="tnum px-4 py-2.5 text-right">{d.close?.closed_volume_lots ?? d.volume_lots ?? '—'}</td>
                       <td data-label="Entry → Exit" className="tnum px-4 py-2.5 text-right">{d.close?.entry_price} → {d.execution_price ?? '—'}</td>
-                      <td data-label="Gross" className="tnum px-4 py-2.5 text-right">{money(d.close!.gross_profit, ACCOUNT_CURRENCY)}</td>
-                      <td data-label="Swap + fees" className="tnum px-4 py-2.5 text-right">{money(d.close!.swap + d.close!.commission, ACCOUNT_CURRENCY)}</td>
-                      <td data-label="Net" className={`tnum px-4 py-2.5 text-right font-semibold ${net < 0 ? 'text-loss' : 'text-profit'}`}>{money(net, ACCOUNT_CURRENCY)}</td>
+                      <td data-label="Gross" className="tnum px-4 py-2.5 text-right"><Money value={d.close!.gross_profit} unit={ACCOUNT_CURRENCY} /></td>
+                      <td data-label="Swap + fees" className="tnum px-4 py-2.5 text-right"><Money value={d.close!.swap + d.close!.commission} unit={ACCOUNT_CURRENCY} /></td>
+                      <td data-label="Net" className="tnum px-4 py-2.5 text-right font-semibold">
+                        <Money value={net} unit={ACCOUNT_CURRENCY} className={net < 0 ? 'text-loss' : 'text-profit'} />
+                      </td>
                     </tr>
                   )
                 })}
