@@ -1,4 +1,5 @@
-import { useEffect, useId, useState, type FormEvent } from 'react'
+import { useEffect, useId, useRef, useState, type FormEvent } from 'react'
+import Banner from '../../components/Banner'
 import Button from '../../components/Button'
 import Drawer from '../../components/Drawer'
 import Input from '../../components/Input'
@@ -9,7 +10,16 @@ import { isMt5 } from '../../lib/platform'
 import type { Account, AccountDetails, SymbolAliases } from '../../lib/types'
 import AliasEditor from './AliasEditor'
 import { accountRoleLabel, mt5Subtitle } from './AccountRow'
-import { draftOf, type AccountDraft, type SaveOutcome } from './useAccountsPage'
+import {
+  draftOf, type AccountDraft, type EditField, type SaveFailure, type SaveOutcome,
+} from './useAccountsPage'
+
+const FIELD_LABEL: Record<EditField, string> = {
+  nickname: 'Nickname',
+  cutoff_date: 'Cutoff date',
+  enabled: 'Copying enabled',
+  role: 'Role',
+}
 
 function formatDate(iso: string | undefined): string {
   if (!iso) return '—'
@@ -35,22 +45,28 @@ function DetailRow({ label, value, mono }: { label: string; value: string; mono?
 }
 
 /** Nickname, role, copying and cutoff, sent only on Save changes. Cancel
- *  puts the form back to what the server has. */
-function EditSection({ account, pending, roleError, onSave }: {
+ *  puts the form back to what the server has. A field the server refused
+ *  keeps what was typed and is named in the form's own alert. */
+function EditSection({ account, pending, onSave }: {
   account: Account
   pending: boolean
-  roleError: string | undefined
   onSave: (account: Account, draft: AccountDraft) => Promise<SaveOutcome>
 }) {
   const id = useId()
   const saved = draftOf(account)
   const [draft, setDraft] = useState<AccountDraft>(saved)
 
+  const [failures, setFailures] = useState<SaveFailure[]>([])
+  // Typed values of fields whose save failed. They survive the reload that
+  // follows a partly successful save, so a refused change never snaps back
+  // silently to the server's value.
+  const keptRef = useRef<Partial<AccountDraft>>({})
+
   // Follow the SERVER's values (after a save, or when a promotion elsewhere
   // demoted this account), never a mere refetch: a window-focus reload
   // must not wipe what is being typed.
   useEffect(() => {
-    setDraft(draftOf(account))
+    setDraft({ ...draftOf(account), ...keptRef.current })
   }, [account.nickname, account.role, account.enabled, account.cutoff_date])
 
   const dirty =
@@ -62,14 +78,41 @@ function EditSection({ account, pending, roleError, onSave }: {
   const submit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault()
     if (!dirty || pending) return
-    const outcome = await onSave(account, draft)
-    if (outcome.promoteCancelled) setDraft((prev) => ({ ...prev, role: account.role }))
+    const submitted = draft
+    keptRef.current = {}
+    setFailures([])
+    const outcome = await onSave(account, submitted)
+    const kept: Partial<AccountDraft> = {}
+    for (const { field } of outcome.failed) Object.assign(kept, { [field]: submitted[field] })
+    keptRef.current = kept
+    setFailures(outcome.failed)
+    setDraft((prev) => ({
+      ...prev,
+      ...kept,
+      ...(outcome.promoteCancelled ? { role: account.role } : {}),
+    }))
+  }
+
+  const cancel = () => {
+    keptRef.current = {}
+    setFailures([])
+    setDraft(saved)
   }
 
   return (
     <section>
       <h3 id={`${id}-heading`} className="desk-label mb-2">Edit</h3>
       <form aria-labelledby={`${id}-heading`} onSubmit={submit} className="space-y-3">
+        {failures.length > 0 && (
+          <Banner kind="error">
+            <p className="font-semibold">Some changes were not saved:</p>
+            <ul className="mt-1 list-disc pl-5">
+              {failures.map((f) => (
+                <li key={f.field}>{FIELD_LABEL[f.field]}: {f.message}</li>
+              ))}
+            </ul>
+          </Banner>
+        )}
         <div>
           <label htmlFor={`${id}-nickname`} className="desk-label block mb-1">Nickname</label>
           <Input
@@ -95,7 +138,6 @@ function EditSection({ account, pending, roleError, onSave }: {
             <option value="slave">Follower</option>
             <option value="ignored">Ignored</option>
           </Select>
-          {roleError && <p className="mt-1 text-xs text-loss-deep">{roleError}</p>}
         </div>
         <label className="flex items-center justify-between gap-4 cursor-pointer has-[:disabled]:cursor-default">
           <span className="desk-label">Copying enabled</span>
@@ -136,7 +178,7 @@ function EditSection({ account, pending, roleError, onSave }: {
             type="button"
             variant="secondary"
             size="sm"
-            onClick={() => setDraft(saved)}
+            onClick={cancel}
             disabled={!dirty || pending}
           >
             Cancel
@@ -166,7 +208,7 @@ function SettingsSummary({ account }: { account: Account }) {
 }
 
 export default function AccountDrawer({
-  account, details, detailsError, aliases, aliasesError, canControl, canTrade, pending, roleError,
+  account, details, detailsError, aliases, aliasesError, canControl, canTrade, pending,
   onClose, onSave, onRotate, onSaveAlias,
 }: {
   account: Account | null
@@ -177,7 +219,6 @@ export default function AccountDrawer({
   canControl: boolean
   canTrade: boolean
   pending: boolean
-  roleError: string | undefined
   onClose: () => void
   onSave: (account: Account, draft: AccountDraft) => Promise<SaveOutcome>
   onRotate: (account: Account) => void
@@ -188,6 +229,7 @@ export default function AccountDrawer({
       open={account != null}
       title={account ? (account.nickname || `Account ${account.trader_login}`) : ''}
       onClose={onClose}
+      busy={pending}
     >
       {account && (
         <>
@@ -203,7 +245,6 @@ export default function AccountDrawer({
                 key={account.ctid_trader_account_id}
                 account={account}
                 pending={pending}
-                roleError={roleError}
                 onSave={onSave}
               />
             ) : (

@@ -110,7 +110,7 @@ export default function AccountRow({
   const health = connectionHealth(account)
 
   const items: MenuItems = [
-    { key: 'flatten', label: 'Flatten', disabled: pending || flatten === 'busy', onSelect: () => onFlatten(account) },
+    { key: 'flatten', label: 'Flatten', tone: 'loss', disabled: pending || flatten === 'busy', onSelect: () => onFlatten(account) },
   ]
   if (needsRegrant(account)) {
     items.push({ key: 'regrant', label: 'Re-grant access', disabled: pending, onSelect: onRegrant })

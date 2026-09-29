@@ -461,6 +461,57 @@ test('one Save with several changes sends one PATCH per field, each with its old
   })
 })
 
+test('a Save that the server partly refuses names the failed field in the drawer and keeps what was typed', async () => {
+  setRole('admin')
+  let listed = mockAccounts.map((a) => ({ ...a }))
+  mockRoutes({
+    // Before the list route, which would otherwise swallow '/accounts/1/details'.
+    '/details': () => jsonResponse(mockDetails),
+    'PATCH /api/orgs/1/accounts/1': (init) => {
+      const body = JSON.parse(String(init?.body))
+      if ('enabled' in body) return jsonResponse({ detail: 'boom' }, 500)
+      listed = listed.map((a) => (a.ctid_trader_account_id === 1 ? { ...a, ...body } : a))
+      return jsonResponse({})
+    },
+    'GET /api/orgs/1/accounts': () => jsonResponse(listed),
+  })
+  renderAccounts()
+
+  await screen.findByText('12345')
+  const drawer = await openDrawer('12345')
+  await userEvent.type(within(drawer).getByLabelText('Nickname'), 'Main live')
+  const enabled = within(drawer).getByLabelText('Copying enabled') as HTMLInputElement
+  await userEvent.click(enabled)
+  await userEvent.click(within(drawer).getByRole('button', { name: /save changes/i }))
+
+  // The alert is inside the drawer, not behind it on the page.
+  const alert = await within(drawer).findByRole('alert')
+  expect(alert).toHaveTextContent(/copying enabled: 500: boom/i)
+  expect(alert).not.toHaveTextContent(/nickname/i)
+  // The refused field keeps the typed value; the saved one shows the server's.
+  expect(enabled.checked).toBe(false)
+  expect((within(drawer).getByLabelText('Nickname') as HTMLInputElement).value).toBe('Main live')
+  expect(within(rowFor('12345')).getByText('Main live')).toBeInTheDocument()
+  // The form stays open with the failed change still pending a retry.
+  expect(within(drawer).getByRole('button', { name: /save changes/i })).toBeEnabled()
+})
+
+test('a Save where every field succeeds shows no alert in the drawer', async () => {
+  setRole('admin')
+  const fetchMock = mockRoutes()
+  renderAccounts()
+
+  await screen.findByText('12345')
+  const drawer = await openDrawer('12345')
+  await userEvent.type(within(drawer).getByLabelText('Nickname'), 'Main live')
+  await userEvent.click(within(drawer).getByLabelText('Copying enabled'))
+  await userEvent.click(within(drawer).getByRole('button', { name: /save changes/i }))
+
+  await waitFor(() => expect(patchCalls(fetchMock)).toHaveLength(2))
+  await waitFor(() => expect(within(drawer).getByLabelText('Nickname')).toBeEnabled())
+  expect(within(drawer).queryByRole('alert')).not.toBeInTheDocument()
+})
+
 test('Cancel discards the drawer edits and sends nothing', async () => {
   setRole('admin')
   const fetchMock = mockRoutes()

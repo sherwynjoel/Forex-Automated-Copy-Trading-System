@@ -32,9 +32,20 @@ export interface AccountDraft {
   cutoff_date: string
 }
 
-/** What a Save did that the form must undo: a promotion the operator
+export type EditField = keyof AccountDraft
+
+/** One field whose PATCH the server refused, with the reason to show. */
+export interface SaveFailure {
+  field: EditField
+  message: string
+}
+
+/** What a Save did that the form must reflect: fields that failed keep the
+ *  typed value and are reported in place, and a promotion the operator
  *  backed out of leaves the role select where the server still has it. */
 export interface SaveOutcome {
+  ok: boolean
+  failed: SaveFailure[]
   promoteCancelled: boolean
 }
 
@@ -50,7 +61,6 @@ interface Feedback { error: string | null; notice: string | null }
 interface RowState {
   pending: Set<number>
   flatten: Record<number, FlattenState>
-  roleErrors: Record<number, string>
 }
 interface DrawerState {
   accountId: number | null
@@ -90,7 +100,7 @@ export function useAccountsPage() {
 
   const [list, setList] = useState<ListState>({ accounts: [], equity: {}, isLoading: true })
   const [feedback, setFeedback] = useState<Feedback>({ error: null, notice: null })
-  const [rows, setRows] = useState<RowState>({ pending: new Set(), flatten: {}, roleErrors: {} })
+  const [rows, setRows] = useState<RowState>({ pending: new Set(), flatten: {} })
   const [dialog, setDialog] = useState<PageDialog>(null)
   const [busy, setBusy] = useState(false)
   const [keyReveal, setKeyReveal] = useState<KeyReveal | null>(null)
@@ -110,9 +120,6 @@ export function useAccountsPage() {
       else delete flatten[accountId]
       return { ...prev, flatten }
     })
-
-  const setRoleError = (accountId: number, message: string) =>
-    setRows((prev) => ({ ...prev, roleErrors: { ...prev.roleErrors, [accountId]: message } }))
 
   // Live equity per account, keyed by account id. Held apart from the rows
   // because it comes from the engine, not the database: the accounts table
@@ -183,26 +190,13 @@ export function useAccountsPage() {
 
   // ---- Edit (the drawer's Save changes) ----
 
-  const patchField = async (accountId: number, body: Record<string, unknown>, what: string) => {
+  /** One PATCH; answers the reason it failed, or null when it saved. */
+  const patchField = async (accountId: number, body: Record<string, unknown>): Promise<string | null> => {
     try {
       await orgApi(orgId, `accounts/${accountId}`, { method: 'PATCH', body: JSON.stringify(body) })
+      return null
     } catch (err) {
-      showError(`Failed to update ${what} (${reason(err)})`)
-    }
-  }
-
-  const patchRole = async (accountId: number, newRole: string) => {
-    try {
-      setRoleError(accountId, '')
-      await orgApi(orgId, `accounts/${accountId}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ role: newRole }),
-      })
-    } catch (err) {
-      const errorCode = reason(err, 'Unknown error')
-      setRoleError(accountId, errorCode === '409'
-        ? 'A master already exists'
-        : `Failed to update role (${errorCode})`)
+      return reason(err)
     }
   }
 
@@ -219,36 +213,49 @@ export function useAccountsPage() {
   }
 
   /** One PATCH per changed field, each with the single-key body the old
-   *  blur-save sent, then one reload. Master waits for its confirmation. */
+   *  blur-save sent, then one reload. Master waits for its confirmation.
+   *  A refused field does not stop the others; it is reported back so the
+   *  drawer can say so in place (the page alert sits behind the drawer). */
   const saveEdits = async (account: Account, draft: AccountDraft): Promise<SaveOutcome> => {
     const accountId = account.ctid_trader_account_id
+    const failed: SaveFailure[] = []
     let promoteCancelled = false
+    const send = async (field: EditField, body: Record<string, unknown>) => {
+      const message = await patchField(accountId, body)
+      if (message != null) failed.push({ field, message })
+    }
     await withPending(accountId, async () => {
       let sent = false
       if (draft.nickname !== (account.nickname ?? '')) {
-        await patchField(accountId, { nickname: draft.nickname }, 'nickname')
+        await send('nickname', { nickname: draft.nickname })
         sent = true
       }
       if (draft.cutoff_date !== (account.cutoff_date ?? '')) {
         // An empty value clears the cutoff (and with it the reminder).
-        await patchField(accountId, { cutoff_date: draft.cutoff_date }, 'cutoff date')
+        await send('cutoff_date', { cutoff_date: draft.cutoff_date })
         sent = true
       }
       if (draft.enabled !== account.enabled) {
-        await patchField(accountId, { enabled: draft.enabled }, 'enabled status')
+        await send('enabled', { enabled: draft.enabled })
         sent = true
       }
       if (draft.role !== account.role) {
         if (draft.role === 'master' && !(await askPromote(account))) {
           promoteCancelled = true
         } else {
-          await patchRole(accountId, draft.role)
+          const message = await patchField(accountId, { role: draft.role })
+          if (message != null) {
+            failed.push({
+              field: 'role',
+              message: message === '409' ? 'A master already exists' : message,
+            })
+          }
           sent = true
         }
       }
       if (sent) await fetchAccounts()
     })
-    return { promoteCancelled }
+    return { ok: failed.length === 0, failed, promoteCancelled }
   }
 
   // ---- Dialogs ----
@@ -481,7 +488,6 @@ export function useAccountsPage() {
     reportError: (message: string) => showError(message),
     pending: rows.pending,
     flatten: rows.flatten,
-    roleErrors: rows.roleErrors,
     dialog,
     busy,
     keyReveal,

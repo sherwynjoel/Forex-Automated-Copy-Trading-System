@@ -185,7 +185,34 @@ test('saveEdits to master waits for the promote confirmation; cancelling sends n
   await waitFor(() => expect(result.current.dialog).toEqual({ kind: 'promote', account: follower }))
 
   await act(async () => { result.current.resolvePromote(false) })
-  await expect(outcome).resolves.toEqual({ promoteCancelled: true })
+  await expect(outcome).resolves.toEqual({ ok: true, failed: [], promoteCancelled: true })
   expect(patchBodies(fetchMock)).toEqual([])
   expect(result.current.dialog).toBeNull()
+})
+
+test('saveEdits reports a refused field and still sends the others', async () => {
+  useOrgMock.mockReturnValue(mockUseOrg('admin'))
+  const fetchMock = routes({
+    'PATCH /api/orgs/1/accounts/1': (init) => String(init?.body).includes('enabled')
+      ? jsonResponse({ detail: 'boom' }, 500)
+      : jsonResponse({}),
+  })
+  const { result } = renderHook(() => useAccountsPage())
+  await waitFor(() => expect(result.current.accounts).toHaveLength(2))
+  const master = result.current.accounts[0]
+
+  let outcome!: SaveOutcome
+  await act(async () => {
+    outcome = await result.current.saveEdits(master, {
+      ...draftOf(master), nickname: 'Main live', enabled: false,
+    })
+  })
+
+  expect(patchBodies(fetchMock)).toEqual([
+    ['/api/orgs/1/accounts/1', { nickname: 'Main live' }],
+    ['/api/orgs/1/accounts/1', { enabled: false }],
+  ])
+  expect(outcome).toEqual({
+    ok: false, failed: [{ field: 'enabled', message: '500: boom' }], promoteCancelled: false,
+  })
 })

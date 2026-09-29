@@ -144,7 +144,6 @@ export default function Accounts() {
         canControl={canControl}
         canTrade={page.canTrade}
         pending={drawerId != null && page.pending.has(drawerId)}
-        roleError={drawerId != null ? page.roleErrors[drawerId] : undefined}
         onClose={page.closeDetails}
         onSave={page.saveEdits}
         onRotate={page.askRotate}
