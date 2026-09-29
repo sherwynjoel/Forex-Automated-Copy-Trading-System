@@ -44,6 +44,8 @@ const InvestorDashboard = pick(investor, 'InvestorDashboard')
 const InvestorDeposit = pick(investor, 'InvestorDeposit')
 const InvestorWithdraw = pick(investor, 'InvestorWithdraw')
 const InvestorPayoutAccounts = pick(investor, 'InvestorPayoutAccounts')
+const InvestorTransfer = pick(investor, 'InvestorTransfer')
+const InvestorWallet = pick(investor, 'InvestorWallet')
 const InvestorHistory = pick(investor, 'InvestorHistory')
 const InvestorAccount = pick(investor, 'InvestorAccount')
 
@@ -109,6 +111,8 @@ export default function App() {
               <Route path="invest/deposit" element={<InvestorDeposit />} />
               <Route path="invest/withdraw" element={<InvestorWithdraw />} />
               <Route path="invest/payout-accounts" element={<InvestorPayoutAccounts />} />
+              <Route path="invest/transfer" element={<InvestorTransfer />} />
+              <Route path="invest/wallet" element={<InvestorWallet />} />
               <Route path="invest/history" element={<InvestorHistory />} />
               <Route path="invest/account" element={<InvestorAccount />} />
               <Route path="*" element={<NotFound />} />
