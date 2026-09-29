@@ -435,17 +435,31 @@ runs against the new schema. The full sequence on the host is:
 ```bash
 cd ~/mirrorfleet && git pull
 sudo docker compose build migrate api
+bash ops/backup.sh                            # while the api still runs: it tars uploads from it
 sudo docker compose stop api
 sudo docker compose run --rm migrate          # prints: applied: ['022_client_wallets.sql']
 sudo docker compose up -d api
 ```
+
+Take the backup first because a migration can be one-way: 022 copies the
+rows of the three 2026-09-23 investor tables into the new ones and then drops
+those tables, so the fresh `mirrorfleet-<stamp>.sql.gz` in `~/backups` is the
+only way back. Run the script as the deploy user, exactly as cron does (it
+reaches docker through `sudo -n` itself); under `sudo` it would leave a
+root-owned backup directory the nightly cron cannot write to. On this first
+client-portal upgrade the running api predates the `uploads` volume, so the
+script's second step (the uploads tarball) fails after the database dump is
+already written -- check the new `.sql.gz` is there and carry on; from then on
+both steps succeed.
 
 Then hard-reload any open dashboard tab (the old bundle is stale). Without a
 new migration the short form is `sudo docker compose build api && sudo docker
 compose up -d api`. The first deploy of the client portal also creates the
 `uploads` volume (compose does it; nothing to add to `.env`, `UPLOAD_DIR` is
 optional), and the admin must add at least one payment method on the
-Investors page before investors can deposit.
+Investors page before investors can deposit. The api caps request bodies
+itself before parsing them (6 MiB for a receipt or proof upload, 1 MiB for
+everything else, answering 413), so no reverse-proxy body limit is needed.
 
 ## 6. Development
 
