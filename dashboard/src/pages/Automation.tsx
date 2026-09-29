@@ -8,6 +8,9 @@ import ConfirmDialog from '../components/ConfirmDialog'
 import Button from '../components/Button'
 import Input from '../components/Input'
 import Badge, { type BadgeTone } from '../components/Badge'
+import Card from '../components/Card'
+import Loading from '../components/Loading'
+import PageHeader from '../components/PageHeader'
 import { useFocusTrap } from '../components/useFocusTrap'
 import type { WebhookReceipt, WebhookSettings, WebhookSecret, RiskRule } from '../lib/types'
 
@@ -211,9 +214,9 @@ export default function Automation() {
   if (!settings) {
     return (
       <div className="space-y-6">
-        <h1 className="page-title">Automation</h1>
+        <PageHeader title="Automation" />
         {error && <Banner kind="error" onDismiss={() => setError(null)}>{error}</Banner>}
-        {!error && <p className="text-ink-soft">Loading…</p>}
+        {!error && <Loading lines={6} label="Loading automation settings" />}
       </div>
     )
   }
@@ -228,19 +231,17 @@ export default function Automation() {
 
   return (
     <div className="space-y-8">
-      <div>
-        <h1 className="page-title">Automation</h1>
-        <p className="text-sm text-ink-soft mt-1 max-w-2xl">
-          A TradingView alert places the order on the master. Every follower copies it,
-          exactly as if a person had traded. Nothing downstream changes.
-        </p>
-      </div>
+      <PageHeader
+        title="Automation"
+        subtitle="A TradingView alert places the order on the master. Every follower copies it, exactly as if a person had traded. Nothing downstream changes."
+      />
 
       {error && <Banner kind="error" onDismiss={() => setError(null)}>{error}</Banner>}
       {notice && <Banner kind="notice" onDismiss={() => setNotice(null)}>{notice}</Banner>}
 
       {/* ---------- status ---------- */}
-      <section className="rounded-lg border border-line bg-card p-5 space-y-4">
+      <Card>
+        <div className="space-y-4">
         <div className="flex items-center justify-between gap-4 flex-wrap">
           <div className="flex items-center gap-3">
             <span
@@ -248,7 +249,7 @@ export default function Automation() {
               className={`inline-block w-2.5 h-2.5 rounded-full ${settings.enabled ? 'bg-profit pulse-dot' : 'bg-line-strong'}`}
             />
             <span className="font-semibold text-ink">
-              {settings.enabled ? 'Automation is ON' : 'Automation is OFF'}
+              {settings.enabled ? 'Automation is on' : 'Automation is off'}
             </span>
             {settings.enabled && !settings.copying_enabled && (
               <Badge tone="loss">
@@ -268,7 +269,7 @@ export default function Automation() {
               busy={busy}
               tone={settings.enabled ? 'loss' : 'profit'}
             >
-              {settings.enabled ? 'TURN OFF' : 'TURN ON'}
+              {settings.enabled ? 'Turn off' : 'Turn on'}
             </Button>
           )}
         </div>
@@ -277,12 +278,13 @@ export default function Automation() {
             Before it can be turned on: {blockers.join(', ')}.
           </p>
         )}
-      </section>
+        </div>
+      </Card>
 
       {/* ---------- the two things TradingView needs ---------- */}
       <section className="grid gap-4 md:grid-cols-2">
-        <div className="rounded-lg border border-line bg-card p-5 space-y-3">
-          <h2 className="desk-label">Webhook URL</h2>
+        <Card title="Webhook URL">
+          <div className="space-y-3">
           {settings.url ? (
             <>
               <code className="block text-xs break-all bg-paper border border-line rounded px-3 py-2 text-ink">
@@ -298,10 +300,11 @@ export default function Automation() {
           ) : (
             <p className="text-sm text-ink-soft">{settings.url_hint ?? 'Generate a secret first.'}</p>
           )}
-        </div>
+          </div>
+        </Card>
 
-        <div className="rounded-lg border border-line bg-card p-5 space-y-3">
-          <h2 className="desk-label">Secret</h2>
+        <Card title="Secret">
+          <div className="space-y-3">
           {settings.has_secret ? (
             <p className="text-sm text-ink-soft">
               A secret exists
@@ -323,14 +326,15 @@ export default function Automation() {
               {settings.has_secret ? 'Generate new secret' : 'Generate secret'}
             </Button>
           )}
-        </div>
+          </div>
+        </Card>
       </section>
 
       {/* ---------- limits ---------- */}
-      <section className="rounded-lg border border-line bg-card p-5 space-y-4">
+      <Card title="Limits">
+        <div className="space-y-4">
         <div>
-          <h2 className="desk-label">Limits</h2>
-          <p className="text-sm text-ink-soft mt-1 max-w-2xl">
+          <p className="text-sm text-ink-soft max-w-2xl">
             These bound what a template typo or a leaked secret can do. Every alert is checked
             against them before anything reaches the broker.
           </p>
@@ -360,11 +364,12 @@ export default function Automation() {
             Save limits
           </Button>
         )}
-      </section>
+        </div>
+      </Card>
 
       {/* ---------- symbol risk rules ---------- */}
-      <section className="rounded-lg border border-line bg-card p-5 space-y-4">
-        <h2 className="desk-label">Symbol Risk Rules</h2>
+      <Card title="Symbol risk rules">
+        <div className="space-y-4">
         <p className="text-sm text-ink-soft">
           For any alert that doesn't send its own stop/target, MirrorFleet fills these in.
           An alert that already sends its own is always used as-is.
@@ -452,13 +457,14 @@ export default function Automation() {
             </Button>
           )}
         </div>
-      </section>
+        </div>
+      </Card>
 
       {/* ---------- entry timeframes ---------- */}
-      <section className="rounded-lg border border-line bg-card p-5 space-y-4">
+      <Card title="Entry timeframes">
+        <div className="space-y-4">
         <div>
-          <h2 className="desk-label">Entry timeframes</h2>
-          <p className="text-sm text-ink-soft mt-1 max-w-2xl">
+          <p className="text-sm text-ink-soft max-w-2xl">
             Which lower-timeframe VT Screener triggers are allowed to place a trade.
             An LTF alert on a timeframe not checked here is refused before anything else
             is even looked at. Starts empty — nothing trades until you turn one on.
@@ -489,11 +495,12 @@ export default function Automation() {
             Save entry timeframes
           </Button>
         )}
-      </section>
+        </div>
+      </Card>
 
       {/* ---------- setup ---------- */}
-      <section className="rounded-lg border border-line bg-card p-5 space-y-3">
-        <h2 className="desk-label">Setting up the alert in TradingView</h2>
+      <Card title="Setting up the alert in TradingView">
+        <div className="space-y-3">
         <ol className="list-decimal pl-5 space-y-2 text-sm text-ink-soft max-w-2xl">
           <li>Create an alert. Under <strong className="text-ink">Notifications</strong>, tick <strong className="text-ink">Webhook URL</strong> and paste the URL above.</li>
           <li>Untick email and push notifications for this alert — the message carries your secret.</li>
@@ -506,18 +513,18 @@ export default function Automation() {
           (send <code>close</code> first), anything above the limits, anything while copying is stopped
           or dry-run is on, and any alert not from TradingView's own servers.
         </p>
-      </section>
+        </div>
+      </Card>
 
       {/* ---------- recent ---------- */}
-      <section className="space-y-3">
-        <div className="flex items-baseline justify-between">
-          <h2 className="desk-label">Recent alerts</h2>
-          <span className="text-xs text-ink-faint">live · updates the moment an alert lands</span>
-        </div>
+      <Card
+        title="Recent alerts"
+        actions={<span className="text-xs text-ink-faint">live · updates the moment an alert lands</span>}
+      >
         {settings.recent.length === 0 ? (
           <p className="text-sm text-ink-soft">No alerts received yet.</p>
         ) : (
-          <div className="overflow-x-auto rounded-lg border border-line bg-card">
+          <div className="inset overflow-x-auto">
             <table className="w-full text-sm stack-table">
               <thead>
                 <tr className="text-left">
@@ -562,7 +569,7 @@ export default function Automation() {
             </table>
           </div>
         )}
-      </section>
+      </Card>
 
       {/* ---------- one-time reveal ---------- */}
       {reveal && (

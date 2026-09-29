@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi, afterEach, beforeEach } from 'vitest'
@@ -42,6 +42,30 @@ afterEach(() => {
   MockWebSocket.instance = null
 })
 
+const ACCOUNTS = [
+  { ctid_trader_account_id: 123, trader_login: 9001, nickname: 'Gold master' },
+  { ctid_trader_account_id: 124, trader_login: 9002, nickname: null },
+]
+
+// Route by URL so each request gets its own fresh Response: the page loads
+// the org's accounts (for the Account filter) alongside the events, and a
+// Response body can only be read once. `events` is read per call, so a test
+// can change what the next events request returns.
+function stubFetch(routes: { events: unknown[] }) {
+  const fetchMock = vi.fn((input: RequestInfo | URL) => {
+    const url = String(input)
+    const body = url.includes('/accounts') ? ACCOUNTS : url.includes('/events') ? routes.events : []
+    return Promise.resolve(
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    )
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  return fetchMock
+}
+
 test('fetches events with filter query params from the org-scoped route', async () => {
   const events = [
     {
@@ -54,13 +78,8 @@ test('fetches events with filter query params from the org-scoped route', async 
       payload: { symbol: 'EURUSD' },
     },
   ]
-  const fetchMock = vi.fn().mockResolvedValue(
-    new Response(JSON.stringify(events), {
-      status: 200,
-      headers: { 'content-type': 'application/json' },
-    })
-  )
-  vi.stubGlobal('fetch', fetchMock)
+  const routes = { events: events as unknown[] }
+  const fetchMock = stubFetch(routes)
 
   render(
     <MemoryRouter>
@@ -77,7 +96,7 @@ test('fetches events with filter query params from the org-scoped route', async 
   fetchMock.mockClear()
 
   // Change severity filter
-  const severitySelect = screen.getByDisplayValue('all')
+  const severitySelect = screen.getByLabelText('Severity')
   await userEvent.selectOptions(severitySelect, 'error')
 
   // Wait for new fetch with severity parameter
@@ -114,13 +133,8 @@ test('renders severity-coded rows', async () => {
       payload: { error: 'Connection lost' },
     },
   ]
-  const fetchMock = vi.fn().mockResolvedValue(
-    new Response(JSON.stringify(events), {
-      status: 200,
-      headers: { 'content-type': 'application/json' },
-    })
-  )
-  vi.stubGlobal('fetch', fetchMock)
+  const routes = { events: events as unknown[] }
+  stubFetch(routes)
 
   render(
     <MemoryRouter>
@@ -154,13 +168,8 @@ test('live websocket event prepends a row, connecting with the org id', async ()
       payload: { symbol: 'EURUSD' },
     },
   ]
-  const fetchMock = vi.fn().mockResolvedValue(
-    new Response(JSON.stringify(initialEvents), {
-      status: 200,
-      headers: { 'content-type': 'application/json' },
-    })
-  )
-  vi.stubGlobal('fetch', fetchMock)
+  const routes = { events: initialEvents as unknown[] }
+  stubFetch(routes)
 
   render(
     <MemoryRouter>
@@ -207,13 +216,8 @@ test('live rows respect current severity filter', async () => {
       payload: { symbol: 'EURUSD' },
     },
   ]
-  const fetchMock = vi.fn().mockResolvedValue(
-    new Response(JSON.stringify(initialEvents), {
-      status: 200,
-      headers: { 'content-type': 'application/json' },
-    })
-  )
-  vi.stubGlobal('fetch', fetchMock)
+  const routes = { events: initialEvents as unknown[] }
+  stubFetch(routes)
 
   render(
     <MemoryRouter>
@@ -231,13 +235,8 @@ test('live rows respect current severity filter', async () => {
   })
 
   // Set severity filter to 'error' - this will refetch events and they'll come back empty
-  fetchMock.mockResolvedValueOnce(
-    new Response(JSON.stringify([]), {
-      status: 200,
-      headers: { 'content-type': 'application/json' },
-    })
-  )
-  const severitySelect = screen.getByDisplayValue('all')
+  routes.events = []
+  const severitySelect = screen.getByLabelText('Severity')
   await userEvent.selectOptions(severitySelect, 'error')
 
   // Wait for the refetch to complete
@@ -312,7 +311,9 @@ test('the log names who performed an operator action, and says system otherwise'
       payload: { action: 'copy_fill' }, actor_email: null,
     },
   ]
-  vi.spyOn(apiModule, 'orgApi').mockResolvedValue(events)
+  vi.spyOn(apiModule, 'orgApi').mockImplementation(
+    async (_org: number, path: string) => (path.startsWith('accounts') ? ACCOUNTS : events) as never,
+  )
 
   render(
     <MemoryRouter>
@@ -323,4 +324,85 @@ test('the log names who performed an operator action, and says system otherwise'
   expect(await screen.findByText('ada@example.com')).toBeInTheDocument()
   // The copier acting on its own is not attributed to a person.
   expect(screen.getByText('system')).toBeInTheDocument()
+})
+
+test('every filter has an accessible name, and the account filter lists the org accounts by name', async () => {
+  stubFetch({ events: [] })
+
+  render(
+    <MemoryRouter>
+      <Logs />
+    </MemoryRouter>
+  )
+
+  const account = screen.getByLabelText('Account')
+  expect(account).toHaveRole('combobox')
+  expect(screen.getByLabelText('Severity')).toHaveRole('combobox')
+  expect(screen.getByLabelText('Category')).toBeInTheDocument()
+  expect(screen.getByLabelText('Since')).toBeInTheDocument()
+
+  // Options are the accounts by nickname, falling back to the login; the
+  // value stays the account id, so the events request is unchanged.
+  expect(await screen.findByRole('option', { name: 'Gold master' })).toHaveValue('123')
+  expect(screen.getByRole('option', { name: '9002' })).toHaveValue('124')
+  expect(screen.getByRole('option', { name: 'All accounts' })).toHaveValue('')
+  // Severity options read as words, their values unchanged.
+  expect(screen.getByRole('option', { name: 'Warning' })).toHaveValue('warning')
+})
+
+test('choosing an account filters the events request by its id', async () => {
+  const fetchMock = stubFetch({ events: [] })
+
+  render(
+    <MemoryRouter>
+      <Logs />
+    </MemoryRouter>
+  )
+
+  await screen.findByRole('option', { name: 'Gold master' })
+  fetchMock.mockClear()
+  await userEvent.selectOptions(screen.getByLabelText('Account'), '123')
+
+  await waitFor(() => {
+    const eventCall = fetchMock.mock.calls.find((call) => String(call[0]).includes('/api/orgs/1/events'))
+    expect(eventCall).toBeDefined()
+    const url = new URL(String(eventCall![0]), 'http://localhost')
+    expect(url.searchParams.get('account_id')).toBe('123')
+  })
+})
+
+test('the live list keeps the newest 500 events', async () => {
+  stubFetch({ events: [] })
+
+  render(
+    <MemoryRouter>
+      <Logs />
+    </MemoryRouter>
+  )
+
+  expect(await screen.findByText('No events found')).toBeInTheDocument()
+  await waitFor(() => {
+    expect(MockWebSocket.instance).not.toBeNull()
+  })
+
+  act(() => {
+    for (let i = 1; i <= 501; i++) {
+      MockWebSocket.instance?.emit({
+        id: i,
+        ts: '2024-01-01T10:00:00Z',
+        account_id: 123,
+        category: `cat_${i}`,
+        severity: 'info',
+        latency_ms: 1,
+        payload: {},
+      })
+    }
+  })
+
+  // Newest first: the 501st is on top and the very first one fell off.
+  expect(await screen.findByText('cat_501')).toBeInTheDocument()
+  expect(screen.queryByText('cat_1')).not.toBeInTheDocument()
+  expect(screen.getByText('cat_2')).toBeInTheDocument()
+  const bodyRows = screen.getAllByRole('row').filter((r) => r.closest('tbody'))
+  expect(bodyRows).toHaveLength(500)
 })

@@ -1,12 +1,26 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useId, useRef } from 'react'
 import { orgApi, eventsSocket } from '../lib/api'
 import { useOrg } from '../lib/org'
 import { formatWhen } from '../lib/format'
-import { EventResponse } from '../lib/types'
+import type { Account, EventResponse } from '../lib/types'
 import Button from '../components/Button'
+import Card from '../components/Card'
 import Input from '../components/Input'
+import Loading from '../components/Loading'
+import PageHeader from '../components/PageHeader'
 import Select from '../components/Select'
 import Badge, { type BadgeTone } from '../components/Badge'
+
+/** The live list keeps the newest rows only: a busy desk streams events all
+ *  day, and an unbounded list grows until the tab slows to a crawl. */
+const LIVE_CAP = 500
+
+const SEVERITIES = [
+  { value: 'all', label: 'All' },
+  { value: 'info', label: 'Info' },
+  { value: 'warning', label: 'Warning' },
+  { value: 'error', label: 'Error' },
+]
 
 export default function Logs() {
   const { orgId } = useOrg()
@@ -14,6 +28,10 @@ export default function Logs() {
   const [loading, setLoading] = useState(false)
   const [isLive, setIsLive] = useState(true)
   const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set())
+  const [accounts, setAccounts] = useState<Account[]>([])
+  const ids = {
+    account: useId(), severity: useId(), category: useId(), since: useId(),
+  }
 
   // Filter state
   const [filters, setFilters] = useState({
@@ -22,6 +40,16 @@ export default function Logs() {
     category: '',
     since: '',
   })
+
+  // The account filter offers the org's own accounts by name. A failed
+  // load leaves only "All accounts"; the log itself still works.
+  useEffect(() => {
+    let cancelled = false
+    orgApi<Account[]>(orgId, 'accounts')
+      .then((list) => { if (!cancelled && Array.isArray(list)) setAccounts(list) })
+      .catch(() => { /* the filter degrades to All accounts */ })
+    return () => { cancelled = true }
+  }, [orgId])
 
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null)
@@ -90,7 +118,7 @@ export default function Logs() {
             (filters.severity === 'all' || newEvent.severity === filters.severity) &&
             (!filters.category || newEvent.category === filters.category)
           ) {
-            setEvents((prev) => [newEvent, ...prev])
+            setEvents((prev) => [newEvent, ...prev].slice(0, LIVE_CAP))
           }
         } catch (err) {
           console.error('Failed to parse WebSocket message:', err)
@@ -150,19 +178,15 @@ export default function Logs() {
 
   return (
     <div className="space-y-6 max-w-6xl">
-      <header>
-        <h1 className="page-title">Logs</h1>
-        <p className="text-sm text-ink-soft mt-1">
-          The append-only audit trail: every master event, copy action,
-          connection change, and control command.
-        </p>
-      </header>
+      <PageHeader
+        title="Logs"
+        subtitle="The append-only audit trail: every master event, copy action, connection change, and control command."
+      />
 
-      {/* Filters */}
-      <div className="bg-card rounded-lg border border-line p-4 space-y-4">
-        <div className="flex items-center justify-between">
-          <h3 className="desk-label">Filters</h3>
-          <label className="flex items-center space-x-2">
+      <Card
+        title="Filters"
+        actions={
+          <label className="flex items-center gap-2">
             <input
               type="checkbox"
               checked={isLive}
@@ -171,60 +195,69 @@ export default function Logs() {
             />
             <span className="text-sm font-medium text-ink">Live</span>
           </label>
-        </div>
-
+        }
+      >
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          {/* Account Select */}
           <div>
-            <label className="block desk-label mb-1">Account</label>
-            <Input
-              type="text"
-              placeholder="Account ID"
+            <label htmlFor={ids.account} className="block desk-label mb-1">Account</label>
+            {/* The value stays the account id as a string: the events
+                request and the live-row match both read it as-is. */}
+            <Select
+              id={ids.account}
+              block
               value={filters.account_id}
               onChange={(e) => setFilters({ ...filters, account_id: e.target.value })}
-            />
+            >
+              <option value="">All accounts</option>
+              {accounts.map((a) => (
+                <option key={a.ctid_trader_account_id} value={String(a.ctid_trader_account_id)}>
+                  {a.nickname ?? a.trader_login}
+                </option>
+              ))}
+            </Select>
           </div>
 
-          {/* Severity Select */}
           <div>
-            <label className="block desk-label mb-1">Severity</label>
+            <label htmlFor={ids.severity} className="block desk-label mb-1">Severity</label>
             <Select
+              id={ids.severity}
               block
               value={filters.severity}
               onChange={(e) => setFilters({ ...filters, severity: e.target.value })}
             >
-              <option value="all">all</option>
-              <option value="info">info</option>
-              <option value="warning">warning</option>
-              <option value="error">error</option>
+              {SEVERITIES.map((s) => (
+                <option key={s.value} value={s.value}>{s.label}</option>
+              ))}
             </Select>
           </div>
 
-          {/* Category Select */}
           <div>
-            <label className="block desk-label mb-1">Category</label>
+            <label htmlFor={ids.category} className="block desk-label mb-1">Category</label>
             <Input
+              id={ids.category}
               type="text"
-              placeholder="Category"
+              placeholder="e.g. control"
               value={filters.category}
               onChange={(e) => setFilters({ ...filters, category: e.target.value })}
             />
           </div>
 
-          {/* Date Since Select */}
           <div>
-            <label className="block desk-label mb-1">Since</label>
+            <label htmlFor={ids.since} className="block desk-label mb-1">Since</label>
             <Input
+              id={ids.since}
               type="datetime-local"
               value={filters.since}
               onChange={(e) => setFilters({ ...filters, since: e.target.value })}
             />
           </div>
         </div>
-      </div>
+      </Card>
 
-      {/* Events Table */}
-      <div className="bg-card rounded-lg border border-line overflow-hidden">
+      {loading ? (
+        <Loading lines={6} label="Loading events" />
+      ) : (
+      <Card inset>
         <div className="overflow-x-auto">
           <table className="stack-table min-w-full divide-y divide-line">
             <thead className="bg-paper">
@@ -253,14 +286,7 @@ export default function Logs() {
               </tr>
             </thead>
             <tbody className="bg-card divide-y divide-line">
-              {loading && (
-                <tr>
-                  <td colSpan={7} className="px-6 py-4 text-center text-ink-faint">
-                    Loading...
-                  </td>
-                </tr>
-              )}
-              {!loading && events.length === 0 && (
+              {events.length === 0 && (
                 <tr>
                   <td colSpan={7} className="px-6 py-4 text-center text-ink-faint">
                     No events found
@@ -312,7 +338,8 @@ export default function Logs() {
             </tbody>
           </table>
         </div>
-      </div>
+      </Card>
+      )}
     </div>
   )
 }

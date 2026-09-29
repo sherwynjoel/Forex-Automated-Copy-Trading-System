@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api, type ApiError } from '../lib/api'
 import Banner from './Banner'
+import Card from './Card'
 import Button from './Button'
 import Input from './Input'
 import PinInput from './PinInput'
@@ -85,11 +86,14 @@ export default function AccountSecurity() {
   }
 
   return (
-    <div className="space-y-4 border-t border-line pt-6">
-      <h3 className="text-lg font-semibold text-ink">Your login</h3>
+    // The card is the section: both the Members page and the investor
+    // Account page show it as "Your login"; the two forms are its parts.
+    <Card title="Your login">
+    <div className="space-y-4">
       {notice && <Banner kind="notice" onDismiss={() => setNotice(null)}>{notice}</Banner>}
       {problem && <Banner kind="error" onDismiss={() => setProblem(null)}>{problem}</Banner>}
 
+      <h3 className="text-base font-semibold text-ink">Change password</h3>
       <form onSubmit={submit} className="flex flex-wrap items-end gap-3">
         <div>
           <label htmlFor="current-password" className="desk-label block mb-1">
@@ -120,6 +124,7 @@ export default function AccountSecurity() {
         </Button>
       </form>
 
+      <h3 className="text-base font-semibold text-ink">Change MPIN</h3>
       <form onSubmit={submitMpin} className="space-y-3">
         <div className="flex flex-wrap items-start gap-4">
           <PinInput id="current-mpin" label="Current MPIN" value={currentMpin} onChange={setCurrentMpin} disabled={busy} />
@@ -141,5 +146,6 @@ export default function AccountSecurity() {
         </p>
       </div>
     </div>
+    </Card>
   )
 }

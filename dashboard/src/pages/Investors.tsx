@@ -11,6 +11,10 @@ import Button from '../components/Button'
 import Input from '../components/Input'
 import Select from '../components/Select'
 import Badge, { type BadgeTone } from '../components/Badge'
+import Card from '../components/Card'
+import Loading from '../components/Loading'
+import PageHeader from '../components/PageHeader'
+import Tabs from '../components/Tabs'
 import type {
   Account, InvestorDeposit, InvestorRow, InvestorWallet, InvestorWithdrawal,
 } from '../lib/types'
@@ -56,6 +60,8 @@ export default function Investors() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  // Until the first load lands, the empty lists are unknown, not empty.
+  const [loaded, setLoaded] = useState(false)
 
   const refresh = useCallback(async () => {
     try {
@@ -73,6 +79,7 @@ export default function Investors() {
         if (!(err instanceof Error && err.message.startsWith('404'))) throw err
       }
       setError(null)
+      setLoaded(true)
     } catch (err) {
       setError(errorText(err, 'Could not load investors'))
     }
@@ -154,18 +161,20 @@ export default function Investors() {
 
   return (
     <div className="space-y-8 max-w-6xl">
-      <header>
-        <h1 className="page-title">Investors</h1>
-        <p className="text-sm text-ink-soft mt-1">
-          Who invests through this workspace, their linked accounts, and the money requests
-          waiting on you. The app records; you move the funds.
-        </p>
-      </header>
+      <PageHeader
+        title="Investors"
+        subtitle="Who invests through this workspace, their linked accounts, and the money requests waiting on you. The app records; you move the funds."
+      />
       {error && <Banner kind="error" onDismiss={() => setError(null)}>{error}</Banner>}
       {notice && <Banner kind="notice" onDismiss={() => setNotice(null)}>{notice}</Banner>}
 
-      <section className="rounded-lg border border-line bg-card overflow-hidden">
-        <div className="px-5 pt-4 pb-3"><h2 className="desk-label">Investors</h2></div>
+      {!loaded ? (
+        // An error before the first load shows the banner above, not an
+        // endless skeleton.
+        !error && <Loading lines={6} label="Loading investors" />
+      ) : (
+      <>
+      <Card title="Investor accounts" inset>
         <div className="overflow-x-auto">
           <table className="stack-table w-full text-sm">
             <thead>
@@ -213,19 +222,22 @@ export default function Investors() {
             </tbody>
           </table>
         </div>
-      </section>
+      </Card>
 
-      <section className="rounded-lg border border-line bg-card overflow-hidden">
-        <div role="tablist" className="flex border-b border-line">
-          {(['deposits', 'withdrawals'] as const).map((t) => (
-            <button key={t} role="tab" aria-selected={tab === t} onClick={() => setTab(t)}
-                    className={`px-5 py-3 text-sm font-semibold ${tab === t ? 'text-brand border-b-2 border-brand' : 'text-ink-soft'}`}>
-              {t === 'deposits' ? `Deposits (${deposits.filter((d) => d.status === 'pending').length} pending)`
-                : `Withdrawals (${withdrawals.filter((w) => w.status === 'requested' || w.status === 'approved').length} open)`}
-            </button>
-          ))}
-        </div>
-        <div className="overflow-x-auto">
+      <Card title="Money requests">
+        {/* The tab names carry what needs acting on (pending / open), which
+            a bare total would not. */}
+        <Tabs
+          idBase="investors"
+          label="Money requests"
+          value={tab}
+          onChange={(k) => setTab(k as 'deposits' | 'withdrawals')}
+          items={[
+            { key: 'deposits', label: `Deposits (${deposits.filter((d) => d.status === 'pending').length} pending)` },
+            { key: 'withdrawals', label: `Withdrawals (${withdrawals.filter((w) => w.status === 'requested' || w.status === 'approved').length} open)` },
+          ]}
+        />
+        <div id="investors-panel" role="tabpanel" aria-labelledby={`investors-tab-${tab}`} className="inset mt-4 overflow-x-auto">
           {tab === 'deposits' ? (
             <table className="stack-table w-full text-sm">
               <thead>
@@ -300,10 +312,10 @@ export default function Investors() {
             </table>
           )}
         </div>
-      </section>
+      </Card>
 
-      <form onSubmit={saveWallet} className="rounded-lg border border-line bg-card p-5 space-y-4">
-        <h2 className="desk-label">Deposit wallet</h2>
+      <Card title="Deposit wallet">
+      <form onSubmit={saveWallet} className="space-y-4">
         <p className="text-sm text-ink-soft">
           The address investors send to. Shown to them with a QR code. This is a receiving
           address only; MirrorFleet never holds a key.
@@ -324,6 +336,9 @@ export default function Investors() {
           )}
         </div>
       </form>
+      </Card>
+      </>
+      )}
 
       <ConfirmDialog
         open={pending != null}

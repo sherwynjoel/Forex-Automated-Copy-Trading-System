@@ -216,7 +216,7 @@ test('lists existing risk rules and can add a new one', async () => {
 
   expect(await screen.findByText('XAUUSD')).toBeInTheDocument()
 
-  await userEvent.type(screen.getByLabelText(/symbol/i), 'EURUSD')
+  await userEvent.type(screen.getByLabelText(/^symbol$/i), 'EURUSD')
   await userEvent.type(screen.getByLabelText(/^stop/i), '20')
   await userEvent.type(screen.getByLabelText(/^target/i), '60')
   await userEvent.click(screen.getByRole('button', { name: /add rule/i }))
@@ -287,7 +287,7 @@ test('a rejected risk rule save shows the server error instead of doing nothing'
   render(<MemoryRouter><Automation /></MemoryRouter>)
   await screen.findByText(/automation is on/i)
 
-  await userEvent.type(screen.getByLabelText(/symbol/i), 'EURUSD')
+  await userEvent.type(screen.getByLabelText(/^symbol$/i), 'EURUSD')
   await userEvent.click(screen.getByRole('checkbox', { name: /trailing/i }))
   await userEvent.click(screen.getByRole('button', { name: /add rule/i }))
 

@@ -443,11 +443,18 @@ test('tabs move with arrow keys', async () => {
   renderHistory()
   await screen.findAllByText('+20.00')
 
+  // Arrow keys follow the visual order: All accounts, Closed positions,
+  // Deals, Orders, Cash flow (wrapping at both ends).
   const closedTab = screen.getByRole('tab', { name: /closed positions/i })
   closedTab.focus()
-  await userEvent.keyboard('{ArrowRight}')
+  await userEvent.keyboard('{ArrowLeft}')
   expect(screen.getByRole('tab', { name: /all accounts/i })).toHaveAttribute('aria-selected', 'true')
   expect(screen.getByRole('tab', { name: /all accounts/i })).toHaveFocus()
+  await userEvent.keyboard('{ArrowRight}{ArrowRight}')
+  expect(screen.getByRole('tab', { name: /^deals/i })).toHaveAttribute('aria-selected', 'true')
+  expect(screen.getByRole('tab', { name: /^deals/i })).toHaveFocus()
+  // The panel is labelled by the selected tab.
+  expect(screen.getByRole('tabpanel')).toHaveAttribute('aria-labelledby', 'history-tab-deals')
 })
 
 test('closing the drill drawer returns focus to the position that opened it', async () => {
@@ -531,7 +538,7 @@ test('a master trade with no copies in the window says so', async () => {
 
   await userEvent.click(screen.getByRole('tab', { name: /all accounts/i }))
   expect(await screen.findByText('#21')).toBeInTheDocument()
-  expect(screen.getByText(/no slave copies in this week/i)).toBeInTheDocument()
+  expect(screen.getByText(/no follower copies in this week/i)).toBeInTheDocument()
 })
 
 test('By-master survives one slave failing and says which copies are missing', async () => {
@@ -653,7 +660,7 @@ test('the fleet view does not also burst-fetch the selected account', async () =
 })
 
 
-test('the default view renders instead of sitting on "Loading history"', async () => {
+test('the default view renders instead of sitting on the history loading state', async () => {
   // Regression: the outer gate waited on the SINGLE-ACCOUNT load, which the
   // fleet tab deliberately does not run. `loading` stayed true forever, so
   // the page rendered nothing at all -- a permanently loading History for
@@ -663,7 +670,8 @@ test('the default view renders instead of sitting on "Loading history"', async (
 
   // The fleet view must reach a rendered state, not the outer spinner.
   await waitFor(() => {
-    expect(screen.queryByText('Loading history…')).not.toBeInTheDocument()
+    expect(screen.queryByRole('status', { name: 'Loading history' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('status', { name: /loading the fleet's history/i })).not.toBeInTheDocument()
   }, { timeout: 10000 })
 
   expect(await screen.findByRole('tabpanel')).toBeInTheDocument()

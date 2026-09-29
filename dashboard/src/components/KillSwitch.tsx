@@ -87,7 +87,7 @@ export default function KillSwitch({ settings, onUpdate }: KillSwitchProps) {
     setPending(null)
   }
 
-  const buttonText = settings.copying_enabled ? 'STOP COPYING' : 'RESUME COPYING'
+  const buttonText = settings.copying_enabled ? 'Stop copying' : 'Resume copying'
 
   // Kill switches are a control-level action; viewers never see them.
   if (!can(role, 'control')) return null

@@ -10,6 +10,9 @@ import Drawer from '../components/Drawer'
 import Input from '../components/Input'
 import Select from '../components/Select'
 import Badge from '../components/Badge'
+import Loading from '../components/Loading'
+import PageHeader from '../components/PageHeader'
+import Tabs from '../components/Tabs'
 
 const DAY_MS = 24 * 3600 * 1000
 
@@ -445,52 +448,14 @@ export default function History() {
         ? { day: '2-digit', month: 'short', year: 'numeric' }
         : { day: '2-digit', month: 'short' })
 
-  const TAB_ORDER: Tab[] = ['closed', 'bymaster', 'deals', 'orders', 'cashflow']
-  const onTablistKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return
-    e.preventDefault()
-    const idx = TAB_ORDER.indexOf(tab)
-    const next = e.key === 'ArrowRight'
-      ? TAB_ORDER[(idx + 1) % TAB_ORDER.length]
-      : TAB_ORDER[(idx + TAB_ORDER.length - 1) % TAB_ORDER.length]
-    setTab(next)
-    document.getElementById(`history-tab-${next}`)?.focus()
-  }
-
-  const tabButton = (key: Tab, label: string, count?: number) => (
-    <button
-      key={key}
-      id={`history-tab-${key}`}
-      role="tab"
-      aria-selected={tab === key}
-      aria-controls="history-tabpanel"
-      tabIndex={tab === key ? 0 : -1}
-      onClick={() => setTab(key)}
-      className={`min-h-11 md:min-h-0 px-4 py-2 text-sm rounded-t border-b-2 transition-colors whitespace-nowrap ${
-        tab === key
-          ? 'border-brand text-brand font-semibold'
-          : 'border-transparent text-ink-soft hover:text-ink'
-      }`}
-    >
-      {label}{count != null && <span className="num text-xs text-ink-faint"> {count}</span>}
-    </button>
-  )
-
   const windowNoun = windowDays === 7 ? 'week' : 'day'
 
   return (
     <div className="space-y-6 max-w-6xl">
-      <header>
-        <h1 className="page-title">History</h1>
-        <p className="text-sm text-ink-soft mt-1 max-w-prose">
-          Every master trade with the copies each slave placed against it,
-          straight from the broker. Switch tabs to look at one account on
-          its own. One week at a time — that is the most cTrader hands out
-          per request.
-        </p>
-      </header>
-
-      {/* Controls */}
+      <PageHeader
+        title="History"
+        subtitle="Every master trade with the copies each follower placed against it, straight from the broker. Switch tabs to look at one account on its own. One week at a time — that is the most cTrader hands out per request."
+      >
       <div className="flex flex-wrap items-end gap-4">
         {/* Only meaningful on the per-account tabs. Leaving it visible on
             the fleet view invites the operator to pick an account and
@@ -576,6 +541,7 @@ export default function History() {
           </p>
         )}
       </div>
+      </PageHeader>
 
       {error && (
         <div className="space-y-3">
@@ -596,29 +562,32 @@ export default function History() {
       {!(error && fetchedAt == null) && (
         <>
           <div className={loading ? 'opacity-60' : ''} aria-busy={loading}>
-          {/* Tabs */}
-          <div
-            className="border-b border-line flex gap-1 overflow-x-auto"
-            role="tablist"
-            onKeyDown={onTablistKeyDown}
-          >
-            {tabButton('bymaster', 'All accounts', fleet != null ? masterGroups.length : undefined)}
-            {tabButton('closed', 'Closed positions', closingDeals.length)}
-            {tabButton('deals', 'Deals', deals.length)}
-            {tabButton('orders', 'Orders', orders.length)}
-            {tabButton('cashflow', 'Cash flow', cashFlow.length)}
-          </div>
+          <Tabs
+            idBase="history"
+            label="History views"
+            value={tab}
+            onChange={(k) => setTab(k as Tab)}
+            items={[
+              { key: 'bymaster', label: 'All accounts', count: fleet != null ? masterGroups.length : undefined },
+              { key: 'closed', label: 'Closed positions', count: closingDeals.length },
+              { key: 'deals', label: 'Deals', count: deals.length },
+              { key: 'orders', label: 'Orders', count: orders.length },
+              { key: 'cashflow', label: 'Cash flow', count: cashFlow.length },
+            ]}
+          />
 
           {/* This gate is about the SINGLE-ACCOUNT load. The fleet tab does
               not run that load -- its three parallel requests would race
               the paced whole-fleet fetch -- so `loading` stays true there
-              forever and the gate never opened: the page sat on "Loading
-              history..." and rendered nothing at all. The fleet view
-              reports its own progress, so it must not be gated here. */}
+              forever and the gate never opened: the page sat on its loading
+              state and rendered nothing at all. The fleet view reports its
+              own progress, so it must not be gated here. The panel itself
+              is always present so the tabs' aria-controls always resolves. */}
+          <div id="history-panel" role="tabpanel" aria-labelledby={`history-tab-${tab}`} className="mt-6">
           {tab !== 'bymaster' && loading && fetchedAt == null ? (
-            <p className="text-sm text-ink-soft py-8">Loading history…</p>
+            <Loading lines={6} label="Loading history" />
           ) : (
-            <div id="history-tabpanel" role="tabpanel" aria-labelledby={`history-tab-${tab}`} className="mt-6">
+            <>
               {tab === 'bymaster' ? (
                 <MasterGroupsView
                   groups={masterGroups}
@@ -651,8 +620,9 @@ export default function History() {
               ) : (
                 <CashFlowTable entries={cashFlow} windowNoun={windowNoun} />
               )}
-            </div>
+            </>
           )}
+          </div>
           </div>
         </>
       )}
@@ -671,7 +641,7 @@ export default function History() {
             Could not fetch this position's deals: {drillError}
           </p>
         ) : drillDeals == null ? (
-          <p className="text-sm text-ink-soft">Fetching from the broker…</p>
+          <Loading lines={4} label="Fetching from the broker" />
         ) : drillDeals.length === 0 ? (
           <p className="text-sm text-ink-soft">
             The broker returned no deals for this position.
@@ -741,12 +711,21 @@ function MasterGroupsView({
     // Paced deliberately (the broker refuses a burst), so a ten-account
     // fleet takes a few seconds. Counting up says "working", where a bare
     // spinner on a slow load says "stuck".
+    const counting = progress && progress.total > 1
+      ? `account ${progress.done + 1} of ${progress.total}`
+      : null
     return (
-      <p className="text-sm text-ink-soft py-8">
-        {progress && progress.total > 1
-          ? `Loading the fleet's history… account ${progress.done + 1} of ${progress.total}`
-          : "Loading the fleet's history…"}
-      </p>
+      <div className="space-y-2">
+        <Loading
+          lines={4}
+          label={counting ? `Loading the fleet's history, ${counting}` : "Loading the fleet's history"}
+        />
+        {counting && (
+          <p aria-hidden="true" className="num text-xs text-ink-faint">
+            Loading the fleet&rsquo;s history: {counting}
+          </p>
+        )}
+      </div>
     )
   }
   const retryButton = (
@@ -796,7 +775,7 @@ function MasterGroupsView({
       {groups.map((group) => {
         const digits = digitsFor(group.symbol)
         return (
-          <div key={group.positionId} className="bg-card rounded-lg border border-line overflow-hidden">
+          <div key={group.positionId} className="inset overflow-hidden">
             <div className="bg-paper border-b border-line px-5 py-3 flex flex-wrap items-baseline gap-x-4 gap-y-1">
               <button
                 onClick={() => onDrill(group.positionId, masterAccountId)}
@@ -822,13 +801,13 @@ function MasterGroupsView({
             </div>
             {group.copies.length === 0 ? (
               <p className="px-5 py-2.5 text-xs text-ink-faint">
-                No slave copies in this {windowNoun}.
+                No follower copies in this {windowNoun}.
               </p>
             ) : (
               <table className="stack-table w-full text-sm">
                 <thead>
                   <tr className="text-left border-b border-line">
-                    <th className="desk-label px-5 py-2 font-semibold">Slave</th>
+                    <th className="desk-label px-5 py-2 font-semibold">Follower</th>
                     <th className="desk-label px-3 py-2 font-semibold">Position</th>
                     <th className="desk-label px-3 py-2 font-semibold text-right">Lots</th>
                     <th className="desk-label px-3 py-2 font-semibold text-right">Entry → Exit</th>
@@ -852,7 +831,7 @@ function MasterGroupsView({
                       : null
                     return (
                       <tr key={`${copy.accountId}-${copy.positionId}`} className="border-b border-line last:border-0">
-                        <td data-label="Slave" className="px-5 py-2.5 text-ink-soft">{copy.accountName}</td>
+                        <td data-label="Follower" className="px-5 py-2.5 text-ink-soft">{copy.accountName}</td>
                         <td data-label="Position" className="num px-3 py-2.5">
                           <button
                             onClick={() => onDrill(copy.positionId, copy.accountId)}
@@ -902,7 +881,7 @@ function CashFlowTable({ entries, windowNoun }: { entries: CashFlowEntry[]; wind
     )
   }
   return (
-    <div className="bg-card rounded-lg border border-line overflow-x-auto">
+    <div className="inset overflow-x-auto">
       <table className="stack-table w-full text-sm">
         <thead>
           <tr className="text-left border-b border-line">
@@ -976,7 +955,7 @@ function ClosedPositionsTable({ deals, onDrill, digitsFor, copyMap, onDrillMaste
     commission: cents(raw.commission), net: cents(raw.net),
   }
   return (
-    <div className="bg-card rounded-lg border border-line overflow-x-auto">
+    <div className="inset overflow-x-auto">
       <table className="stack-table w-full text-sm">
         <thead>
           <tr className="text-left border-b border-line">
@@ -1077,7 +1056,7 @@ function DealsTable({ deals, digitsFor, windowNoun }: {
     return <p className="text-sm text-ink-soft py-8">No fills in this {windowNoun}.</p>
   }
   return (
-    <div className="bg-card rounded-lg border border-line overflow-x-auto">
+    <div className="inset overflow-x-auto">
       <table className="stack-table w-full text-sm">
         <thead>
           <tr className="text-left border-b border-line">
@@ -1129,7 +1108,7 @@ function OrdersTable({ orders, digitsFor, windowNoun }: {
     return <p className="text-sm text-ink-soft py-8">No orders in this {windowNoun}.</p>
   }
   return (
-    <div className="bg-card rounded-lg border border-line overflow-x-auto">
+    <div className="inset overflow-x-auto">
       <table className="stack-table w-full text-sm">
         <thead>
           <tr className="text-left border-b border-line">

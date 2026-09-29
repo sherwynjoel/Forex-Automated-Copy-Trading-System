@@ -17,6 +17,9 @@ import SearchSelect from '../components/SearchSelect'
 import Button from '../components/Button'
 import Input from '../components/Input'
 import Select from '../components/Select'
+import Card from '../components/Card'
+import Loading from '../components/Loading'
+import PageHeader from '../components/PageHeader'
 
 // Only used to recover a last-known price when the market is shut and no
 // live quote exists; two H1 bars is plenty.
@@ -61,7 +64,9 @@ function readDefaultSymbol(orgId: number, accountId: number): string | null {
 
 function accountLabel(account: Account): string {
   const env = account.is_live ? 'Live' : 'Demo'
-  return `${accountWho(account)} · ${env} (${account.role})`
+  // The API says slave; the desk says follower.
+  const roleWord = account.role === 'slave' ? 'follower' : account.role
+  return `${accountWho(account)} · ${env} (${roleWord})`
 }
 
 export default function Trade() {
@@ -506,9 +511,7 @@ export default function Trade() {
   if (!can(role, 'trade')) {
     return (
       <div className="space-y-6">
-        <header>
-          <h1 className="page-title">Trade</h1>
-        </header>
+        <PageHeader title="Trade" />
         <p className="text-sm text-ink-soft">
           Your role does not allow placing orders.
         </p>
@@ -518,13 +521,10 @@ export default function Trade() {
 
   return (
     <div className="space-y-6">
-      <header>
-        <h1 className="page-title">Trade</h1>
-        <p className="text-sm text-ink-soft mt-1 max-w-prose">
-          Place orders on any connected account. Master orders replicate to
-          every slave; slave orders stay where you put them.
-        </p>
-      </header>
+      <PageHeader
+        title="Trade"
+        subtitle="Place orders on any connected account. Master orders replicate to every follower; follower orders stay where you put them."
+      />
 
       {/* Permanently mounted so screen readers reliably announce notices. */}
       <div role="status" className={notice ? undefined : 'sr-only'}>
@@ -541,11 +541,10 @@ export default function Trade() {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Order ticket */}
-        <section className="lg:col-span-1 bg-card rounded-lg border border-line p-5 space-y-4 h-fit">
-          <h2 className="desk-label">Order ticket</h2>
-
+        <Card title="Order ticket" className="lg:col-span-1 h-fit">
+          <div className="space-y-4">
           {accounts == null ? (
-            <p className="text-sm text-ink-faint">Loading accounts…</p>
+            <Loading lines={4} label="Loading the order ticket" />
           ) : accounts.length === 0 ? (
             <div className="py-4 text-center space-y-3">
               <p className="text-sm text-ink-soft">
@@ -556,7 +555,7 @@ export default function Trade() {
               </Button>
               <p className="text-xs text-ink-faint">
                 One grant covers every account under your cTrader ID; orders on
-                the master replicate to every enabled slave.
+                the master replicate to every enabled follower.
               </p>
             </div>
           ) : (
@@ -577,13 +576,13 @@ export default function Trade() {
             </Select>
             {selected?.role === 'slave' && (
               <p className="mt-2 text-xs text-warn-deep bg-warn-wash rounded px-2 py-1.5">
-                Manual order on a slave: it is not copied anywhere and the
+                Manual order on a follower: it is not copied anywhere and the
                 copier leaves the position for you to manage.
               </p>
             )}
             {selected?.role === 'master' && (
               <p className="mt-2 text-xs text-ink-soft">
-                Fills on the master are copied to every enabled slave.
+                Fills on the master are copied to every enabled follower.
               </p>
             )}
           </div>
@@ -591,30 +590,29 @@ export default function Trade() {
           <div>
             <div className="flex items-baseline justify-between mb-1">
               <label htmlFor="ticket-symbol" className="desk-label">Symbol</label>
-              {accountId != null && ticket.symbol && (
-                readDefaultSymbol(orgId, accountId) === ticket.symbol ? (
-                  <button
+              {accountId != null && ticket.symbol && (() => {
+                // One toggle: pressed while this symbol is the pinned default;
+                // pressing it again clears the pin.
+                const isDefault = readDefaultSymbol(orgId, accountId) === ticket.symbol
+                return (
+                  <Button
+                    variant="ghost"
+                    tone="neutral"
+                    size="sm"
+                    aria-pressed={isDefault}
+                    aria-label="Set as default symbol"
                     onClick={() => {
-                      try { localStorage.removeItem(defaultSymbolKey(orgId, accountId)) } catch { /* private mode */ }
+                      try {
+                        if (isDefault) localStorage.removeItem(defaultSymbolKey(orgId, accountId))
+                        else localStorage.setItem(defaultSymbolKey(orgId, accountId), ticket.symbol)
+                      } catch { /* private mode */ }
                       setPinVersion((v) => v + 1)
                     }}
-                    aria-label="Default symbol — click to clear"
-                    className="text-[11px] font-semibold text-brand-deep bg-brand-wash rounded px-1.5 py-0.5 hover:bg-brand hover:text-on-accent transition-colors"
                   >
-                    ★ Default
-                  </button>
-                ) : (
-                  <button
-                    onClick={() => {
-                      try { localStorage.setItem(defaultSymbolKey(orgId, accountId), ticket.symbol) } catch { /* private mode */ }
-                      setPinVersion((v) => v + 1)
-                    }}
-                    className="text-[11px] font-medium text-ink-soft hover:text-brand-deep transition-colors"
-                  >
-                    ☆ Set as default
-                  </button>
+                    {isDefault ? '★ Default' : '☆ Set as default'}
+                  </Button>
                 )
-              )}
+              })()}
             </div>
             <SearchSelect
               id="ticket-symbol"
@@ -680,21 +678,17 @@ export default function Trade() {
 
           <div className="flex items-center justify-between gap-2">
             <span className="desk-label">Protection</span>
-            <div className="flex rounded border border-field-line overflow-hidden text-xs">
+            <div className="flex gap-1">
               {(['price', 'amount'] as const).map((mode) => (
-                <button
+                <Button
                   key={mode}
-                  type="button"
+                  variant={ticket.protectionMode === mode ? 'primary' : 'secondary'}
+                  size="sm"
                   aria-pressed={ticket.protectionMode === mode}
                   onClick={() => setTicket({ ...ticket, protectionMode: mode })}
-                  className={`min-h-11 md:min-h-0 px-2.5 py-1 font-medium transition-colors ${
-                    ticket.protectionMode === mode
-                      ? 'bg-brand text-on-accent'
-                      : 'text-ink-soft hover:text-ink'
-                  }`}
                 >
                   {mode === 'price' ? 'Price' : `Amount${quoteCurrency ? ` (${quoteCurrency})` : ''}`}
-                </button>
+                </Button>
               ))}
             </div>
           </div>
@@ -833,26 +827,26 @@ export default function Trade() {
           </Button>
           </>
           )}
-        </section>
+          </div>
+        </Card>
 
         {/* Live positions + working orders for the selected account */}
-        <section className="lg:col-span-2 space-y-6">
-          <div className="bg-card rounded-lg border border-line">
-            <div className="px-5 py-3 border-b border-line flex items-baseline justify-between">
-              <h2 className="desk-label">Open positions</h2>
-              {details?.balance != null && (
-                <span className="text-xs text-ink-soft">
-                  Balance <span className="num text-ink">{details.balance.toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
-                  {details.deposit_currency ? ` ${details.deposit_currency}` : ''}
-                </span>
-              )}
-            </div>
+        <div className="lg:col-span-2 space-y-6">
+          <Card
+            title="Open positions"
+            actions={details?.balance != null && (
+              <span className="text-xs text-ink-soft">
+                Balance <span className="num text-ink">{details.balance.toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
+                {details.deposit_currency ? ` ${details.deposit_currency}` : ''}
+              </span>
+            )}
+          >
             {!details || details.open_positions.length === 0 ? (
-              <p className="px-5 py-6 text-sm text-ink-faint">
+              <p className="text-sm text-ink-faint">
                 No open positions on this account.
               </p>
             ) : (
-              <div className="overflow-x-auto">
+              <div className="inset overflow-x-auto">
                 <table className="stack-table w-full text-sm">
                   <thead>
                     <tr className="text-left border-b border-line">
@@ -915,18 +909,15 @@ export default function Trade() {
                 </table>
               </div>
             )}
-          </div>
+          </Card>
 
-          <div className="bg-card rounded-lg border border-line">
-            <div className="px-5 py-3 border-b border-line">
-              <h2 className="desk-label">Working orders</h2>
-            </div>
+          <Card title="Working orders">
             {!details || details.pending_orders.length === 0 ? (
-              <p className="px-5 py-6 text-sm text-ink-faint">
+              <p className="text-sm text-ink-faint">
                 No working orders on this account.
               </p>
             ) : (
-              <div className="overflow-x-auto">
+              <div className="inset overflow-x-auto">
                 <table className="stack-table w-full text-sm">
                   <thead>
                     <tr className="text-left border-b border-line">
@@ -973,8 +964,8 @@ export default function Trade() {
                 </table>
               </div>
             )}
-          </div>
-        </section>
+          </Card>
+        </div>
       </div>
 
 

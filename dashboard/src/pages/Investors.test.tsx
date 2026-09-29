@@ -110,6 +110,8 @@ test('marks an approved withdrawal paid with a transaction id', async () => {
   render(<MemoryRouter><Investors /></MemoryRouter>)
   expect((await screen.findAllByText('Ada Investor')).length).toBeGreaterThan(0)
   await userEvent.click(screen.getByRole('tab', { name: /Withdrawals/ }))
+  expect(screen.getByRole('tab', { name: /Withdrawals/ })).toHaveAttribute('aria-selected', 'true')
+  expect(screen.getByRole('tabpanel')).toHaveAttribute('aria-labelledby', 'investors-tab-withdrawals')
   await userEvent.click(await screen.findByRole('button', { name: 'Mark withdrawal 21 paid' }))
   const paid = screen.getByRole('button', { name: 'Mark paid' })
   expect(paid).toBeDisabled()
@@ -145,4 +147,14 @@ test('the wallet card follows the server when the form is untouched', async () =
   expect(await screen.findByDisplayValue('TFirst')).toBeInTheDocument()
   await vi.advanceTimersByTimeAsync(10000)
   expect(await screen.findByDisplayValue('TSecond')).toBeInTheDocument()
+})
+
+test('shows a loading state, not an empty table, until the first load lands', async () => {
+  mockRoutes()
+  render(<MemoryRouter><Investors /></MemoryRouter>)
+  expect(screen.getByRole('heading', { level: 1, name: 'Investors' })).toBeInTheDocument()
+  expect(screen.getByRole('status', { name: 'Loading investors' })).toBeInTheDocument()
+  expect(screen.queryByText(/No investors yet/)).not.toBeInTheDocument()
+  expect((await screen.findAllByText('Ada Investor')).length).toBeGreaterThan(0)
+  expect(screen.queryByRole('status', { name: 'Loading investors' })).not.toBeInTheDocument()
 })

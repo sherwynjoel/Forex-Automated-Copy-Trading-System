@@ -143,7 +143,7 @@ test('defaults to the master account and loads its symbols', async () => {
     expect((select as HTMLSelectElement).value).toBe('100')
   })
   // Symbol picker defaults to the first cached symbol
-  const symbolBox = await screen.findByLabelText(/symbol/i)
+  const symbolBox = await screen.findByLabelText('Symbol')
   await waitFor(() => {
     expect((symbolBox as HTMLInputElement).value).toBe('EURUSD')
   })
@@ -153,7 +153,7 @@ test('symbol picker searches and selects manually', async () => {
   mockRoutes()
   renderTrade()
 
-  const symbolBox = await screen.findByLabelText(/symbol/i)
+  const symbolBox = await screen.findByLabelText('Symbol')
   await waitFor(() => {
     expect((symbolBox as HTMLInputElement).value).toBe('EURUSD')
   })
@@ -171,7 +171,7 @@ test('shows the margin estimate for the ticket', async () => {
   mockRoutes()
   renderTrade()
 
-  await screen.findByLabelText(/symbol/i)
+  await screen.findByLabelText('Symbol')
   expect(await screen.findByText(/margin required/i)).toBeInTheDocument()
   const values = await screen.findAllByText('13.75')
   expect(values.length).toBe(2)  // buy and sell
@@ -196,7 +196,7 @@ test('the trade page carries no chart', async () => {
   mockRoutes()
   const { container } = renderTrade()
 
-  await screen.findByLabelText(/symbol/i)
+  await screen.findByLabelText('Symbol')
   // The desk is the ticket and the book; the candle chart was removed.
   expect(container.querySelector('[data-chart="candles"]')).toBeNull()
   expect(screen.queryByRole('button', { name: /^H1$/ })).not.toBeInTheDocument()
@@ -208,7 +208,7 @@ test('a closed market still shows the last close as a reference price', async ()
   mockRoutes({ quote: { bid: null, ask: null } })
   renderTrade()
 
-  await screen.findByLabelText(/symbol/i)
+  await screen.findByLabelText('Symbol')
   // Sourced from the last trendbar, and labelled as indicative rather
   // than dressed up as a live price.
   expect(await screen.findByText(/Last close 1\.11000 · indicative/))
@@ -221,7 +221,7 @@ test('placing a market order POSTs /api/orgs/1/orders in one click, no dialog', 
   renderTrade()
 
   await waitFor(() => {
-    expect((screen.getByLabelText(/symbol/i) as HTMLInputElement).value).toBe('EURUSD')
+    expect((screen.getByLabelText('Symbol') as HTMLInputElement).value).toBe('EURUSD')
   })
 
   await userEvent.clear(screen.getByLabelText(/volume/i))
@@ -260,7 +260,7 @@ test('the Buy/Sell toggle carries its selected state as aria-pressed, not colour
   renderTrade()
 
   await waitFor(() => {
-    expect((screen.getByLabelText(/symbol/i) as HTMLInputElement).value).toBe('EURUSD')
+    expect((screen.getByLabelText('Symbol') as HTMLInputElement).value).toBe('EURUSD')
   })
 
   const buyButton = screen.getByRole('button', { name: /^buy/i })
@@ -280,7 +280,7 @@ test('limit order includes the limit price', async () => {
   renderTrade()
 
   await waitFor(() => {
-    expect((screen.getByLabelText(/symbol/i) as HTMLInputElement).value).toBe('EURUSD')
+    expect((screen.getByLabelText('Symbol') as HTMLInputElement).value).toBe('EURUSD')
   })
 
   await userEvent.selectOptions(screen.getByLabelText(/order type/i), 'LIMIT')
@@ -303,7 +303,7 @@ test('live bid/ask lands on the Sell/Buy buttons and in the order summary', asyn
   mockRoutes()
   renderTrade()
 
-  await screen.findByLabelText(/symbol/i)
+  await screen.findByLabelText('Symbol')
   const sellButton = await screen.findByRole('button', { name: /^sell/i })
   await waitFor(() => {
     expect(sellButton).toHaveTextContent('1.08423')
@@ -319,7 +319,7 @@ test('without a live tick yet, the last close is shown as indicative', async () 
   mockRoutes({ '/quote': { symbol: 'EURUSD', bid: null, ask: null } })
   renderTrade()
 
-  await screen.findByLabelText(/symbol/i)
+  await screen.findByLabelText('Symbol')
   // Last close from the H1 candles fixture is 1.11.
   expect(await screen.findByText(/last close/i)).toHaveTextContent('1.11000')
   expect(screen.getByText(/indicative/i)).toBeInTheDocument()
@@ -330,7 +330,7 @@ test('symbol picker is fully keyboard operable', async () => {
   mockRoutes()
   renderTrade()
 
-  const symbolBox = await screen.findByLabelText(/symbol/i)
+  const symbolBox = await screen.findByLabelText('Symbol')
   await waitFor(() => {
     expect((symbolBox as HTMLInputElement).value).toBe('EURUSD')
   })
@@ -357,7 +357,7 @@ test('order failure survives background refreshes and clears only on dismiss', a
     renderTrade()
 
     await waitFor(() => {
-      expect((screen.getByLabelText(/symbol/i) as HTMLInputElement).value).toBe('EURUSD')
+      expect((screen.getByLabelText('Symbol') as HTMLInputElement).value).toBe('EURUSD')
     })
     await userEvent.click(screen.getByRole('button', { name: /place order/i }))
 
@@ -384,7 +384,7 @@ test('account data re-polls every 5 seconds as a websocket fallback', async () =
     const fetchMock = mockRoutes()
     renderTrade()
 
-    await screen.findByLabelText(/symbol/i)
+    await screen.findByLabelText('Symbol')
     const countDetails = () =>
       fetchMock.mock.calls.filter(([u]) => String(u).includes('/details')).length
     const before = countDetails()
@@ -415,7 +415,7 @@ test('an account with no symbols yet says so instead of "no matches"', async () 
   mockRoutes({ '/symbols': [] })
   renderTrade()
 
-  const symbolBox = await screen.findByLabelText(/symbol/i)
+  const symbolBox = await screen.findByLabelText('Symbol')
   await userEvent.click(symbolBox)
   expect(await screen.findByText(/no symbols on this account yet/i)).toBeInTheDocument()
 })
@@ -427,7 +427,7 @@ test('shows a not-copied note when a slave account is selected', async () => {
 
   const select = await screen.findByLabelText(/account/i)
   await waitFor(() => {
-    expect((screen.getByLabelText(/symbol/i) as HTMLInputElement).value).toBe('EURUSD')
+    expect((screen.getByLabelText('Symbol') as HTMLInputElement).value).toBe('EURUSD')
   })
   await userEvent.selectOptions(select, '101')
 
@@ -510,7 +510,7 @@ test('placing an order refreshes the book fast, not after a fixed 1.5s', async (
     const fetchMock = mockRoutes()
     renderTrade()
     await waitFor(() => {
-      expect((screen.getByLabelText(/symbol/i) as HTMLInputElement).value).toBe('EURUSD')
+      expect((screen.getByLabelText('Symbol') as HTMLInputElement).value).toBe('EURUSD')
     })
     const countDetails = () =>
       fetchMock.mock.calls.filter(([u]) => String(u).includes('/details')).length
@@ -533,7 +533,7 @@ test('closing a position marks its row instantly', async () => {
   mockRoutes()
   renderTrade()
   await waitFor(() => {
-    expect((screen.getByLabelText(/symbol/i) as HTMLInputElement).value).toBe('EURUSD')
+    expect((screen.getByLabelText('Symbol') as HTMLInputElement).value).toBe('EURUSD')
   })
 
   await userEvent.click(screen.getByRole('button', { name: /^close$/i }))
@@ -549,7 +549,7 @@ test('a broker order rejection streams into the order-error banner', async () =>
   setRole('admin')
   mockRoutes()
   renderTrade()
-  await screen.findByLabelText(/symbol/i)
+  await screen.findByLabelText('Symbol')
 
   const ws = fakeSockets[fakeSockets.length - 1]
   act(() => {
@@ -569,7 +569,7 @@ test('a quotes tick moves the ticket prices and position marks in place', async 
   setRole('admin')
   const fetchMock = mockRoutes()
   renderTrade()
-  await screen.findByLabelText(/symbol/i)
+  await screen.findByLabelText('Symbol')
   await screen.findByText('+4.20') // the open position row rendered
 
   const callsBefore = fetchMock.mock.calls.length
@@ -606,7 +606,7 @@ test('a pinned default symbol wins over the first cached symbol', async () => {
   mockRoutes()
   renderTrade()
 
-  const symbolBox = await screen.findByLabelText(/symbol/i)
+  const symbolBox = await screen.findByLabelText('Symbol')
   await waitFor(() => {
     expect((symbolBox as HTMLInputElement).value).toBe('GBPUSD')
   })
@@ -617,7 +617,7 @@ test('set as default pins the current symbol; unpin clears it', async () => {
   mockRoutes()
   renderTrade()
 
-  const symbolBox = await screen.findByLabelText(/symbol/i)
+  const symbolBox = await screen.findByLabelText('Symbol')
   await waitFor(() => {
     expect((symbolBox as HTMLInputElement).value).toBe('EURUSD')
   })
@@ -626,10 +626,10 @@ test('set as default pins the current symbol; unpin clears it', async () => {
   expect(localStorage.getItem('mf.defaultSymbol.1.100')).toBe('EURUSD')
 
   // The pin reflects its state and can be cleared.
-  const pinned = screen.getByRole('button', { name: /default symbol — click to clear/i })
+  const pinned = screen.getByRole('button', { name: 'Set as default symbol', pressed: true })
   await userEvent.click(pinned)
   expect(localStorage.getItem('mf.defaultSymbol.1.100')).toBeNull()
-  expect(screen.getByRole('button', { name: /set as default/i })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Set as default symbol', pressed: false })).toBeInTheDocument()
 })
 
 test('open positions on the Trade page carry live P&L', async () => {
@@ -638,7 +638,7 @@ test('open positions on the Trade page carry live P&L', async () => {
   renderTrade()
 
   await waitFor(() => {
-    expect((screen.getByLabelText(/symbol/i) as HTMLInputElement).value).toBe('EURUSD')
+    expect((screen.getByLabelText('Symbol') as HTMLInputElement).value).toBe('EURUSD')
   })
 
   // The row shows its own live P&L, joined from the state snapshot.
@@ -658,7 +658,7 @@ test('amount mode sends a converted PRICE, never the raw money figure', async ()
   renderTrade()
 
   await waitFor(() => {
-    expect((screen.getByLabelText(/symbol/i) as HTMLInputElement).value).toBe('EURUSD')
+    expect((screen.getByLabelText('Symbol') as HTMLInputElement).value).toBe('EURUSD')
   })
 
   await userEvent.click(screen.getByRole('button', { name: /^amount/i }))
@@ -686,7 +686,7 @@ test('amount mode shows the price it will exit at, rather than converting silent
   renderTrade()
 
   await waitFor(() => {
-    expect((screen.getByLabelText(/symbol/i) as HTMLInputElement).value).toBe('EURUSD')
+    expect((screen.getByLabelText('Symbol') as HTMLInputElement).value).toBe('EURUSD')
   })
 
   await userEvent.click(screen.getByRole('button', { name: /^amount/i }))
@@ -705,7 +705,7 @@ test('price mode: what you type is what is sent', async () => {
   renderTrade()
 
   await waitFor(() => {
-    expect((screen.getByLabelText(/symbol/i) as HTMLInputElement).value).toBe('EURUSD')
+    expect((screen.getByLabelText('Symbol') as HTMLInputElement).value).toBe('EURUSD')
   })
 
   // Amount is the default; switch to Price explicitly rather than lean on
@@ -734,6 +734,6 @@ test('an MT5 account is labelled by its MT5 login in the account picker', async 
   renderTrade()
 
   const select = await screen.findByLabelText(/account/i)
-  expect(within(select).getByRole('option', { name: 'VPS desk · MT5 · login 555 · Live (slave)' }))
+  expect(within(select).getByRole('option', { name: 'VPS desk · MT5 · login 555 · Live (follower)' }))
     .toBeInTheDocument()
 })

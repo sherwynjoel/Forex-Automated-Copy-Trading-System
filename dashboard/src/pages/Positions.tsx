@@ -8,6 +8,9 @@ import { can } from '../lib/roles'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
 import ConfirmDialog from '../components/ConfirmDialog'
 import Button from '../components/Button'
+import Card from '../components/Card'
+import Loading from '../components/Loading'
+import PageHeader from '../components/PageHeader'
 import Input from '../components/Input'
 import { actionBurst } from '../lib/refresh'
 import { mergeTicksIntoApiState, TicksPayload } from '../lib/ticks'
@@ -261,52 +264,52 @@ export default function Positions() {
     }
   }
 
+  const header = (
+    <PageHeader
+      title="Positions"
+      subtitle="The master's open book and how each follower copy tracks it. Close or trim positions from the Trade page."
+    />
+  )
+
   if (loading && !state) {
-    return <div className="p-6">Loading positions...</div>
+    return (
+      <>
+        {header}
+        <Loading lines={6} label="Loading positions" />
+      </>
+    )
   }
 
   if (error && !state) {
-    return <div className="p-6"><Banner kind="error">{error}</Banner></div>
+    return <>{header}<Banner kind="error">{error}</Banner></>
   }
 
   if (!state) {
-    return <div className="p-6">No data available</div>
+    return <>{header}<p className="text-ink-faint">No data available</p></>
   }
 
   return (
     <div className="space-y-8 max-w-6xl">
-      <header>
-        <h1 className="page-title">Positions</h1>
-        <p className="text-sm text-ink-soft mt-1">
-          The master's open book and how each slave copy tracks it. Close or
-          trim positions from the Trade page.
-        </p>
-      </header>
+      {header}
 
-      {error && (
-        <div className="p-4 bg-loss-wash border border-loss/30 rounded text-loss-deep">
-          {error}
-        </div>
-      )}
+      {error && <Banner kind="error">{error}</Banner>}
 
       {brokerError && (
         <Banner kind="error" onDismiss={() => setBrokerError(null)}>{brokerError}</Banner>
       )}
 
-      {/* Master Positions Section */}
-      <section>
-        <h2 className="font-display text-xl text-ink mb-4">Master Positions</h2>
+      <Card title="Master positions">
         {state.master_positions.length === 0 ? (
           <p className="text-ink-faint">No open master positions</p>
         ) : (
-          <div className="overflow-x-auto bg-card border border-line rounded-lg">
+          <div className="inset overflow-x-auto">
             <table className="stack-table w-full border-collapse">
               <thead>
                 <tr>
                   <th className="desk-label p-3 text-left border-b border-line">Symbol</th>
                   <th className="desk-label p-3 text-left border-b border-line">Side</th>
                   <th className="desk-label p-3 text-right border-b border-line">Volume (units)</th>
-                  <th className="desk-label p-3 text-right border-b border-line">Entry Price</th>
+                  <th className="desk-label p-3 text-right border-b border-line">Entry price</th>
                   <th className="desk-label p-3 text-right border-b border-line">Current</th>
                   <th className="desk-label p-3 text-right border-b border-line whitespace-nowrap">SL / TP</th>
                   <th className="desk-label p-3 text-right border-b border-line">P&L</th>
@@ -337,15 +340,13 @@ export default function Positions() {
             </table>
           </div>
         )}
-      </section>
+      </Card>
 
-      {/* Pending Orders Section */}
-      <section>
-        <h2 className="font-display text-xl text-ink mb-4">Pending Orders</h2>
+      <Card title="Pending orders">
         {state.pending_orders.length === 0 ? (
           <p className="text-ink-faint">No pending orders</p>
         ) : (
-          <div className="overflow-x-auto bg-card border border-line rounded-lg">
+          <div className="inset overflow-x-auto">
             <table className="stack-table w-full border-collapse">
               <thead>
                 <tr>
@@ -368,7 +369,7 @@ export default function Positions() {
             </table>
           </div>
         )}
-      </section>
+      </Card>
 
       <ConfirmDialog
         open={editing != null}
@@ -381,7 +382,7 @@ export default function Positions() {
       >
         <p>
           Applies to the master position and, through the normal copy path,
-          to every slave copy of it.
+          to every follower copy of it.
         </p>
         <div className="flex items-center justify-between gap-2">
           <span className="desk-label">Set by</span>
@@ -470,9 +471,7 @@ export default function Positions() {
         )}
       </ConfirmDialog>
 
-      {/* Drift/Orphan Section */}
-      <section>
-        <h2 className="font-display text-xl text-ink mb-4">Drift Items</h2>
+      <Card title="Drift items">
         {state.drift.length === 0 ? (
           <p className="text-ink-faint">No drift items</p>
         ) : (
@@ -490,7 +489,7 @@ export default function Positions() {
             ))}
           </div>
         )}
-      </section>
+      </Card>
 
       <ConfirmDialog
         open={closingOrphanId != null}
@@ -526,7 +525,7 @@ function PositionRow({
         <td data-label="Symbol" className="num p-3">{position.symbol || `ID:${position.symbol_id}`}</td>
         <td data-label="Side" className="num p-3">{position.side}</td>
         <td data-label="Volume (units)" className="num p-3 text-right">{position.volume_lots || position.volume}</td>
-        <td data-label="Entry Price" className="num p-3 text-right">{position.price.toFixed(5)}</td>
+        <td data-label="Entry price" className="num p-3 text-right">{position.price.toFixed(5)}</td>
         <td data-label="Current" className={`num p-3 text-right font-medium ${
           position.current_price != null ? 'text-brand' : 'text-ink-faint'
         }`}>
@@ -554,13 +553,13 @@ function PositionRow({
         <tr className="bg-paper border-b border-line">
           <td colSpan={8} className="p-4">
             <div className="ml-4 space-y-2">
-              <h4 className="desk-label mb-2">Slave Copies</h4>
+              <h3 className="desk-label mb-2">Follower copies</h3>
               <table className="stack-table w-full text-sm">
                 <thead>
                   <tr>
                     <th className="desk-label p-2 text-left border-b border-line">Account</th>
                     <th className="desk-label p-2 text-left border-b border-line">Status</th>
-                    <th className="desk-label p-2 text-right border-b border-line">Fill Price</th>
+                    <th className="desk-label p-2 text-right border-b border-line">Fill price</th>
                     <th className="desk-label p-2 text-right border-b border-line whitespace-nowrap">SL / TP</th>
                     <th className="desk-label p-2 text-right border-b border-line">Current</th>
                     <th className="desk-label p-2 text-right border-b border-line">Live P&L</th>
@@ -611,7 +610,7 @@ function OrderRow({
         <tr className="bg-paper border-b border-line">
           <td colSpan={6} className="p-4">
             <div className="ml-4 space-y-2">
-              <h4 className="desk-label mb-2">Slave Copies</h4>
+              <h3 className="desk-label mb-2">Follower copies</h3>
               <table className="stack-table w-full text-sm">
                 <thead>
                   <tr>
@@ -655,7 +654,7 @@ function CopyRow({
     <tr className="border-b border-line last:border-0">
       <td data-label="Account" className="num p-2">{copy.slave_account_id}</td>
       <td data-label="Status" className="num p-2">{copy.status}</td>
-      <td data-label="Fill Price" className="num p-2 text-right">{fillPriceDisplay}</td>
+      <td data-label="Fill price" className="num p-2 text-right">{fillPriceDisplay}</td>
       {/* A copy can be live without the protection its master carries --
           say so rather than leaving the operator to assume it followed. */}
       <td data-label="SL / TP" className={`num p-2 text-right whitespace-nowrap ${
@@ -695,13 +694,15 @@ function DriftItemRow({
   onDismiss: () => void
 }) {
   const isOrphanSlave = drift.kind === 'orphan_slave_position'
+  // The API's kind names the role by its wire value; the desk says follower.
   const kindDisplay = drift.kind
     .split('_')
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .map((word) => (word === 'slave' ? 'follower' : word))
     .join(' ')
+    .replace(/^./, (c) => c.toUpperCase())
 
   return (
-    <div className="border border-line rounded-lg p-4 bg-card">
+    <div className="inset p-4">
       <div className="mb-3">
         <p className="font-semibold">{kindDisplay}</p>
         <p className="text-sm text-ink-soft">{drift.detail}</p>
@@ -709,7 +710,7 @@ function DriftItemRow({
       <div className="flex gap-2">
         {isOrphanSlave && canClose && (
           <Button tone="loss" onClick={onCloseOrphan}>
-            Close Orphan
+            Close orphan
           </Button>
         )}
         {isOrphanSlave && canRemedy && (

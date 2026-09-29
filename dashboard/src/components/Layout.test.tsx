@@ -690,10 +690,10 @@ test('the strip kill switch confirms, then PUTs copying_enabled false', async ()
   const fetchMock = mockRoutes()
   renderLayout()
 
-  await userEvent.click(await screen.findByRole('button', { name: /stop copying/i }))
+  await userEvent.click(await screen.findByRole('button', { name: 'Stop copying' }))
   const dialog = await screen.findByRole('dialog')
   expect(dialog).toHaveTextContent(/stop copying\?/i)
-  await userEvent.click(within(dialog).getByRole('button', { name: /^stop copying$/i }))
+  await userEvent.click(within(dialog).getByRole('button', { name: 'Stop copying' }))
 
   await waitFor(() => {
     const put = settingsPuts(fetchMock)[0]
@@ -707,7 +707,7 @@ test('the strip kill switch does not PUT if the dialog is cancelled', async () =
   const fetchMock = mockRoutes()
   renderLayout()
 
-  await userEvent.click(await screen.findByRole('button', { name: /stop copying/i }))
+  await userEvent.click(await screen.findByRole('button', { name: 'Stop copying' }))
   const dialog = await screen.findByRole('dialog')
   await userEvent.click(within(dialog).getByRole('button', { name: /cancel/i }))
 
@@ -720,10 +720,10 @@ test('the strip kill switch resume: confirming PUTs copying_enabled true', async
   const fetchMock = mockRoutes({ settings: { copying_enabled: false, dry_run: false, shards: 1 } })
   renderLayout()
 
-  await userEvent.click(await screen.findByRole('button', { name: /resume copying/i }))
+  await userEvent.click(await screen.findByRole('button', { name: 'Resume copying' }))
   const dialog = await screen.findByRole('dialog')
   expect(dialog).toHaveTextContent(/resume copying\?/i)
-  await userEvent.click(within(dialog).getByRole('button', { name: /^resume copying$/i }))
+  await userEvent.click(within(dialog).getByRole('button', { name: 'Resume copying' }))
 
   await waitFor(() => {
     const put = settingsPuts(fetchMock)[0]
@@ -737,7 +737,7 @@ test('the strip kill switch resume: cancelling the dialog sends nothing', async 
   const fetchMock = mockRoutes({ settings: { copying_enabled: false, dry_run: false, shards: 1 } })
   renderLayout()
 
-  await userEvent.click(await screen.findByRole('button', { name: /resume copying/i }))
+  await userEvent.click(await screen.findByRole('button', { name: 'Resume copying' }))
   const dialog = await screen.findByRole('dialog')
   await userEvent.click(within(dialog).getByRole('button', { name: /cancel/i }))
 
@@ -837,7 +837,7 @@ test('the strip kill switch is visible for an admin (control)', async () => {
   mockRoutes()
   renderLayout()
 
-  expect(await screen.findByRole('button', { name: /stop copying/i })).toBeInTheDocument()
+  expect(await screen.findByRole('button', { name: 'Stop copying' })).toBeInTheDocument()
   expect(screen.getByTestId('dry-run-toggle')).toBeInTheDocument()
 })
 
@@ -865,9 +865,9 @@ test('stopping copying from the strip updates Overview without a reload', async 
   await waitFor(() =>
     expect(screen.getByTestId('attention-card')).toHaveTextContent('All clear — copying live'))
 
-  await userEvent.click(await screen.findByRole('button', { name: /stop copying/i }))
+  await userEvent.click(await screen.findByRole('button', { name: 'Stop copying' }))
   const dialog = await screen.findByRole('dialog')
-  await userEvent.click(within(dialog).getByRole('button', { name: /^stop copying$/i }))
+  await userEvent.click(within(dialog).getByRole('button', { name: 'Stop copying' }))
 
   await waitFor(() =>
     expect(screen.getByTestId('attention-card')).toHaveTextContent('All clear — copying paused'))

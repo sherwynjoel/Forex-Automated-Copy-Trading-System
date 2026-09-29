@@ -8,6 +8,10 @@ import {
 } from '../components/charts'
 import StatTile from '../components/StatTile'
 import Select from '../components/Select'
+import Banner from '../components/Banner'
+import Card from '../components/Card'
+import Loading from '../components/Loading'
+import PageHeader from '../components/PageHeader'
 import { money, signed } from '../lib/format'
 import { cumulativeSeries, drawdownSeries, dailyPnl } from '../lib/perf'
 
@@ -106,14 +110,10 @@ export default function Performance() {
 
   return (
     <div className="space-y-6 max-w-6xl">
-      <header>
-        <h1 className="page-title">Performance</h1>
-        <p className="text-sm text-ink-soft mt-1">
-          Realized results from the broker's own deal history — closed trades
-          only; open positions live on Overview.
-        </p>
-      </header>
-
+      <PageHeader
+        title="Performance"
+        subtitle="Realized results from the broker's own deal history — closed trades only; open positions live on Overview."
+      >
       <div className="flex flex-wrap items-end gap-4">
         <div>
           <label htmlFor="perf-account" className="desk-label block mb-1">Account</label>
@@ -153,22 +153,19 @@ export default function Performance() {
           </p>
         )}
       </div>
+      </PageHeader>
 
-      {error && (
-        <div role="alert" className="rounded border border-loss/30 bg-loss-wash px-4 py-3 text-sm text-loss-deep">
-          {error}
-        </div>
-      )}
+      {error && <Banner kind="error">{error}</Banner>}
 
       {loading && !a ? (
-        <p className="text-sm text-ink-faint py-8">Crunching deal history…</p>
+        <Loading lines={6} label="Crunching deal history" />
       ) : !a ? null : a.closed_trades === 0 ? (
-        <div className="rounded-lg border border-line bg-card px-6 py-12 text-center">
+        <Card className="text-center">
           <p className="text-ink-soft">No closed trades in this range.</p>
           <p className="text-sm text-ink-faint mt-1">
             Widen the range, or pick another account.
           </p>
-        </div>
+        </Card>
       ) : (
         <>
           {/* Headline stats */}
@@ -222,8 +219,7 @@ export default function Performance() {
               min-width:auto would lock the whole track at that width --
               off the right edge of a phone. */}
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4 *:min-w-0">
-            <div className="rounded-lg border border-line bg-card p-4 flex flex-col">
-              <h3 className="desk-label mb-2">MirrorFleet score</h3>
+            <Card title="MirrorFleet score" className="flex flex-col">
               <MirrorScore
                 large
                 winRate={a.win_rate}
@@ -231,9 +227,8 @@ export default function Performance() {
                 avgLoss={a.avg_loss}
                 profitFactor={a.profit_factor}
               />
-            </div>
-            <div className="rounded-lg border border-line bg-card p-4 flex flex-col">
-              <h3 className="desk-label mb-2">Cumulative P&L</h3>
+            </Card>
+            <Card title="Cumulative P&L" className="flex flex-col">
               <div className="my-auto">
                 <PerfLine
                   points={cumSeries}
@@ -241,9 +236,8 @@ export default function Performance() {
                   chart="cumulative-pnl"
                 />
               </div>
-            </div>
-            <div className="rounded-lg border border-line bg-card p-4 flex flex-col">
-              <h3 className="desk-label mb-2">Drawdown</h3>
+            </Card>
+            <Card title="Drawdown" className="flex flex-col">
               <div className="my-auto">
                 {ddSeries.some((pt) => pt.v < 0) ? (
                   <PerfLine
@@ -264,9 +258,8 @@ export default function Performance() {
                   </span>
                 </div>
               </div>
-            </div>
-            <div className="rounded-lg border border-line bg-card p-4 flex flex-col">
-              <h3 className="desk-label mb-2">P&L by day</h3>
+            </Card>
+            <Card title="P&L by day" className="flex flex-col">
               <div className="my-auto">
                 <PerfBars
                   bars={dailySeries}
@@ -274,12 +267,11 @@ export default function Performance() {
                   chart="daily-pnl"
                 />
               </div>
-            </div>
+            </Card>
           </div>
 
           {/* Equity curve */}
-          <section className="rounded-lg border border-line bg-card p-5">
-            <h2 className="desk-label mb-3">Balance after each closed trade</h2>
+          <Card title="Balance after each closed trade">
             {a.equity_curve.length > 1 ? (
               <EquityCurve points={a.equity_curve} />
             ) : (
@@ -287,22 +279,20 @@ export default function Performance() {
                 Not enough closed trades yet to draw a curve.
               </p>
             )}
-          </section>
+          </Card>
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 *:min-w-0">
             {/* Weekly P&L */}
-            <section className="rounded-lg border border-line bg-card p-5">
-              <h2 className="desk-label mb-3">Weekly gross P&L</h2>
+            <Card title="Weekly gross P&L">
               {a.weekly.length > 0 ? (
                 <PnlBars buckets={a.weekly} />
               ) : (
                 <p className="text-sm text-ink-faint py-6">No weekly data.</p>
               )}
-            </section>
+            </Card>
 
             {/* Per-symbol */}
-            <section className="rounded-lg border border-line bg-card">
-              <h2 className="desk-label px-5 pt-5 pb-3">By symbol</h2>
+            <Card title="By symbol" inset>
               <table className="stack-table w-full text-sm">
                 <thead>
                   <tr className="text-left border-b border-line">
@@ -325,7 +315,7 @@ export default function Performance() {
                   ))}
                 </tbody>
               </table>
-            </section>
+            </Card>
           </div>
 
           <p className="text-xs text-ink-faint">

@@ -10,6 +10,8 @@ import Button from '../components/Button'
 import Input from '../components/Input'
 import Select from '../components/Select'
 import AccountSecurity from '../components/AccountSecurity'
+import Card from '../components/Card'
+import PageHeader from '../components/PageHeader'
 
 export default function Members() {
   const { orgId, role, me, org, refreshMe } = useOrg()
@@ -87,10 +89,11 @@ export default function Members() {
 
   return (
     <div className="space-y-8">
-      <h1 className="page-title">Members</h1>
+      <PageHeader title="Members" subtitle={org.name} />
       {error && (
         <Banner kind="error">{error}</Banner>
       )}
+      <Card title="People" inset>
       <table className="stack-table w-full text-sm">
         <thead>
           <tr className="text-left desk-label border-b border-line">
@@ -130,10 +133,11 @@ export default function Members() {
           ))}
         </tbody>
       </table>
+      </Card>
 
       {can(role, 'control') && (
+        <Card title="Invites">
         <div className="space-y-4">
-          <h3 className="text-lg font-semibold text-ink">Invites</h3>
           <form onSubmit={createInvite} className="flex items-center gap-3">
             <Select
               aria-label="Invite role"
@@ -186,13 +190,14 @@ export default function Members() {
             ))}
           </ul>
         </div>
+        </Card>
       )}
 
       <AccountSecurity />
 
       {can(role, 'manage_members') && (
-        <div className="space-y-4 border-t border-line pt-6">
-          <h3 className="text-lg font-semibold text-ink">Organization</h3>
+        <Card title="Organization">
+        <div className="space-y-4">
           <form
             onSubmit={async (e) => {
               e.preventDefault()
@@ -247,6 +252,7 @@ export default function Members() {
             </p>
           </ConfirmDialog>
         </div>
+        </Card>
       )}
     </div>
   )
