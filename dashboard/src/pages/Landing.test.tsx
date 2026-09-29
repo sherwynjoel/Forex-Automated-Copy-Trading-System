@@ -1,12 +1,19 @@
 // src/pages/Landing.test.tsx
-import { render, screen } from '@testing-library/react'
+import { existsSync, readFileSync } from 'node:fs'
+import { render, screen, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { expect, test } from 'vitest'
-import Landing from './Landing'
+import Landing, { LANDING_FACTS, PAGE_TITLE } from './Landing'
 
-test('the front page offers sign in and account creation and names its sections', () => {
-  render(<MemoryRouter><Landing /></MemoryRouter>)
-  expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent(/trade once/i)
+function renderLanding() {
+  return render(<MemoryRouter><Landing /></MemoryRouter>)
+}
+
+test('the front page has one h1, offers sign in and account creation, and names its sections', () => {
+  renderLanding()
+  const h1s = screen.getAllByRole('heading', { level: 1 })
+  expect(h1s).toHaveLength(1)
+  expect(h1s[0]).toHaveTextContent(/trade once/i)
 
   const signIns = screen.getAllByRole('link', { name: 'Sign in' })
   expect(signIns.length).toBeGreaterThan(0)
@@ -16,14 +23,111 @@ test('the front page offers sign in and account creation and names its sections'
   expect(creates.length).toBeGreaterThan(1)
   for (const a of creates) expect(a).toHaveAttribute('href', '/register')
 
-  for (const name of ['Platform', 'How it works', 'For investors', 'FAQ']) {
-    expect(screen.getByRole('heading', { name })).toBeInTheDocument()
+  for (const name of ['One desk for every account', 'How it works', 'For investors', 'Questions']) {
+    expect(screen.getByRole('heading', { level: 2, name })).toBeInTheDocument()
   }
   expect(screen.getByText(/high level of risk/i)).toBeInTheDocument()
 })
 
+test('the hero shows the product inside a glass frame', () => {
+  renderLanding()
+  const shot = screen.getByRole('img', { name: /MirrorFleet Overview/i })
+  const frame = shot.closest('figure')
+  expect(frame).not.toBeNull()
+  expect(frame).toHaveClass('glass')
+})
+
+test('three asymmetric panels each show a piece of the product, marked as example data', () => {
+  renderLanding()
+  const fleet = screen.getByRole('heading', { level: 3, name: 'Every follower on one screen' }).closest('article')
+  const log = screen.getByRole('heading', { level: 3, name: 'Every fill, timestamped' }).closest('article')
+  const risk = screen.getByRole('heading', { level: 3, name: 'Limits before the broker' }).closest('article')
+  expect(fleet).not.toBeNull()
+  expect(log).not.toBeNull()
+  expect(risk).not.toBeNull()
+
+  // One wide panel, two narrow ones.
+  expect(fleet).toHaveClass('md:col-span-2')
+  expect(log).not.toHaveClass('md:col-span-2')
+  expect(risk).not.toHaveClass('md:col-span-2')
+
+  // Real markup, not icons: follower cards with status words and equity,
+  // timestamped log lines, a rule table.
+  expect(within(fleet!).getByText('Offline')).toBeInTheDocument()
+  expect(within(fleet!).getAllByText('Copying').length).toBeGreaterThan(1)
+  expect(within(fleet!).getAllByText(/^[0-9,]+\.[0-9]{2}$/).length).toBeGreaterThan(3)
+  expect(log!.querySelectorAll('time').length).toBeGreaterThan(3)
+  expect(within(risk!).getByRole('table')).toBeInTheDocument()
+
+  expect(screen.getByText(/example data, not trading results/i)).toBeInTheDocument()
+})
+
+test('how it works is prose, with no numbered markers', () => {
+  renderLanding()
+  const how = document.getElementById('how')
+  expect(how).not.toBeNull()
+  expect(how!.querySelector('ol')).toBeNull()
+  const prose = how!.querySelector('p')
+  expect(prose?.textContent).toMatch(/connect.*add.*trade once/is)
+})
+
+test('the FAQ is a disclosure list', () => {
+  renderLanding()
+  const items = document.querySelectorAll('#faq details')
+  expect(items.length).toBe(6)
+  items.forEach((d) => {
+    expect(d.querySelector('summary')).not.toBeNull()
+    expect(d).not.toHaveAttribute('open')
+  })
+})
+
+test('no eyebrow kickers: the small-caps label only appears on table headers', () => {
+  renderLanding()
+  expect(screen.queryByText(/copy trading desk/i)).toBeNull()
+  const labels = Array.from(document.querySelectorAll('.desk-label'))
+  for (const el of labels) expect(el.tagName).toBe('TH')
+})
+
+test('the footer carries the risk notice, the support email and the address', () => {
+  renderLanding()
+  const footer = screen.getByRole('contentinfo')
+  const mail = within(footer).getByRole('link', { name: LANDING_FACTS.supportEmail })
+  expect(mail).toHaveAttribute('href', 'mailto:support@mirrorfleet.com')
+  expect(within(footer).getByText(/Chennai, India/)).toBeInTheDocument()
+  expect(within(footer).getByText(/high level of risk/i)).toBeInTheDocument()
+})
+
+test('the page sets its own title and hands the old one back on unmount', () => {
+  document.title = 'Before'
+  const { unmount } = renderLanding()
+  expect(document.title).toBe('MirrorFleet — copy trading for cTrader and MT5')
+  expect(PAGE_TITLE.length).toBeLessThan(60)
+  unmount()
+  expect(document.title).toBe('Before')
+})
+
+test('index.html describes the product in one honest sentence', () => {
+  const html = readFileSync('index.html', 'utf8')
+  const m = html.match(/<meta name="description" content="([^"]+)" \/>/)
+  expect(m).not.toBeNull()
+  const description = m![1]
+  expect(description.length).toBeGreaterThan(50)
+  expect(description.length).toBeLessThanOrEqual(160)
+  expect(description).toMatch(/cTrader/)
+  expect(description).toMatch(/MetaTrader 5/)
+  expect(description).not.toMatch(/regulated|licensed|award|guarantee|best|#1/i)
+})
+
+test('the landing sources use tokens, never hard-coded colours', () => {
+  const files = ['src/pages/Landing.tsx', 'src/pages/landing/HeroPreview.tsx'].filter((f) => existsSync(f))
+  for (const f of files) {
+    const src = readFileSync(f, 'utf8')
+    expect(src).not.toMatch(/#[0-9a-fA-F]{6}\b|#[0-9a-fA-F]{3}\b|rgba?\(|hsla?\(/)
+  }
+})
+
 test('the page makes no claims it cannot back', () => {
-  render(<MemoryRouter><Landing /></MemoryRouter>)
+  renderLanding()
   const text = document.body.textContent ?? ''
-  expect(text).not.toMatch(/regulated|licensed|award|[0-9,]+\+? (clients|traders|users)/i)
+  expect(text).not.toMatch(/regulated|licensed|award|guarantee|risk-free|[0-9,]+\+? (clients|traders|users)/i)
 })
