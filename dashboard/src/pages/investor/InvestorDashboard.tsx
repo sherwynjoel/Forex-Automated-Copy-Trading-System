@@ -71,23 +71,48 @@ function dayLabel(ms: number): string {
 function WalletTiles({ summary, unit }: { summary: InvestorSummary; unit: string }) {
   const [hidden] = useHiddenBalances()
   const tile = (v: number) => (hidden ? '••••' : money(v, unit))
+  // A sparkline still shows the SHAPE of a figure (a spike three days ago)
+  // even once the number reads "••••", so it is dropped along with the
+  // figure -- not just recolored -- whenever balances are hidden.
+  const spark = (values: number[], label: string) =>
+    hidden ? '••••' : <Sparkline values={values} label={label} />
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
       <StatTile label="My wallet" value={tile(summary.wallets.main.available)} tone="brand"
-                sub={<Sparkline values={last7(summary.cash_flow, (f) => f.deposits - f.withdrawals)}
-                                label="Net flow, last 7 days" />} />
+                sub={spark(last7(summary.cash_flow, (f) => f.deposits - f.withdrawals), 'Net flow, last 7 days')} />
       <StatTile label="Total deposited" value={tile(summary.totals.deposited)}
-                sub={<Sparkline values={last7(summary.cash_flow, (f) => f.deposits)}
-                                label="Deposits, last 7 days" />} />
+                sub={spark(last7(summary.cash_flow, (f) => f.deposits), 'Deposits, last 7 days')} />
       <StatTile label="Total withdrawn" value={tile(summary.totals.withdrawn)}
-                sub={<Sparkline values={last7(summary.cash_flow, (f) => f.withdrawals)}
-                                label="Withdrawals, last 7 days" />} />
+                sub={spark(last7(summary.cash_flow, (f) => f.withdrawals), 'Withdrawals, last 7 days')} />
       {/* cash_flow carries no transfer series, so this tile says the split in words. */}
       <StatTile label="Total transferred"
                 value={tile(summary.totals.transferred_in + summary.totals.transferred_out)}
                 sub={hidden ? '••••'
                   : `${money(summary.totals.transferred_out, unit)} to trading · ${money(summary.totals.transferred_in, unit)} back`} />
     </div>
+  )
+}
+
+/**
+ * The cash-flow bars. Reads the hide-balances flag itself, for the same
+ * reason WalletTiles does (a broadcast must only re-render this slice, not
+ * the page, which calls useOrg()) -- and because the bars are a chart of
+ * money values, they are dropped entirely while hidden, replaced by a
+ * neutral placeholder; the tabs and the totals strip around it stay.
+ */
+function CashFlowChart({ buckets }: { buckets: { week_start: number; gross_pnl: number; trades: number }[] }) {
+  const [hidden] = useHiddenBalances()
+  if (hidden) {
+    return <p className="py-8 text-center text-xs text-ink-faint">Chart hidden while balances are hidden</p>
+  }
+  if (buckets.length === 0) {
+    return <p className="py-8 text-center text-xs text-ink-faint">No deposits or withdrawals in this range</p>
+  }
+  // Deposits rise above the baseline, withdrawals fall below it; a day with
+  // both shows its net, the strip below gives the split.
+  return (
+    <PnlBars buckets={buckets} height={160} label="Deposits and withdrawals by day"
+             bucketLabel={dayLabel} countNoun="movement" />
   )
 }
 
@@ -243,14 +268,7 @@ export default function InvestorDashboard() {
                                onChange={(k) => setRange(k as RangeKey)} label="Cash flow range" idBase="cashflow" />}>
             <div id="cashflow-panel" role="tabpanel" aria-labelledby={`cashflow-tab-${range}`} className="space-y-3">
               <div className="inset p-3">
-                {buckets.length === 0 ? (
-                  <p className="py-8 text-center text-xs text-ink-faint">No deposits or withdrawals in this range</p>
-                ) : (
-                  // Deposits rise above the baseline, withdrawals fall below it; a
-                  // day with both shows its net, the strip below gives the split.
-                  <PnlBars buckets={buckets} height={160} label="Deposits and withdrawals by day"
-                           bucketLabel={dayLabel} countNoun="movement" />
-                )}
+                <CashFlowChart buckets={buckets} />
               </div>
               <dl className="inset p-3 grid grid-cols-3 gap-3 text-sm">
                 <div><dt className="desk-label">Deposits</dt>

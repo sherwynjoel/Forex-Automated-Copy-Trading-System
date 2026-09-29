@@ -133,6 +133,27 @@ test('Hide balances masks every figure and flips to Show balances', async () => 
   expect(screen.getByRole('button', { name: 'Show balances' })).toHaveAttribute('aria-pressed', 'true')
 })
 
+test('Hide balances also removes every chart -- a sparkline or the cash-flow bars can leak shape and timing even with the figures masked', async () => {
+  mockRoutes(linked)
+  render(<MemoryRouter><InvestorDashboard /></MemoryRouter>)
+  // Shown: the three sparklines and the cash-flow bars are all present.
+  expect(await screen.findByRole('img', { name: 'Net flow, last 7 days' })).toBeInTheDocument()
+  expect(screen.getByRole('img', { name: 'Deposits, last 7 days' })).toBeInTheDocument()
+  expect(screen.getByRole('img', { name: 'Withdrawals, last 7 days' })).toBeInTheDocument()
+  expect(screen.getByRole('img', { name: 'Deposits and withdrawals by day' })).toBeInTheDocument()
+
+  await userEvent.click(screen.getByRole('button', { name: 'Hide balances' }))
+
+  expect(screen.queryByRole('img', { name: 'Net flow, last 7 days' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('img', { name: 'Deposits, last 7 days' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('img', { name: 'Withdrawals, last 7 days' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('img', { name: 'Deposits and withdrawals by day' })).not.toBeInTheDocument()
+  expect(screen.getByText('Chart hidden while balances are hidden')).toBeInTheDocument()
+  // The tabs and the masked totals strip stay put.
+  expect(screen.getByRole('tab', { name: '30D' })).toBeInTheDocument()
+  expect(screen.getAllByText('••••').length).toBeGreaterThan(3)
+})
+
 test('unlinked investors see the setup notice with the new copy and no account card', async () => {
   mockRoutes(unlinked)
   render(<MemoryRouter><InvestorDashboard /></MemoryRouter>)
