@@ -90,6 +90,46 @@ def test_the_size_cap_is_five_megabytes(portal):
     assert r.status_code == 400 and r.json()["detail"] == "file too large (5 MB max)"
 
 
+def _files_rows(db):
+    with psycopg.connect(db, autocommit=True) as conn:
+        (n,) = conn.execute("SELECT count(*) FROM files").fetchone()
+    return n
+
+
+def test_a_seven_mebibyte_upload_is_413_before_the_route_runs(portal, db):
+    """The api caps the request body at 6 MiB for this route (body_limit.py)
+    before FastAPI parses the multipart form: the route's own 5 MB check
+    never runs (its 400 wording is absent), no row, no bytes on disk."""
+    client, org_id, _, root = portal
+    big = PNG + b"\x00" * (7 * 1024 * 1024)
+    r = upload(client, org_id, big)
+    assert r.status_code == 413 and r.json() == {"detail": "request body too large"}
+    assert _files_rows(db) == 0 and not list(root.rglob("*"))
+
+
+def test_a_chunked_seven_mebibyte_upload_is_counted_and_refused(portal, db):
+    """Without a Content-Length the body is counted as it streams."""
+    client, org_id, _, root = portal
+    boundary = "mirrorfleet-test-boundary"
+    body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"purpose\"\r\n\r\n"
+            f"deposit_receipt\r\n--{boundary}\r\nContent-Disposition: form-data; "
+            f"name=\"file\"; filename=\"r.png\"\r\nContent-Type: image/png\r\n\r\n").encode()
+    body += PNG + b"\x00" * (7 * 1024 * 1024) + f"\r\n--{boundary}--\r\n".encode()
+    r = client.post(f"/api/orgs/{org_id}/investor/files", content=iter([body]),
+                    headers={"Content-Type": f"multipart/form-data; boundary={boundary}",
+                             **csrf(client)})
+    assert r.status_code == 413 and r.json() == {"detail": "request body too large"}
+    assert _files_rows(db) == 0 and not list(root.rglob("*"))
+
+
+def test_a_five_mebibyte_upload_still_fits_under_the_body_cap(portal, db):
+    from api.uploads import MAX_UPLOAD_BYTES
+    client, org_id, _, _ = portal
+    r = upload(client, org_id, PNG + b"\x00" * (MAX_UPLOAD_BYTES - len(PNG)))
+    assert r.status_code == 201 and r.json()["size_bytes"] == 5 * 1024 * 1024
+    assert _files_rows(db) == 1
+
+
 def test_an_empty_file_is_refused(portal):
     client, org_id, _, _ = portal
     r = upload(client, org_id, b"")

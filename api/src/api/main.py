@@ -24,6 +24,7 @@ from .routes.settings_control import create_settings_control_router, create_stat
 from .routes.trading import create_trading_router
 from .routes.insights import create_insights_router
 from .alerts import EmailAlerter
+from .body_limit import BodyLimitMiddleware
 from .telegram import TelegramNotifier
 from .uploads import UploadStore
 from .ws import create_ws_router, broadcaster
@@ -154,6 +155,9 @@ def create_app(http_transport: Optional[httpx.BaseTransport] = None) -> FastAPI:
     # Add CSRF middleware
     app.add_middleware(CSRFMiddleware)
     app.add_middleware(SecurityHeadersMiddleware)
+    # Added last, so it is the outermost middleware: an oversized body is
+    # refused (413) before any other layer or route reads it. body_limit.py.
+    app.add_middleware(BodyLimitMiddleware)
 
     # Include auth router
     auth_router = create_auth_router(rate_limiter)
