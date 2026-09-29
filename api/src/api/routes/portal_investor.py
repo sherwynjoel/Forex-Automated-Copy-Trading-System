@@ -14,7 +14,7 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 import psycopg
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel
 
@@ -55,6 +55,19 @@ class WithdrawalRequest(BaseModel):
     mpin: Any = None
 
 
+class MoneyRef(BaseModel):
+    kind: str
+    wallet: Optional[str] = None
+    account_id: Optional[int] = None
+
+
+class TransferRequest(BaseModel):
+    source: MoneyRef
+    target: MoneyRef
+    amount: Any
+    mpin: Any = None
+
+
 BANK_REQUIRED = ("bank_name", "holder", "account_number", "code")
 BANK_OPTIONAL = ("bank_address", "country")
 CRYPTO_REQUIRED = ("coin", "network", "address")
@@ -76,6 +89,19 @@ def clean_destination_details(kind: str, details: object) -> dict:
             if value is not None:
                 out[key] = value
     return out
+
+
+WALLET_LABELS: Dict[str, str] = {
+    "main": "My wallet", "credit": "Credit wallet", "pamm": "PAMM wallet",
+    "social": "Social wallet"}
+
+
+def money_ref_label(kind: str, account_id: Optional[int]) -> str:
+    """'My wallet' / 'PAMM wallet' / … or 'trading account <id>', for audit
+    summaries and investor emails."""
+    if kind == "account":
+        return f"trading account {account_id}"
+    return WALLET_LABELS.get(kind, kind)
 
 
 def create_portal_investor_router() -> APIRouter:
@@ -395,6 +421,137 @@ def create_portal_investor_router() -> APIRouter:
             conn, org_id=ctx.org_id, action="investor_withdrawal_cancelled",
             actor_email=ctx.user_email, user_id=ctx.user_id,
             withdrawal_id=wd_id, amount=out["amount"])
+        return out
+
+    # -------------------------------------------------------------- transfers
+
+    @router.get("/investor/transfers", response_model=List[Dict[str, Any]])
+    async def my_transfers(ctx: OrgContext = Depends(require_org_role("investor")),
+                           conn: psycopg.Connection = Depends(get_conn)) -> List[Dict[str, Any]]:
+        rows = conn.execute(
+            f"SELECT {pc.TRANSFER_COLS} FROM transfers "
+            "WHERE org_id = %s AND user_id = %s ORDER BY created_at DESC, id DESC",
+            (ctx.org_id, ctx.user_id)).fetchall()
+        return [pc.transfer_json(r) for r in rows]
+
+    @router.post("/investor/transfers", status_code=201, response_model=Dict[str, Any])
+    async def request_transfer(body: TransferRequest, http_request: Request,
+                               ctx: OrgContext = Depends(require_org_role("investor")),
+                               conn: psycopg.Connection = Depends(get_conn)):
+        failure = require_mpin(conn, ctx.user_id, body.mpin)
+        if failure is not None:
+            return failure
+        try:
+            amount = pc.parse_amount(body.amount)
+            source_kind, target_kind = pc.transfer_pair(body.source.model_dump(),
+                                                         body.target.model_dump())
+        except pc.LedgerError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        account_id: Optional[int] = None
+        if "account" in (source_kind, target_kind):
+            account_id = pc.linked_account(conn, ctx.org_id, ctx.user_id)
+            if account_id is None:
+                raise HTTPException(status_code=409, detail="no account linked yet")
+            named = body.source.account_id if source_kind == "account" else body.target.account_id
+            if named != account_id:
+                raise HTTPException(status_code=404, detail="Account not found")
+        # The equity lookup is a network round trip to the copier and must
+        # run BEFORE the lock is taken: nothing may be awaited while it is
+        # held (lock_investor_ledger's docstring). The cap check itself
+        # moves inside the locked transaction below so it reads the same
+        # snapshot the INSERT commits against.
+        equity: Optional[Decimal] = None
+        equity_source = "unknown"
+        if source_kind == "account":
+            equity, equity_source, _positions = await pc.equity_for(
+                http_request, conn, ctx.org_id, account_id)
+        instant = source_kind != "account" and target_kind != "account"
+        source_wallet = None if source_kind == "account" else source_kind
+        target_wallet = None if target_kind == "account" else target_kind
+        # Wallet-to-wallet moves need no admin: inserted as done and settled
+        # in the same transaction. Account moves wait for the admin. The
+        # per-investor ledger lock is taken FIRST inside the transaction, as
+        # every writer of wallet_entries must: otherwise a concurrent
+        # request could read the same available/equity figure, both pass
+        # their cap and over-commit the wallet or the account.
+        with conn.transaction():
+            pc.lock_investor_ledger(conn, ctx.org_id, ctx.user_id)
+            if source_kind == "account":
+                if equity is not None:
+                    account_available = pc.floor_cents(
+                        equity - pc.open_account_transfers_out(
+                            conn, ctx.org_id, ctx.user_id, account_id))
+                    if amount > account_available:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="amount exceeds the account's available equity "
+                                   f"({account_available:.2f})")
+            else:
+                available = pc.wallet_figures(conn, ctx.org_id, ctx.user_id)[source_kind]["available"]
+                if amount > available:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"amount exceeds what is available ({available:.2f})")
+            if hourly.is_limited(f"portal-transfer:{ctx.org_id}:{ctx.user_id}"):
+                raise HTTPException(status_code=429, detail=RATE_LIMITED)
+            row = conn.execute(
+                "INSERT INTO transfers (org_id, user_id, source_kind, source_wallet, "
+                "source_account_id, target_kind, target_wallet, target_account_id, amount, "
+                "status, equity_at_request, equity_verified, done_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
+                "CASE WHEN %s THEN now() END) "
+                f"RETURNING {pc.TRANSFER_COLS}",
+                (ctx.org_id, ctx.user_id,
+                 "wallet" if source_wallet else "account", source_wallet,
+                 account_id if source_kind == "account" else None,
+                 "wallet" if target_wallet else "account", target_wallet,
+                 account_id if target_kind == "account" else None,
+                 amount, "done" if instant else "requested", equity,
+                 equity_source == "live", instant)).fetchone()
+            out = pc.transfer_json(row)
+            if instant:
+                pc.settle(conn, org_id=ctx.org_id, user_id=ctx.user_id, wallet=source_wallet,
+                         amount=-amount, kind="transfer", ref_table="transfers",
+                         ref_id=out["id"])
+                pc.settle(conn, org_id=ctx.org_id, user_id=ctx.user_id, wallet=target_wallet,
+                         amount=amount, kind="transfer", ref_table="transfers",
+                         ref_id=out["id"])
+        from_label = money_ref_label(source_kind, account_id)
+        to_label = money_ref_label(target_kind, account_id)
+        await pc.audit_control(
+            conn, org_id=ctx.org_id, action="investor_transfer_requested",
+            actor_email=ctx.user_email, user_id=ctx.user_id,
+            severity="info" if instant else "warning",
+            account_id=account_id, transfer_id=out["id"], amount=out["amount"],
+            source=from_label, target=to_label, instant=instant,
+            equity_verified=out["equity_verified"],
+            summary=f"Transfer request: {amount:.2f} USD from {from_label} to {to_label} "
+                    f"from {ctx.user_email}")
+        return out
+
+    @router.post("/investor/transfers/{tr_id}/cancel", response_model=Dict[str, Any])
+    async def cancel_transfer(tr_id: int,
+                              ctx: OrgContext = Depends(require_org_role("investor")),
+                              conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
+        current = conn.execute(
+            "SELECT status FROM transfers WHERE id = %s AND org_id = %s AND user_id = %s",
+            (tr_id, ctx.org_id, ctx.user_id)).fetchone()
+        if not current:
+            raise HTTPException(status_code=404, detail="Transfer not found")
+        if not pc.can_transition("transfers", current[0], "cancelled"):
+            raise HTTPException(status_code=409, detail=f"transfer is already {current[0]}")
+        row = conn.execute(
+            "UPDATE transfers SET status = 'cancelled', decided_by = %s, decided_at = now() "
+            "WHERE id = %s AND org_id = %s AND status = %s "
+            f"RETURNING {pc.TRANSFER_COLS}",
+            (ctx.user_id, tr_id, ctx.org_id, current[0])).fetchone()
+        if not row:
+            raise HTTPException(status_code=409, detail="decided by someone else")
+        out = pc.transfer_json(row)
+        await pc.audit_control(
+            conn, org_id=ctx.org_id, action="investor_transfer_cancelled",
+            actor_email=ctx.user_email, user_id=ctx.user_id,
+            transfer_id=tr_id, amount=out["amount"])
         return out
 
     return router

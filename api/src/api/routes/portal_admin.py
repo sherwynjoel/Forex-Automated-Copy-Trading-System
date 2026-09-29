@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from ..db import get_conn
 from ..rbac import OrgContext, require_org_role
+from .portal_investor import money_ref_label
 from .. import portal_common as pc
 
 logger = logging.getLogger(__name__)
@@ -534,6 +535,100 @@ def create_portal_admin_router() -> APIRouter:
             f"Your payout account {summary} was {new_status}",
             f"Status: {new_status}\nPayout account: {summary}\nNote: {note or '—'}\n\n"
             "Open the portal for details.")
+        return out
+
+    # -------------------------------------------------------------- transfers
+
+    @router.get("/transfers", response_model=List[Dict[str, Any]])
+    async def transfer_queue(status: Optional[str] = None,
+                             ctx: OrgContext = Depends(require_org_role("admin")),
+                             conn: psycopg.Connection = Depends(get_conn)) -> List[Dict[str, Any]]:
+        where = "t.org_id = %s" + (" AND t.status = %s" if status else "")
+        params = (ctx.org_id, status) if status else (ctx.org_id,)
+        rows = conn.execute(
+            f"SELECT {pc.TRANSFER_COLS}, email, display_name FROM ("
+            "  SELECT t.*, u.email, u.display_name FROM transfers t "
+            f"  JOIN users u ON u.id = t.user_id WHERE {where}) AS q "
+            "ORDER BY (status IN ('requested', 'approved')) DESC, created_at DESC, id DESC",
+            params).fetchall()
+        return [pc.transfer_json(r) for r in rows]
+
+    @router.post("/transfers/{tr_id}/decision", response_model=Dict[str, Any])
+    async def decide_transfer(tr_id: int, body: pc.Decision, http_request: Request,
+                              ctx: OrgContext = Depends(require_org_role("admin")),
+                              conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
+        new_status = body.status.strip().lower()
+        if new_status not in ("approved", "done", "rejected"):
+            raise HTTPException(status_code=400,
+                                detail="status must be approved, done or rejected")
+        try:
+            note = pc.require_note_on_reject(new_status, body.note)
+        except pc.LedgerError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        current = conn.execute(
+            "SELECT status, user_id, source_kind, source_wallet, source_account_id, "
+            "target_kind, target_wallet, target_account_id, amount FROM transfers "
+            "WHERE id = %s AND org_id = %s", (tr_id, ctx.org_id)).fetchone()
+        if not current:
+            raise HTTPException(status_code=404, detail="Transfer not found")
+        (status_now, user_id, source_kind, source_wallet, source_account, target_kind,
+         target_wallet, target_account, amount) = current
+        if not pc.can_transition("transfers", status_now, new_status):
+            raise HTTPException(status_code=409, detail=f"transfer is already {status_now}")
+        amount = Decimal(amount)
+        # The per-investor ledger lock is the first statement inside the
+        # transaction on every decision path -- not just `done`, which is
+        # the only one that settles -- so every writer of wallet_entries
+        # for this investor is uniformly serialised (the same rule Task 8
+        # applies to withdrawals). Keyed on the transfer's INVESTOR
+        # (user_id), never the admin deciding it.
+        with conn.transaction():
+            pc.lock_investor_ledger(conn, ctx.org_id, user_id)
+            if new_status == "done":
+                # Done straight from requested also records the decision;
+                # done after approved keeps the earlier decision.
+                row = conn.execute(
+                    "UPDATE transfers SET status = 'done', "
+                    "decided_by = COALESCE(decided_by, %s), "
+                    "decided_at = COALESCE(decided_at, now()), "
+                    "decision_note = COALESCE(%s, decision_note), "
+                    "done_by = %s, done_at = now() "
+                    "WHERE id = %s AND org_id = %s AND status = %s "
+                    f"RETURNING {pc.TRANSFER_COLS}",
+                    (ctx.user_id, note, ctx.user_id, tr_id, ctx.org_id, status_now)).fetchone()
+            else:
+                row = conn.execute(
+                    "UPDATE transfers SET status = %s, decided_by = %s, decided_at = now(), "
+                    "decision_note = %s WHERE id = %s AND org_id = %s AND status = %s "
+                    f"RETURNING {pc.TRANSFER_COLS}",
+                    (new_status, ctx.user_id, note, tr_id, ctx.org_id, status_now)).fetchone()
+            if not row:
+                raise HTTPException(status_code=409, detail="decided by someone else")
+            if new_status == "done":
+                if source_wallet is not None:
+                    pc.settle(conn, org_id=ctx.org_id, user_id=user_id, wallet=source_wallet,
+                             amount=-amount, kind="transfer", ref_table="transfers",
+                             ref_id=tr_id)
+                if target_wallet is not None:
+                    pc.settle(conn, org_id=ctx.org_id, user_id=user_id, wallet=target_wallet,
+                             amount=amount, kind="transfer", ref_table="transfers",
+                             ref_id=tr_id)
+        out = pc.transfer_json(row)
+        from_label = money_ref_label(source_kind if source_kind == "account" else source_wallet,
+                                     source_account)
+        to_label = money_ref_label(target_kind if target_kind == "account" else target_wallet,
+                                   target_account)
+        await pc.audit_control(
+            conn, org_id=ctx.org_id, action="investor_transfer_decided",
+            actor_email=ctx.user_email, user_id=user_id,
+            account_id=source_account if source_account is not None else target_account,
+            transfer_id=tr_id, status=new_status, note=note, amount=out["amount"],
+            source=from_label, target=to_label)
+        await pc.notify_investor(
+            conn, http_request, user_id,
+            f"Your transfer of {amount:.2f} USD was {new_status}",
+            f"Status: {new_status}\nAmount: {amount:.2f} USD\nFrom: {from_label}\n"
+            f"To: {to_label}\nNote: {note or '—'}\n\nOpen the portal for details.")
         return out
 
     return router
