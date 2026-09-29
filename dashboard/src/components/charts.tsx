@@ -183,9 +183,18 @@ export interface PnlBucket {
   trades: number
 }
 
-export function PnlBars({ buckets, height = 180 }: {
+export function PnlBars({
+  buckets, height = 180, label = 'Weekly profit and loss',
+  bucketLabel = (ms) => `Week of ${shortDate(ms)}`, countNoun = 'trade',
+}: {
   buckets: PnlBucket[]
   height?: number
+  /** The chart's accessible name. */
+  label?: string
+  /** Tooltip heading for the bucket that starts at `ms`. */
+  bucketLabel?: (ms: number) => string
+  /** What `trades` counts (singular); an "s" is added above one. */
+  countNoun?: string
 }) {
   const [ref, width] = useElementWidth()
   const [tip, setTip] = useState<TooltipState | null>(null)
@@ -204,7 +213,7 @@ export function PnlBars({ buckets, height = 180 }: {
 
   return (
     <div ref={ref} className="relative" data-chart="weekly-pnl">
-      <svg width={width} height={height} role="img" aria-label="Weekly profit and loss">
+      <svg width={width} height={height} role="img" aria-label={label}>
         <line x1={pad.left} x2={pad.left + plotW} y1={zeroY} y2={zeroY}
               stroke={LINE_STRONG} strokeWidth={1} />
         <text x={pad.left + plotW + 6} y={zeroY + 3} fontSize={10}
@@ -228,11 +237,11 @@ export function PnlBars({ buckets, height = 180 }: {
                     x: x + barW / 2, y: Math.min(zeroY, y1),
                     content: (
                       <div>
-                        <div className="text-ink-soft">Week of {shortDate(b.week_start)}</div>
+                        <div className="text-ink-soft">{bucketLabel(b.week_start)}</div>
                         <div className={`num ${up ? 'text-profit' : 'text-loss'}`}>
                           {signedFmt(b.gross_pnl)}
                         </div>
-                        <div className="text-ink-faint">{b.trades} trade{b.trades === 1 ? '' : 's'}</div>
+                        <div className="text-ink-faint">{b.trades} {countNoun}{b.trades === 1 ? '' : 's'}</div>
                       </div>
                     ),
                   })

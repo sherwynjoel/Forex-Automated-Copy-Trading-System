@@ -40,7 +40,7 @@ const Performance = pick(admin, 'Performance')
 const Logs = pick(admin, 'Logs')
 const Members = pick(admin, 'Members')
 const Investors = pick(admin, 'Investors')
-const InvestorOverview = pick(investor, 'InvestorOverview')
+const InvestorDashboard = pick(investor, 'InvestorDashboard')
 const InvestorDeposit = pick(investor, 'InvestorDeposit')
 const InvestorWithdraw = pick(investor, 'InvestorWithdraw')
 const InvestorHistory = pick(investor, 'InvestorHistory')
@@ -104,7 +104,7 @@ export default function App() {
               <Route path="logs" element={<Logs />} />
               <Route path="members" element={<Members />} />
               <Route path="investors" element={<Investors />} />
-              <Route path="invest" element={<InvestorOverview />} />
+              <Route path="invest" element={<InvestorDashboard />} />
               <Route path="invest/deposit" element={<InvestorDeposit />} />
               <Route path="invest/withdraw" element={<InvestorWithdraw />} />
               <Route path="invest/history" element={<InvestorHistory />} />
