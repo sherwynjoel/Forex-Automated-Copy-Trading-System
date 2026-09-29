@@ -125,7 +125,7 @@ export PYTHONPATH="$(pwd -W)/src"
 - Consumes: `apply_migrations` (`db/migrate.py`); conftest `db`, `database`, `make_user`, `make_org`, `ADMIN_DSN`, `default_mock_callback`.
 - Produces: tables `files`, `payment_methods`, `portal_settings`, `payout_destinations`, `wallet_entries`, `deposits`, `withdrawals`, `transfers` exactly as spec section 5, with indexes `files_by_user`, `payment_methods_by_org`, `payout_destinations_by_user`, `payout_destinations_queue`, `wallet_entries_by_user`, `wallet_entries_by_org_time`, `wallet_entries_one_per_ref`, `deposits_queue`, `deposits_by_user`, `deposits_one_live_reference`, `withdrawals_queue`, `withdrawals_by_user`, `transfers_queue`, `transfers_by_user`; `api/tests/portal_helpers.py` with `csrf`, `member`, `add_method`, `credit`, `approved_destination`, `seed_file`, `link`, `set_state`, `set_copier_down`.
 
-- [ ] **Step 1: Write the failing migration test**
+- [x] **Step 1: Write the failing migration test**
 
 Create `api/tests/test_migration_022.py`:
 
@@ -454,12 +454,12 @@ def test_upgrade_copies_the_three_old_tables_then_drops_them(database):
             admin.execute(f"DROP DATABASE IF EXISTS {UPGRADE_DB} WITH (FORCE)")
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run (from `api/`): `.venv/Scripts/python -m pytest tests/test_migration_022.py -q -p no:cacheprovider`
 Expected: FAIL. The first test fails with `assert '022_client_wallets.sql' in names`; the column tests fail with `assert [] == [...]`; the upgrade test errors with `FileNotFoundError` on `022_client_wallets.sql`.
 
-- [ ] **Step 3: Write the migration**
+- [x] **Step 3: Write the migration**
 
 Create `db/migrations/022_client_wallets.sql`:
 
@@ -724,7 +724,7 @@ DROP TABLE investor_deposits;
 DROP TABLE org_investor_wallets;
 ```
 
-- [ ] **Step 4: Point the `db` fixture at the new tables**
+- [x] **Step 4: Point the `db` fixture at the new tables**
 
 The `db` fixture TRUNCATEs the three dropped tables, so from this step every test would error until it is updated. In `api/tests/conftest.py` replace:
 
@@ -753,12 +753,12 @@ with:
         )
 ```
 
-- [ ] **Step 5: Run the migration test to verify it passes**
+- [x] **Step 5: Run the migration test to verify it passes**
 
 Run: `.venv/Scripts/python -m pytest tests/test_migration_022.py -q -p no:cacheprovider`
 Expected: PASS, 17 passed.
 
-- [ ] **Step 6: Trim the two tests that seeded the dropped tables**
+- [x] **Step 6: Trim the two tests that seeded the dropped tables**
 
 Replace the whole of `api/tests/test_migration_019.py` with (the first three tests are unchanged; the three that inserted into `investor_deposits` and `org_investor_wallets` are gone because 022 dropped those tables and test_migration_022 covers their successors):
 
@@ -923,7 +923,7 @@ with:
     return app_client, org_id, users, outsider
 ```
 
-- [ ] **Step 7: Delete the 2026-09-23 portal test file**
+- [x] **Step 7: Delete the 2026-09-23 portal test file**
 
 Its routes still exist until Task 10 but every table they read is gone, and `TestClient` re-raises the resulting `UndefinedTable` errors. Its helpers live on in `portal_helpers.py` (next step); its behaviours are re-tested per feature in Tasks 6–10.
 
@@ -931,7 +931,7 @@ Its routes still exist until Task 10 but every table they read is gone, and `Tes
 git rm api/tests/test_investor_portal.py
 ```
 
-- [ ] **Step 8: Write the shared portal test helpers**
+- [x] **Step 8: Write the shared portal test helpers**
 
 Create `api/tests/portal_helpers.py`:
 
@@ -1057,7 +1057,7 @@ def set_copier_down(client) -> None:
     client.app.state.mock_transport.set_callback(callback)
 ```
 
-- [ ] **Step 9: Run the touched suites**
+- [x] **Step 9: Run the touched suites**
 
 Run: `.venv/Scripts/python -m pytest tests/test_migration_019.py tests/test_migration_020.py tests/test_migration_021.py tests/test_migration_022.py tests/test_rbac_matrix.py tests/test_investor_ledger.py -q -p no:cacheprovider`
 Expected: PASS, 86 passed (3 + 5 + 2 + 17 + 35 + 24; `test_investor_ledger.py` is 24 collected items because two of its tests are parametrised).
@@ -1065,7 +1065,7 @@ Expected: PASS, 86 passed (3 + 5 + 2 + 17 + 35 + 24; `test_investor_ledger.py` i
 Then the full suite: `.venv/Scripts/python -m pytest tests -q -p no:cacheprovider`
 Expected: everything passes except the 7 pre-existing `test_events_ws.py` errors and the one EA-download CRLF failure.
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add db/migrations/022_client_wallets.sql api/tests/test_migration_022.py api/tests/portal_helpers.py api/tests/conftest.py api/tests/test_migration_019.py api/tests/test_rbac_matrix.py
@@ -1092,7 +1092,7 @@ Claude-Session: https://claude.ai/code/session_01Lz2HHZEdtFN7DEfGj6Pi3b"
 - Consumes: nothing from the codebase (pure module).
 - Produces: `WALLETS`, `CENT`, `LedgerError`, `parse_amount`, `clean_text`, `floor_cents`, `round_cents`, `fee_for`, `balance`, `holds`, `available`, `DEPOSIT_TRANSITIONS`, `WITHDRAWAL_TRANSITIONS`, `TRANSFER_TRANSITIONS`, `DESTINATION_TRANSITIONS`, `can_transition`, `INVESTOR_MOVES`, `TRANSFER_PAIRS`, `transfer_pair`, `money` — all in `api.portal_ledger`, exactly as the interfaces doc lists them.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `api/tests/test_portal_ledger.py`:
 
@@ -1283,12 +1283,12 @@ class TestMoney:
         assert money(None) is None
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
+- [x] **Step 2: Run them to verify they fail**
 
 Run: `.venv/Scripts/python -m pytest tests/test_portal_ledger.py -q -p no:cacheprovider`
 Expected: FAIL at collection with `ModuleNotFoundError: No module named 'api.portal_ledger'`.
 
-- [ ] **Step 3: Write the module**
+- [x] **Step 3: Write the module**
 
 Create `api/src/api/portal_ledger.py`:
 
@@ -1474,7 +1474,7 @@ def transfer_pair(source: dict, target: dict) -> tuple[str, str]:
     return pair
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv/Scripts/python -m pytest tests/test_portal_ledger.py tests/test_investor_ledger.py -q -p no:cacheprovider`
 Expected: PASS, 76 passed (52 new + the 24 old ones, which keep passing until Task 10 deletes them).
@@ -1482,7 +1482,7 @@ Expected: PASS, 76 passed (52 new + the 24 old ones, which keep passing until Ta
 Then the full suite: `.venv/Scripts/python -m pytest tests -q -p no:cacheprovider`
 Expected: everything passes except the 7 pre-existing `test_events_ws.py` errors and the one EA-download CRLF failure.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add api/src/api/portal_ledger.py api/tests/test_portal_ledger.py
@@ -1506,7 +1506,7 @@ Claude-Session: https://claude.ai/code/session_01Lz2HHZEdtFN7DEfGj6Pi3b"
 - Consumes: `_DUMMY_HASH`, `verify_password` (`api.auth`); `users.mpin_hash`, `users.mpin_failed_attempts`, `users.mpin_locked_until` (migration 021).
 - Produces: `MPIN_RE`, `MPIN_MAX_ATTEMPTS`, `MPIN_LOCK_MINUTES`, `check_mpin(conn, user_id, mpin) -> Optional[Response]`, `require_mpin(conn, user_id, mpin) -> Optional[Response]`, `audit_auth(conn, user_id, action) -> None`, plus the helper `lock_state(conn, user_id) -> tuple[Optional[str], int, Optional[datetime]]` (the old `_lock_state`, needed by `routes/mpin.py`'s set route), all in `api.mpin_core`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `api/tests/test_mpin_core.py`:
 
@@ -1600,12 +1600,12 @@ def test_audit_auth_writes_an_org_less_auth_event(db, make_user):
     assert rows == [(None, None, "auth", "info", {"action": "mpin_locked", "user_id": user["id"]})]
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
+- [x] **Step 2: Run them to verify they fail**
 
 Run: `.venv/Scripts/python -m pytest tests/test_mpin_core.py -q -p no:cacheprovider`
 Expected: FAIL at collection with `ModuleNotFoundError: No module named 'api.mpin_core'`.
 
-- [ ] **Step 3: Write `mpin_core.py`**
+- [x] **Step 3: Write `mpin_core.py`**
 
 Create `api/src/api/mpin_core.py` (the bodies of `_audit`, `_locked_response`, `_lock_state`, `_lock` and `_check_mpin` are moved from `routes/mpin.py` unchanged; only the names lose their underscore where another module needs them):
 
@@ -1728,7 +1728,7 @@ def require_mpin(conn: psycopg.Connection, user_id: int, mpin: object) -> Option
     return check_mpin(conn, user_id, mpin)
 ```
 
-- [ ] **Step 4: Make `routes/mpin.py` import the moved functions**
+- [x] **Step 4: Make `routes/mpin.py` import the moved functions**
 
 Replace the whole of `api/src/api/routes/mpin.py` with (the four routes, their bodies, `_validate_pair` and `_store` are byte-for-byte what they were; `_audit`, `_locked_response`, `_lock_state`, `_lock` and `_check_mpin` are gone, imported from `mpin_core` instead):
 
@@ -1883,7 +1883,7 @@ def create_mpin_router(rate_limiter: LoginRateLimiter) -> APIRouter:
     return router
 ```
 
-- [ ] **Step 5: Run both MPIN suites to verify they pass**
+- [x] **Step 5: Run both MPIN suites to verify they pass**
 
 Run: `.venv/Scripts/python -m pytest tests/test_mpin_core.py tests/test_mpin.py -q -p no:cacheprovider`
 Expected: PASS, 30 passed (14 new, 16 existing — the login routes behave exactly as before).
@@ -1891,7 +1891,7 @@ Expected: PASS, 30 passed (14 new, 16 existing — the login routes behave exact
 Then the full suite: `.venv/Scripts/python -m pytest tests -q -p no:cacheprovider`
 Expected: everything passes except the 7 pre-existing `test_events_ws.py` errors and the one EA-download CRLF failure.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add api/src/api/mpin_core.py api/src/api/routes/mpin.py api/tests/test_mpin_core.py
@@ -1925,7 +1925,7 @@ Claude-Session: https://claude.ai/code/session_01Lz2HHZEdtFN7DEfGj6Pi3b"
 
 No `events` row is written by these routes: spec section 13 defines no file action, and the deposit or destination that references the file is audited when it is filed (Tasks 7 and 8).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `api/tests/test_uploads.py`:
 
@@ -2183,12 +2183,12 @@ def test_the_store_lays_files_out_by_org_and_refuses_escaping_keys(tmp_path):
             store.path(bad)
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
+- [x] **Step 2: Run them to verify they fail**
 
 Run: `.venv/Scripts/python -m pytest tests/test_uploads.py -q -p no:cacheprovider`
 Expected: FAIL — every `portal` test errors with `ModuleNotFoundError: No module named 'api.uploads'`, and the two direct ones fail the same way inside the test.
 
-- [ ] **Step 3: Add `python-multipart` (FastAPI needs it for `Form`/`File`)**
+- [x] **Step 3: Add `python-multipart` (FastAPI needs it for `Form`/`File`)**
 
 In `api/pyproject.toml` replace:
 
@@ -2213,7 +2213,7 @@ with:
 Then install it (from `api/`): `.venv/Scripts/python -m pip install -e ".[dev]"`
 Expected: the output ends with `Successfully installed ... python-multipart-0.0.x ...` (the api package reinstalls in editable mode too).
 
-- [ ] **Step 4: `ApiConfig.upload_dir`**
+- [x] **Step 4: `ApiConfig.upload_dir`**
 
 In `api/src/api/config.py` replace:
 
@@ -2257,7 +2257,7 @@ with:
         )
 ```
 
-- [ ] **Step 5: Write `uploads.py`**
+- [x] **Step 5: Write `uploads.py`**
 
 Create `api/src/api/uploads.py`:
 
@@ -2343,7 +2343,7 @@ class UploadStore:
         return self.path(key).read_bytes()
 ```
 
-- [ ] **Step 6: Write `routes/portal_files.py`**
+- [x] **Step 6: Write `routes/portal_files.py`**
 
 Create `api/src/api/routes/portal_files.py`:
 
@@ -2488,7 +2488,7 @@ def create_portal_files_router() -> APIRouter:
     return router
 ```
 
-- [ ] **Step 7: Wire the store and the router in `main.py`**
+- [x] **Step 7: Wire the store and the router in `main.py`**
 
 In `api/src/api/main.py` replace:
 
@@ -2576,12 +2576,12 @@ with:
     app.include_router(create_portal_files_router())
 ```
 
-- [ ] **Step 8: Run the upload tests to verify they pass**
+- [x] **Step 8: Run the upload tests to verify they pass**
 
 Run: `.venv/Scripts/python -m pytest tests/test_uploads.py -q -p no:cacheprovider`
 Expected: PASS, 31 passed (1 + 3 + 1 + 1 + 1 + 6 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 8 + 1; the six `purpose` cases include `""`, which now proves the blank-purpose path lands on the 400, not a 422). (Running the suite creates `api/data/uploads/`; Step 9 ignores it in git.)
 
-- [ ] **Step 9: The ops plumbing — image, volume, backup, env, gitignore**
+- [x] **Step 9: The ops plumbing — image, volume, backup, env, gitignore**
 
 In `api/Dockerfile` replace:
 
@@ -2760,7 +2760,7 @@ node_modules/
 data/
 ```
 
-- [ ] **Step 10: Check the image still builds and the full suite is green**
+- [x] **Step 10: Check the image still builds and the full suite is green**
 
 Run (from the repo root): `docker compose build api`
 Expected: the build ends with `=> exporting to image` and no error; the `RUN useradd ... mkdir -p /data/uploads ...` layer succeeds.
@@ -2771,7 +2771,7 @@ Expected: everything passes except the 7 pre-existing `test_events_ws.py` errors
 Run: `git status --short`
 Expected: no `api/data/` entry (ignored); the listed changes are exactly the files of this task.
 
-- [ ] **Step 11: Commit**
+- [x] **Step 11: Commit**
 
 ```bash
 git add api/pyproject.toml api/src/api/config.py api/src/api/uploads.py api/src/api/routes/portal_files.py api/src/api/main.py api/Dockerfile docker-compose.yml ops/backup.sh .env.example .gitignore api/tests/test_uploads.py
@@ -2796,7 +2796,7 @@ The one module both routers import. It re-exports the pure rules of `portal_ledg
 - Consumes: `portal_ledger.WALLETS`, `balance`, `holds`, `available`, `floor_cents`, `round_cents`, `money`, `clean_text`, `LedgerError` (Task 2); tables `wallet_entries`, `withdrawals`, `transfers`, `portal_settings`, `payout_destinations`, `deposits` (Task 1); test helpers `portal_helpers.credit`, `portal_helpers.approved_destination` (Task 1); `routes.settings_control._proxy_to_copier`, `routes.mt5.MT5_OFFLINE_AFTER_S`, `ws.broadcaster`.
 - Produces: `audit_control`, `notify_investor`, `linked_account`, `account_card`, `org_state`, `equity_from`, `equity_for`, `wallet_balances`, `wallet_holds`, `wallet_figures`, `open_account_transfers_out`, `net_funded`, `settle`, `portal_settings`, `destination_summary`, `short_address`, `qualify`, `CURRENCY`, `DEPOSIT_COLS`, `WITHDRAWAL_COLS`, `TRANSFER_COLS`, `DESTINATION_COLS`, `ENTRY_COLS`, `METHOD_COLS`, `deposit_json`, `withdrawal_json`, `transfer_json`, `destination_json`, `entry_json`, `method_json`, `Decision`, `require_note_on_reject`; every `portal_ledger` name is reachable as `portal_common.<name>`. (`account_card`, `org_state`, `equity_from` and `qualify` are private helpers this task adds beyond the interfaces doc; Task 10 uses the first three for the summary and the investors list.)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `api/tests/test_portal_common.py`:
 
@@ -3134,7 +3134,7 @@ def test_notify_investor_is_best_effort(db, org_user, monkeypatch):
     assert fake.sent == [("inv@example.com", "Subject", "Body")]
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
+- [x] **Step 2: Run them to verify they fail**
 
 Run (from `api/`, environment exported as in the Global Constraints):
 
@@ -3144,7 +3144,7 @@ Run (from `api/`, environment exported as in the Global Constraints):
 
 Expected: collection ERROR, `ModuleNotFoundError: No module named 'api.portal_common'` (1 error).
 
-- [ ] **Step 3: Write the module**
+- [x] **Step 3: Write the module**
 
 Create `api/src/api/portal_common.py`:
 
@@ -3544,7 +3544,7 @@ def require_note_on_reject(status: str, note: Optional[str]) -> Optional[str]:
     return clean_text(note, "note", max_len=500, required=(status == "rejected"))
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 ```bash
 .venv/Scripts/python -m pytest tests/test_portal_common.py tests/test_portal_ledger.py -q -p no:cacheprovider
@@ -3552,7 +3552,7 @@ def require_note_on_reject(status: str, note: Optional[str]) -> Optional[str]:
 
 Expected: PASS, all tests green (13 in `test_portal_common.py` plus the Task 2 file).
 
-- [ ] **Step 5: Run the whole API suite**
+- [x] **Step 5: Run the whole API suite**
 
 ```bash
 .venv/Scripts/python -m pytest tests -q -p no:cacheprovider
@@ -3560,7 +3560,7 @@ Expected: PASS, all tests green (13 in `test_portal_common.py` plus the Task 2 f
 
 Expected: green apart from the 7 pre-existing `test_events_ws.py` errors and the one EA-download CRLF failure.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add api/src/api/portal_common.py api/tests/test_portal_common.py
@@ -3586,7 +3586,7 @@ Creates the two portal routers and mounts them. The admin router gets payment-me
 - Consumes: `portal_common` (`METHOD_COLS`, `method_json`, `audit_control`, `portal_settings`, `money`, `clean_text`, `parse_amount`, `LedgerError`) (Task 5); `require_org_role`, `OrgContext`, `get_conn`; tables `payment_methods`, `portal_settings`, `deposits` (Task 1); test helpers `portal_helpers.csrf`, `portal_helpers.add_method` (Task 1).
 - Produces: `create_portal_admin_router() -> APIRouter` with `MethodBody`, `MethodPatch`, `SettingsBody`, `clean_details(kind, raw) -> dict`, `parse_min(raw, field) -> Decimal`, `parse_pct(raw, field) -> Decimal`, `REQUIRED_DETAILS`, `OPTIONAL_DETAILS`; routes `GET/POST payment-methods`, `PATCH/DELETE payment-methods/{method_id}`, `GET/PUT portal-settings`. `create_portal_investor_router() -> APIRouter` with `RATE_LIMITED = "too many requests; try again later"` and route `GET investor/payment-methods`. Both mounted in `main.py`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `api/tests/test_portal_methods.py`:
 
@@ -3824,7 +3824,7 @@ def test_roles_below_admin_are_refused_on_every_admin_route(org_client, make_use
         assert r.status_code == 403, f"{role} {method} {tail} -> {r.status_code}"
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
+- [x] **Step 2: Run them to verify they fail**
 
 ```bash
 .venv/Scripts/python -m pytest tests/test_portal_methods.py -q -p no:cacheprovider
@@ -3832,7 +3832,7 @@ def test_roles_below_admin_are_refused_on_every_admin_route(org_client, make_use
 
 Expected: FAIL. Every test that calls a portal route gets 404 `Not Found` where it expects 2xx/400/403 (the routes do not exist yet).
 
-- [ ] **Step 3: Create the investor router**
+- [x] **Step 3: Create the investor router**
 
 Create `api/src/api/routes/portal_investor.py`:
 
@@ -3880,7 +3880,7 @@ def create_portal_investor_router() -> APIRouter:
     return router
 ```
 
-- [ ] **Step 4: Create the admin router**
+- [x] **Step 4: Create the admin router**
 
 Create `api/src/api/routes/portal_admin.py`:
 
@@ -4154,7 +4154,7 @@ def create_portal_admin_router() -> APIRouter:
     return router
 ```
 
-- [ ] **Step 5: Mount both routers in `main.py`**
+- [x] **Step 5: Mount both routers in `main.py`**
 
 In `api/src/api/main.py`, the current block reads:
 
@@ -4189,7 +4189,7 @@ Replace it with:
 
 (If Task 4 already placed `app.include_router(create_portal_files_router())` in this area, keep it; only the relative order of the new portal routers and the old investor routers matters.)
 
-- [ ] **Step 6: Run the tests to verify they pass**
+- [x] **Step 6: Run the tests to verify they pass**
 
 ```bash
 .venv/Scripts/python -m pytest tests/test_portal_methods.py tests/test_portal_common.py -q -p no:cacheprovider
@@ -4197,7 +4197,7 @@ Replace it with:
 
 Expected: PASS, all green (18 in `test_portal_methods.py`: 6 plain tests, 10 parametrised refusals, 2 parametrised role cases, plus Task 5's 13).
 
-- [ ] **Step 7: Run the whole API suite**
+- [x] **Step 7: Run the whole API suite**
 
 ```bash
 .venv/Scripts/python -m pytest tests -q -p no:cacheprovider
@@ -4205,7 +4205,7 @@ Expected: PASS, all green (18 in `test_portal_methods.py`: 6 plain tests, 10 par
 
 Expected: green apart from the 7 pre-existing `test_events_ws.py` errors and the one EA-download CRLF failure.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add api/src/api/routes/portal_admin.py api/src/api/routes/portal_investor.py api/src/api/main.py api/tests/test_portal_methods.py
@@ -4230,7 +4230,7 @@ The investor files a deposit notice against a payment method (kind and label sna
 - Consumes: `portal_common` (`DEPOSIT_COLS`, `METHOD_COLS`, `deposit_json`, `qualify`, `parse_amount`, `clean_text`, `fee_for`, `can_transition`, `linked_account`, `settle`, `wallet_figures`, `audit_control`, `notify_investor`, `require_note_on_reject`, `LedgerError`) (Task 5); `routes.portal_files.file_belongs` (Task 4); `LoginRateLimiter` (`api.auth`); tables `deposits`, `transfers`, `wallet_entries`, `files` (Task 1); test helpers `portal_helpers.csrf`, `add_method`, `link`, `seed_file` (Task 1).
 - Produces: routes `GET investor/deposits`, `POST investor/deposits` (201), `POST investor/deposits/{deposit_id}/cancel`, `GET deposits?status=`, `POST deposits/{deposit_id}/decision`; `DepositNotice`, `DepositDecision`; the investor router's `hourly = LoginRateLimiter(max_attempts=REQUESTS_PER_HOUR, window_s=3600)` that Tasks 8 and 9 reuse with keys `portal-withdrawal:{org}:{user}`, `portal-transfer:{org}:{user}`, `portal-destination:{org}:{user}`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `api/tests/test_portal_deposits.py`:
 
@@ -4668,7 +4668,7 @@ def test_a_decision_emails_the_investor_and_a_failed_email_never_fails_the_reque
     assert r.status_code == 200 and r.json()["status"] == "rejected"
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
+- [x] **Step 2: Run them to verify they fail**
 
 ```bash
 .venv/Scripts/python -m pytest tests/test_portal_deposits.py -q -p no:cacheprovider
@@ -4676,7 +4676,7 @@ def test_a_decision_emails_the_investor_and_a_failed_email_never_fails_the_reque
 
 Expected: FAIL. `POST investor/deposits` is still answered by the retired 2026-09-23 router (its table is gone, so the TestClient re-raises `psycopg.errors.UndefinedTable: relation "org_investor_wallets" does not exist`), and the admin `deposits` routes answer 404.
 
-- [ ] **Step 3: Add the investor deposit routes**
+- [x] **Step 3: Add the investor deposit routes**
 
 In `api/src/api/routes/portal_investor.py`, replace the import block:
 
@@ -4861,7 +4861,7 @@ Then insert the three routes immediately above the final `    return router` lin
 
 ```
 
-- [ ] **Step 4: Add the admin deposit routes**
+- [x] **Step 4: Add the admin deposit routes**
 
 In `api/src/api/routes/portal_admin.py`, replace the import line:
 
@@ -4987,7 +4987,7 @@ Then insert the two routes immediately above the final `    return router` line 
 
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 ```bash
 .venv/Scripts/python -m pytest tests/test_portal_deposits.py tests/test_portal_methods.py tests/test_portal_common.py -q -p no:cacheprovider
@@ -4995,7 +4995,7 @@ Then insert the two routes immediately above the final `    return router` line 
 
 Expected: PASS, all green (`test_portal_deposits.py`: 16 plain tests plus 6 parametrised refusals = 22).
 
-- [ ] **Step 6: Run the whole API suite**
+- [x] **Step 6: Run the whole API suite**
 
 ```bash
 .venv/Scripts/python -m pytest tests -q -p no:cacheprovider
@@ -5003,7 +5003,7 @@ Expected: PASS, all green (`test_portal_deposits.py`: 16 plain tests plus 6 para
 
 Expected: green apart from the 7 pre-existing `test_events_ws.py` errors and the one EA-download CRLF failure.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add api/src/api/routes/portal_investor.py api/src/api/routes/portal_admin.py api/tests/test_portal_deposits.py
@@ -5029,7 +5029,7 @@ Claude-Session: https://claude.ai/code/session_01Lz2HHZEdtFN7DEfGj6Pi3b"
 
 Conventions this task relies on from Tasks 5–7 (verify each with a quick grep before Step 3; the interfaces doc fixes them): the serialisers `withdrawal_json(row)` / `destination_json(row, full=)` append `email` and `display_name` to the dict when the row carries two extra trailing columns (the old `_withdrawal_json` did the same); `require_note_on_reject` raises `LedgerError`; `wallet_figures(...)[wallet]["available"]` is already floored; `portal_settings` returns Decimals.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `api/tests/test_portal_withdrawals.py`:
 
@@ -5483,13 +5483,13 @@ def test_investors_only_see_their_own_withdrawals_and_cannot_work_the_queue(
     assert _decide_destination(client, org_id, dest_id, "approved").status_code == 403
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run (from `api/`, env exported as in the Global Constraints):
 `.venv/Scripts/python -m pytest tests/test_portal_withdrawals.py -q -p no:cacheprovider`
 Expected: 21 FAIL. Every test fails on a status assertion because the routes do not exist yet (`assert 404 == 201`, `assert 404 == 401`, …); no ImportError.
 
-- [ ] **Step 3: Body classes, imports and the details helper in `portal_investor.py`**
+- [x] **Step 3: Body classes, imports and the details helper in `portal_investor.py`**
 
 At the top of `api/src/api/routes/portal_investor.py` make sure every one of these imports is present (add the missing ones next to the existing import lines; Task 7 already has most of them):
 
@@ -5557,7 +5557,7 @@ def clean_destination_details(kind: str, details: object) -> dict:
     return out
 ```
 
-- [ ] **Step 4: Investor routes for destinations and withdrawals**
+- [x] **Step 4: Investor routes for destinations and withdrawals**
 
 Inside `create_portal_investor_router()`, immediately before its final `return router` line, add. (`hourly` is the router's `LoginRateLimiter(max_attempts=10, window_s=3600)` from Task 7; if Task 7 gave it another name, use that name in the two `is_limited` calls.)
 
@@ -5727,7 +5727,7 @@ Inside `create_portal_investor_router()`, immediately before its final `return r
         return out
 ```
 
-- [ ] **Step 5: Admin routes for the withdrawal and destination queues**
+- [x] **Step 5: Admin routes for the withdrawal and destination queues**
 
 At the top of `api/src/api/routes/portal_admin.py` make sure these imports are present (add the missing ones):
 
@@ -5911,17 +5911,17 @@ Inside `create_portal_admin_router()`, immediately before its final `return rout
         return out
 ```
 
-- [ ] **Step 6: Run the task's tests**
+- [x] **Step 6: Run the task's tests**
 
 Run: `.venv/Scripts/python -m pytest tests/test_portal_withdrawals.py -q -p no:cacheprovider`
 Expected: PASS, 21 passed.
 
-- [ ] **Step 7: Run every portal test file together**
+- [x] **Step 7: Run every portal test file together**
 
 Run: `.venv/Scripts/python -m pytest tests/test_portal_ledger.py tests/test_portal_common.py tests/test_portal_methods.py tests/test_portal_deposits.py tests/test_portal_withdrawals.py tests/test_mpin_core.py tests/test_uploads.py -q -p no:cacheprovider`
 Expected: all pass, 0 failed.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add api/src/api/routes/portal_investor.py api/src/api/routes/portal_admin.py api/tests/test_portal_withdrawals.py
@@ -5944,7 +5944,7 @@ Claude-Session: https://claude.ai/code/session_01Lz2HHZEdtFN7DEfGj6Pi3b"
 - Consumes: `require_mpin`; `parse_amount`, `LedgerError`, `transfer_pair`, `TRANSFER_PAIRS`, `floor_cents`, `can_transition` (`portal_ledger`); `audit_control`, `notify_investor`, `linked_account`, `equity_for`, `wallet_figures`, `open_account_transfers_out`, `settle`, `transfer_json`, `TRANSFER_COLS`, `Decision`, `require_note_on_reject` (`portal_common`); `hourly`; test helpers `csrf`, `credit`, `link`.
 - Produces: routes above; `WALLET_LABELS: dict[str, str]` and `money_ref_label(kind, account_id) -> str` (module-level in `portal_investor.py`, reused by Task 10's adjustment email).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `api/tests/test_portal_transfers.py`:
 
@@ -6300,12 +6300,12 @@ def test_investors_only_see_their_own_transfers_and_cannot_work_the_queue(
     assert client.get(f"/api/orgs/{org_id}/transfers").status_code == 403
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `.venv/Scripts/python -m pytest tests/test_portal_transfers.py -q -p no:cacheprovider`
 Expected: 19 FAIL (6 parametrised cases of `test_disallowed_pairs_are_refused` plus 13 others), each on a status assertion such as `assert 404 == 201` because the routes do not exist.
 
-- [ ] **Step 3: Body classes, labels and imports in `portal_investor.py`**
+- [x] **Step 3: Body classes, labels and imports in `portal_investor.py`**
 
 Extend the import block of `api/src/api/routes/portal_investor.py` so it also has:
 
@@ -6351,7 +6351,7 @@ def money_ref_label(kind: str, account_id: Optional[int]) -> str:
     return WALLET_LABELS.get(kind, kind)
 ```
 
-- [ ] **Step 4: Investor transfer routes**
+- [x] **Step 4: Investor transfer routes**
 
 Inside `create_portal_investor_router()`, before `return router`, add:
 
@@ -6474,7 +6474,7 @@ Inside `create_portal_investor_router()`, before `return router`, add:
         return out
 ```
 
-- [ ] **Step 5: Admin transfer routes**
+- [x] **Step 5: Admin transfer routes**
 
 Extend the `portal_common` import in `api/src/api/routes/portal_admin.py` with `TRANSFER_COLS` and `transfer_json`, and add `from .portal_investor import money_ref_label` below the `..rbac` import. Then, inside `create_portal_admin_router()` before `return router`, add:
 
@@ -6565,17 +6565,17 @@ Extend the `portal_common` import in `api/src/api/routes/portal_admin.py` with `
         return out
 ```
 
-- [ ] **Step 6: Run the task's tests**
+- [x] **Step 6: Run the task's tests**
 
 Run: `.venv/Scripts/python -m pytest tests/test_portal_transfers.py -q -p no:cacheprovider`
 Expected: PASS, 19 passed.
 
-- [ ] **Step 7: Run every portal test file together**
+- [x] **Step 7: Run every portal test file together**
 
 Run: `.venv/Scripts/python -m pytest tests/test_portal_ledger.py tests/test_portal_common.py tests/test_portal_methods.py tests/test_portal_deposits.py tests/test_portal_withdrawals.py tests/test_portal_transfers.py tests/test_mpin_core.py tests/test_uploads.py -q -p no:cacheprovider`
 Expected: all pass, 0 failed.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add api/src/api/routes/portal_investor.py api/src/api/routes/portal_admin.py api/tests/test_portal_transfers.py
@@ -6606,7 +6606,7 @@ Claude-Session: https://claude.ai/code/session_01Lz2HHZEdtFN7DEfGj6Pi3b"
 - Consumes: `require_mpin`; `WALLETS`, `parse_amount`, `clean_text`, `LedgerError`, `floor_cents`, `money` (`portal_ledger`); `audit_control`, `notify_investor`, `linked_account`, `equity_for`, `wallet_figures`, `open_account_transfers_out`, `net_funded`, `portal_settings`, `entry_json`, `ENTRY_COLS` (`portal_common`); `WALLET_LABELS` (Task 9); `_proxy_to_copier`, `COPIER_SLOW_COMMAND_TIMEOUT_S` (`routes/settings_control`), `MT5_OFFLINE_AFTER_S` (`routes/mt5`); test helpers `csrf`, `credit`, `approved_destination`, `link`, `add_method`.
 - Produces: the complete API of spec section 8; `pending_counts(conn, org_id, user_id) -> dict` and `entries_page(conn, org_id, user_id, *, wallet, kind, date_from, date_to, limit, before) -> dict` (module-level in `portal_investor.py`, imported by `portal_admin.py`); `ALERT_RULES` / `TELEGRAM_RULES` with the six warning actions.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `api/tests/test_portal_summary.py`:
 
@@ -7132,12 +7132,12 @@ def test_the_old_router_and_ledger_are_gone(org_client):
         assert client.get(f"/api/orgs/{org_id}/{tail}").status_code == 404, tail
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `.venv/Scripts/python -m pytest tests/test_portal_summary.py -q -p no:cacheprovider`
 Expected: FAIL. The summary, wallet-entries, investors, adjustments, requests/summary and read-through tests fail on status assertions (404s from missing routes, or old-router answers such as a missing `wallets` key); `test_the_six_warning_actions_reach_both_alerters` fails on `investor_transfer_requested`; `test_the_old_router_and_ledger_are_gone` fails on `find_spec(...) is None`.
 
-- [ ] **Step 3: Retire the old router and ledger**
+- [x] **Step 3: Retire the old router and ledger**
 
 In `api/src/api/main.py` delete this block (Task 6 kept the new `create_portal_*_router()` includes elsewhere in the function; leave those):
 
@@ -7158,7 +7158,7 @@ grep -rn "routes.investor\|investor_ledger\|create_investor_router\|create_inves
 
 Expected: `git rm` removes three files; the `grep` prints nothing.
 
-- [ ] **Step 4: Summary, ledger page and read-throughs in `portal_investor.py`**
+- [x] **Step 4: Summary, ledger page and read-throughs in `portal_investor.py`**
 
 Extend the imports of `api/src/api/routes/portal_investor.py` with:
 
@@ -7416,7 +7416,7 @@ Inside `create_portal_investor_router()`, before `return router`, add:
             f"?account_id={account_id}&from={from_ms}&to={to_ms}", method="GET")
 ```
 
-- [ ] **Step 5: Investors list, link, ledger view, adjustments and requests summary in `portal_admin.py`**
+- [x] **Step 5: Investors list, link, ledger view, adjustments and requests summary in `portal_admin.py`**
 
 Extend the imports of `api/src/api/routes/portal_admin.py` with:
 
@@ -7643,7 +7643,7 @@ Inside `create_portal_admin_router()`, before `return router`, add:
         return {**counts, "total": sum(counts.values())}
 ```
 
-- [ ] **Step 6: Alert and Telegram rules**
+- [x] **Step 6: Alert and Telegram rules**
 
 In `api/src/api/alerts.py` replace:
 
@@ -7685,7 +7685,7 @@ with:
     ("control", "warning", "payment_method_changed"),
 ```
 
-- [ ] **Step 7: Point the RBAC matrix at the portal routes**
+- [x] **Step 7: Point the RBAC matrix at the portal routes**
 
 Replace `api/tests/test_rbac_matrix.py` in full with:
 
@@ -7941,17 +7941,17 @@ def test_a_half_session_is_refused_on_every_matrix_route(matrix_org):
 
 If Task 1 (Part A) already rewrote this file to keep the suite green, this version replaces it: it is the final matrix for the portal.
 
-- [ ] **Step 8: Run the task's tests and the matrix**
+- [x] **Step 8: Run the task's tests and the matrix**
 
 Run: `.venv/Scripts/python -m pytest tests/test_portal_summary.py tests/test_rbac_matrix.py -q -p no:cacheprovider`
 Expected: PASS. `test_portal_summary.py` 15 passed; `test_rbac_matrix.py` all rows pass (63 parametrised cases plus the two extra tests).
 
-- [ ] **Step 9: Run the full API suite**
+- [x] **Step 9: Run the full API suite**
 
 Run: `.venv/Scripts/python -m pytest tests -q -p no:cacheprovider`
 Expected: everything passes except the pre-existing Windows-only cases: 7 errors in `test_events_ws.py` and 1 EA-download CRLF failure. No other failure, and no `ImportError` anywhere (nothing imports `api.investor_ledger` or `api.routes.investor` any more).
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add -A api/src/api api/tests
@@ -7984,7 +7984,7 @@ The shared pieces every portal page (Tasks 13–19) imports. Nothing here render
 - Produces: types `WalletKind`, `RequestStatus`, `MoneyRef`, `PaymentMethod`, `PortalDeposit`, `PortalWithdrawal`, `PortalTransfer`, `PayoutDestination`, `WalletEntry`, `WalletEntriesPage`, `WalletFigures`, `InvestorSummary`, `InvestorRow`, `PortalSettings`, `RequestsSummary`, `UploadedFile`; `ACCOUNT_CURRENCY`, `WALLETS`, `walletLabel`, `statusLabel`, `statusTone`, `approvedLabel`, `RequestKind`, `BADGE_TONE`, `moneyOrDash`, `shortAddress`, `entryLabel`; `HIDE_KEY`, `readHidden`, `setHidden`, `useHiddenBalances`; `Money` (default), `MoneyProps`, `HideBalancesToggle`; `apiUpload`, `orgUpload`; `FileInput` (default), `FileInputProps`, `RECEIPT_ACCEPT`, `MAX_UPLOAD_BYTES`, `formatBytes`; `PinConfirmDialog` (default), `PinConfirmDialogProps`, `mpinErrorText`; fixtures `summaryFixture`, `depositFixture`, `withdrawalFixture`, `transferFixture`, `destinationFixture`, `entryFixture`, `methodFixture`, `investorRowFixture`.
 - Deviation from the interfaces doc: `statusLabel`/`statusTone` gain an optional `kind?: RequestKind` second argument; bare `approved` keeps 'Approved, payment pending' (the existing test and the Requests desk rely on it); `approvedLabel(kind)` and `RequestKind` are the way to get 'Approved, in progress' (transfer) or 'Approved' (destination). Later tasks call `statusLabel(status, 'transfer')` / `statusTone(status, 'transfer')` for transfer rows and `statusLabel(status, 'destination')` / `statusTone(status, 'destination')` for payout-account rows. Also: `orgApi` gains the same optional `opts?: { redirectOn401?: boolean }` fourth argument as `api()`, so step-up POSTs (withdrawal, transfer, destination, adjustment) can go through `orgApi(..., { redirectOn401: false })` as spec section 10 says, instead of spelling out the `/api/orgs/{id}/` prefix through `api()`.
 
-- [ ] **Step 1: Move the five old types out of `lib/types.ts`**
+- [x] **Step 1: Move the five old types out of `lib/types.ts`**
 
 Create `dashboard/src/lib/legacyInvestorTypes.ts` with exactly this content (it is the text being removed from `types.ts`, unchanged):
 
@@ -8277,7 +8277,7 @@ export interface RequestsSummary { deposits: number; withdrawals: number; transf
 export interface UploadedFile { id: number; purpose: string; content_type: string; size_bytes: number; created_at: string }
 ```
 
-- [ ] **Step 2: Point the four old pages at the legacy module**
+- [x] **Step 2: Point the four old pages at the legacy module**
 
 `dashboard/src/pages/investor/InvestorOverview.tsx` — replace
 
@@ -8333,12 +8333,12 @@ import type { Account } from '../lib/types'
 import type { InvestorDeposit, InvestorRow, InvestorWallet, InvestorWithdrawal } from '../lib/legacyInvestorTypes'
 ```
 
-- [ ] **Step 3: Prove the type move compiles**
+- [x] **Step 3: Prove the type move compiles**
 
 Run from `dashboard/`: `npx tsc --noEmit -p tsconfig.app.json`
 Expected: no output, exit code 0. (If it lists `InvestorSummary` or `InvestorRow` errors, an import in Step 2 was missed.)
 
-- [ ] **Step 4: Write the failing vocabulary tests**
+- [x] **Step 4: Write the failing vocabulary tests**
 
 Replace `dashboard/src/lib/investor.test.ts` with:
 
@@ -8439,7 +8439,7 @@ describe('portal vocabulary', () => {
 Run: `npx vitest run src/lib/investor.test.ts`
 Expected: FAIL — the four legacy tests pass; the five 'portal vocabulary' tests fail (`TypeError: walletLabel is not a function`, `expected undefined to deeply equal ['main', ...]`, `statusLabel('cancelled')` returning 'cancelled'). Vitest turns a missing named export into `undefined` rather than a SyntaxError, so the file loads and each test fails on its own line.
 
-- [ ] **Step 5: Extend `lib/investor.ts`**
+- [x] **Step 5: Extend `lib/investor.ts`**
 
 Replace `dashboard/src/lib/investor.ts` with:
 
@@ -8560,7 +8560,7 @@ export function pillClass(status: string): string {
 Run: `npx vitest run src/lib/investor.test.ts`
 Expected: PASS — Tests 9 passed (9).
 
-- [ ] **Step 6: Write the failing hide-balances and `Money` tests**
+- [x] **Step 6: Write the failing hide-balances and `Money` tests**
 
 Create `dashboard/src/lib/hideBalances.test.ts`:
 
@@ -8675,7 +8675,7 @@ test('the toggle is a pressed ghost button that flips every Money on the page an
 Run: `npx vitest run src/lib/hideBalances.test.ts src/components/Money.test.tsx`
 Expected: FAIL — both files fail to load (`Failed to resolve import "./hideBalances"` / `"./Money"`).
 
-- [ ] **Step 7: Implement `lib/hideBalances.ts` and `components/Money.tsx`**
+- [x] **Step 7: Implement `lib/hideBalances.ts` and `components/Money.tsx`**
 
 Create `dashboard/src/lib/hideBalances.ts`:
 
@@ -8791,7 +8791,7 @@ export function HideBalancesToggle() {
 Run: `npx vitest run src/lib/hideBalances.test.ts src/components/Money.test.tsx`
 Expected: PASS — Test Files 2 passed; Tests 8 passed (8).
 
-- [ ] **Step 8: Write the failing `apiUpload` tests**
+- [x] **Step 8: Write the failing `apiUpload` tests**
 
 Append to `dashboard/src/lib/api.test.ts` (add `apiUpload, orgApi, orgUpload` to the existing import: `import { api, apiUpload, orgApi, orgUpload, type ApiError } from './api'`):
 
@@ -8857,7 +8857,7 @@ test('orgApi passes redirectOn401 through so a step-up 401 stays inline', async 
 Run: `npx vitest run src/lib/api.test.ts`
 Expected: FAIL — the four new tests fail: three with `TypeError: apiUpload is not a function` / `orgUpload is not a function` (a missing named export is `undefined` under vitest, not a SyntaxError), and the `orgApi` step-up test with `expected '/login' to be '/org/1/invest/withdraw'` (the current `orgApi` drops the opts, so the 401 still redirects); the nine existing tests pass.
 
-- [ ] **Step 9: Add `apiUpload` and `orgUpload` to `lib/api.ts`, and let `orgApi` pass `opts` through**
+- [x] **Step 9: Add `apiUpload` and `orgUpload` to `lib/api.ts`, and let `orgApi` pass `opts` through**
 
 Replace `dashboard/src/lib/api.ts` with (the 401, error and parse logic is the existing code, moved into `finish` so both request shapes share it; `orgApi` gains the same optional `opts` as `api()`):
 
@@ -9031,7 +9031,7 @@ export function eventsSocket(orgId: number): WebSocket {
 Run: `npx vitest run src/lib/api.test.ts`
 Expected: PASS — Tests 13 passed (13) (the nine existing plus four new).
 
-- [ ] **Step 10: Write the failing `FileInput` tests**
+- [x] **Step 10: Write the failing `FileInput` tests**
 
 Create `dashboard/src/components/FileInput.test.tsx`:
 
@@ -9150,7 +9150,7 @@ test('required marks the input and shows in the hint; a caller error is announce
 Run: `npx vitest run src/components/FileInput.test.tsx`
 Expected: FAIL — `Failed to resolve import "./FileInput"`.
 
-- [ ] **Step 11: Implement `components/FileInput.tsx`**
+- [x] **Step 11: Implement `components/FileInput.tsx`**
 
 Create `dashboard/src/components/FileInput.tsx`:
 
@@ -9287,7 +9287,7 @@ export default function FileInput({
 Run: `npx vitest run src/components/FileInput.test.tsx`
 Expected: PASS — Tests 6 passed (6).
 
-- [ ] **Step 12: Write the failing `PinConfirmDialog` tests**
+- [x] **Step 12: Write the failing `PinConfirmDialog` tests**
 
 Create `dashboard/src/components/PinConfirmDialog.test.tsx`:
 
@@ -9409,7 +9409,7 @@ test('Cancel is the first focus and reports to the caller; closing forgets the P
 Run: `npx vitest run src/components/PinConfirmDialog.test.tsx`
 Expected: FAIL — `Failed to resolve import "./PinConfirmDialog"`.
 
-- [ ] **Step 13: Implement `components/PinConfirmDialog.tsx`**
+- [x] **Step 13: Implement `components/PinConfirmDialog.tsx`**
 
 Create `dashboard/src/components/PinConfirmDialog.tsx`:
 
@@ -9514,7 +9514,7 @@ export default function PinConfirmDialog({
 Run: `npx vitest run src/components/PinConfirmDialog.test.tsx`
 Expected: PASS — Tests 6 passed (6).
 
-- [ ] **Step 14: Add the portal fixtures with a shape test**
+- [x] **Step 14: Add the portal fixtures with a shape test**
 
 Create `dashboard/src/test/portalFixtures.ts`:
 
@@ -9672,12 +9672,12 @@ test('every row builder merges overrides over a complete row', () => {
 Run: `npx vitest run src/test/portalFixtures.test.ts`
 Expected: PASS — Tests 2 passed (2).
 
-- [ ] **Step 15: Full dashboard gate**
+- [x] **Step 15: Full dashboard gate**
 
 Run from `dashboard/`: `npm test`
 Expected: palette prover prints its pass line and exits 0; `tsc` prints nothing; vitest ends with every file passed (the existing InvestorOverview / InvestorDeposit / InvestorWithdraw / Investors tests still pass because their pages and their behaviour are unchanged). If vitest is slow on this machine, run it as `npx vitest run --maxWorkers=2 --minWorkers=1` after `node scripts/palette_check.mjs && npx tsc --noEmit -p tsconfig.app.json`.
 
-- [ ] **Step 16: Commit**
+- [x] **Step 16: Commit**
 
 ```bash
 git add dashboard/src/lib/types.ts dashboard/src/lib/legacyInvestorTypes.ts dashboard/src/lib/investor.ts dashboard/src/lib/investor.test.ts dashboard/src/lib/hideBalances.ts dashboard/src/lib/hideBalances.test.ts dashboard/src/lib/api.ts dashboard/src/lib/api.test.ts dashboard/src/components/Money.tsx dashboard/src/components/Money.test.tsx dashboard/src/components/FileInput.tsx dashboard/src/components/FileInput.test.tsx dashboard/src/components/PinConfirmDialog.tsx dashboard/src/components/PinConfirmDialog.test.tsx dashboard/src/test/portalFixtures.ts dashboard/src/test/portalFixtures.test.ts dashboard/src/pages/investor/InvestorOverview.tsx dashboard/src/pages/investor/InvestorDeposit.tsx dashboard/src/pages/investor/InvestorWithdraw.tsx dashboard/src/pages/Investors.tsx
@@ -9706,7 +9706,7 @@ The shell learns the portal's shape before the pages exist. After this task the 
 - Consumes: `RequestsSummary` (Task 11 types), `orgApi`, `eventsSocket`, `can`/`Role`, `Badge`, `useLiveRefresh`.
 - Produces: `NavItem { path; label; end?; badge? }`, `adminNav(orgId, role, requestsBadge?)`, `investorNav(orgId)` (groups `''`, `Money`, `Trading`), `bottomBarItems(orgId, role)` (investors: Dashboard, Deposit, Withdraw, Transactions), `useRequestsBadge(orgId, role): number | undefined`, `REQUESTS_POLL_MS`; NavRail renders `<Badge tone="neutral">` after the label and names the link `"<label>, <n> open"` when `badge > 0`; BottomBar shows More for every role.
 
-- [ ] **Step 1: Write the failing nav data tests**
+- [x] **Step 1: Write the failing nav data tests**
 
 Create `dashboard/src/components/layout/nav.test.ts`:
 
@@ -9768,7 +9768,7 @@ test('the Requests item carries the open count it was given, and nothing else do
 Run: `npx vitest run src/components/layout/nav.test.ts`
 Expected: FAIL — the first test fails with `expected [ '' ] to deeply equal [ '', 'Money', 'Trading' ]`; the others fail on the Requests item and the investor tab bar.
 
-- [ ] **Step 2: Rewrite `nav.ts`**
+- [x] **Step 2: Rewrite `nav.ts`**
 
 Replace `dashboard/src/components/layout/nav.ts` with:
 
@@ -9881,7 +9881,7 @@ export function bottomBarItems(orgId: number, role: Role): NavItem[] {
 Run: `npx vitest run src/components/layout/nav.test.ts`
 Expected: PASS — Tests 4 passed (4).
 
-- [ ] **Step 3: Write the failing NavRail and BottomBar tests**
+- [x] **Step 3: Write the failing NavRail and BottomBar tests**
 
 Replace `dashboard/src/components/layout/NavRail.test.tsx` with:
 
@@ -10012,7 +10012,7 @@ test('viewers get History instead of Trade; investors get Dashboard, Deposit, Wi
 Run: `npx vitest run src/components/layout/NavRail.test.tsx src/components/layout/BottomBar.test.tsx`
 Expected: FAIL — NavRail: `Unable to find an accessible element with the role "link" and name "Requests, 3 open"`; BottomBar: `Unable to find an accessible element with the role "button" and name "More"` in the investor test.
 
-- [ ] **Step 4: Update `NavRail.tsx` and `BottomBar.tsx`**
+- [x] **Step 4: Update `NavRail.tsx` and `BottomBar.tsx`**
 
 Replace `dashboard/src/components/layout/NavRail.tsx` with:
 
@@ -10114,7 +10114,7 @@ export default function BottomBar({ orgId, role, onMore }: {
 Run: `npx vitest run src/components/layout/NavRail.test.tsx src/components/layout/BottomBar.test.tsx`
 Expected: PASS — Test Files 2 passed; Tests 6 passed (6).
 
-- [ ] **Step 5: Let `useLiveRefresh` skip the socket for a null org**
+- [x] **Step 5: Let `useLiveRefresh` skip the socket for a null org**
 
 The events socket refuses investors outright (`ws.py` closes with 4403), so the badge hook must open no socket for them; a hook cannot be called conditionally, so the hook itself learns to stand down. Append to `dashboard/src/hooks/useLiveRefresh.test.tsx`:
 
@@ -10186,7 +10186,7 @@ and, inside `connect`, replace `ws = eventsSocket(orgId)` with `ws = eventsSocke
 Run: `npx vitest run src/hooks/useLiveRefresh.test.tsx`
 Expected: PASS — Tests 4 passed (4).
 
-- [ ] **Step 6: Write the failing `useRequestsBadge` tests**
+- [x] **Step 6: Write the failing `useRequestsBadge` tests**
 
 Create `dashboard/src/hooks/useRequestsBadge.test.tsx`:
 
@@ -10282,7 +10282,7 @@ test('viewers and investors get undefined, no request and no socket', async () =
 Run: `npx vitest run src/hooks/useRequestsBadge.test.tsx`
 Expected: FAIL — `Failed to resolve import "./useRequestsBadge"`.
 
-- [ ] **Step 7: Implement `hooks/useRequestsBadge.ts`**
+- [x] **Step 7: Implement `hooks/useRequestsBadge.ts`**
 
 Create `dashboard/src/hooks/useRequestsBadge.ts`:
 
@@ -10340,7 +10340,7 @@ export function useRequestsBadge(orgId: number, role: Role): number | undefined 
 Run: `npx vitest run src/hooks/useRequestsBadge.test.tsx`
 Expected: PASS — Tests 3 passed (3).
 
-- [ ] **Step 8: Write the failing Layout tests**
+- [x] **Step 8: Write the failing Layout tests**
 
 In `dashboard/src/components/Layout.test.tsx` make these edits.
 
@@ -10525,7 +10525,7 @@ test('a control event refreshes the Requests count without waiting for the poll'
 Run: `npx vitest run src/components/Layout.test.tsx`
 Expected: FAIL — the three new admin tests fail (`Unable to find an accessible element with the role "link" and name "Requests, 3 open"`, and likewise 'Requests, 1 open'); the rewritten investor test and every pre-existing test pass (nav.ts and BottomBar are already in place from Steps 2 and 4, so Wallet/Money/Trading and More already render and no `/requests/summary` call happens until Step 9 wires the hook; the socket edits are behaviour-neutral until Layout opens the second socket).
 
-- [ ] **Step 9: Wire the badge into `Layout.tsx`**
+- [x] **Step 9: Wire the badge into `Layout.tsx`**
 
 In `dashboard/src/components/Layout.tsx` replace
 
@@ -10572,12 +10572,12 @@ with
 Run: `npx vitest run src/components/Layout.test.tsx`
 Expected: PASS — Tests 56 passed (56) (the 53 existing plus three new).
 
-- [ ] **Step 10: Full dashboard gate**
+- [x] **Step 10: Full dashboard gate**
 
 Run from `dashboard/`: `npm test`
 Expected: palette prover passes, `tsc` prints nothing, vitest ends with every file passed (the `nav.test.ts`, `NavRail`, `BottomBar`, `useLiveRefresh`, `useRequestsBadge` and `Layout` files included). If vitest is slow on this machine: `node scripts/palette_check.mjs && npx tsc --noEmit -p tsconfig.app.json && npx vitest run --maxWorkers=2 --minWorkers=1`.
 
-- [ ] **Step 11: Commit**
+- [x] **Step 11: Commit**
 
 ```bash
 git add dashboard/src/components/layout/nav.ts dashboard/src/components/layout/nav.test.ts dashboard/src/components/layout/NavRail.tsx dashboard/src/components/layout/NavRail.test.tsx dashboard/src/components/layout/BottomBar.tsx dashboard/src/components/layout/BottomBar.test.tsx dashboard/src/hooks/useLiveRefresh.ts dashboard/src/hooks/useLiveRefresh.test.tsx dashboard/src/hooks/useRequestsBadge.ts dashboard/src/hooks/useRequestsBadge.test.tsx dashboard/src/components/Layout.tsx dashboard/src/components/Layout.test.tsx
@@ -10604,7 +10604,7 @@ Claude-Session: https://claude.ai/code/session_01Lz2HHZEdtFN7DEfGj6Pi3b"
 - Consumes: `InvestorSummary`, `WalletEntriesPage`, `WalletEntry` (`lib/types.ts`); `entryLabel`, `walletLabel`, `ACCOUNT_CURRENCY` (`lib/investor.ts`); `useHiddenBalances`, `setHidden` (`lib/hideBalances.ts`); `Money`, `HideBalancesToggle` (`components/Money.tsx`); `summaryFixture`, `entryFixture` (`src/test/portalFixtures.ts`); `PnlBars` (`components/charts.tsx`); `NextStep`; `orgApi`; `GET investor/summary`, `GET investor/wallet-entries?limit=8`.
 - Produces: page `InvestorDashboard` (default export, route `invest`, title `Dashboard`); exported helpers `greeting(hour)`, `flowWindow(flow, days, now?)`, `last7(flow, pick, now?)`; `PnlBars` optional props `label`, `bucketLabel`, `countNoun`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `dashboard/src/pages/investor/InvestorDashboard.test.tsx`:
 
@@ -10796,12 +10796,12 @@ test('dismissing a load error shows the empty state, not an endless skeleton', a
 })
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run (from `dashboard/`): `npx vitest run src/pages/investor/InvestorDashboard.test.tsx`
 Expected: FAIL — `Error: Failed to load url ./InvestorDashboard` (the module does not exist yet).
 
-- [ ] **Step 3: Let `PnlBars` name its buckets**
+- [x] **Step 3: Let `PnlBars` name its buckets**
 
 In `dashboard/src/components/charts.tsx` replace the `PnlBars` signature:
 
@@ -10868,7 +10868,7 @@ with
 
 `Performance.tsx` calls `<PnlBars buckets={a.weekly} />` and keeps every default.
 
-- [ ] **Step 4: Write the page**
+- [x] **Step 4: Write the page**
 
 Create `dashboard/src/pages/investor/InvestorDashboard.tsx`:
 
@@ -11164,12 +11164,12 @@ export default function InvestorDashboard() {
 }
 ```
 
-- [ ] **Step 5: Run the test to verify it passes**
+- [x] **Step 5: Run the test to verify it passes**
 
 Run: `npx vitest run src/pages/investor/InvestorDashboard.test.tsx`
 Expected: PASS, 12 passed.
 
-- [ ] **Step 6: Route it and retire InvestorOverview**
+- [x] **Step 6: Route it and retire InvestorOverview**
 
 In `dashboard/src/pages/groups/investor.ts` replace
 
@@ -11213,12 +11213,12 @@ Delete the old page and its test:
 git rm dashboard/src/pages/investor/InvestorOverview.tsx dashboard/src/pages/investor/InvestorOverview.test.tsx
 ```
 
-- [ ] **Step 7: Full dashboard gate**
+- [x] **Step 7: Full dashboard gate**
 
 Run (from `dashboard/`): `npm test`
 Expected: prover ALL PASS, `tsc` clean (nothing imports InvestorOverview any more), every vitest file green (run vitest as `npx vitest run --maxWorkers=2 --minWorkers=1` if the plain run is slow on this machine). The nav and Layout tests already say "Dashboard" since Task 12.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add dashboard/src/pages/investor/InvestorDashboard.tsx dashboard/src/pages/investor/InvestorDashboard.test.tsx dashboard/src/components/charts.tsx dashboard/src/pages/groups/investor.ts dashboard/src/App.tsx
@@ -11242,7 +11242,7 @@ Claude-Session: https://claude.ai/code/session_01Lz2HHZEdtFN7DEfGj6Pi3b"
 - Produces: page `InvestorDeposit` (title `Deposit`, Tabs `idBase="deposit-kind"`, chips `50 100 250 500 Min`, submit `File deposit notice`, NextStep `Deposits are not open yet`, cancel button `aria-label="Cancel deposit {id}"`).
 - Deviation from spec 11.3: the notices table's Receipt column is an `Open` link to `GET investor/files/{id}` (new tab), not a thumbnail. PDF receipts have no thumbnail and the file route needs the session cookie, so one link serves both kinds; the tests assert the link's `href`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Replace the whole of `dashboard/src/pages/investor/InvestorDeposit.test.tsx` with:
 
@@ -11508,12 +11508,12 @@ test('dismissing a load error shows the empty state, not an endless skeleton', a
 })
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `npx vitest run src/pages/investor/InvestorDeposit.test.tsx`
 Expected: FAIL — the QR source-grep test passes, every other test fails (the Task 11 stub of this page still calls `investor/wallet` and has no tabs, chips or radio; e.g. `Unable to find role="tab" and name "Crypto"`).
 
-- [ ] **Step 3: Write the page**
+- [x] **Step 3: Write the page**
 
 Replace the whole of `dashboard/src/pages/investor/InvestorDeposit.tsx` with:
 
@@ -11959,17 +11959,17 @@ export default function InvestorDeposit() {
 }
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `npx vitest run src/pages/investor/InvestorDeposit.test.tsx`
 Expected: PASS, 11 passed.
 
-- [ ] **Step 5: Full dashboard gate**
+- [x] **Step 5: Full dashboard gate**
 
 Run (from `dashboard/`): `npm test`
 Expected: prover ALL PASS, `tsc` clean, every vitest file green. (`vocabulary.test.ts` scans this file: no `<h1`, no literal "Loading...".)
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add dashboard/src/pages/investor/InvestorDeposit.tsx dashboard/src/pages/investor/InvestorDeposit.test.tsx
@@ -11996,7 +11996,7 @@ Claude-Session: https://claude.ai/code/session_01Lz2HHZEdtFN7DEfGj6Pi3b"
 - Consumes: `InvestorSummary`, `PayoutDestination`, `PortalWithdrawal`, `UploadedFile`; `ACCOUNT_CURRENCY`, `BADGE_TONE`, `statusLabel`, `statusTone`; `Money`; `PinConfirmDialog` (`{open, title, children, confirmLabel, busy?, onConfirm(mpin), onCancel}`; PinInput `id="confirm-mpin" label="Your MPIN"`, boxes labelled `Your MPIN digit N of 6`); `FileInput`, `RECEIPT_ACCEPT`, `MAX_UPLOAD_BYTES`; `Drawer`, `ConfirmDialog`, `Select`; `orgApi` (step-up POSTs with `{ redirectOn401: false }`), `orgUpload`; fixtures `summaryFixture`, `destinationFixture`, `withdrawalFixture`; routes `GET investor/payout-destinations`, `POST investor/payout-destinations` `{kind, nickname, details, proof_file_id, mpin}`, `POST investor/payout-destinations/{id}/remove`, `GET investor/withdrawals`, `POST investor/withdrawals` `{destination_id, amount, mpin}`, `POST investor/withdrawals/{id}/cancel`, `POST investor/files` (purpose `payout_proof`).
 - Produces: pages `InvestorWithdraw` (title `Withdraw`, submit `Request withdrawal`, dialog title `Send {money(amount, 'USD')} to {destination_summary}?`, `STEPS = ['requested','approved','paid']`, cancel `aria-label="Cancel withdrawal {id}"`) and `InvestorPayoutAccounts` (title `Payout accounts`, route `invest/payout-accounts`, Drawer titles `Add bank account` / `Add crypto address`, save `Save payout account`, remove `aria-label="Remove {nickname}"`); exported `feePreview(amount, feePct)`.
 
-- [ ] **Step 1: Write the failing Withdraw test**
+- [x] **Step 1: Write the failing Withdraw test**
 
 Replace the whole of `dashboard/src/pages/investor/InvestorWithdraw.test.tsx` with:
 
@@ -12253,12 +12253,12 @@ test('dismissing a load error shows the empty state, not an endless skeleton', a
 })
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `npx vitest run src/pages/investor/InvestorWithdraw.test.tsx`
 Expected: FAIL — `TypeError: feePreview is not a function` in the feePreview test (under vitest a missing named export is `undefined`, not a SyntaxError); every page test fails on `Unable to find a label with the text of: Amount in USD` (the Task 11 stub keeps the old form).
 
-- [ ] **Step 3: Write the Withdraw page**
+- [x] **Step 3: Write the Withdraw page**
 
 Replace the whole of `dashboard/src/pages/investor/InvestorWithdraw.tsx` with:
 
@@ -12531,12 +12531,12 @@ export default function InvestorWithdraw() {
 }
 ```
 
-- [ ] **Step 4: Run the Withdraw test to verify it passes**
+- [x] **Step 4: Run the Withdraw test to verify it passes**
 
 Run: `npx vitest run src/pages/investor/InvestorWithdraw.test.tsx`
 Expected: PASS, 14 passed.
 
-- [ ] **Step 5: Write the failing Payout accounts test**
+- [x] **Step 5: Write the failing Payout accounts test**
 
 Create `dashboard/src/pages/investor/InvestorPayoutAccounts.test.tsx`:
 
@@ -12738,12 +12738,12 @@ test('dismissing a load error shows the empty states, not an endless skeleton', 
 })
 ```
 
-- [ ] **Step 6: Run it to verify it fails**
+- [x] **Step 6: Run it to verify it fails**
 
 Run: `npx vitest run src/pages/investor/InvestorPayoutAccounts.test.tsx`
 Expected: FAIL — `Error: Failed to load url ./InvestorPayoutAccounts`.
 
-- [ ] **Step 7: Write the Payout accounts page**
+- [x] **Step 7: Write the Payout accounts page**
 
 Create `dashboard/src/pages/investor/InvestorPayoutAccounts.tsx`:
 
@@ -12999,12 +12999,12 @@ export default function InvestorPayoutAccounts() {
 }
 ```
 
-- [ ] **Step 8: Run the Payout accounts test to verify it passes**
+- [x] **Step 8: Run the Payout accounts test to verify it passes**
 
 Run: `npx vitest run src/pages/investor/InvestorPayoutAccounts.test.tsx`
 Expected: PASS, 7 passed.
 
-- [ ] **Step 9: Route it**
+- [x] **Step 9: Route it**
 
 In `dashboard/src/pages/groups/investor.ts` add, after the `InvestorWithdraw` line:
 
@@ -13024,12 +13024,12 @@ and, after the `invest/withdraw` route line:
               <Route path="invest/payout-accounts" element={<InvestorPayoutAccounts />} />
 ```
 
-- [ ] **Step 10: Full dashboard gate**
+- [x] **Step 10: Full dashboard gate**
 
 Run (from `dashboard/`): `npm test`
 Expected: prover ALL PASS, `tsc` clean, every vitest file green.
 
-- [ ] **Step 11: Commit**
+- [x] **Step 11: Commit**
 
 ```bash
 git add dashboard/src/pages/investor/InvestorWithdraw.tsx dashboard/src/pages/investor/InvestorWithdraw.test.tsx dashboard/src/pages/investor/InvestorPayoutAccounts.tsx dashboard/src/pages/investor/InvestorPayoutAccounts.test.tsx dashboard/src/pages/groups/investor.ts dashboard/src/App.tsx
@@ -13056,7 +13056,7 @@ Claude-Session: https://claude.ai/code/session_01Lz2HHZEdtFN7DEfGj6Pi3b"
 - Consumes: `InvestorSummary`, `MoneyRef`, `PortalTransfer`, `WalletEntriesPage`, `WalletEntry`, `WalletKind`; `ACCOUNT_CURRENCY`, `WALLETS`, `walletLabel`, `entryLabel`, `BADGE_TONE`, `statusLabel`, `statusTone`; `Money`; `PinConfirmDialog`; `ConfirmDialog`, `Select`; `orgApi` (step-up POST with `{ redirectOn401: false }`); fixtures `summaryFixture`, `transferFixture`, `entryFixture`; routes `GET investor/transfers`, `POST investor/transfers` `{source, target, amount, mpin}` (`{"kind":"wallet","wallet":"main"}` | `{"kind":"account","account_id":N}`), `POST investor/transfers/{id}/cancel`, `GET investor/wallet-entries?limit=20`.
 - Produces: pages `InvestorTransfer` (title `Transfer`, `Select`s `aria-label="From"` / `"To"` with option values `wallet:main`, `wallet:pamm`, `wallet:social`, `account:<id>`, submit `Request transfer`, dialog title `Move {money(amount, 'USD')} from {from} to {to}?`, cancel `aria-label="Cancel transfer {id}"`) and `InvestorWallet` (title `Wallet`); exported `transferOptions(summary)`, `pairAllowed(from, to)`.
 
-- [ ] **Step 1: Write the failing Transfer test**
+- [x] **Step 1: Write the failing Transfer test**
 
 Create `dashboard/src/pages/investor/InvestorTransfer.test.tsx`:
 
@@ -13271,12 +13271,12 @@ test('dismissing a load error shows the empty state, not an endless skeleton', a
 })
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `npx vitest run src/pages/investor/InvestorTransfer.test.tsx`
 Expected: FAIL — `Error: Failed to load url ./InvestorTransfer`.
 
-- [ ] **Step 3: Write the Transfer page**
+- [x] **Step 3: Write the Transfer page**
 
 Create `dashboard/src/pages/investor/InvestorTransfer.tsx`:
 
@@ -13542,12 +13542,12 @@ export default function InvestorTransfer() {
 }
 ```
 
-- [ ] **Step 4: Run the Transfer test to verify it passes**
+- [x] **Step 4: Run the Transfer test to verify it passes**
 
 Run: `npx vitest run src/pages/investor/InvestorTransfer.test.tsx`
 Expected: PASS, 9 passed.
 
-- [ ] **Step 5: Write the failing Wallet test**
+- [x] **Step 5: Write the failing Wallet test**
 
 Create `dashboard/src/pages/investor/InvestorWallet.test.tsx`:
 
@@ -13635,12 +13635,12 @@ test('dismissing a load error shows the empty state, not an endless skeleton', a
 })
 ```
 
-- [ ] **Step 6: Run it to verify it fails**
+- [x] **Step 6: Run it to verify it fails**
 
 Run: `npx vitest run src/pages/investor/InvestorWallet.test.tsx`
 Expected: FAIL — `Error: Failed to load url ./InvestorWallet`.
 
-- [ ] **Step 7: Write the Wallet page**
+- [x] **Step 7: Write the Wallet page**
 
 Create `dashboard/src/pages/investor/InvestorWallet.tsx`:
 
@@ -13772,12 +13772,12 @@ export default function InvestorWallet() {
 }
 ```
 
-- [ ] **Step 8: Run the Wallet test to verify it passes**
+- [x] **Step 8: Run the Wallet test to verify it passes**
 
 Run: `npx vitest run src/pages/investor/InvestorWallet.test.tsx`
 Expected: PASS, 2 passed.
 
-- [ ] **Step 9: Route both pages**
+- [x] **Step 9: Route both pages**
 
 In `dashboard/src/pages/groups/investor.ts` add, after the `InvestorPayoutAccounts` line:
 
@@ -13800,12 +13800,12 @@ and, after the `invest/payout-accounts` route line:
               <Route path="invest/wallet" element={<InvestorWallet />} />
 ```
 
-- [ ] **Step 10: Full dashboard gate**
+- [x] **Step 10: Full dashboard gate**
 
 Run (from `dashboard/`): `npm test`
 Expected: prover ALL PASS, `tsc` clean, every vitest file green.
 
-- [ ] **Step 11: Commit**
+- [x] **Step 11: Commit**
 
 ```bash
 git add dashboard/src/pages/investor/InvestorTransfer.tsx dashboard/src/pages/investor/InvestorTransfer.test.tsx dashboard/src/pages/investor/InvestorWallet.tsx dashboard/src/pages/investor/InvestorWallet.test.tsx dashboard/src/pages/groups/investor.ts dashboard/src/App.tsx
@@ -13832,7 +13832,7 @@ Claude-Session: https://claude.ai/code/session_01Lz2HHZEdtFN7DEfGj6Pi3b"
 - Consumes: `WalletEntry`, `WalletEntriesPage`, `InvestorSummary`, `InvestorPositions`, `Analytics`; `ACCOUNT_CURRENCY`, `WALLETS`, `walletLabel`, `entryLabel`, `moneyOrDash`; `Money`; `Tabs`, `Select`, `Input`, `EquityCurve`, `AccountSecurity`, `NextStep`; `orgApi`; fixtures `summaryFixture`, `entryFixture`; routes `GET investor/wallet-entries?wallet=&kind=&from=&to=&limit=&before=` → `{entries, has_more, next_before}`, `GET investor/summary`, `GET investor/positions`, `GET investor/analytics?weeks=4`.
 - Produces: page `InvestorTransactions` (title `Transactions`, Tabs `idBase="wallet"` All + WALLETS, filters `From date` / `To date` / `Kind`, `Load more`, `Download CSV` → `transactions.csv` with columns Date, Wallet, Kind, Amount, Reference, Note); exported `entriesQuery(filter)`, `toCsv(rows)`; `InvestorAccount` extended (title `Account`).
 
-- [ ] **Step 1: Write the failing Transactions test**
+- [x] **Step 1: Write the failing Transactions test**
 
 Create `dashboard/src/pages/investor/InvestorTransactions.test.tsx`:
 
@@ -14003,12 +14003,12 @@ test('dismissing a load error shows the empty state, not an endless skeleton', a
 })
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `npx vitest run src/pages/investor/InvestorTransactions.test.tsx`
 Expected: FAIL — `Error: Failed to load url ./InvestorTransactions`.
 
-- [ ] **Step 3: Write the Transactions page**
+- [x] **Step 3: Write the Transactions page**
 
 Create `dashboard/src/pages/investor/InvestorTransactions.tsx`:
 
@@ -14213,12 +14213,12 @@ export default function InvestorTransactions() {
 }
 ```
 
-- [ ] **Step 4: Run the Transactions test to verify it passes**
+- [x] **Step 4: Run the Transactions test to verify it passes**
 
 Run: `npx vitest run src/pages/investor/InvestorTransactions.test.tsx`
 Expected: PASS, 8 passed.
 
-- [ ] **Step 5: Write the failing Account test**
+- [x] **Step 5: Write the failing Account test**
 
 Replace the whole of `dashboard/src/pages/investor/InvestorAccount.test.tsx` with:
 
@@ -14312,12 +14312,12 @@ test('unlinked investors see the setup notice instead of positions', async () =>
 })
 ```
 
-- [ ] **Step 6: Run it to verify it fails**
+- [x] **Step 6: Run it to verify it fails**
 
 Run: `npx vitest run src/pages/investor/InvestorAccount.test.tsx`
 Expected: FAIL — the first and third tests fail on `Unable to find an element with the text: XAUUSD` / `/your account is being set up/i` (the page fetches nothing yet); the second fails the same way.
 
-- [ ] **Step 7: Extend the Account page**
+- [x] **Step 7: Extend the Account page**
 
 Replace the whole of `dashboard/src/pages/investor/InvestorAccount.tsx` with:
 
@@ -14502,12 +14502,12 @@ export default function InvestorAccount() {
 }
 ```
 
-- [ ] **Step 8: Run the Account test to verify it passes**
+- [x] **Step 8: Run the Account test to verify it passes**
 
 Run: `npx vitest run src/pages/investor/InvestorAccount.test.tsx`
 Expected: PASS, 3 passed.
 
-- [ ] **Step 9: Route Transactions**
+- [x] **Step 9: Route Transactions**
 
 In `dashboard/src/pages/groups/investor.ts` add, after the `InvestorWallet` line:
 
@@ -14555,12 +14555,12 @@ The investor routes in `App.tsx` now read, in full:
               <Route path="invest/account" element={<InvestorAccount />} />
 ```
 
-- [ ] **Step 10: Full dashboard gate**
+- [x] **Step 10: Full dashboard gate**
 
 Run (from `dashboard/`): `npm test`
 Expected: prover ALL PASS, `tsc` clean, every vitest file green — including `vocabulary.test.ts` (no `<h1` outside PageHeader, no literal "Loading...", no "Slave" in any of the seven investor pages) and every colocated investor test: `InvestorDashboard` 12, `InvestorDeposit` 11, `InvestorWithdraw` 14, `InvestorPayoutAccounts` 7, `InvestorTransfer` 9, `InvestorWallet` 2, `InvestorTransactions` 8, `InvestorAccount` 3, `InvestorHistory` unchanged.
 
-- [ ] **Step 11: Commit**
+- [x] **Step 11: Commit**
 
 ```bash
 git add dashboard/src/pages/investor/InvestorTransactions.tsx dashboard/src/pages/investor/InvestorTransactions.test.tsx dashboard/src/pages/investor/InvestorAccount.tsx dashboard/src/pages/investor/InvestorAccount.test.tsx dashboard/src/pages/groups/investor.ts dashboard/src/App.tsx
@@ -14600,7 +14600,7 @@ renames or stubs) is replaced wholesale here: both files are rewritten from scra
 - Consumes: `InvestorRow`, `Account`, `PaymentMethod`, `PortalSettings`, `WalletEntry`, `WalletEntriesPage`, `WalletKind` (`lib/types.ts`, Task 11); `WALLETS`, `walletLabel`, `entryLabel`, `moneyOrDash`, `shortAddress` (`lib/investor.ts`, Task 11); `PinConfirmDialog` (Task 11); `investorRowFixture`, `methodFixture`, `entryFixture` (`src/test/portalFixtures.ts`, Task 11); `api`, `orgApi`, `eventsSocket` (`lib/api.ts`); `useLiveRefresh`; `money`, `signed`, `formatWhen`, `errorText` (`lib/format.ts`); primitives `Badge`, `Banner`, `Button`, `Card`, `ConfirmDialog`, `Drawer`, `Input`, `Loading`, `Menu`, `PageHeader`, `Select`, `Tabs`; API routes `GET investors`, `GET accounts`, `PUT investors/{user_id}/account`, `GET investors/{user_id}/wallet-entries?wallet=&limit=&before=`, `POST investors/{user_id}/adjustments`, `GET/POST payment-methods`, `PATCH/DELETE payment-methods/{id}`, `GET/PUT portal-settings` (Tasks 6 and 10).
 - Produces: `Runner` type (exported from `PaymentMethodsTab.tsx`), `DETAIL_FIELDS`, `methodSummary` (same file); the open-request chip links `/org/{orgId}/requests?tab=<kind>` that Task 19's Requests page honours.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Replace the whole of `dashboard/src/pages/Investors.test.tsx` with:
 
@@ -14892,12 +14892,12 @@ test('a viewer sees the figures but no actions', async () => {
 })
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run (from `dashboard/`): `npx vitest run src/pages/Investors.test.tsx`
 Expected: FAIL — the Task 11 version of `Investors.tsx` still compiles and renders (it imports nothing from `./investors/`, so no module-resolution error is possible yet; only the `../test/portalFixtures` import must resolve, and it does), and the tests fail on missing DOM: `Unable to find role="tab" and name "Payment methods"`, `Unable to find role="button" and name "Actions for inv@example.com"`, `Unable to find an element with the text: 5,120.50`. The first test's heading and `Loading investors` assertions may pass; every test that reaches a tab, a row menu or a wallet figure must be red.
 
-- [ ] **Step 3: Write `PaymentMethodsTab.tsx`**
+- [x] **Step 3: Write `PaymentMethodsTab.tsx`**
 
 Create `dashboard/src/pages/investors/PaymentMethodsTab.tsx`:
 
@@ -15272,7 +15272,7 @@ export default function PaymentMethodsTab({ orgId, control, methods, settings, b
 }
 ```
 
-- [ ] **Step 4: Write `LedgerDrawer.tsx`**
+- [x] **Step 4: Write `LedgerDrawer.tsx`**
 
 Create `dashboard/src/pages/investors/LedgerDrawer.tsx`:
 
@@ -15396,7 +15396,7 @@ export default function LedgerDrawer({ orgId, investor, onClose }: {
 }
 ```
 
-- [ ] **Step 5: Write `AdjustDialog.tsx`**
+- [x] **Step 5: Write `AdjustDialog.tsx`**
 
 Create `dashboard/src/pages/investors/AdjustDialog.tsx`:
 
@@ -15493,7 +15493,7 @@ export default function AdjustDialog({ orgId, investor, onCancel, onPosted }: {
 }
 ```
 
-- [ ] **Step 6: Rewrite `Investors.tsx`**
+- [x] **Step 6: Rewrite `Investors.tsx`**
 
 Replace the whole of `dashboard/src/pages/Investors.tsx` with:
 
@@ -15728,7 +15728,7 @@ export default function Investors() {
 }
 ```
 
-- [ ] **Step 7: Run the test to verify it passes**
+- [x] **Step 7: Run the test to verify it passes**
 
 Run: `npx vitest run src/pages/Investors.test.tsx`
 Expected: PASS, 11 passed.
@@ -15736,7 +15736,7 @@ Expected: PASS, 11 passed.
 Then the whole gate: `node scripts/palette_check.mjs && npx tsc --noEmit -p tsconfig.app.json && npx vitest run --maxWorkers=2 --minWorkers=1`
 Expected: the palette prover prints no failing pair, `tsc` prints nothing, vitest all green (the `vocabulary.test.ts` and `theme-css.test.ts` scans included). If `tsc` names an unused import in `Investors.tsx`, delete that import line; nothing else in this task is optional.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add dashboard/src/pages/Investors.tsx dashboard/src/pages/Investors.test.tsx dashboard/src/pages/investors/PaymentMethodsTab.tsx dashboard/src/pages/investors/LedgerDrawer.tsx dashboard/src/pages/investors/AdjustDialog.tsx
@@ -15773,7 +15773,7 @@ Open / All client-side, so one refresh serves both views and the Select flips in
 - Consumes: `PortalDeposit`, `PortalWithdrawal`, `PortalTransfer`, `PayoutDestination`, `MoneyRef`, `RequestsSummary` (`lib/types.ts`, Task 11); `BADGE_TONE`, `statusLabel`, `statusTone`, `walletLabel`, `moneyOrDash` (`lib/investor.ts`, Task 11); `depositFixture`, `withdrawalFixture`, `transferFixture`, `destinationFixture` (`src/test/portalFixtures.ts`, Task 11); `TabItem` (`components/Tabs.tsx`); `orgApi`, `eventsSocket`; `useLiveRefresh`; API routes `GET requests/summary`, `GET deposits`, `POST deposits/{id}/decision`, `GET withdrawals`, `POST withdrawals/{id}/decision`, `POST withdrawals/{id}/paid`, `GET transfers`, `POST transfers/{id}/decision`, `GET payout-destinations`, `POST payout-destinations/{id}/decision`, `GET files/{id}` (Tasks 4, 7, 8, 9, 10); the `?tab=<kind>` query the Investors chips (Task 18) link with.
 - Produces: `RequestKind`, `REQUEST_KINDS`, `isOpen`, `KIND_WORD`, `tabItems`, `moneyRefLabel`, `DepositsTable`, `WithdrawalsTable`, `TransfersTable`, `DestinationsTable` (`RequestTabs.tsx`); `Details` type and the default export of `RequestDetailsDrawer.tsx` with props `{ orgId, details, destinations: PayoutDestination[], onClose }` — the page hands it the full `GET payout-destinations` list (`full=True` for admins, so bank `account_number` is unmasked) and the withdrawal drawer looks its row's `destination_id` up in it to show the account number / crypto address the admin must pay to; page `Requests` in the admin chunk at route `requests`. Both admin pages use the page-contract root `<div className="space-y-6 max-w-5xl">`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `dashboard/src/pages/Requests.test.tsx`:
 
@@ -16080,12 +16080,12 @@ test('a viewer sees the queues and the details but no decisions', async () => {
 })
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run (from `dashboard/`): `npx vitest run src/pages/Requests.test.tsx`
 Expected: FAIL — `Error: Failed to resolve import "./Requests" from "src/pages/Requests.test.tsx"`.
 
-- [ ] **Step 3: Write `RequestTabs.tsx` — the four tables**
+- [x] **Step 3: Write `RequestTabs.tsx` — the four tables**
 
 Create `dashboard/src/pages/requests/RequestTabs.tsx`:
 
@@ -16395,7 +16395,7 @@ export function DestinationsTable({ rows, control, busy, show, onApprove, onReje
 }
 ```
 
-- [ ] **Step 4: Write `RequestDetailsDrawer.tsx`**
+- [x] **Step 4: Write `RequestDetailsDrawer.tsx`**
 
 Create `dashboard/src/pages/requests/RequestDetailsDrawer.tsx`:
 
@@ -16656,7 +16656,7 @@ export default function RequestDetailsDrawer({ orgId, details, destinations, onC
 }
 ```
 
-- [ ] **Step 5: Write `Requests.tsx`**
+- [x] **Step 5: Write `Requests.tsx`**
 
 Create `dashboard/src/pages/Requests.tsx`:
 
@@ -16942,7 +16942,7 @@ export default function Requests() {
 }
 ```
 
-- [ ] **Step 6: Export the page from the admin chunk and route it**
+- [x] **Step 6: Export the page from the admin chunk and route it**
 
 In `dashboard/src/pages/groups/admin.ts`, after the line
 
@@ -16982,17 +16982,17 @@ add:
 
 (Tasks 12–17 have already renamed the investor `pick` consts and routes in this file; the two `Investors` anchor lines above are untouched by them.)
 
-- [ ] **Step 7: Run the test to verify it passes**
+- [x] **Step 7: Run the test to verify it passes**
 
 Run: `npx vitest run src/pages/Requests.test.tsx`
 Expected: PASS, 11 passed.
 
-- [ ] **Step 8: Run the whole dashboard gate**
+- [x] **Step 8: Run the whole dashboard gate**
 
 Run (from `dashboard/`): `node scripts/palette_check.mjs && npx tsc --noEmit -p tsconfig.app.json && npx vitest run --maxWorkers=2 --minWorkers=1`
 Expected: the palette prover prints no failing pair, `tsc` prints nothing, vitest all green. The nav tests from Task 12 already expect the `Requests` link; `Layout.test.tsx` renders the route tree lazily and needs no change.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add dashboard/src/pages/Requests.tsx dashboard/src/pages/Requests.test.tsx dashboard/src/pages/requests/RequestTabs.tsx dashboard/src/pages/requests/RequestDetailsDrawer.tsx dashboard/src/pages/groups/admin.ts dashboard/src/App.tsx
@@ -17021,7 +17021,7 @@ what they will follow.
 - Consumes: the API test command and the dashboard test command from the plan's Global constraints; `UPLOAD_DIR` (`ApiConfig.upload_dir`, Task 4); the `uploads` compose volume and `ops/backup.sh` tar step (Task 4); migration `022_client_wallets.sql` (Task 1).
 - Produces: nothing for later tasks; the branch is ready for `superpowers:finishing-a-development-branch`.
 
-- [ ] **Step 1: Run the full API suite**
+- [x] **Step 1: Run the full API suite**
 
 From `api/` in Git Bash, with Docker Desktop running and `docker compose up -d postgres` done from the repo root (password from the repo-root `.env`, key `POSTGRES_PASSWORD`):
 
@@ -17050,7 +17050,7 @@ Expected output: `0`.
 
 Expected: the summary line reads `<N> passed` with no `failed`, no `error` and no `ERROR: file or directory not found` (a missing file means a task's test file was never written; go back to that task). Any red here is a defect in Tasks 1–10, fixed in that task's files with a `fix(api): …` commit before going on.
 
-- [ ] **Step 2: Run the full dashboard gate**
+- [x] **Step 2: Run the full dashboard gate**
 
 From `dashboard/`:
 
@@ -17072,7 +17072,7 @@ grep -rn "Loading\.\.\." src/pages src/components --include='*.tsx' | grep -v '\
 
 Expected: no lines, then `exit=1` (grep found nothing).
 
-- [ ] **Step 3: Prove the copier is untouched**
+- [x] **Step 3: Prove the copier is untouched**
 
 From the repo root:
 
@@ -17083,7 +17083,7 @@ git diff --stat main.. -- copier/ | wc -l
 
 Expected: the first command prints nothing; the second prints `0`. If either shows a file, revert it (`git checkout main -- copier/<file>` and commit `chore: revert stray copier change`), because no task in this plan may touch `copier/`.
 
-- [ ] **Step 4: Flip the spec's status line**
+- [x] **Step 4: Flip the spec's status line**
 
 In `docs/superpowers/specs/2026-09-29-client-portal-phase-1-money-design.md` line 4 currently reads (it may have been edited by the owner since; replace whatever the `**Status:**` line says):
 
@@ -17099,7 +17099,7 @@ Replace it with:
 
 Verify: `grep -n '^\*\*Status:\*\*' docs/superpowers/specs/2026-09-29-client-portal-phase-1-money-design.md` prints exactly one line, the new one.
 
-- [ ] **Step 5: README — the uploads volume and the migration sequence**
+- [x] **Step 5: README — the uploads volume and the migration sequence**
 
 In `README.md`, replace the Backups bullet (currently):
 
@@ -17149,7 +17149,7 @@ Investors page before investors can deposit.
 
 Verify: `grep -n 'Upgrading with a migration\|uploads' README.md` prints the new heading and the two volume mentions.
 
-- [ ] **Step 6: Check `.env.example` documents `UPLOAD_DIR`**
+- [x] **Step 6: Check `.env.example` documents `UPLOAD_DIR`**
 
 ```bash
 grep -n 'UPLOAD_DIR' .env.example
@@ -17167,7 +17167,7 @@ UPLOAD_DIR=
 
 and include the file in Step 8's commit. Also confirm the volume is in compose: `grep -n 'uploads' docker-compose.yml` prints the `uploads:/data/uploads` mount on `api` and the `uploads: {}` entry under `volumes:`.
 
-- [ ] **Step 7: Tick every step in the plan**
+- [x] **Step 7: Tick every step in the plan**
 
 The plan this part belongs to is `docs/superpowers/plans/2026-09-29-client-portal-phase-1.md`. That file is the assembled plan (`.superpowers/plan-parts/header.md` + `part-A.md` … `part-F.md`, in order); `.superpowers/` is gitignored, so the assembled copy must exist at that path and be committed on the branch — it is what Step 4's status line and Step 8's commit reference. Check it is there before touching it, then tick every step:
 
@@ -17180,7 +17180,7 @@ grep -c '^- \[ \]' docs/superpowers/plans/2026-09-29-client-portal-phase-1.md
 
 Expected: the `test -f` prints nothing (if it prints the assemble message and exits 1, build the file with `cat .superpowers/plan-parts/header.md .superpowers/plan-parts/part-{A,B,C,D,E,F}.md > docs/superpowers/plans/2026-09-29-client-portal-phase-1.md` and `git add` it, then rerun); `git ls-files --error-unmatch` prints the path (it is tracked — if it errors with `did not match any file(s) known to git`, `git add` it now, Step 8 commits it); the `grep -c` prints `0`. (A step left unticked on purpose, because it was skipped, is a defect: go back and do it.)
 
-- [ ] **Step 8: Final commit and branch check**
+- [x] **Step 8: Final commit and branch check**
 
 ```bash
 git add README.md docs/superpowers/specs/2026-09-29-client-portal-phase-1-money-design.md docs/superpowers/plans/2026-09-29-client-portal-phase-1.md

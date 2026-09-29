@@ -374,10 +374,12 @@ slave, confirm a few real trades copy correctly, then scale up.
 - **New instruments** — the copier fetches each account's symbol map once, at
   startup. Instruments the broker adds later are not copyable until you
   restart the copier (`docker compose restart copier`).
-- **Backups** — all durable state lives in the `postgres` Docker volume
-  (`pgdata`). Back that volume up (or the underlying Postgres data via
-  `pg_dump`) on whatever schedule matches your risk tolerance; there is no
-  other persistent state to capture.
+- **Backups** — durable state lives in two Docker volumes: `pgdata` (Postgres)
+  and `uploads` (the deposit receipts and payout proofs the client portal
+  stores under `/data/uploads` on the `api` service; `UPLOAD_DIR` in
+  `.env.example`). `ops/backup.sh` dumps the database and tars the uploads
+  volume next to it every night; there is no other persistent state to
+  capture.
 - **Logs** — the dashboard's Logs screen is a live, filterable view (account,
   severity, category, date) over the append-only `events` table, streamed
   over WebSocket. For container/process-level logs (startup, connection
@@ -422,6 +424,28 @@ to a VPS:
   changes nothing except leaving a working login password sitting in `.env`.
 - Do **not** widen the published ports to `0.0.0.0` to "make it reachable" —
   proxy to loopback instead.
+
+### Upgrading with a migration
+
+`docker compose build api` alone never applies a new file in `db/migrations/`:
+the migrations are baked into the `migrate` image, so that image must be rebuilt
+and run, and the `api` container must be stopped first so the old code never
+runs against the new schema. The full sequence on the host is:
+
+```bash
+cd ~/mirrorfleet && git pull
+sudo docker compose build migrate api
+sudo docker compose stop api
+sudo docker compose run --rm migrate          # prints: applied: ['022_client_wallets.sql']
+sudo docker compose up -d api
+```
+
+Then hard-reload any open dashboard tab (the old bundle is stale). Without a
+new migration the short form is `sudo docker compose build api && sudo docker
+compose up -d api`. The first deploy of the client portal also creates the
+`uploads` volume (compose does it; nothing to add to `.env`, `UPLOAD_DIR` is
+optional), and the admin must add at least one payment method on the
+Investors page before investors can deposit.
 
 ## 6. Development
 
