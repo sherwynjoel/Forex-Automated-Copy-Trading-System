@@ -144,6 +144,7 @@ stores a balance.
     note TEXT NULL;
     created_by BIGINT NULL REFERENCES users(id) ON DELETE SET NULL;  -- admin for adjustments
     created_at
+    CHECK ((ref_table IS NULL) = (ref_id IS NULL))       -- a reference is a pair or nothing
     INDEX wallet_entries_by_user (org_id, user_id, wallet, created_at DESC, id DESC)
     INDEX wallet_entries_by_org_time (org_id, created_at DESC)
     UNIQUE INDEX wallet_entries_one_per_ref (ref_table, ref_id, wallet)
@@ -168,8 +169,10 @@ stores a balance.
     decided_by; decided_at; decision_note; created_at
     INDEX deposits_queue (org_id, status, created_at)
     INDEX deposits_by_user (org_id, user_id, created_at DESC)
-    UNIQUE INDEX deposits_one_live_reference (org_id, reference)
-      WHERE status IN ('pending','confirmed')
+    UNIQUE INDEX deposits_one_live_reference (org_id, lower(reference))
+      WHERE status IN ('pending','confirmed')             -- case-insensitive
+    UNIQUE INDEX deposits_one_receipt (receipt_file_id)
+      WHERE receipt_file_id IS NOT NULL                   -- a receipt backs one notice
 
 **withdrawals** — always from `main`.
 
@@ -204,10 +207,15 @@ stores a balance.
     done_by BIGINT NULL REFERENCES users(id) ON DELETE SET NULL; done_at TIMESTAMPTZ NULL;
     note TEXT NULL; created_at
     CHECK ((source_kind = 'wallet') = (source_wallet IS NOT NULL))
-    CHECK ((source_kind = 'account') = (source_account_id IS NOT NULL))
+    CHECK (source_kind = 'account' OR source_account_id IS NULL)
     CHECK ((target_kind = 'wallet') = (target_wallet IS NOT NULL))
-    CHECK ((target_kind = 'account') = (target_account_id IS NOT NULL))
+    CHECK (target_kind = 'account' OR target_account_id IS NULL)
     CHECK (NOT (source_kind = 'account' AND target_kind = 'account'))
+    CHECK (NOT (source_kind = 'wallet' AND target_kind = 'wallet'
+                AND source_wallet = target_wallet))
+    -- An account end may carry a NULL id: the account FKs are ON DELETE SET
+    -- NULL, so removing an MT5 account or disconnecting a cTrader grant keeps
+    -- the transfer history instead of failing on a CHECK.
     INDEX transfers_queue (org_id, status, created_at)
     INDEX transfers_by_user (org_id, user_id, created_at DESC)
 
