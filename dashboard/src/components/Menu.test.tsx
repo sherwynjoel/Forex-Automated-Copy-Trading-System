@@ -39,3 +39,28 @@ test('Escape closes without selecting; a disabled item is skipped by arrows', as
   expect(screen.queryByRole('menu')).toBeNull()
   expect(spy).not.toHaveBeenCalled()
 })
+
+test('Tab closes the menu without selecting', async () => {
+  const spy = vi.fn()
+  render(<Menu label="Actions" items={items(spy)} />)
+  await userEvent.click(screen.getByRole('button', { name: 'Actions' }))
+  expect(screen.getByRole('menu')).toBeInTheDocument()
+  await userEvent.keyboard('{Tab}')
+  expect(screen.queryByRole('menu')).toBeNull()
+  expect(spy).not.toHaveBeenCalled()
+})
+
+test('clicking outside closes the menu', async () => {
+  const spy = vi.fn()
+  render(
+    <>
+      <Menu label="Actions" items={items(spy)} />
+      <button>Elsewhere</button>
+    </>
+  )
+  await userEvent.click(screen.getByRole('button', { name: 'Actions' }))
+  expect(screen.getByRole('menu')).toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: 'Elsewhere' }))
+  expect(screen.queryByRole('menu')).toBeNull()
+  expect(spy).not.toHaveBeenCalled()
+})

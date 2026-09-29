@@ -10,8 +10,12 @@ test('is the page main region with a glass card, the logo, a real h1, a lead and
       <input aria-label="Email" />
     </AuthCard>
   )
-  expect(screen.getByRole('main')).toHaveAttribute('id', 'main')
-  expect(screen.getByRole('heading', { level: 1, name: 'Sign in' })).toBeInTheDocument()
+  const main = screen.getByRole('main')
+  expect(main).toHaveAttribute('id', 'main')
+  expect(main).not.toHaveAttribute('tabindex')
+  const heading = screen.getByRole('heading', { level: 1, name: 'Sign in' })
+  expect(heading).toHaveAttribute('id', 'page-title')
+  expect(heading).toHaveAttribute('tabindex', '-1')
   expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1)
   expect(screen.getByText('Welcome back.')).toBeInTheDocument()
   expect(screen.getByRole('link', { name: 'Create account' })).toBeInTheDocument()
