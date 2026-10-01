@@ -326,10 +326,12 @@ def create_portal_admin_router() -> APIRouter:
                             conn: psycopg.Connection = Depends(get_conn)) -> List[Dict[str, Any]]:
         where = "d.org_id = %s" + (" AND d.status = %s" if status else "")
         params = (ctx.org_id, status) if status else (ctx.org_id,)
+        # ponytail: fixed cap, add paging when an org has more than 500 open requests
         rows = conn.execute(
             f"SELECT {pc.qualify(pc.DEPOSIT_COLS, 'd')}, u.email, u.display_name "
             "FROM deposits d JOIN users u ON u.id = d.user_id "
-            f"WHERE {where} ORDER BY (d.status = 'pending') DESC, d.created_at DESC, d.id DESC",
+            f"WHERE {where} ORDER BY (d.status = 'pending') DESC, d.created_at DESC, d.id DESC "
+            "LIMIT 500",
             params).fetchall()
         return [pc.deposit_json(r) for r in rows]
 
@@ -367,6 +369,9 @@ def create_portal_admin_router() -> APIRouter:
             if credited <= 0:
                 raise HTTPException(status_code=400,
                                     detail="credited_amount must be greater than 0")
+            if credited > Decimal(amount):
+                raise HTTPException(status_code=400, detail="credited amount cannot exceed "
+                                    f"the notice amount ({Decimal(amount):.2f})")
         linked: Optional[int] = None
         transfer_id: Optional[int] = None
         with conn.transaction():
@@ -429,13 +434,15 @@ def create_portal_admin_router() -> APIRouter:
                                conn: psycopg.Connection = Depends(get_conn)) -> List[Dict[str, Any]]:
         where = "w.org_id = %s" + (" AND w.status = %s" if status else "")
         params = (ctx.org_id, status) if status else (ctx.org_id,)
+        # ponytail: fixed cap, add paging when an org has more than 500 open requests
         # A derived table so the bare column list of WITHDRAWAL_COLS is
         # unambiguous next to users (both carry id and created_at).
         rows = conn.execute(
             f"SELECT {pc.WITHDRAWAL_COLS}, email, display_name FROM ("
             "  SELECT w.*, u.email, u.display_name FROM withdrawals w "
             f"  JOIN users u ON u.id = w.user_id WHERE {where}) AS q "
-            "ORDER BY (status IN ('requested', 'approved')) DESC, created_at DESC, id DESC",
+            "ORDER BY (status IN ('requested', 'approved')) DESC, created_at DESC, id DESC "
+            "LIMIT 500",
             params).fetchall()
         return [pc.withdrawal_json(r) for r in rows]
 
@@ -533,11 +540,13 @@ def create_portal_admin_router() -> APIRouter:
                                 conn: psycopg.Connection = Depends(get_conn)) -> List[Dict[str, Any]]:
         where = "d.org_id = %s" + (" AND d.status = %s" if status else "")
         params = (ctx.org_id, status) if status else (ctx.org_id,)
+        # ponytail: fixed cap, add paging when an org has more than 500 open requests
         rows = conn.execute(
             f"SELECT {pc.DESTINATION_COLS}, email, display_name FROM ("
             "  SELECT d.*, u.email, u.display_name FROM payout_destinations d "
             f"  JOIN users u ON u.id = d.user_id WHERE {where}) AS q "
-            "ORDER BY (status = 'pending') DESC, created_at DESC, id DESC", params).fetchall()
+            "ORDER BY (status = 'pending') DESC, created_at DESC, id DESC LIMIT 500",
+            params).fetchall()
         return [pc.destination_json(r, full=True) for r in rows]
 
     @router.post("/payout-destinations/{dest_id}/decision", response_model=Dict[str, Any])
@@ -588,11 +597,13 @@ def create_portal_admin_router() -> APIRouter:
                              conn: psycopg.Connection = Depends(get_conn)) -> List[Dict[str, Any]]:
         where = "t.org_id = %s" + (" AND t.status = %s" if status else "")
         params = (ctx.org_id, status) if status else (ctx.org_id,)
+        # ponytail: fixed cap, add paging when an org has more than 500 open requests
         rows = conn.execute(
             f"SELECT {pc.TRANSFER_COLS}, email, display_name FROM ("
             "  SELECT t.*, u.email, u.display_name FROM transfers t "
             f"  JOIN users u ON u.id = t.user_id WHERE {where}) AS q "
-            "ORDER BY (status IN ('requested', 'approved')) DESC, created_at DESC, id DESC",
+            "ORDER BY (status IN ('requested', 'approved')) DESC, created_at DESC, id DESC "
+            "LIMIT 500",
             params).fetchall()
         return [pc.transfer_json(r) for r in rows]
 

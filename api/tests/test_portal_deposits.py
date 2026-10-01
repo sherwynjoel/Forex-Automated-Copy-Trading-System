@@ -358,6 +358,9 @@ def test_admin_may_edit_the_credited_amount(org_client, make_user, login_as, db)
     assert r.status_code == 400 and r.json()["detail"] == "credited_amount must be greater than 0"
     r = _decide(client, org_id, dep["id"], status="confirmed", credited_amount="4900.005")
     assert r.status_code == 400 and r.json()["detail"] == "credited_amount may have at most two decimals"
+    r = _decide(client, org_id, dep["id"], status="confirmed", credited_amount="5000.01")
+    assert r.status_code == 400
+    assert r.json()["detail"] == "credited amount cannot exceed the notice amount (5000.00)"
     r = _decide(client, org_id, dep["id"], status="confirmed", credited_amount="4900",
                 note="fee was higher on chain")
     assert r.status_code == 200
@@ -484,6 +487,49 @@ def test_the_queue_lists_open_notices_first_and_refuses_investors(
     login_as(client, viewer)
     assert client.get(f"/api/orgs/{org_id}/deposits").status_code == 403
     assert _decide(client, org_id, older, status="confirmed").status_code == 403
+
+
+def test_every_admin_queue_returns_at_most_500_rows(org_client, make_user, db):
+    """The queues are capped; open rows sort first, so the one open row
+    below 500 decided ones still comes back."""
+    from portal_helpers import approved_destination
+    client, org_id, _seed = org_client
+    investor = make_user(email="inv@example.com")
+    _member(db, org_id, investor, "investor")
+    uid = investor["id"]
+    method_id = add_method(db, org_id)
+    dest_id = approved_destination(db, org_id, uid)
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO deposits (org_id, user_id, method_id, method_kind, method_label, amount, "
+            "reference, status, decided_at, created_at) SELECT %s, %s, %s, 'crypto', 'm', 1, "
+            "'r' || g, CASE WHEN g = 0 THEN 'pending' ELSE 'rejected' END, now(), "
+            "now() - g * interval '1 minute' FROM generate_series(0, 500) g",
+            (org_id, uid, method_id))
+        conn.execute(
+            "INSERT INTO withdrawals (org_id, user_id, destination_id, destination_kind, "
+            "destination_summary, amount, fee, net_amount, status, decided_at, created_at) "
+            "SELECT %s, %s, %s, 'crypto', 's', 1, 0, 1, "
+            "CASE WHEN g = 0 THEN 'requested' ELSE 'rejected' END, now(), "
+            "now() - g * interval '1 minute' FROM generate_series(0, 500) g",
+            (org_id, uid, dest_id))
+        conn.execute(
+            "INSERT INTO transfers (org_id, user_id, source_kind, source_wallet, target_kind, "
+            "target_wallet, amount, status, decided_at, created_at) "
+            "SELECT %s, %s, 'wallet', 'pamm', 'wallet', 'main', 1, "
+            "CASE WHEN g = 0 THEN 'requested' ELSE 'rejected' END, now(), "
+            "now() - g * interval '1 minute' FROM generate_series(0, 500) g", (org_id, uid))
+        conn.execute(
+            "INSERT INTO payout_destinations (org_id, user_id, kind, nickname, details, status, "
+            "decided_at, created_at) SELECT %s, %s, 'crypto', 'n' || g, "
+            "jsonb_build_object('coin', 'USDT', 'network', 'TRC20', 'address', 'T' || g), "
+            "CASE WHEN g = 0 THEN 'pending' ELSE 'rejected' END, now(), "
+            "now() - g * interval '1 minute' FROM generate_series(0, 500) g", (org_id, uid))
+    for queue, open_status in [("deposits", "pending"), ("withdrawals", "requested"),
+                               ("transfers", "requested"), ("payout-destinations", "pending")]:
+        rows = client.get(f"/api/orgs/{org_id}/{queue}").json()
+        assert len(rows) == 500, queue
+        assert rows[0]["status"] == open_status, queue
 
 
 # ------------------------------------------------------------ email
