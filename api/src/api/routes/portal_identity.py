@@ -120,12 +120,15 @@ def create_portal_identity_router() -> APIRouter:
             return JSONResponse(status_code=400, content={
                 "detail": "complete your profile first: " + ", ".join(profile["missing"]),
                 "missing": profile["missing"]})
+        # updated_at (the last of PROFILE_COLS) pins the row we checked for
+        # completeness: a save landing in between makes this a 409, not an
+        # incomplete submission.
         row = conn.execute(
             "UPDATE kyc_profiles SET status = 'submitted', submitted_at = now(), "
             "decided_by = NULL, decided_at = NULL, decision_note = NULL, updated_at = now() "
-            "WHERE org_id = %s AND user_id = %s AND status = %s "
+            "WHERE org_id = %s AND user_id = %s AND status = %s AND updated_at = %s "
             f"RETURNING {pid.PROFILE_COLS}",
-            (ctx.org_id, ctx.user_id, profile["status"])).fetchone()
+            (ctx.org_id, ctx.user_id, profile["status"], row[-1])).fetchone()
         if row is None:
             raise HTTPException(status_code=409, detail="your profile changed; reload it")
         await pc.audit_control(
