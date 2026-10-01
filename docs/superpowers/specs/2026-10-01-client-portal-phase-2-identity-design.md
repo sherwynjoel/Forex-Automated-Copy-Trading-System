@@ -1,7 +1,7 @@
 # Client portal, phase 2: verification, profile, security and account requests
 
 **Date:** 2026-10-01
-**Status:** draft, awaiting the owner's review
+**Status:** implemented on branch client-portal-phase-2 (plan docs/superpowers/plans/2026-10-01-client-portal-phase-2.md); awaiting deploy
 **Builds on:** `2026-09-29-client-portal-phase-1-money-design.md` (live since 2026-09-30).
 **Reference:** `docs/reference/aiprime-portal-survey.md` (KYC, Profile, Password,
 Authentication, Open Live Account, Activity Logs).

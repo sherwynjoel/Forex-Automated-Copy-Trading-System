@@ -6270,14 +6270,14 @@ Claude-Session: https://claude.ai/code/session_01UQPL1C8PgeZ12quFkw2nCM"
 - Consumes: everything above.
 - Produces: a green branch and the deploy notes.
 
-- [ ] **Step 1: Full API suite**
+- [x] **Step 1: Full API suite**
 
 From `api/` with the env of the Global Constraints:
 
 Run: `.venv/Scripts/python -m pytest tests -q -p no:cacheprovider`
 Expected: everything passes except the 7 known `test_events_ws.py` errors and the 1 EA-download CRLF failure.
 
-- [ ] **Step 2: Full dashboard gate**
+- [x] **Step 2: Full dashboard gate**
 
 From `dashboard/`:
 
@@ -6287,12 +6287,12 @@ Expected: palette prover passes, no type errors, every test passes, and the outp
 Run: `npm run build`
 Expected: build succeeds.
 
-- [ ] **Step 3: `copier/` untouched**
+- [x] **Step 3: `copier/` untouched**
 
 Run: `git diff --stat portal-followups..HEAD -- copier/`
 Expected: prints nothing.
 
-- [ ] **Step 4: README runbook**
+- [x] **Step 4: README runbook**
 
 In `README.md`, directly after the paragraph that starts "Take the backup first because a migration can be one-way", add:
 
@@ -6308,12 +6308,12 @@ open account request are sealed with `FERNET_KEY`: rotating that key makes them
 unreadable, and the admin then rejects the request and asks for a new one.
 ```
 
-- [ ] **Step 5: Spec status**
+- [x] **Step 5: Spec status**
 
 In the spec, replace `**Status:** draft, awaiting the owner's review` with
 `**Status:** implemented on branch client-portal-phase-2 (plan docs/superpowers/plans/2026-10-01-client-portal-phase-2.md); awaiting deploy`.
 
-- [ ] **Step 6: Tick this plan's checkboxes, then commit**
+- [x] **Step 6: Tick this plan's checkboxes, then commit**
 
 ```bash
 git add README.md docs/superpowers/specs/2026-10-01-client-portal-phase-2-identity-design.md docs/superpowers/plans/2026-10-01-client-portal-phase-2.md
