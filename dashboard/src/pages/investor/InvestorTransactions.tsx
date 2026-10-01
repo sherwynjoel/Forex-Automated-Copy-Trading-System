@@ -40,16 +40,19 @@ export function entriesQuery(f: EntriesFilter): string {
 }
 
 /** transactions.csv from the rows on screen: RFC 4180 quoting, CRLF, a
- *  plain two-decimal number for the amount so spreadsheets read it as one. */
+ *  plain two-decimal number for the amount so spreadsheets read it as one.
+ *  Any other cell a spreadsheet would run as a formula gets a leading '. */
 export function toCsv(rows: WalletEntry[]): string {
   const esc = (v: string) => (/[",\r\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v)
+  const AMOUNT_COL = 3
+  const inert = (v: string, i: number) => (i !== AMOUNT_COL && /^[=+\-@\t\r]/.test(v) ? `'${v}` : v)
   const lines = [['Date', 'Wallet', 'Kind', 'Amount', 'Reference', 'Note'].join(',')]
   for (const e of rows) {
     lines.push([
       e.created_at, walletLabel(e.wallet), e.kind, e.amount.toFixed(2),
       e.ref_table && e.ref_id != null ? `${e.ref_table}/${e.ref_id}` : '',
       e.note ?? '',
-    ].map(esc).join(','))
+    ].map((v, i) => esc(inert(v, i))).join(','))
   }
   return lines.join('\r\n') + '\r\n'
 }

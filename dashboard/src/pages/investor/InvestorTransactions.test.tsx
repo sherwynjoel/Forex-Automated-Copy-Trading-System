@@ -88,6 +88,18 @@ test('toCsv writes the six columns, quotes commas and doubles quotes', () => {
   expect(lines[4]).toBe('')
 })
 
+test('toCsv neutralises formula cells but keeps a negative amount a plain number', () => {
+  const evil = entryFixture({
+    ...withdrawal, note: '=HYPERLINK("http://x","click")', kind: '+cmd', ref_table: null,
+  })
+  const lines = toCsv([evil, { ...adjustment, note: '@SUM(A1)' }, { ...adjustment, note: '-2+3' },
+                       { ...adjustment, note: '\tTAB' }]).split('\r\n')
+  expect(lines[1]).toBe(`2026-09-21T10:00:00Z,My wallet,'+cmd,-1000.00,,"'=HYPERLINK(""http://x"",""click"")"`)
+  expect(lines[2].endsWith(",12.50,,'@SUM(A1)")).toBe(true)
+  expect(lines[3].endsWith(",12.50,,'-2+3")).toBe(true)
+  expect(lines[4].endsWith(",12.50,,'\tTAB")).toBe(true)
+})
+
 test('lists entries with a signed amount and a link to the request, and has its heading and title', async () => {
   mockRoutes()
   render(<MemoryRouter><InvestorTransactions /></MemoryRouter>)
