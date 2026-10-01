@@ -125,6 +125,7 @@ function mockRoutes(options: {
       return jsonResponse({ ...older, id: 901 }, 201)
     }
     if (path.endsWith('/investors/5/account')) return jsonResponse({ user_id: 5, account_id: null })
+    if (path.endsWith('/account-packages')) return jsonResponse([])
     return jsonResponse({})
   })
   vi.stubGlobal('fetch', fetchMock)
@@ -516,6 +517,17 @@ test('a touched settings form survives a poll tick with different server values'
   await act(async () => { await vi.advanceTimersByTimeAsync(10000) })
   expect(minField).toHaveValue('99')
   expect(screen.getByLabelText('Withdrawal fee %')).toHaveValue('0')
+})
+
+test('the investors table shows each investor\'s verification, and the packages tab opens', async () => {
+  mockRoutes()
+  render(<MemoryRouter><Investors /></MemoryRouter>)
+  expect(await screen.findByRole('columnheader', { name: 'Verification' })).toBeInTheDocument()
+  expect(screen.getByText('Verified')).toBeInTheDocument()
+  await userEvent.click(screen.getByRole('tab', { name: 'Account packages' }))
+  expect(await screen.findByRole('heading', { name: 'Account packages' })).toBeInTheDocument()
+  expect(await screen.findByText('No packages yet. Investors cannot request an account until you add one.'))
+    .toBeInTheDocument()
 })
 
 test('a viewer sees the figures but no actions', async () => {

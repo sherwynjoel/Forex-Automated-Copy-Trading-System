@@ -1,9 +1,9 @@
 import { expect, test } from 'vitest'
 import { adminNav, bottomBarItems, investorNav } from './nav'
 
-test('investorNav is three groups: the Dashboard alone, Money, and Trading', () => {
+test('investorNav is three groups: the Dashboard alone, Money, and Account', () => {
   const groups = investorNav(7)
-  expect(groups.map((g) => g.name)).toEqual(['', 'Money', 'Trading'])
+  expect(groups.map((g) => g.name)).toEqual(['', 'Money', 'Account'])
   expect(groups[0].items).toEqual([{ path: '/org/7/invest', label: 'Dashboard', end: true }])
   expect(groups[1].items.map((i) => [i.label, i.path])).toEqual([
     ['Wallet', '/org/7/invest/wallet'],
@@ -14,10 +14,13 @@ test('investorNav is three groups: the Dashboard alone, Money, and Trading', () 
     ['Payout accounts', '/org/7/invest/payout-accounts'],
   ])
   expect(groups[2].items.map((i) => [i.label, i.path])).toEqual([
-    ['Account', '/org/7/invest/account'],
+    ['Trading account', '/org/7/invest/account'],
+    ['Profile & verification', '/org/7/invest/profile'],
+    ['Open account', '/org/7/invest/open-account'],
+    ['Security', '/org/7/invest/security'],
     ['History', '/org/7/invest/history'],
   ])
-  expect(groups.flatMap((g) => g.items)).toHaveLength(9)
+  expect(groups.flatMap((g) => g.items)).toHaveLength(12)
 })
 
 test('the investor tab bar is the four money-first pages, Dashboard exact-matched', () => {

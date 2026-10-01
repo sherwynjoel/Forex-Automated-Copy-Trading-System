@@ -616,11 +616,12 @@ test('an investor sees the grouped portal nav, no desk strip and no requests pol
   renderShell('/org/1/invest')
   expect(await screen.findByText('investor home')).toBeInTheDocument()
   for (const label of ['Dashboard', 'Wallet', 'Deposit', 'Withdraw', 'Transfer', 'Transactions',
-                       'Payout accounts', 'Account', 'History']) {
+                       'Payout accounts', 'Trading account', 'Profile & verification', 'Open account',
+                       'Security', 'History']) {
     expect(screen.getAllByRole('link', { name: label }).length).toBeGreaterThan(0)
   }
   expect(screen.getByText('Money')).toBeInTheDocument()
-  expect(screen.getByText('Trading')).toBeInTheDocument()
+  expect(screen.getByText('Account')).toBeInTheDocument()
   expect(screen.queryByRole('link', { name: 'Overview' })).not.toBeInTheDocument()
   expect(screen.queryByRole('link', { name: 'Accounts' })).not.toBeInTheDocument()
   expect(screen.queryByText(/Close all positions/)).not.toBeInTheDocument()

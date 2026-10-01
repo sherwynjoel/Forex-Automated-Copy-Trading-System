@@ -52,7 +52,7 @@ export function adminNav(orgId: number, role: Role, requestsBadge?: number): Nav
   ]
 }
 
-/** The investor portal: the dashboard, their money, their trading account. */
+/** The investor portal: the dashboard, their money, their account and identity. */
 export function investorNav(orgId: number): NavGroup[] {
   const p = `/org/${orgId}/invest`
   return [
@@ -72,9 +72,12 @@ export function investorNav(orgId: number): NavGroup[] {
       ],
     },
     {
-      name: 'Trading',
+      name: 'Account',
       items: [
-        { path: `${p}/account`, label: 'Account' },
+        { path: `${p}/account`, label: 'Trading account' },
+        { path: `${p}/profile`, label: 'Profile & verification' },
+        { path: `${p}/open-account`, label: 'Open account' },
+        { path: `${p}/security`, label: 'Security' },
         { path: `${p}/history`, label: 'History' },
       ],
     },

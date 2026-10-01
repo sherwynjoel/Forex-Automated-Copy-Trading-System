@@ -206,3 +206,18 @@ test('dismissing a load error shows the empty state, not an endless skeleton', a
   expect(screen.queryByRole('status')).not.toBeInTheDocument()
   expect(screen.getByText('Nothing yet')).toBeInTheDocument()
 })
+
+test('the verification card sends an unverified investor to their profile', async () => {
+  mockRoutes({ ...summaryFixture(), kyc_status: 'draft' })
+  render(<MemoryRouter><InvestorDashboard /></MemoryRouter>)
+  const card = (await screen.findByRole('heading', { name: 'Identity verification' })).closest('section')!
+  expect(within(card).getByText('Not submitted')).toBeInTheDocument()
+  expect(within(card).getByRole('link', { name: 'Verify now' })).toHaveAttribute('href', '/org/1/invest/profile')
+})
+
+test('a verified investor without an account is offered Open account', async () => {
+  mockRoutes({ ...summaryFixture(), kyc_status: 'approved', link_state: 'unlinked', account: null })
+  render(<MemoryRouter><InvestorDashboard /></MemoryRouter>)
+  const card = (await screen.findByRole('heading', { name: 'Identity verification' })).closest('section')!
+  expect(within(card).getByRole('link', { name: 'Open account' })).toHaveAttribute('href', '/org/1/invest/open-account')
+})
