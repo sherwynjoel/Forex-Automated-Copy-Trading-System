@@ -618,13 +618,12 @@ Claude-Session: https://claude.ai/code/session_01UQPL1C8PgeZ12quFkw2nCM"
 **Files:**
 - Modify: `api/src/api/auth.py` (imports; new `record_login`, `sign_ins` after `_is_proxy_address`; login handler; `PasswordChangeRequest` and `change_password`; new `GET /api/me/sign-ins`)
 - Modify: `api/src/api/routes/mpin.py` (`verify_mpin`)
-- Modify: `api/src/api/routes/portal_investor.py` (import; `GET investor/sign-ins`)
 - Create: `api/tests/test_login_events.py`
 - Modify: `api/tests/test_auth.py:125,142,166,185,188`
 
 **Interfaces:**
 - Consumes: table `login_events` (Task 1); `auth.get_client_ip`; `mpin_core.require_mpin`; `rbac.require_investor`.
-- Produces: `auth.LOGIN_HISTORY_DAYS = 180`, `auth.SIGN_INS_MAX = 200`, `auth.record_login(conn, user_id, request, cfg, outcome) -> None`, `auth.sign_ins(conn, user_id, limit=50) -> list[dict]`; routes `GET /api/me/sign-ins`, `GET /api/orgs/{org_id}/investor/sign-ins`; `POST /api/me/password` takes `mpin`.
+- Produces: `auth.LOGIN_HISTORY_DAYS = 180`, `auth.SIGN_INS_MAX = 200`, `auth.record_login(conn, user_id, request, cfg, outcome) -> None`, `auth.sign_ins(conn, user_id, limit=50) -> list[dict]`; route `GET /api/me/sign-ins` (any role; the investor Security page uses it too — ruling: no investor/sign-ins duplicate); `POST /api/me/password` takes `mpin`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -706,18 +705,6 @@ def test_me_sign_ins_needs_the_mpin(app_client, make_user):
     assert r.status_code == 401 and r.json()["detail"] == "MPIN required"
 
 
-def test_investor_sign_ins_are_for_investors_only(org_client, make_user, login_as, db):
-    client, org_id, _seed = org_client
-    r = client.get(f"/api/orgs/{org_id}/investor/sign-ins")
-    assert r.status_code == 403
-    investor = make_user(email="inv@example.com")
-    member(db, org_id, investor["id"], "investor")
-    client.cookies.clear()
-    login_as(client, investor)
-    rows = client.get(f"/api/orgs/{org_id}/investor/sign-ins").json()
-    assert [r["outcome"] for r in rows] == ["mpin_ok", "password_ok"]
-
-
 def test_a_password_change_needs_the_mpin(app_client, make_user, login_as):
     user = make_user(email="p@example.com")
     login_as(app_client, user)
@@ -748,7 +735,7 @@ In `api/tests/test_auth.py` add `"mpin": "123456"` to each of the five `/api/me/
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `.venv/Scripts/python -m pytest tests/test_login_events.py tests/test_auth.py -q -p no:cacheprovider`
-Expected: FAIL — `_events` is empty, `/api/me/sign-ins` and `investor/sign-ins` are 404, and the password change answers 204 without an MPIN. `test_auth.py` still passes (an extra body field is ignored today).
+Expected: FAIL — `_events` is empty, `/api/me/sign-ins` is 404, and the password change answers 204 without an MPIN. `test_auth.py` still passes (an extra body field is ignored today).
 
 - [ ] **Step 3: Record and read sign-ins in `auth.py`**
 
@@ -883,20 +870,6 @@ Add `record_login` to the `..auth` import list, then replace `verify_mpin`:
         return response
 ```
 
-- [ ] **Step 5: The investor's own sign-ins**
-
-In `api/src/api/routes/portal_investor.py` change `from ..auth import LoginRateLimiter` to `from ..auth import LoginRateLimiter, sign_ins` and add before the `# ---------------------------------------------------------- read-throughs` comment:
-
-```python
-    @router.get("/investor/sign-ins", response_model=List[Dict[str, Any]])
-    async def my_sign_ins(limit: int = 50,
-                          ctx: OrgContext = Depends(require_investor),
-                          conn: psycopg.Connection = Depends(get_conn)) -> List[Dict[str, Any]]:
-        """The investor's own sign-in history for the portal's Security page.
-        Sign-ins are per account, not per org."""
-        return sign_ins(conn, ctx.user_id, limit)
-```
-
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `.venv/Scripts/python -m pytest tests/test_login_events.py tests/test_auth.py tests/test_mpin.py tests/test_mpin_core.py -q -p no:cacheprovider`
@@ -905,8 +878,8 @@ Expected: PASS.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add api/src/api/auth.py api/src/api/routes/mpin.py api/src/api/routes/portal_investor.py api/tests/test_login_events.py api/tests/test_auth.py
-git commit -m "feat(api): sign-in history (login_events, /api/me/sign-ins, investor/sign-ins); a password change needs the MPIN
+git add api/src/api/auth.py api/src/api/routes/mpin.py api/tests/test_login_events.py api/tests/test_auth.py
+git commit -m "feat(api): sign-in history (login_events, /api/me/sign-ins); a password change needs the MPIN
 
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01UQPL1C8PgeZ12quFkw2nCM"
@@ -2998,7 +2971,6 @@ Append inside `MATRIX`, after the `payout-destinations/2/decision` row:
                                                   "investor_password": "Inv12345",
                                                   "mpin": MPIN},                "investor_only"),
     ("POST",   "investor/account-requests/1/cancel", None,                      "investor_only"),
-    ("GET",    "investor/sign-ins",              None,                          "investor_only"),
     # ---- phase 2, admin side
     ("GET",    "kyc",                            None,                          "admin"),
     ("POST",   "kyc/{investor}/decision",        {"status": "rejected", "note": "matrix"}, "admin"),
@@ -3550,7 +3522,7 @@ function mockRoutes(opts: { wrongMpinOnce?: boolean } = {}) {
   let passwordPosts = 0
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
-    if (url.includes('/investor/sign-ins')) return jsonResponse([signInFixture()])
+    if (url.includes('/api/me/sign-ins')) return jsonResponse([signInFixture()])
     if (url === '/api/me/password' && init?.method === 'POST') {
       passwordPosts += 1
       if (opts.wrongMpinOnce && passwordPosts === 1) {
@@ -3579,7 +3551,7 @@ test('the Security page shows the login forms and the sign-in history', async ()
   expect(screen.getByRole('heading', { name: 'Your login' })).toBeInTheDocument()
   expect(await screen.findByText('Chrome on Windows')).toBeInTheDocument()
   expect(document.title).toBe('Security · MirrorFleet')
-  expect(fetchMock.mock.calls.some(([u]) => String(u) === '/api/orgs/1/investor/sign-ins?limit=50')).toBe(true)
+  expect(fetchMock.mock.calls.some(([u]) => String(u) === '/api/me/sign-ins?limit=50')).toBe(true)
 })
 
 test('a password change asks for the MPIN; a wrong one stays in the dialog', async () => {
@@ -3865,7 +3837,7 @@ export default function InvestorSecurity() {
     <div className="space-y-6 max-w-5xl">
       <PageHeader title="Security" subtitle="Your password, your MPIN, your sessions and where you signed in from." />
       <AccountSecurity />
-      <SignInHistory path={`/api/orgs/${orgId}/investor/sign-ins?limit=50`} />
+      <SignInHistory path="/api/me/sign-ins?limit=50" />
     </div>
   )
 }

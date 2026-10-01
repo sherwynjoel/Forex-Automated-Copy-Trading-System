@@ -56,7 +56,7 @@ helpers, never rename or reshape anything here. Spec (binding):
 |---|---|---|
 | 1 | Migration `023_portal_identity.sql`, `test_migration_023.py`, conftest TRUNCATE, `portal_helpers` additions | tables, `add_package`, `kyc_profile`, `open_account_request` |
 | 2 | Uploads accept `kyc_document` / `kyc_photo`; `file_belongs` excludes files already in a KYC slot | upload purposes |
-| 3 | `login_events` writes (login, MPIN verify), `GET /api/me/sign-ins`, `GET investor/sign-ins`, `POST /api/me/password` needs `mpin` | `auth.record_login`, `auth.sign_ins` |
+| 3 | `login_events` writes (login, MPIN verify), `GET /api/me/sign-ins`, `POST /api/me/password` needs `mpin` | `auth.record_login`, `auth.sign_ins` |
 | 4 | `api/src/api/portal_identity.py` rules + serialisers, `tests/test_portal_identity_rules.py` | every `pid.*` name |
 | 5 | `routes/portal_identity.py` created; KYC investor routes; `main.py` mounts it; `tests/test_portal_kyc.py` | the router |
 | 6 | KYC admin routes; `kyc_status` on `investor/summary` and admin `investors`; tests | |
@@ -141,7 +141,6 @@ def sign_ins(conn, user_id: int, limit: int = 50) -> list[dict]
   `record_login(..., "mpin_ok")`. Failures write nothing.
 - `POST /api/me/password`: body gains `mpin: Any = None`; `require_mpin` runs first.
 - `GET /api/me/sign-ins?limit=50` (require_user, any role) → `sign_ins(...)`.
-- `GET /api/orgs/{org_id}/investor/sign-ins?limit=50` (portal_investor.py, require_investor) → `sign_ins(conn, ctx.user_id, limit)`.
 
 ### `api/src/api/portal_identity.py` (Task 4) — imported as `pid`
 
@@ -326,7 +325,7 @@ export, re-export in `pages/groups/investor.ts`, `pick()` const, `<Route>` line.
 
 ### Page contracts
 
-- InvestorSecurity title `Security`; `AccountSecurity` then `SignInHistory path=/api/orgs/{org}/investor/sign-ins?limit=50`.
+- InvestorSecurity title `Security`; `AccountSecurity` then `SignInHistory path=/api/me/sign-ins?limit=50`.
 - AccountSecurity: the password form opens `PinConfirmDialog` title `Change your password?`,
   confirm `Confirm`; posts `{current_password, new_password, mpin}` with `{ redirectOn401: false }`.
   Its "Confirm new MPIN" PinInput id becomes `confirm-new-mpin`.

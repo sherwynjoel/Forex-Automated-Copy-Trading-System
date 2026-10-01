@@ -137,7 +137,6 @@ Investor:
     GET  investor/account-requests           -> own requests (no passwords)
     POST investor/account-requests           {package_id, leverage, main_password, investor_password, mpin} -> 201
     POST investor/account-requests/{id}/cancel
-    GET  investor/sign-ins?limit=50          -> own login_events
 
 Admin:
 
@@ -150,8 +149,8 @@ Admin:
     POST account-requests/{id}/reject        {note}
     GET  investors                           gains kyc_status per row
 
-Self: `POST /api/me/password` gains `mpin`; `GET /api/me/sign-ins` (any role) for the
-desk's own Security card.
+Self: `POST /api/me/password` gains `mpin`; `GET /api/me/sign-ins` (any role; the investor Security page and the
+desk's own Security card both use it).
 
 ## 7. Dashboard
 
