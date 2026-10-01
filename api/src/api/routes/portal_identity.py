@@ -137,4 +137,55 @@ def create_portal_identity_router() -> APIRouter:
             summary=f"Identity verification submitted by {ctx.user_email}")
         return pid.profile_json(row)
 
+    # ------------------------------------------------------------ KYC, admin
+
+    @router.get("/kyc", response_model=List[Dict[str, Any]])
+    async def kyc_queue(status: Optional[str] = None,
+                        ctx: OrgContext = Depends(require_org_role("admin")),
+                        conn: psycopg.Connection = Depends(get_conn)) -> List[Dict[str, Any]]:
+        where = "k.org_id = %s" + (" AND k.status = %s" if status else "")
+        params = (ctx.org_id, status) if status else (ctx.org_id,)
+        # ponytail: LIMIT 500, paginate when a workspace has that many profiles
+        rows = conn.execute(
+            f"SELECT {pc.qualify(pid.PROFILE_COLS, 'k')}, u.email, u.display_name "
+            "FROM kyc_profiles k JOIN users u ON u.id = k.user_id "
+            f"WHERE {where} ORDER BY (k.status = 'submitted') DESC, "
+            "k.submitted_at DESC NULLS LAST, k.updated_at DESC LIMIT 500", params).fetchall()
+        return [pid.profile_json(r) for r in rows]
+
+    @router.post("/kyc/{user_id}/decision", response_model=Dict[str, Any])
+    async def decide_kyc(user_id: int, body: pc.Decision, http_request: Request,
+                         ctx: OrgContext = Depends(require_org_role("admin")),
+                         conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
+        new_status = body.status.strip().lower()
+        if new_status not in ("approved", "rejected"):
+            raise HTTPException(status_code=400, detail="status must be approved or rejected")
+        try:
+            note = pc.require_note_on_reject(new_status, body.note)
+        except pc.LedgerError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        current = conn.execute(
+            "SELECT status FROM kyc_profiles WHERE org_id = %s AND user_id = %s",
+            (ctx.org_id, user_id)).fetchone()
+        if not current:
+            raise HTTPException(status_code=404, detail="Profile not found")
+        if current[0] != "submitted":
+            raise HTTPException(status_code=409, detail=f"profile is {current[0]}, not submitted")
+        row = conn.execute(
+            "UPDATE kyc_profiles SET status = %s, decided_by = %s, decided_at = now(), "
+            "decision_note = %s, updated_at = now() "
+            "WHERE org_id = %s AND user_id = %s AND status = 'submitted' "
+            f"RETURNING {pid.PROFILE_COLS}",
+            (new_status, ctx.user_id, note, ctx.org_id, user_id)).fetchone()
+        if not row:
+            raise HTTPException(status_code=409, detail="decided by someone else")
+        await pc.audit_control(
+            conn, org_id=ctx.org_id, action="investor_kyc_decided",
+            actor_email=ctx.user_email, user_id=user_id, status=new_status, note=note)
+        await pc.notify_investor(
+            conn, http_request, user_id,
+            f"Your identity verification was {new_status}",
+            f"Status: {new_status}\nNote: {note or '—'}\n\nOpen the portal for details.")
+        return pid.profile_json(row)
+
     return router

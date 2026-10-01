@@ -705,16 +705,17 @@ def create_portal_admin_router() -> APIRouter:
                              cfg: ApiConfig = Depends(ApiConfig.from_env)) -> List[Dict[str, Any]]:
         rows = conn.execute(
             """SELECT u.id, u.email, u.display_name, m.created_at, a.ctid_trader_account_id,
-                      a.nickname
+                      a.nickname, COALESCE(k.status, 'draft')
                FROM org_memberships m
                JOIN users u ON u.id = m.user_id
                LEFT JOIN accounts a ON a.org_id = m.org_id AND a.investor_user_id = u.id
+               LEFT JOIN kyc_profiles k ON k.org_id = m.org_id AND k.user_id = u.id
                WHERE m.org_id = %s AND m.role = 'investor'
                ORDER BY u.display_name, u.id""", (ctx.org_id,)).fetchall()
         # One /state round trip for the whole list, never one per investor.
         state = await _org_state(http_request.app.state.http, cfg, ctx.org_id)
         out = []
-        for user_id, email, name, joined_at, account_id, nickname in rows:
+        for user_id, email, name, joined_at, account_id, nickname, kyc in rows:
             figures = pc.wallet_figures(conn, ctx.org_id, user_id)
             equity, source = None, "unknown"
             if account_id is not None:
@@ -728,6 +729,7 @@ def create_portal_admin_router() -> APIRouter:
                 "on_hold": pc.money(figures["main"]["on_hold"]),
                 "available": pc.money(figures["main"]["available"]),
                 "pending": pending_counts(conn, ctx.org_id, user_id),
+                "kyc_status": kyc,
             })
         return out
 

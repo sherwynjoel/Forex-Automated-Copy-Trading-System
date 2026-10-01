@@ -195,3 +195,93 @@ def test_the_profile_routes_are_for_investors_only(portal, login_as):
     assert client.get(f"/api/orgs/{org_id}/investor/profile").status_code == 403
     assert _put(client, org_id, {"phone": "1"}).status_code == 403
     assert _submit(client, org_id).status_code == 403
+
+
+# ------------------------------------------------------------ admin
+
+
+class _FakeAlerter:
+    def __init__(self):
+        self.sent = []
+
+    async def send_to(self, to_addr, subject, text):
+        self.sent.append((to_addr, subject, text))
+        return True
+
+
+def _decide(client, org_id, user_id, **body):
+    return client.post(f"/api/orgs/{org_id}/kyc/{user_id}/decision", json=body,
+                       headers=csrf(client))
+
+
+def test_the_queue_lists_submitted_first_with_who(portal, db, make_user, login_as):
+    client, org_id, investor = portal
+    other = make_user(email="other@example.com", display_name="Other")
+    member(db, org_id, other["id"], "investor")
+    kyc_profile(db, org_id, other["id"], status="approved")
+    kyc_profile(db, org_id, investor["id"], status="submitted")
+    client.cookies.clear()
+    login_as(client, ADMIN)
+    rows = client.get(f"/api/orgs/{org_id}/kyc").json()
+    assert [r["user_id"] for r in rows] == [investor["id"], other["id"]]
+    assert rows[0]["email"] == "inv@example.com" and rows[0]["display_name"] == "Inv One"
+    assert rows[0]["full_name"] == COMPLETE_PROFILE["full_name"]
+    assert [r["user_id"] for r in client.get(f"/api/orgs/{org_id}/kyc?status=approved").json()] \
+        == [other["id"]]
+
+
+def test_an_admin_approves_and_the_investor_is_emailed(portal, db, login_as, monkeypatch):
+    client, org_id, investor = portal
+    kyc_profile(db, org_id, investor["id"], status="submitted")
+    client.cookies.clear()
+    login_as(client, ADMIN)
+    fake = _FakeAlerter()
+    monkeypatch.setattr(ws_module.broadcaster, "alerter", fake, raising=False)
+    r = _decide(client, org_id, investor["id"], status="approved")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "approved" and body["decided_by"] is not None and body["decided_at"]
+    assert fake.sent[0][:2] == ("inv@example.com", "Your identity verification was approved")
+    severity, payload, actor = _events(db, org_id, "investor_kyc_decided")[-1]
+    assert severity == "info" and payload["user_id"] == investor["id"]
+    assert payload["status"] == "approved" and actor == "admin@example.com"
+    r = _decide(client, org_id, investor["id"], status="rejected", note="late")
+    assert r.status_code == 409 and r.json()["detail"] == "profile is approved, not submitted"
+
+
+def test_a_rejection_needs_a_note_and_bad_input_is_refused(portal, db, login_as):
+    client, org_id, investor = portal
+    kyc_profile(db, org_id, investor["id"], status="submitted")
+    client.cookies.clear()
+    login_as(client, ADMIN)
+    r = _decide(client, org_id, investor["id"], status="rejected")
+    assert r.status_code == 400 and r.json()["detail"] == "note is required"
+    r = _decide(client, org_id, investor["id"], status="maybe")
+    assert r.status_code == 400 and r.json()["detail"] == "status must be approved or rejected"
+    r = _decide(client, org_id, 9999, status="approved")
+    assert r.status_code == 404 and r.json()["detail"] == "Profile not found"
+    r = _decide(client, org_id, investor["id"], status="rejected", note="ID photo is blurred")
+    assert r.status_code == 200 and r.json()["decision_note"] == "ID photo is blurred"
+    assert _status(db, org_id, investor["id"]) == "rejected"
+
+
+def test_kyc_status_rides_on_the_summary_and_the_investors_list(portal, db, login_as):
+    client, org_id, investor = portal
+    assert client.get(f"/api/orgs/{org_id}/investor/summary").json()["kyc_status"] == "draft"
+    kyc_profile(db, org_id, investor["id"], status="approved")
+    assert client.get(f"/api/orgs/{org_id}/investor/summary").json()["kyc_status"] == "approved"
+    client.cookies.clear()
+    login_as(client, ADMIN)
+    (row,) = client.get(f"/api/orgs/{org_id}/investors").json()
+    assert row["kyc_status"] == "approved"
+
+
+def test_the_admin_kyc_routes_refuse_investors_and_viewers(portal, db, make_user, login_as):
+    client, org_id, investor = portal
+    assert client.get(f"/api/orgs/{org_id}/kyc").status_code == 403
+    assert _decide(client, org_id, investor["id"], status="approved").status_code == 403
+    viewer = make_user(email="v@example.com")
+    member(db, org_id, viewer["id"], "viewer")
+    client.cookies.clear()
+    login_as(client, viewer)
+    assert client.get(f"/api/orgs/{org_id}/kyc").status_code == 403

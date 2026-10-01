@@ -25,6 +25,7 @@ from ..db import get_conn
 from ..mpin_core import require_mpin
 from ..rbac import OrgContext, require_investor
 from .. import portal_common as pc
+from .. import portal_identity as pid
 # Controller ruling (Task 10): account_card/org_state/equity_from already
 # live in portal_common (Task 5); imported under these underscore names
 # rather than re-defined here, byte-identical to what this router used to
@@ -728,6 +729,7 @@ def create_portal_investor_router() -> APIRouter:
             "profit": pc.money(profit),
             "account_available": pc.money(account_available),
             "open_positions": len([p for p in positions if isinstance(p, dict)]),
+            "kyc_status": pid.kyc_status(conn, ctx.org_id, ctx.user_id),
         }
 
     @router.get("/investor/wallet-entries", response_model=Dict[str, Any])
