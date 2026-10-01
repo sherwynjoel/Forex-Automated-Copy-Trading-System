@@ -25,7 +25,7 @@ const DETAIL_LABELS: Record<string, string> = {
   address: 'Address',
 }
 
-function Row({ label, value, mono }: { label: string; value: ReactNode; mono?: boolean }) {
+export function Row({ label, value, mono }: { label: string; value: ReactNode; mono?: boolean }) {
   return (
     <div className="flex justify-between gap-4">
       <dt className="text-ink-soft shrink-0">{label}</dt>
@@ -34,7 +34,7 @@ function Row({ label, value, mono }: { label: string; value: ReactNode; mono?: b
   )
 }
 
-function Section({ title, children }: { title: string; children: ReactNode }) {
+export function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section>
       <h3 className="desk-label mb-2">{title}</h3>
@@ -49,7 +49,7 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
  * (`GET files/{id}`) answers. A PDF is served as a download, never inline,
  * so the <img> fails and the link underneath is the way in.
  */
-function FilePreview({ orgId, fileId, label }: { orgId: number; fileId: number; label: string }) {
+export function FilePreview({ orgId, fileId, label }: { orgId: number; fileId: number; label: string }) {
   const [failed, setFailed] = useState(false)
   const src = `/api/orgs/${orgId}/files/${fileId}`
   return (

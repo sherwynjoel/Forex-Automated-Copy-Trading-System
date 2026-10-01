@@ -1,6 +1,6 @@
 import type {
-  InvestorRow, InvestorSummary, PayoutDestination, PaymentMethod, PortalDeposit, PortalTransfer,
-  PortalWithdrawal, WalletEntry,
+  AccountPackage, AccountRequest, InvestorRow, InvestorSummary, KycProfile, PayoutDestination, PaymentMethod,
+  PortalDeposit, PortalTransfer, PortalWithdrawal, SignIn, WalletEntry,
 } from '../lib/types'
 
 /**
@@ -42,6 +42,7 @@ export function summaryFixture(overrides: Partial<InvestorSummary> = {}): Invest
     profit: 240.25,
     account_available: 1240.25,
     open_positions: 2,
+    kyc_status: 'approved',
     ...overrides,
   }
 }
@@ -115,6 +116,46 @@ export function investorRowFixture(overrides: Partial<InvestorRow> = {}): Invest
     account_id: 555, nickname: 'Growth', equity: 1240.25, equity_source: 'live',
     balances: { main: 5120.5, credit: 0, pamm: 250, social: 0 }, on_hold: 100, available: 5020.5,
     pending: { deposits: 1, withdrawals: 0, transfers: 0, payout_destinations: 0 },
+    kyc_status: 'approved',
+    ...overrides,
+  }
+}
+
+export function profileFixture(overrides: Partial<KycProfile> = {}): KycProfile {
+  return {
+    user_id: 1, full_name: 'Sherwyn Joel', gender: 'male', date_of_birth: '1990-04-02',
+    phone: '+91 98765 43210', address_line: '12 Lake Road', area: null, landmark: null,
+    city: 'Coimbatore', state: 'Tamil Nadu', postal_code: '641001', country_residence: 'IN',
+    country_citizenship: 'IN', id_type: 'passport', id_number: 'P1234567',
+    id_front_file_id: 31, id_back_file_id: 32, address_proof_file_id: 33, photo_file_id: 34,
+    status: 'draft', submitted_at: null, decided_by: null, decided_at: null, decision_note: null,
+    updated_at: WHEN, missing: [],
+    ...overrides,
+  }
+}
+
+export function packageFixture(overrides: Partial<AccountPackage> = {}): AccountPackage {
+  return {
+    id: 1, name: 'Standard', min_deposit: 100, currency: 'USD', spread_label: '20-25',
+    leverage_options: [100, 200, 500], enabled: true, sort_order: 0,
+    ...overrides,
+  }
+}
+
+export function accountRequestFixture(overrides: Partial<AccountRequest> = {}): AccountRequest {
+  return {
+    id: 7, user_id: 1, package_id: 1, package_name: 'Standard', leverage: 200, status: 'requested',
+    mt5_login: null, mt5_server: null, account_id: null, decided_by: null, decided_at: null,
+    decision_note: null, created_at: WHEN,
+    ...overrides,
+  }
+}
+
+export function signInFixture(overrides: Partial<SignIn> = {}): SignIn {
+  return {
+    id: 1, ip: '203.0.113.7',
+    user_agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0 Safari/537.36',
+    outcome: 'mpin_ok', created_at: WHEN,
     ...overrides,
   }
 }

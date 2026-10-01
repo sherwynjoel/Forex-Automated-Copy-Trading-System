@@ -658,6 +658,7 @@ export interface InvestorSummary {
   profit: number | null
   account_available: number | null
   open_positions: number
+  kyc_status: KycStatus
 }
 
 /** One row of the admin's Investors table (GET investors). */
@@ -674,11 +675,65 @@ export interface InvestorRow {
   on_hold: number
   available: number
   pending: { deposits: number; withdrawals: number; transfers: number; payout_destinations: number }
+  kyc_status: KycStatus
 }
 
 export interface PortalSettings { withdrawal_min: number; withdrawal_fee_pct: number }
 
-export interface RequestsSummary { deposits: number; withdrawals: number; transfers: number; payout_destinations: number; total: number }
+export interface RequestsSummary {
+  deposits: number; withdrawals: number; transfers: number; payout_destinations: number
+  kyc: number; account_requests: number; total: number
+}
 
 /** What POST investor/files answers. */
 export interface UploadedFile { id: number; purpose: string; content_type: string; size_bytes: number; created_at: string }
+
+// ------------------------------------------------------------ phase 2: identity
+
+export type KycStatus = 'draft' | 'submitted' | 'approved' | 'rejected'
+export type Gender = 'male' | 'female' | 'other'
+export type IdType = 'passport' | 'national_id' | 'driving_licence'
+export type KycTextField =
+  | 'full_name' | 'gender' | 'date_of_birth' | 'phone' | 'address_line' | 'area' | 'landmark'
+  | 'city' | 'state' | 'postal_code' | 'country_residence' | 'country_citizenship' | 'id_type'
+  | 'id_number'
+export type KycFileField = 'id_front_file_id' | 'id_back_file_id' | 'address_proof_file_id' | 'photo_file_id'
+
+/** GET investor/profile, PUT investor/profile, and each row of the admin's GET kyc
+ *  (which adds email and display_name). `missing` lists the required fields still empty. */
+export type KycProfile = { user_id: number }
+  & Record<KycTextField, string | null>
+  & Record<KycFileField, number | null>
+  & {
+    status: KycStatus
+    submitted_at: string | null
+    decided_by: number | null
+    decided_at: string | null
+    decision_note: string | null
+    updated_at: string | null
+    missing: string[]
+    email?: string
+    display_name?: string
+  }
+
+export interface AccountPackage {
+  id: number; name: string; min_deposit: number; currency: string; spread_label: string | null
+  leverage_options: number[]; enabled: boolean; sort_order: number
+}
+
+export type AccountRequestStatus = 'requested' | 'fulfilled' | 'rejected' | 'cancelled'
+
+/** Never carries the passwords; the admin reads them through POST .../reveal. */
+export interface AccountRequest {
+  id: number; user_id: number; package_id: number | null; package_name: string; leverage: number
+  status: AccountRequestStatus; mt5_login: number | null; mt5_server: string | null
+  account_id: number | null; decided_by: number | null; decided_at: string | null
+  decision_note: string | null; created_at: string; email?: string; display_name?: string
+}
+
+export interface RevealedPasswords { main_password: string; investor_password: string }
+
+export interface SignIn {
+  id: number; ip: string; user_agent: string | null
+  outcome: 'password_ok' | 'mpin_ok' | 'failed'; created_at: string
+}
