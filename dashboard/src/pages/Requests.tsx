@@ -35,6 +35,8 @@ interface Pending {
   requireText: boolean
   danger?: boolean
   credited?: string
+  /** The notice amount; the credited amount may not exceed it. */
+  creditedMax?: number
   run: (text: string, credited: string) => Promise<void>
 }
 
@@ -102,6 +104,15 @@ export default function Requests() {
     }
   }, [orgId])
 
+  // An org switch drops every answer still in flight for the previous org
+  // and clears its rows. Declared before the effect below so the new org's
+  // first refresh is numbered after the cut.
+  useEffect(() => {
+    lastApplied.current = requestSeq.current
+    setSummary(null); setDeposits([]); setWithdrawals([]); setTransfers([]); setDestinations([])
+    setLoaded(false)
+  }, [orgId])
+
   useEffect(() => {
     refresh()
     const id = window.setInterval(refresh, POLL_MS)
@@ -138,6 +149,7 @@ export default function Requests() {
     confirmLabel: status === 'confirmed' ? 'Confirm' : 'Reject',
     textLabel: 'Note', requireText: status === 'rejected', danger: status === 'rejected',
     credited: status === 'confirmed' ? (d.amount - d.fee).toFixed(2) : undefined,
+    creditedMax: d.amount,
     run: (note, creditedAmount) => act(async () => {
       const body = status === 'confirmed'
         ? { status, credited_amount: creditedAmount, note }
@@ -192,9 +204,10 @@ export default function Requests() {
   const visible = <T extends { status: string }>(kind: RequestKind, rows: T[]): T[] =>
     show === 'open' ? rows.filter((r) => isOpen(kind, r.status)) : rows
 
+  const overCredit = pending?.creditedMax != null && Number(credited.trim()) > pending.creditedMax
   const confirmBlocked =
     (Boolean(pending?.requireText) && text.trim() === '') ||
-    (pending?.credited != null && !AMOUNT.test(credited.trim()))
+    (pending?.credited != null && !AMOUNT.test(credited.trim())) || overCredit
 
   return (
     <div className="space-y-6 max-w-5xl">
@@ -277,6 +290,11 @@ export default function Requests() {
             <span className="desk-label block mb-1">Credited amount</span>
             <Input aria-label="Credited amount" num inputMode="decimal" value={credited}
                    onChange={(e) => setCredited(e.target.value)} />
+            {overCredit && (
+              <span role="alert" className="block mt-1 text-xs text-loss-deep">
+                Credited amount cannot exceed the notice amount ({pending?.creditedMax?.toFixed(2)})
+              </span>
+            )}
             <span className="block mt-1 text-xs text-ink-soft">
               Prefilled with the amount less the method fee. Change it when what arrived differs.
             </span>

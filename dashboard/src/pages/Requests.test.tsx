@@ -414,6 +414,63 @@ test('a newer answer is applied even while an even newer refresh is still in fli
   expect(screen.queryByText('SECOND')).not.toBeInTheDocument()
 })
 
+test('an answer from the previous org never paints after an org switch', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  const row = (id: number, reference: string) =>
+    depositFixture({ ...who, id, reference, status: 'pending' })
+  const org1Poll = deferredResponse()
+  const org2Load = deferredResponse()
+  let org1Calls = 0
+  const summary = { deposits: 1, withdrawals: 0, transfers: 0, payout_destinations: 0, total: 1 }
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input)
+    const method = init?.method || 'GET'
+    if (url.endsWith('/requests/summary')) return Promise.resolve(jsonResponse(summary))
+    if (url.endsWith('/deposits') && method === 'GET') {
+      if (url.includes('/orgs/2/')) return org2Load.promise
+      org1Calls += 1
+      return org1Calls === 1 ? Promise.resolve(jsonResponse([row(81, 'ORG1-LOADED')])) : org1Poll.promise
+    }
+    return Promise.resolve(jsonResponse([]))
+  }))
+
+  const { rerender } = renderPage()
+  expect(await screen.findByText('ORG1-LOADED')).toBeInTheDocument()
+  // The poll for org 1 goes out and stays in flight ...
+  await act(async () => { await vi.advanceTimersByTimeAsync(10000) })
+  await waitFor(() => expect(org1Calls).toBe(2))
+  // ... while the admin switches to org 2: org 1's rows go at once.
+  useOrgMock.mockReturnValue(mockUseOrg('admin', 2))
+  rerender(<MemoryRouter initialEntries={['/org/2/requests']}><Requests /></MemoryRouter>)
+  expect(screen.queryByText('ORG1-LOADED')).not.toBeInTheDocument()
+
+  // Org 1's late answer is dropped, not painted under org 2.
+  org1Poll.resolve([row(82, 'ORG1-LATE')])
+  await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+  expect(screen.queryByText('ORG1-LATE')).not.toBeInTheDocument()
+
+  org2Load.resolve([row(83, 'ORG2')])
+  expect(await screen.findByText('ORG2')).toBeInTheDocument()
+  expect(screen.queryByText('ORG1-LATE')).not.toBeInTheDocument()
+})
+
+test('a credited amount above the notice amount blocks Confirm with the rule shown', async () => {
+  mockRoutes()
+  renderPage()
+  await screen.findByText('UTR123')
+  await userEvent.click(screen.getByRole('button', { name: 'Confirm deposit 11' }))
+  const confirm = screen.getByRole('button', { name: 'Confirm' })
+  const credited = screen.getByLabelText('Credited amount')
+  await userEvent.clear(credited)
+  await userEvent.type(credited, '5000.01')
+  expect(confirm).toBeDisabled()
+  expect(screen.getByText('Credited amount cannot exceed the notice amount (5000.00)')).toBeInTheDocument()
+  await userEvent.clear(credited)
+  await userEvent.type(credited, '5000')
+  expect(confirm).toBeEnabled()
+  expect(screen.queryByText(/cannot exceed/)).not.toBeInTheDocument()
+})
+
 test('a viewer sees the queues and the details but no decisions', async () => {
   useOrgMock.mockReturnValue(mockUseOrg('viewer'))
   mockRoutes()
