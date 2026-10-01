@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react'
+import { act, cleanup, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi, afterEach, beforeEach } from 'vitest'
@@ -67,8 +67,10 @@ function mockRoutes(summaries: InvestorSummary | InvestorSummary[], entries: unk
 }
 
 beforeEach(() => { useOrgMock.mockReturnValue(mockUseOrg('investor')) })
+// Unmount first: setHidden(false) broadcasts to every subscriber, and a
+// still-mounted page would update outside act().
 afterEach(() => {
-  vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers()
+  cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers()
   setHidden(false)
   facts.supportEmail = ''
 })
@@ -190,7 +192,7 @@ test('the account card goes away when the account is unlinked later', async () =
   mockRoutes([linked, unlinked])
   render(<MemoryRouter><InvestorDashboard /></MemoryRouter>)
   expect(await screen.findByText('Inv')).toBeInTheDocument()
-  await vi.advanceTimersByTimeAsync(10000)
+  await act(async () => { await vi.advanceTimersByTimeAsync(10000) })
   expect(await screen.findByText(/your account is being set up/i)).toBeInTheDocument()
   expect(screen.queryByText('Inv')).not.toBeInTheDocument()
 })
