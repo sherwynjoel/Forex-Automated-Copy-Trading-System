@@ -518,14 +518,14 @@ def create_portal_identity_router() -> APIRouter:
             conn, org_id=ctx.org_id, action="account_request_passwords_revealed",
             actor_email=ctx.user_email, user_id=user_id, severity="warning", request_id=req_id,
             summary=f"Passwords of account request #{req_id} revealed by {ctx.user_email}")
-        return out
+        return JSONResponse(out, headers={"Cache-Control": "no-store"})
 
     @router.post("/account-requests/{req_id}/fulfil", response_model=Dict[str, Any])
     async def fulfil_request(req_id: int, body: FulfilBody, http_request: Request,
                              ctx: OrgContext = Depends(require_org_role("admin")),
                              conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
         login = body.mt5_login
-        if isinstance(login, bool) or not isinstance(login, int) or login <= 0:
+        if isinstance(login, bool) or not isinstance(login, int) or not 0 < login <= 2**63 - 1:
             raise HTTPException(status_code=400,
                                 detail="mt5_login must be a whole number above zero")
         try:

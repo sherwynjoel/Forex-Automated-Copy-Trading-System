@@ -228,6 +228,7 @@ def test_reveal_needs_the_admins_mpin_and_is_audited_every_time(desk, db):
         r = _act(client, org_id, req_id, "reveal", mpin="123456")
         assert r.status_code == 200
         assert r.json() == {"main_password": "Main1234", "investor_password": "Look1234"}
+        assert r.headers["cache-control"] == "no-store"
     rows = _events(db, org_id, "account_request_passwords_revealed")
     assert len(rows) == 2
     severity, payload = rows[-1]
@@ -254,6 +255,8 @@ def test_fulfil_hands_over_the_login_wipes_the_passwords_and_emails(desk, db, mo
     fake = _FakeAlerter()
     monkeypatch.setattr(ws_module.broadcaster, "alerter", fake, raising=False)
     r = _act(client, org_id, req_id, "fulfil", mt5_login=0, mt5_server="Broker-Live")
+    assert r.status_code == 400 and r.json()["detail"] == "mt5_login must be a whole number above zero"
+    r = _act(client, org_id, req_id, "fulfil", mt5_login=2**63, mt5_server="Broker-Live")
     assert r.status_code == 400 and r.json()["detail"] == "mt5_login must be a whole number above zero"
     r = _act(client, org_id, req_id, "fulfil", mt5_login=5001)
     assert r.status_code == 400 and r.json()["detail"] == "mt5_server is required"

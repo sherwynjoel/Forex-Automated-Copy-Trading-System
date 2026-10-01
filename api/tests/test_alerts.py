@@ -129,11 +129,12 @@ def test_money_routing_changes_are_never_cooled_down():
     swap (and let one org's change suppress another's)."""
     recorded = []
     alerter = _make_alerter(recorded, clock=lambda: 1000.0)
-    for action in ("payment_method_changed", "investor_wallet_set"):
+    for action in ("payment_method_changed", "investor_wallet_set",
+                   "account_request_passwords_revealed"):
         for i in range(2):
             event = _event("control", "warning", action, account_id=None, _i=i)
             assert _run(alerter.consider(event)) is True, (action, i)
-    assert len(recorded) == 4
+    assert len(recorded) == 6
 
 
 def test_disabled_without_config():
