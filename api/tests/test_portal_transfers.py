@@ -534,6 +534,32 @@ def test_a_transfer_whose_account_was_removed_cannot_be_done(org_client, make_us
     assert _entries(db, org_id, investor["id"]) == []
 
 
+def test_an_account_removed_after_the_read_still_blocks_done(
+        org_client, make_user, login_as, db, monkeypatch):
+    """The removal can land between decide_transfer's read and its UPDATE;
+    the guard lives in the UPDATE, so done is still refused and nothing
+    settles."""
+    from api import portal_common as pc
+
+    client, org_id, investor = _funded(org_client, make_user, login_as, db, main="0",
+                                       link_to=1001, equity="800")
+    tr = _transfer(client, org_id, A(1001), W("main"), "100").json()
+    login_as(client, ADMIN)
+    real_lock = pc.lock_investor_ledger
+
+    def remove_then_lock(conn, org_id_, user_id_):
+        with psycopg.connect(db, autocommit=True) as other:
+            other.execute("UPDATE transfers SET source_account_id = NULL WHERE id = %s",
+                          (tr["id"],))
+        return real_lock(conn, org_id_, user_id_)
+
+    monkeypatch.setattr(pc, "lock_investor_ledger", remove_then_lock)
+    r = _decide(client, org_id, tr["id"], "done")
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"] == "the trading account was removed; reject this transfer instead"
+    assert _entries(db, org_id, investor["id"]) == []
+
+
 def test_money_ref_label_names_a_removed_account():
     from api.routes.portal_investor import money_ref_label
     assert money_ref_label("account", None) == "trading account (removed)"

@@ -629,11 +629,6 @@ def create_portal_admin_router() -> APIRouter:
          target_wallet, target_account, amount) = current
         if not pc.can_transition("transfers", status_now, new_status):
             raise HTTPException(status_code=409, detail=f"transfer is already {status_now}")
-        # Account removal NULLs the account end; done would settle against nothing.
-        if new_status == "done" and ((source_kind == "account" and source_account is None)
-                                     or (target_kind == "account" and target_account is None)):
-            raise HTTPException(status_code=409, detail="the trading account was removed; "
-                                                        "reject this transfer instead")
         amount = Decimal(amount)
         # The per-investor ledger lock is the first statement inside the
         # transaction on every decision path -- not just `done`, which is
@@ -653,6 +648,10 @@ def create_portal_admin_router() -> APIRouter:
                     "decision_note = COALESCE(%s, decision_note), "
                     "done_by = %s, done_at = now() "
                     "WHERE id = %s AND org_id = %s AND status = %s "
+                    # Account removal NULLs the account end (without our lock);
+                    # done would settle against nothing, so guard it here.
+                    "AND NOT ((source_kind = 'account' AND source_account_id IS NULL) "
+                    "OR (target_kind = 'account' AND target_account_id IS NULL)) "
                     f"RETURNING {pc.TRANSFER_COLS}",
                     (ctx.user_id, note, ctx.user_id, tr_id, ctx.org_id, status_now)).fetchone()
             else:
@@ -661,6 +660,13 @@ def create_portal_admin_router() -> APIRouter:
                     "decision_note = %s WHERE id = %s AND org_id = %s AND status = %s "
                     f"RETURNING {pc.TRANSFER_COLS}",
                     (new_status, ctx.user_id, note, tr_id, ctx.org_id, status_now)).fetchone()
+            if not row and new_status == "done" and conn.execute(
+                    "SELECT 1 FROM transfers WHERE id = %s AND status = %s AND "
+                    "((source_kind = 'account' AND source_account_id IS NULL) "
+                    "OR (target_kind = 'account' AND target_account_id IS NULL))",
+                    (tr_id, status_now)).fetchone():
+                raise HTTPException(status_code=409, detail="the trading account was removed; "
+                                                            "reject this transfer instead")
             if not row:
                 raise HTTPException(status_code=409, detail="decided by someone else")
             if new_status == "done":
