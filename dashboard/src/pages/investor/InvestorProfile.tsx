@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { orgApi, orgUpload } from '../../lib/api'
+import { orgApi, orgUpload, type ApiError } from '../../lib/api'
 import { useOrg } from '../../lib/org'
 import { errorText, formatWhen } from '../../lib/format'
 import { FIELD_LABELS, GENDERS, ID_TYPES, fieldValue, kycBadge, kycLabel } from '../../lib/identity'
@@ -51,6 +51,13 @@ type Form = Record<KycTextField, string>
 
 function formOf(p: KycProfile): Form {
   return Object.fromEntries(TEXT_FIELDS.map((k) => [k, p[k] ?? ''])) as Form
+}
+
+/** The server's "someone else saved first" conflict -- reload and show it,
+ *  rather than let the investor resubmit over data they never saw. */
+function isReloadConflict(err: unknown): boolean {
+  const res = (err as ApiError | undefined)?.response
+  return res?.status === 409 && res.body?.detail === 'your profile changed; reload it'
 }
 
 function Field({ field, value, onChange }: { field: KycTextField; value: string; onChange: (v: string) => void }) {
@@ -117,6 +124,9 @@ export default function InvestorProfile() {
   const [profile, setProfile] = useState<KycProfile | null>(null)
   const [form, setForm] = useState<Form | null>(null)
   const [files, setFiles] = useState<Partial<Record<KycFileField, File | null>>>({})
+  // An id an upload already landed under while its step's PUT then failed:
+  // kept so a retry attaches it instead of uploading the same file again.
+  const [pendingFileIds, setPendingFileIds] = useState<Partial<Record<KycFileField, number>>>({})
   const [step, setStep] = useState<Step>('profile')
   const [pinOpen, setPinOpen] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -148,11 +158,19 @@ export default function InvestorProfile() {
       }
       for (const k of STEP_FIELDS[s].files) {
         const file = files[k]
-        if (!file) continue
-        const fd = new FormData()
-        fd.append('purpose', k === 'photo_file_id' ? 'kyc_photo' : 'kyc_document')
-        fd.append('file', file)
-        body[k] = (await orgUpload<UploadedFile>(orgId, 'investor/files', fd)).id
+        if (file) {
+          const fd = new FormData()
+          fd.append('purpose', k === 'photo_file_id' ? 'kyc_photo' : 'kyc_document')
+          fd.append('file', file)
+          const id = (await orgUpload<UploadedFile>(orgId, 'investor/files', fd)).id
+          // Already on the server even if the PUT below fails: remember the
+          // id and clear the slot, so a retry neither re-uploads nor drops it.
+          setFiles((f) => ({ ...f, [k]: null }))
+          setPendingFileIds((p) => ({ ...p, [k]: id }))
+          body[k] = id
+        } else if (pendingFileIds[k] != null) {
+          body[k] = pendingFileIds[k]!
+        }
       }
       if (Object.keys(body).length > 0) {
         const saved = await orgApi<KycProfile>(orgId, 'investor/profile', { method: 'PUT', body: JSON.stringify(body) })
@@ -162,9 +180,11 @@ export default function InvestorProfile() {
         setProfile(saved)
         setForm(formOf(saved))
         setFiles({})
+        setPendingFileIds({})
       }
       return true
     } catch (err) {
+      if (isReloadConflict(err)) await load()
       setError(errorText(err, 'Could not save your profile'))
       return false
     } finally {
@@ -176,7 +196,9 @@ export default function InvestorProfile() {
     if (await saveStep(s)) setStep(STEPS[STEPS.findIndex((x) => x.key === s) + 1].key)
   }
 
-  // Rejections propagate: PinConfirmDialog shows them inline and clears the PIN.
+  // A profile-changed conflict reloads before rethrowing, and a missing-fields
+  // refusal is rethrown with its field names as labels; everything else
+  // propagates as-is -- PinConfirmDialog shows it inline and clears the PIN.
   const submit = async (mpin: string) => {
     setBusy(true)
     try {
@@ -186,6 +208,15 @@ export default function InvestorProfile() {
       setForm(formOf(p))
       setPinOpen(false)
       setNotice('Submitted. An admin reviews your documents; you will get an email with the result.')
+    } catch (err) {
+      if (isReloadConflict(err)) await load()
+      const res = (err as ApiError | undefined)?.response
+      const missing = res?.body?.missing
+      if (res?.status === 400 && Array.isArray(missing)) {
+        throw new Error(`complete your profile first: ${(missing as string[])
+          .map((k) => FIELD_LABELS[k as KycTextField | KycFileField] ?? k).join(', ')}`)
+      }
+      throw err
     } finally {
       setBusy(false)
     }
