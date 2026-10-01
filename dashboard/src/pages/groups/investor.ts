@@ -8,3 +8,4 @@ export { default as InvestorTransactions } from '../investor/InvestorTransaction
 export { default as InvestorHistory } from '../investor/InvestorHistory'
 export { default as InvestorAccount } from '../investor/InvestorAccount'
 export { default as InvestorSecurity } from '../investor/InvestorSecurity'
+export { default as InvestorProfile } from '../investor/InvestorProfile'

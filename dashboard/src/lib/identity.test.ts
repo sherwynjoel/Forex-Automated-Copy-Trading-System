@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest'
 import {
-  deviceLabel, generatePassword, kycBadge, kycLabel, passwordProblem, requestBadge, requestLabel,
+  deviceLabel, fieldValue, generatePassword, kycBadge, kycLabel, passwordProblem, requestBadge, requestLabel,
 } from './identity'
 
 test('KYC and request statuses read as words with a tone', () => {
@@ -31,6 +31,13 @@ test('a generated password always passes the policy and differs each time', () =
     seen.add(p)
   }
   expect(seen.size).toBe(50)
+})
+
+test('fieldValue shows choices as words and nothing as a dash', () => {
+  expect(fieldValue('id_type', 'national_id')).toBe('National ID card')
+  expect(fieldValue('gender', 'female')).toBe('Female')
+  expect(fieldValue('city', 'Coimbatore')).toBe('Coimbatore')
+  expect(fieldValue('city', null)).toBe('—')
 })
 
 test('deviceLabel names the browser and the system', () => {

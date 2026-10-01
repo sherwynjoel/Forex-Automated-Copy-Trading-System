@@ -121,3 +121,11 @@ export const GENDERS: readonly (readonly [Gender, string])[] = [
 export const ID_TYPES: readonly (readonly [IdType, string])[] = [
   ['passport', 'Passport'], ['national_id', 'National ID card'], ['driving_licence', 'Driving licence'],
 ]
+
+/** A profile value as people read it: 'Passport' for passport, '—' for nothing. */
+export function fieldValue(field: KycTextField, value: string | null): string {
+  if (value == null || value === '') return '—'
+  const options: readonly (readonly [string, string])[] | null =
+    field === 'gender' ? GENDERS : field === 'id_type' ? ID_TYPES : null
+  return options?.find(([v]) => v === value)?.[1] ?? value
+}
