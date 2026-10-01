@@ -54,6 +54,14 @@ class PackagePatch(BaseModel):
     sort_order: Optional[int] = None
 
 
+class AccountRequestBody(BaseModel):
+    package_id: int
+    leverage: Any = None
+    main_password: Any = None
+    investor_password: Any = None
+    mpin: Any = None
+
+
 def _profile_row(conn: psycopg.Connection, org_id: int, user_id: int):
     return conn.execute(
         f"SELECT {pid.PROFILE_COLS} FROM kyc_profiles WHERE org_id = %s AND user_id = %s",
@@ -323,5 +331,98 @@ def create_portal_identity_router() -> APIRouter:
             f"SELECT {pid.PACKAGE_COLS} FROM account_packages WHERE org_id = %s AND enabled "
             "ORDER BY sort_order, id", (ctx.org_id,)).fetchall()
         return [pid.package_json(r) for r in rows]
+
+    # ------------------------------------------------------------ account requests, investor
+
+    @router.get("/investor/account-requests", response_model=List[Dict[str, Any]])
+    async def my_account_requests(ctx: OrgContext = Depends(require_investor),
+                                  conn: psycopg.Connection = Depends(get_conn)) -> List[Dict[str, Any]]:
+        rows = conn.execute(
+            f"SELECT {pid.REQUEST_COLS} FROM account_requests WHERE org_id = %s AND user_id = %s "
+            "ORDER BY created_at DESC, id DESC", (ctx.org_id, ctx.user_id)).fetchall()
+        return [pid.request_json(r) for r in rows]
+
+    @router.post("/investor/account-requests", status_code=201, response_model=Dict[str, Any])
+    async def request_account(body: AccountRequestBody,
+                              ctx: OrgContext = Depends(require_investor),
+                              conn: psycopg.Connection = Depends(get_conn),
+                              cfg: ApiConfig = Depends(ApiConfig.from_env)):
+        """A live MT5 account from one package. KYC must be approved, the
+        investor has no linked account (phase 1 links one per investor) and
+        no other open request. The two passwords are sealed with FERNET_KEY
+        and live only until an admin decides."""
+        failure = require_mpin(conn, ctx.user_id, body.mpin)
+        if failure is not None:
+            return failure
+        if pid.kyc_status(conn, ctx.org_id, ctx.user_id) != "approved":
+            raise HTTPException(status_code=409, detail="verify your identity first")
+        if pc.linked_account(conn, ctx.org_id, ctx.user_id) is not None:
+            raise HTTPException(status_code=409, detail="you already have a trading account")
+        if conn.execute("SELECT 1 FROM account_requests WHERE org_id = %s AND user_id = %s "
+                        "AND status = 'requested'", (ctx.org_id, ctx.user_id)).fetchone():
+            raise HTTPException(status_code=409, detail="a request is already open")
+        row = conn.execute(
+            f"SELECT {pid.PACKAGE_COLS} FROM account_packages WHERE id = %s AND org_id = %s "
+            "AND enabled", (body.package_id, ctx.org_id)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Package not found")
+        package = pid.package_json(row)
+        options = package["leverage_options"]
+        leverage = body.leverage
+        if isinstance(leverage, bool) or not isinstance(leverage, int) or leverage not in options:
+            raise HTTPException(status_code=400, detail="leverage must be one of "
+                                + ", ".join(str(o) for o in options))
+        try:
+            main = pid.check_mt5_password(body.main_password, "main_password")
+            investor = pid.check_mt5_password(body.investor_password, "investor_password")
+        except pc.LedgerError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        if main == investor:
+            # MT5 itself refuses an investor (read-only) password equal to
+            # the main one; better to say so before the admin finds out.
+            raise HTTPException(status_code=400,
+                                detail="the investor password must differ from the main password")
+        try:
+            row = conn.execute(
+                "INSERT INTO account_requests (org_id, user_id, package_id, package_name, "
+                "leverage, main_password_enc, investor_password_enc) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+                f"RETURNING {pid.REQUEST_COLS}",
+                (ctx.org_id, ctx.user_id, package["id"], package["name"], leverage,
+                 pid.seal(cfg.fernet_key, main), pid.seal(cfg.fernet_key, investor))).fetchone()
+        except psycopg.errors.UniqueViolation:
+            # A second request raced the check above (account_requests_one_open).
+            raise HTTPException(status_code=409, detail="a request is already open")
+        out = pid.request_json(row)
+        await pc.audit_control(
+            conn, org_id=ctx.org_id, action="investor_account_requested",
+            actor_email=ctx.user_email, user_id=ctx.user_id, severity="warning",
+            request_id=out["id"], package_name=package["name"], leverage=leverage,
+            summary=f"Trading account requested: {package['name']} 1:{leverage} "
+                    f"by {ctx.user_email}")
+        return out
+
+    @router.post("/investor/account-requests/{req_id}/cancel", response_model=Dict[str, Any])
+    async def cancel_account_request(req_id: int,
+                                     ctx: OrgContext = Depends(require_investor),
+                                     conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
+        current = conn.execute(
+            "SELECT status FROM account_requests WHERE id = %s AND org_id = %s AND user_id = %s",
+            (req_id, ctx.org_id, ctx.user_id)).fetchone()
+        if not current:
+            raise HTTPException(status_code=404, detail="Request not found")
+        if current[0] != "requested":
+            raise HTTPException(status_code=409, detail=f"request is already {current[0]}")
+        row = conn.execute(
+            "UPDATE account_requests SET status = 'cancelled', decided_by = %s, "
+            "decided_at = now(), main_password_enc = NULL, investor_password_enc = NULL "
+            "WHERE id = %s AND org_id = %s AND status = 'requested' "
+            f"RETURNING {pid.REQUEST_COLS}", (ctx.user_id, req_id, ctx.org_id)).fetchone()
+        if not row:
+            raise HTTPException(status_code=409, detail="decided by someone else")
+        await pc.audit_control(
+            conn, org_id=ctx.org_id, action="investor_account_request_cancelled",
+            actor_email=ctx.user_email, user_id=ctx.user_id, request_id=req_id)
+        return pid.request_json(row)
 
     return router
