@@ -123,6 +123,19 @@ def test_cooldown_suppresses_repeats_per_action_and_account():
     assert len(recorded) == 3
 
 
+def test_money_routing_changes_are_never_cooled_down():
+    """A label edit then an address swap a minute later must both alert:
+    account_id is None for these, so a shared cooldown key would hide the
+    swap (and let one org's change suppress another's)."""
+    recorded = []
+    alerter = _make_alerter(recorded, clock=lambda: 1000.0)
+    for action in ("payment_method_changed", "investor_wallet_set"):
+        for i in range(2):
+            event = _event("control", "warning", action, account_id=None, _i=i)
+            assert _run(alerter.consider(event)) is True, (action, i)
+    assert len(recorded) == 4
+
+
 def test_disabled_without_config():
     recorded = []
     alerter = _make_alerter(recorded, api_key="", to="")

@@ -105,12 +105,14 @@ export default function Requests() {
   }, [orgId])
 
   // An org switch drops every answer still in flight for the previous org
-  // and clears its rows. Declared before the effect below so the new org's
-  // first refresh is numbered after the cut.
+  // and clears its rows -- and closes any open decision dialog, whose
+  // action targets the previous org's row. Declared before the effect below
+  // so the new org's first refresh is numbered after the cut.
   useEffect(() => {
     lastApplied.current = requestSeq.current
     setSummary(null); setDeposits([]); setWithdrawals([]); setTransfers([]); setDestinations([])
     setLoaded(false)
+    setPending(null); setText(''); setCredited(''); setDialogError(null)
   }, [orgId])
 
   useEffect(() => {

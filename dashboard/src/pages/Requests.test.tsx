@@ -454,6 +454,16 @@ test('an answer from the previous org never paints after an org switch', async (
   expect(screen.queryByText('ORG1-LATE')).not.toBeInTheDocument()
 })
 
+test('an org switch closes an open decision dialog', async () => {
+  mockRoutes()
+  const { rerender } = renderPage('/org/1/requests?tab=transfers')
+  await userEvent.click(await screen.findByRole('button', { name: 'Mark transfer 31 done' }))
+  expect(screen.getByRole('button', { name: 'Mark done' })).toBeInTheDocument()
+  useOrgMock.mockReturnValue(mockUseOrg('admin', 2))
+  rerender(<MemoryRouter initialEntries={['/org/2/requests']}><Requests /></MemoryRouter>)
+  await waitFor(() => expect(screen.queryByRole('button', { name: 'Mark done' })).not.toBeInTheDocument())
+})
+
 test('a credited amount above the notice amount blocks Confirm with the rule shown', async () => {
   mockRoutes()
   renderPage()

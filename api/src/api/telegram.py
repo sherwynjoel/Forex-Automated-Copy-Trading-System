@@ -16,7 +16,7 @@ from typing import Any, Callable
 
 import httpx
 
-from .alerts import ALERT_RULES
+from .alerts import ALERT_RULES, NO_COOLDOWN
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +87,7 @@ class TelegramNotifier:
         scope = payload.get("user_id") if action.startswith("investor_") else event.get("account_id")
         cooldown_key = (action, scope)
         now = self._clock()
-        last = self._last_sent.get(cooldown_key)
+        last = None if action in NO_COOLDOWN else self._last_sent.get(cooldown_key)
         if last is not None and (now - last) < COOLDOWN_S:
             return False
 
