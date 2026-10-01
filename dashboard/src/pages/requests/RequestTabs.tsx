@@ -12,6 +12,10 @@ import type {
 export type RequestKind = 'deposits' | 'withdrawals' | 'transfers' | 'payout_destinations'
 export const REQUEST_KINDS: RequestKind[] = ['deposits', 'withdrawals', 'transfers', 'payout_destinations']
 
+/** The desk's tabs: the four money queues plus phase 2's two identity queues. */
+export type DeskTab = RequestKind | 'kyc' | 'account_requests'
+export const DESK_TABS: DeskTab[] = [...REQUEST_KINDS, 'kyc', 'account_requests']
+
 /** Task 11's `statusLabel`/`statusTone` take their own singular `RequestKind`
  *  (`lib/investor.ts`) -- an "approved" transfer reads "Approved, in
  *  progress" and an "approved" payout account reads "Approved" at ok tone,
@@ -49,12 +53,15 @@ export const KIND_WORD: Record<RequestKind, string> = {
 }
 
 export function tabItems(summary: RequestsSummary | null): TabItem[] {
-  const n = (k: RequestKind) => (summary ? summary[k] : 0)
+  // `?? 0`: an api that predates a queue answers without its count.
+  const n = (k: Exclude<keyof RequestsSummary, 'total'>) => summary?.[k] ?? 0
   return [
     { key: 'deposits', label: `Deposits (${n('deposits')})` },
     { key: 'withdrawals', label: `Withdrawals (${n('withdrawals')})` },
     { key: 'transfers', label: `Transfers (${n('transfers')})` },
     { key: 'payout_destinations', label: `Payout accounts (${n('payout_destinations')})` },
+    { key: 'kyc', label: `Verification (${n('kyc')})` },
+    { key: 'account_requests', label: `Account requests (${n('account_requests')})` },
   ]
 }
 
