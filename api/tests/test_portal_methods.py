@@ -144,6 +144,26 @@ def test_patch_replaces_details_and_validates_against_the_rows_kind(org_client, 
                         headers=csrf(client)).status_code == 404
 
 
+def test_the_audit_shows_the_method_before_and_after_a_change(org_client, db):
+    """An address swap must be visible in the alert, not just the label."""
+    client, org_id, seed = org_client
+    method_id = _post_method(client, org_id).json()["id"]
+    swapped = {**CRYPTO, "address": "TAttacker999"}
+    r = client.patch(f"/api/orgs/{org_id}/payment-methods/{method_id}",
+                     json={"details": swapped}, headers=csrf(client))
+    assert r.status_code == 200
+    created, updated = [p for _, p, _ in _events(db, org_id, "payment_method_changed")]
+    assert "before" not in created
+    assert created["after"] == {"label": "USDT on TRC20", "kind": "crypto", "enabled": True,
+                                "details": CRYPTO}
+    assert updated["before"]["details"]["address"] == "TAddr123"
+    assert updated["after"] == {"label": "USDT on TRC20", "kind": "crypto", "enabled": True,
+                                "details": swapped}
+    client.delete(f"/api/orgs/{org_id}/payment-methods/{method_id}", headers=csrf(client))
+    deleted = _events(db, org_id, "payment_method_changed")[-1][1]
+    assert deleted["before"]["details"] == swapped and "after" not in deleted
+
+
 # ------------------------------------------------------------ delete
 
 

@@ -162,14 +162,21 @@ def create_portal_admin_router() -> APIRouter:
         return row
 
     async def _audit_method(conn: psycopg.Connection, ctx: OrgContext, method_id: int,
-                            change: str, kind: str, label: str) -> None:
+                            change: str, kind: str, label: str, *,
+                            before=None, after=None) -> None:
         # A warning, not an info: this is where every investor is told to
         # send money, and an attacker with an admin session would change
-        # exactly this. Both alerters are wired to warnings.
+        # exactly this. Both alerters are wired to warnings. before/after
+        # carry the details so an address swap shows in the alert.
+        snaps = {}
+        for name, row in (("before", before), ("after", after)):
+            if row:
+                m = pc.method_json(row, public=False)
+                snaps[name] = {k: m[k] for k in ("label", "kind", "enabled", "details")}
         await pc.audit_control(
             conn, org_id=ctx.org_id, action="payment_method_changed",
             actor_email=ctx.user_email, user_id=ctx.user_id, severity="warning",
-            method_id=method_id, change=change, kind=kind, label=label,
+            method_id=method_id, change=change, kind=kind, label=label, **snaps,
             summary=f"Payment method {change}: {label} ({kind}) by {ctx.user_email}")
 
     # ------------------------------------------------------------ payment methods
@@ -208,7 +215,7 @@ def create_portal_admin_router() -> APIRouter:
             (ctx.org_id, kind, label, currency, Jsonb(details), min_amount, fee_pct,
              instructions, body.sort_order, ctx.user_id)).fetchone()
         out = pc.method_json(row, public=False)
-        await _audit_method(conn, ctx, out["id"], "created", kind, label)
+        await _audit_method(conn, ctx, out["id"], "created", kind, label, after=row)
         return out
 
     @router.patch("/payment-methods/{method_id}", response_model=Dict[str, Any])
@@ -255,7 +262,8 @@ def create_portal_admin_router() -> APIRouter:
             f"UPDATE payment_methods SET {', '.join(sets)} WHERE id = %s AND org_id = %s "
             f"RETURNING {pc.METHOD_COLS}", (*params, method_id, ctx.org_id)).fetchone()
         out = pc.method_json(row, public=False)
-        await _audit_method(conn, ctx, method_id, "updated", kind, out["label"])
+        await _audit_method(conn, ctx, method_id, "updated", kind, out["label"],
+                            before=current, after=row)
         return out
 
     @router.delete("/payment-methods/{method_id}", status_code=204)
@@ -273,7 +281,8 @@ def create_portal_admin_router() -> APIRouter:
             raise HTTPException(status_code=409, detail="a pending deposit still uses this method")
         conn.execute("DELETE FROM payment_methods WHERE id = %s AND org_id = %s",
                      (method_id, ctx.org_id))
-        await _audit_method(conn, ctx, method_id, "deleted", current[1], current[2])
+        await _audit_method(conn, ctx, method_id, "deleted", current[1], current[2],
+                            before=current)
         return Response(status_code=204)
 
     # ------------------------------------------------------------ portal settings
