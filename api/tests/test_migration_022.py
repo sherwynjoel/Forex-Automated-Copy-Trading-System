@@ -335,7 +335,10 @@ def test_upgrade_copies_the_three_old_tables_then_drops_them(database):
     try:
         with psycopg.connect(UPGRADE_DSN) as conn:
             for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
-                if path.name.startswith("022_"):
+                # Stop before 022 itself: this exercises its upgrade logic
+                # against pre-022 state. Later migrations (e.g. 023) build
+                # on tables 022 creates, so they must not run here either.
+                if int(path.name[:3]) >= 22:
                     continue
                 conn.execute(path.read_text())
             conn.execute(
