@@ -501,3 +501,41 @@ def test_removing_the_linked_mt5_account_keeps_its_transfers_with_no_account(
     mine = client.get(f"/api/orgs/{org_id}/investor/transfers")
     assert mine.status_code == 200
     assert sorted(t["id"] for t in mine.json()) == sorted([into, out])
+
+
+def test_a_transfer_whose_account_was_removed_cannot_be_done(org_client, make_user, db):
+    """Account removal NULLs the transfer's account end. Marking it done
+    would settle against nothing, so done is refused; approve and reject
+    still work, and the audit names the end 'trading account (removed)'."""
+    client, org_id, _seed = org_client
+    investor = make_user(email="inv@example.com")
+    _member(db, org_id, investor, "investor")
+    with psycopg.connect(db, autocommit=True) as conn:
+        (into,) = conn.execute(
+            "INSERT INTO transfers (org_id, user_id, source_kind, source_wallet, target_kind, "
+            "amount) VALUES (%s, %s, 'wallet', 'main', 'account', 10) RETURNING id",
+            (org_id, investor["id"])).fetchone()
+        (out,) = conn.execute(
+            "INSERT INTO transfers (org_id, user_id, source_kind, target_kind, target_wallet, "
+            "amount) VALUES (%s, %s, 'account', 'wallet', 'main', 20) RETURNING id",
+            (org_id, investor["id"])).fetchone()
+    removed = "the trading account was removed; reject this transfer instead"
+    for tr_id in (into, out):
+        r = _decide(client, org_id, tr_id, "done")
+        assert r.status_code == 409 and r.json()["detail"] == removed
+    assert _decide(client, org_id, into, "approved").status_code == 200
+    r = _decide(client, org_id, into, "done")
+    assert r.status_code == 409 and r.json()["detail"] == removed
+    assert _decide(client, org_id, into, "rejected", "account gone").status_code == 200
+    assert _decide(client, org_id, out, "rejected", "account gone").status_code == 200
+    decided = [p for _, p in _events(db, org_id) if p["action"] == "investor_transfer_decided"]
+    assert decided[-2]["target"] == "trading account (removed)"
+    assert decided[-1]["source"] == "trading account (removed)"
+    assert _entries(db, org_id, investor["id"]) == []
+
+
+def test_money_ref_label_names_a_removed_account():
+    from api.routes.portal_investor import money_ref_label
+    assert money_ref_label("account", None) == "trading account (removed)"
+    assert money_ref_label("account", 1001) == "trading account 1001"
+    assert money_ref_label("main", None) == "My wallet"

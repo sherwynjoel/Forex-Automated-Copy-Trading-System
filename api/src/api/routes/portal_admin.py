@@ -618,6 +618,11 @@ def create_portal_admin_router() -> APIRouter:
          target_wallet, target_account, amount) = current
         if not pc.can_transition("transfers", status_now, new_status):
             raise HTTPException(status_code=409, detail=f"transfer is already {status_now}")
+        # Account removal NULLs the account end; done would settle against nothing.
+        if new_status == "done" and ((source_kind == "account" and source_account is None)
+                                     or (target_kind == "account" and target_account is None)):
+            raise HTTPException(status_code=409, detail="the trading account was removed; "
+                                                        "reject this transfer instead")
         amount = Decimal(amount)
         # The per-investor ledger lock is the first statement inside the
         # transaction on every decision path -- not just `done`, which is

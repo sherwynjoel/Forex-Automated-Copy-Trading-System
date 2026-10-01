@@ -108,7 +108,8 @@ def money_ref_label(kind: str, account_id: Optional[int]) -> str:
     """'My wallet' / 'PAMM wallet' / … or 'trading account <id>', for audit
     summaries and investor emails."""
     if kind == "account":
-        return f"trading account {account_id}"
+        return ("trading account (removed)" if account_id is None
+                else f"trading account {account_id}")
     return WALLET_LABELS.get(kind, kind)
 
 
