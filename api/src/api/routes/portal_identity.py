@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 
 import psycopg
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
 from ..config import ApiConfig
@@ -24,6 +24,7 @@ from ..mpin_core import require_mpin
 from ..rbac import OrgContext, require_investor, require_org_role
 from .. import portal_common as pc
 from .. import portal_identity as pid
+from .portal_admin import parse_min
 from .portal_files import file_belongs
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,26 @@ logger = logging.getLogger(__name__)
 
 class MpinBody(BaseModel):
     mpin: Any = None
+
+
+class PackageBody(BaseModel):
+    name: str
+    min_deposit: Any = "0"
+    currency: str = "USD"
+    spread_label: Optional[str] = None
+    leverage_options: Any = None
+    enabled: bool = True
+    sort_order: int = 0
+
+
+class PackagePatch(BaseModel):
+    name: Optional[str] = None
+    min_deposit: Any = None
+    currency: Optional[str] = None
+    spread_label: Optional[str] = None   # "" clears it
+    leverage_options: Any = None
+    enabled: Optional[bool] = None
+    sort_order: Optional[int] = None
 
 
 def _profile_row(conn: psycopg.Connection, org_id: int, user_id: int):
@@ -187,5 +208,120 @@ def create_portal_identity_router() -> APIRouter:
             f"Your identity verification was {new_status}",
             f"Status: {new_status}\nNote: {note or '—'}\n\nOpen the portal for details.")
         return pid.profile_json(row)
+
+    # ------------------------------------------------------------ account packages
+
+    def _package_row(conn: psycopg.Connection, org_id: int, package_id: int):
+        row = conn.execute(
+            f"SELECT {pid.PACKAGE_COLS} FROM account_packages WHERE id = %s AND org_id = %s",
+            (package_id, org_id)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Package not found")
+        return row
+
+    async def _audit_package(conn: psycopg.Connection, ctx: OrgContext, package_id: int,
+                             change: str, name: str) -> None:
+        await pc.audit_control(
+            conn, org_id=ctx.org_id, action="account_package_changed",
+            actor_email=ctx.user_email, user_id=ctx.user_id, package_id=package_id,
+            change=change, name=name,
+            summary=f"Account package {change}: {name} by {ctx.user_email}")
+
+    @router.get("/account-packages", response_model=List[Dict[str, Any]])
+    async def list_packages(ctx: OrgContext = Depends(require_org_role("admin")),
+                            conn: psycopg.Connection = Depends(get_conn)) -> List[Dict[str, Any]]:
+        rows = conn.execute(
+            f"SELECT {pid.PACKAGE_COLS} FROM account_packages WHERE org_id = %s "
+            "ORDER BY sort_order, id", (ctx.org_id,)).fetchall()
+        return [pid.package_json(r) for r in rows]
+
+    @router.post("/account-packages", status_code=201, response_model=Dict[str, Any])
+    async def create_package(body: PackageBody,
+                             ctx: OrgContext = Depends(require_org_role("admin")),
+                             conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
+        try:
+            name = pc.clean_text(body.name, "name", max_len=64)
+            min_deposit = parse_min(body.min_deposit, "min_deposit")
+            currency = (pc.clean_text(body.currency, "currency", max_len=8,
+                                      required=False) or "USD").upper()
+            spread = pc.clean_text(body.spread_label, "spread_label", max_len=32, required=False)
+            leverage = pid.parse_leverage_options(body.leverage_options)
+        except pc.LedgerError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        row = conn.execute(
+            "INSERT INTO account_packages (org_id, name, min_deposit, currency, spread_label, "
+            "leverage_options, enabled, sort_order) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
+            f"RETURNING {pid.PACKAGE_COLS}",
+            (ctx.org_id, name, min_deposit, currency, spread, leverage, body.enabled,
+             body.sort_order)).fetchone()
+        out = pid.package_json(row)
+        await _audit_package(conn, ctx, out["id"], "created", name)
+        return out
+
+    @router.patch("/account-packages/{package_id}", response_model=Dict[str, Any])
+    async def update_package(package_id: int, body: PackagePatch,
+                             ctx: OrgContext = Depends(require_org_role("admin")),
+                             conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
+        current = _package_row(conn, ctx.org_id, package_id)
+        sets: list[str] = []
+        params: list[Any] = []
+        try:
+            if body.name is not None:
+                sets.append("name = %s")
+                params.append(pc.clean_text(body.name, "name", max_len=64))
+            if body.min_deposit is not None:
+                sets.append("min_deposit = %s")
+                params.append(parse_min(body.min_deposit, "min_deposit"))
+            if body.currency is not None:
+                sets.append("currency = %s")
+                params.append((pc.clean_text(body.currency, "currency", max_len=8,
+                                             required=False) or "USD").upper())
+            if body.spread_label is not None:
+                sets.append("spread_label = %s")
+                params.append(pc.clean_text(body.spread_label, "spread_label", max_len=32,
+                                            required=False))
+            if body.leverage_options is not None:
+                sets.append("leverage_options = %s")
+                params.append(pid.parse_leverage_options(body.leverage_options))
+            if body.enabled is not None:
+                sets.append("enabled = %s")
+                params.append(bool(body.enabled))
+            if body.sort_order is not None:
+                sets.append("sort_order = %s")
+                params.append(int(body.sort_order))
+        except pc.LedgerError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        if not sets:
+            return pid.package_json(current)
+        sets.append("updated_at = now()")
+        row = conn.execute(
+            f"UPDATE account_packages SET {', '.join(sets)} WHERE id = %s AND org_id = %s "
+            f"RETURNING {pid.PACKAGE_COLS}", (*params, package_id, ctx.org_id)).fetchone()
+        out = pid.package_json(row)
+        await _audit_package(conn, ctx, package_id, "updated", out["name"])
+        return out
+
+    @router.delete("/account-packages/{package_id}", status_code=204)
+    async def delete_package(package_id: int,
+                             ctx: OrgContext = Depends(require_org_role("admin")),
+                             conn: psycopg.Connection = Depends(get_conn)):
+        current = _package_row(conn, ctx.org_id, package_id)
+        if conn.execute("SELECT 1 FROM account_requests WHERE package_id = %s "
+                        "AND status = 'requested'", (package_id,)).fetchone():
+            # Decided requests keep their package_name snapshot and lose
+            # only the id (ON DELETE SET NULL); an open one still needs it.
+            raise HTTPException(status_code=409, detail="an open request still uses this package")
+        conn.execute("DELETE FROM account_packages WHERE id = %s AND org_id = %s",
+                     (package_id, ctx.org_id))
+        await _audit_package(conn, ctx, package_id, "deleted", current[1])
+        return Response(status_code=204)
+
+    @router.get("/investor/account-packages", response_model=List[Dict[str, Any]])
+    async def my_packages(ctx: OrgContext = Depends(require_investor),
+                          conn: psycopg.Connection = Depends(get_conn)) -> List[Dict[str, Any]]:
+        rows = conn.execute(
+            f"SELECT {pid.PACKAGE_COLS} FROM account_packages WHERE org_id = %s AND enabled "
+            "ORDER BY sort_order, id", (ctx.org_id,)).fetchall()
+        return [pid.package_json(r) for r in rows]
 
     return router
