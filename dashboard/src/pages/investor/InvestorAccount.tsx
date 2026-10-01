@@ -12,7 +12,7 @@ import PageHeader from '../../components/PageHeader'
 import StatTile from '../../components/StatTile'
 import { EquityCurve } from '../../components/charts'
 import NextStep from './NextStep'
-import type { Analytics, InvestorPositions, InvestorSummary } from '../../lib/types'
+import type { AccountRequest, Analytics, InvestorPositions, InvestorSummary } from '../../lib/types'
 
 const POLL_MS = 10000
 
@@ -62,6 +62,7 @@ export default function InvestorAccount() {
   const [summary, setSummary] = useState<InvestorSummary | null>(null)
   const [positions, setPositions] = useState<InvestorPositions | null>(null)
   const [analytics, setAnalytics] = useState<Analytics | null>(null)
+  const [login, setLogin] = useState<AccountRequest | null>(null)
   const [error, setError] = useState<string | null>(null)
   // True once the first load has settled, success or failure: the skeleton
   // is for "not asked yet", never for "asked and failed".
@@ -69,8 +70,12 @@ export default function InvestorAccount() {
 
   const refresh = useCallback(async () => {
     try {
-      const s = await orgApi<InvestorSummary>(orgId, 'investor/summary')
+      const [s, requests] = await Promise.all([
+        orgApi<InvestorSummary>(orgId, 'investor/summary'),
+        orgApi<AccountRequest[]>(orgId, 'investor/account-requests'),
+      ])
       setSummary(s)
+      setLogin(requests.find((r) => r.status === 'fulfilled') ?? null)
       if (s.link_state === 'linked') {
         const [p, a] = await Promise.all([
           orgApi<InvestorPositions>(orgId, 'investor/positions'),
@@ -108,6 +113,17 @@ export default function InvestorAccount() {
           <div><dt className="desk-label">Role</dt><dd className="text-ink">Investor</dd></div>
         </dl>
       </Card>
+
+      {login && (
+        <Card title="Your MT5 login">
+          <dl className="inset p-4 grid gap-3 sm:grid-cols-3 text-sm">
+            <div><dt className="desk-label">Login</dt><dd className="num text-ink">{login.mt5_login}</dd></div>
+            <div><dt className="desk-label">Server</dt><dd className="num text-ink">{login.mt5_server}</dd></div>
+            <div><dt className="desk-label">Package</dt>
+              <dd className="text-ink">{`${login.package_name} · 1:${login.leverage}`}</dd></div>
+          </dl>
+        </Card>
+      )}
 
       {!loaded && <Loading lines={3} />}
 

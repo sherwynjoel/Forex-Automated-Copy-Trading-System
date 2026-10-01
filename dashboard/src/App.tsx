@@ -52,6 +52,7 @@ const InvestorHistory = pick(investor, 'InvestorHistory')
 const InvestorAccount = pick(investor, 'InvestorAccount')
 const InvestorSecurity = pick(investor, 'InvestorSecurity')
 const InvestorProfile = pick(investor, 'InvestorProfile')
+const InvestorOpenAccount = pick(investor, 'InvestorOpenAccount')
 
 /** `/` → the last-used org, else the first org, else /welcome; signed-out
  *  visitors get the public front page instead of the login screen. */
@@ -123,6 +124,7 @@ export default function App() {
               <Route path="invest/account" element={<InvestorAccount />} />
               <Route path="invest/security" element={<InvestorSecurity />} />
               <Route path="invest/profile" element={<InvestorProfile />} />
+              <Route path="invest/open-account" element={<InvestorOpenAccount />} />
               <Route path="*" element={<NotFound />} />
             </Route>
             <Route path="/" element={<RootRedirect />} />
