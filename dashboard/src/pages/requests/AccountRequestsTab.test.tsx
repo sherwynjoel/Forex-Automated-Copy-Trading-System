@@ -108,3 +108,81 @@ test('a viewer sees the queue but no actions', async () => {
   expect(await screen.findByText('Ada')).toBeInTheDocument()
   expect(screen.queryByRole('button', { name: 'Fulfil account request 7' })).not.toBeInTheDocument()
 })
+
+test('a failed load stays in the tab with Retry, never an empty queue', async () => {
+  let fail = true
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input)
+    if (url.endsWith('/account-requests')) {
+      if (fail) return jsonResponse({ detail: 'boom' }, 500)
+      return jsonResponse([accountRequestFixture({ email: 'ada@example.com', display_name: 'Ada' })])
+    }
+    return jsonResponse([])
+  }))
+  render(<AccountRequestsTab orgId={1} control show="open" onDone={vi.fn()} onError={vi.fn()} />)
+  expect(await screen.findByText('boom')).toBeInTheDocument()
+  expect(screen.queryByText('No open account requests')).not.toBeInTheDocument()
+  fail = false
+  await userEvent.click(screen.getByRole('button', { name: 'Retry' }))
+  expect(await screen.findByText('Ada')).toBeInTheDocument()
+  expect(screen.queryByText('boom')).not.toBeInTheDocument()
+})
+
+test('a fulfil 409 clears the passwords and reloads the queue', async () => {
+  let decided = false
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input)
+    if (url.endsWith('/account-requests')) {
+      return jsonResponse([accountRequestFixture({ display_name: 'Ada', ...(decided ? { status: 'rejected' as const } : {}) })])
+    }
+    if (url.endsWith('/reveal')) return jsonResponse({ main_password: 'Main1234', investor_password: 'Look1234' })
+    if (url.endsWith('/fulfil')) { decided = true; return jsonResponse({ detail: 'Request already decided' }, 409) }
+    return jsonResponse([])
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  render(<AccountRequestsTab orgId={1} control show="open" onDone={vi.fn()} onError={vi.fn()} />)
+  await userEvent.click(await screen.findByRole('button', { name: 'Fulfil account request 7' }))
+  const drawer = await screen.findByRole('dialog', { name: 'Fulfil request #7' })
+  await enterPin(drawer, '123456')
+  await userEvent.click(within(drawer).getByRole('button', { name: 'Reveal passwords' }))
+  expect(await within(drawer).findByText('Main1234')).toBeInTheDocument()
+  await userEvent.type(within(drawer).getByLabelText('MT5 login'), '5001')
+  await userEvent.type(within(drawer).getByLabelText('MT5 server'), 'Broker-Live')
+  await userEvent.click(within(drawer).getByRole('button', { name: 'Fulfil request' }))
+  expect(await within(drawer).findByText('Request already decided')).toBeInTheDocument()
+  expect(within(drawer).queryByText('Main1234')).not.toBeInTheDocument()
+  expect(await screen.findByText('No open account requests')).toBeInTheDocument()
+  expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/account-requests'))).toHaveLength(2)
+})
+
+test('a login beyond the safe integer range is refused inline', async () => {
+  const fetchMock = mockRoutes()
+  render(<AccountRequestsTab orgId={1} control show="open" onDone={vi.fn()} onError={vi.fn()} />)
+  await userEvent.click(await screen.findByRole('button', { name: 'Fulfil account request 7' }))
+  const drawer = await screen.findByRole('dialog', { name: 'Fulfil request #7' })
+  await userEvent.type(within(drawer).getByLabelText('MT5 login'), '9007199254740993')
+  await userEvent.type(within(drawer).getByLabelText('MT5 server'), 'Broker-Live')
+  await userEvent.click(within(drawer).getByRole('button', { name: 'Fulfil request' }))
+  expect(await within(drawer).findByText('Enter the MT5 login number')).toBeInTheDocument()
+  expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith('/fulfil'))).toBe(false)
+})
+
+test('closing the drawer forgets the passwords; reopening asks for the MPIN again', async () => {
+  mockRoutes()
+  render(<AccountRequestsTab orgId={1} control show="open" onDone={vi.fn()} onError={vi.fn()} />)
+  await userEvent.click(await screen.findByRole('button', { name: 'Fulfil account request 7' }))
+  let drawer = await screen.findByRole('dialog', { name: 'Fulfil request #7' })
+  await enterPin(drawer, '000000')
+  await userEvent.click(within(drawer).getByRole('button', { name: 'Reveal passwords' }))
+  await within(drawer).findByText('Wrong MPIN, 4 tries left')
+  await enterPin(drawer, '123456')
+  await userEvent.click(within(drawer).getByRole('button', { name: 'Reveal passwords' }))
+  expect(await within(drawer).findByText('Main1234')).toBeInTheDocument()
+  await userEvent.click(within(drawer).getByRole('button', { name: 'Close' }))
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  await userEvent.click(screen.getByRole('button', { name: 'Fulfil account request 7' }))
+  drawer = await screen.findByRole('dialog', { name: 'Fulfil request #7' })
+  expect(within(drawer).queryByText('Main1234')).not.toBeInTheDocument()
+  expect(within(drawer).getByRole('button', { name: 'Reveal passwords' })).toBeDisabled()
+  expect(within(drawer).getByLabelText('Your MPIN digit 1 of 6')).toHaveValue('')
+})

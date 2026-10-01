@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { orgApi } from '../../lib/api'
+import { orgApi, type ApiError } from '../../lib/api'
 import { errorText, formatWhen } from '../../lib/format'
 import { FIELD_LABELS, fieldValue, kycBadge, kycLabel } from '../../lib/identity'
 import Badge from '../../components/Badge'
@@ -31,8 +31,11 @@ const DOCUMENTS: KycFileField[] = ['id_front_file_id', 'id_back_file_id', 'addre
 /** Identity verifications waiting on an admin: the profile, the four
  *  documents, Approve, or Reject with a note. Loads its own queue; the
  *  page's summary refresh follows every decision through onDone. */
-export default function VerificationTab({ orgId, control, show, onDone, onError }: DeskTabProps) {
+export default function VerificationTab({ orgId, control, show, onDone }: DeskTabProps) {
   const [rows, setRows] = useState<KycProfile[] | null>(null)
+  // A failed load stays in the tab (with Retry): the page's poll clears its
+  // own banner, which would leave a misleading empty queue behind.
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [details, setDetails] = useState<KycProfile | null>(null)
   const [pending, setPending] = useState<{ row: KycProfile; status: 'approved' | 'rejected' } | null>(null)
   const [note, setNote] = useState('')
@@ -49,14 +52,14 @@ export default function VerificationTab({ orgId, control, show, onDone, onError 
       const r = await orgApi<KycProfile[]>(orgId, 'kyc')
       if (seq <= lastApplied.current) return
       lastApplied.current = seq
-      setRows(r)
+      setRows(r); setLoadError(null)
     } catch (err) {
       if (seq <= lastApplied.current) return
       lastApplied.current = seq
-      onError(errorText(err, 'Could not load the verifications'))
+      setLoadError(errorText(err, 'Could not load the verifications'))
       setRows((r) => r ?? [])
     }
-  }, [orgId, onError])
+  }, [orgId])
 
   useEffect(() => { load() }, [load])
 
@@ -78,6 +81,8 @@ export default function VerificationTab({ orgId, control, show, onDone, onError 
       onDone(`Verification ${word}`)
     } catch (err) {
       setDialogError(errorText(err, 'The action failed'))
+      // 409: someone else decided it -- show the row as it is now.
+      if ((err as ApiError).response?.status === 409) void load()
     } finally {
       setBusy(false)
     }
@@ -89,6 +94,12 @@ export default function VerificationTab({ orgId, control, show, onDone, onError 
 
   return (
     <>
+      {loadError && (
+        <div className="p-3 space-y-2">
+          <Banner kind="error">{loadError}</Banner>
+          <Button size="sm" variant="secondary" onClick={() => { void load() }}>Retry</Button>
+        </div>
+      )}
       <table className="stack-table w-full text-sm">
         <thead>
           <tr className="text-left border-b border-line">
@@ -101,7 +112,7 @@ export default function VerificationTab({ orgId, control, show, onDone, onError 
           </tr>
         </thead>
         <tbody>
-          {visible.length === 0 && (
+          {visible.length === 0 && !loadError && (
             <tr><td colSpan={6} className="text-center py-8 text-ink-faint">
               {show === 'open' ? 'No open verifications' : 'No verifications yet'}
             </td></tr>

@@ -83,3 +83,17 @@ test('a viewer sees the queue but no decisions', async () => {
   expect(screen.queryByRole('button', { name: 'Approve verification 5' })).not.toBeInTheDocument()
   expect(screen.getByRole('button', { name: 'Details of verification 5' })).toBeInTheDocument()
 })
+
+test('a failed load stays in the tab with Retry, never an empty queue', async () => {
+  let fail = true
+  vi.stubGlobal('fetch', vi.fn(async () => fail
+    ? jsonResponse({ detail: 'boom' }, 500)
+    : jsonResponse([{ ...submitted }])))
+  render(<VerificationTab orgId={1} control show="open" onDone={vi.fn()} onError={vi.fn()} />)
+  expect(await screen.findByText('boom')).toBeInTheDocument()
+  expect(screen.queryByText('No open verifications')).not.toBeInTheDocument()
+  fail = false
+  await userEvent.click(screen.getByRole('button', { name: 'Retry' }))
+  expect(await screen.findByText('Ada')).toBeInTheDocument()
+  expect(screen.queryByText('boom')).not.toBeInTheDocument()
+})

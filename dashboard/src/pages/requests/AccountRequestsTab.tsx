@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { orgApi } from '../../lib/api'
+import { orgApi, type ApiError } from '../../lib/api'
 import { errorText, formatWhen } from '../../lib/format'
 import { requestBadge, requestLabel } from '../../lib/identity'
 import Badge from '../../components/Badge'
@@ -26,8 +26,11 @@ const TEXTAREA = 'w-full rounded border border-line-strong px-3 py-2 text-sm bg-
  * drawer), opens the login at the broker, then records login, server and
  * optionally the MirrorFleet MT5 account to link. Reject needs a note.
  */
-export default function AccountRequestsTab({ orgId, control, show, onDone, onError }: DeskTabProps) {
+export default function AccountRequestsTab({ orgId, control, show, onDone }: DeskTabProps) {
   const [rows, setRows] = useState<AccountRequest[] | null>(null)
+  // A failed load stays in the tab (with Retry): the page's poll clears its
+  // own banner, which would leave a misleading empty queue behind.
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [accounts, setAccounts] = useState<Account[]>([])
   const [target, setTarget] = useState<AccountRequest | null>(null)
   const [pin, setPin] = useState('')
@@ -56,14 +59,14 @@ export default function AccountRequestsTab({ orgId, control, show, onDone, onErr
       ])
       if (seq <= lastApplied.current) return
       lastApplied.current = seq
-      setRows(r); setAccounts(a)
+      setRows(r); setAccounts(a); setLoadError(null)
     } catch (err) {
       if (seq <= lastApplied.current) return
       lastApplied.current = seq
-      onError(errorText(err, 'Could not load the account requests'))
+      setLoadError(errorText(err, 'Could not load the account requests'))
       setRows((x) => x ?? [])
     }
-  }, [orgId, onError])
+  }, [orgId])
 
   useEffect(() => { load() }, [load])
 
@@ -82,6 +85,7 @@ export default function AccountRequestsTab({ orgId, control, show, onDone, onErr
         { method: 'POST', body: JSON.stringify({ mpin: pin }) }, { redirectOn401: false }))
     } catch (err) {
       setPinError(mpinErrorText(err, 'Could not reveal the passwords'))
+      if ((err as ApiError).response?.status === 409) void load()
     } finally {
       setPin('')
       setBusy(false)
@@ -91,14 +95,17 @@ export default function AccountRequestsTab({ orgId, control, show, onDone, onErr
   const fulfil = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!target) return
-    if (!/^\d+$/.test(login.trim()) || Number(login.trim()) <= 0) { setDrawerError('Enter the MT5 login number'); return }
+    const loginNo = Number(login.trim())
+    if (!/^\d+$/.test(login.trim()) || !Number.isSafeInteger(loginNo) || loginNo <= 0) {
+      setDrawerError('Enter the MT5 login number'); return
+    }
     if (!server.trim()) { setDrawerError('Enter the MT5 server'); return }
     setBusy(true); setDrawerError(null)
     try {
       await orgApi(orgId, `account-requests/${target.id}/fulfil`, {
         method: 'POST',
         body: JSON.stringify({
-          mt5_login: Number(login.trim()), mt5_server: server.trim(),
+          mt5_login: loginNo, mt5_server: server.trim(),
           account_id: accountId ? Number(accountId) : null, note: note.trim() || null,
         }),
       })
@@ -108,6 +115,8 @@ export default function AccountRequestsTab({ orgId, control, show, onDone, onErr
       onDone(`Account request #${id} fulfilled`)
     } catch (err) {
       setDrawerError(errorText(err, 'Could not fulfil the request'))
+      // 409: decided elsewhere -- its passwords are gone; refresh the row.
+      if ((err as ApiError).response?.status === 409) { setRevealed(null); void load() }
     } finally {
       setBusy(false)
     }
@@ -126,6 +135,7 @@ export default function AccountRequestsTab({ orgId, control, show, onDone, onErr
       onDone(`Account request #${id} rejected`)
     } catch (err) {
       setDialogError(errorText(err, 'The action failed'))
+      if ((err as ApiError).response?.status === 409) void load()
     } finally {
       setBusy(false)
     }
@@ -138,6 +148,12 @@ export default function AccountRequestsTab({ orgId, control, show, onDone, onErr
 
   return (
     <>
+      {loadError && (
+        <div className="p-3 space-y-2">
+          <Banner kind="error">{loadError}</Banner>
+          <Button size="sm" variant="secondary" onClick={() => { void load() }}>Retry</Button>
+        </div>
+      )}
       <table className="stack-table w-full text-sm">
         <thead>
           <tr className="text-left border-b border-line">
@@ -149,7 +165,7 @@ export default function AccountRequestsTab({ orgId, control, show, onDone, onErr
           </tr>
         </thead>
         <tbody>
-          {visible.length === 0 && (
+          {visible.length === 0 && !loadError && (
             <tr><td colSpan={5} className="text-center py-8 text-ink-faint">
               {show === 'open' ? 'No open account requests' : 'No account requests yet'}
             </td></tr>
