@@ -21,7 +21,7 @@ from fastapi.responses import Response
 from ..auth import LoginRateLimiter
 from ..db import get_conn
 from ..rbac import OrgContext, require_investor, require_org_role
-from ..uploads import (ALLOWED, MAX_UPLOAD_BYTES, PHASE1_PURPOSES, UPLOADS_PER_HOUR,
+from ..uploads import (ACCEPTED_PURPOSES, ALLOWED, MAX_UPLOAD_BYTES, UPLOADS_PER_HOUR,
                        UploadStore, detect_type)
 
 logger = logging.getLogger(__name__)
@@ -32,16 +32,19 @@ FILE_COLS = "id, org_id, user_id, purpose, content_type, size_bytes, storage_key
 def file_belongs(conn: psycopg.Connection, org_id: int, user_id: int,
                  file_id: Optional[int], purpose: str) -> bool:
     """Whether file_id is this investor's file of this purpose in this org,
-    and not yet attached to any request row (spec section 9: a file is
-    referenced by at most one request row). None (no file attached) is
-    fine. Request routes call this before storing a file id on a deposit
-    or a payout destination, so this is the one gate that rule needs."""
+    and not yet attached anywhere: not to a deposit or a payout destination
+    (spec section 9: a file is referenced by at most one request row) and
+    not to any slot of a KYC profile (phase 2: one file per document slot).
+    None (no file attached) is fine. Routes call this before storing a file
+    id, so this is the one gate that rule needs."""
     if file_id is None:
         return True
     row = conn.execute(
         "SELECT 1 FROM files WHERE id = %s AND org_id = %s AND user_id = %s AND purpose = %s "
         "  AND NOT EXISTS (SELECT 1 FROM deposits d WHERE d.receipt_file_id = files.id) "
-        "  AND NOT EXISTS (SELECT 1 FROM payout_destinations p WHERE p.proof_file_id = files.id)",
+        "  AND NOT EXISTS (SELECT 1 FROM payout_destinations p WHERE p.proof_file_id = files.id) "
+        "  AND NOT EXISTS (SELECT 1 FROM kyc_profiles k WHERE files.id IN "
+        "      (k.id_front_file_id, k.id_back_file_id, k.address_proof_file_id, k.photo_file_id))",
         (file_id, org_id, user_id, purpose)).fetchone()
     return row is not None
 
@@ -90,7 +93,7 @@ def create_portal_files_router() -> APIRouter:
                           file: UploadFile = File(...),
                           ctx: OrgContext = Depends(require_investor),
                           conn: psycopg.Connection = Depends(get_conn)):
-        if purpose not in PHASE1_PURPOSES:
+        if purpose not in ACCEPTED_PURPOSES:
             raise HTTPException(status_code=400, detail="purpose is not accepted yet")
         # One byte past the cap is enough to know it is too big; never
         # buffer an unbounded body.

@@ -136,9 +136,16 @@ def test_an_empty_file_is_refused(portal):
     assert r.status_code == 400 and r.json()["detail"] == "file is empty"
 
 
-@pytest.mark.parametrize("purpose", ["kyc_document", "kyc_photo", "ticket_attachment", "avatar",
-                                     "selfie", ""])
-def test_only_the_phase_1_purposes_are_accepted(portal, purpose):
+@pytest.mark.parametrize("purpose", ["kyc_document", "kyc_photo"])
+def test_the_kyc_purposes_are_accepted(portal, purpose):
+    client, org_id, _, _ = portal
+    r = upload(client, org_id, purpose=purpose)
+    assert r.status_code == 201, r.text
+    assert r.json()["purpose"] == purpose
+
+
+@pytest.mark.parametrize("purpose", ["ticket_attachment", "avatar", "selfie", ""])
+def test_only_the_accepted_purposes_are_stored(portal, purpose):
     client, org_id, _, _ = portal
     r = upload(client, org_id, purpose=purpose)
     assert r.status_code == 400 and r.json()["detail"] == "purpose is not accepted yet"
@@ -301,3 +308,16 @@ def test_the_csp_lets_the_upload_preview_show_its_object_url(app_client):
     directives = [d.strip() for d in r.headers["content-security-policy"].split(";")]
     assert "img-src 'self' data: blob:" in directives
     assert "default-src 'self'" in directives and "object-src 'none'" in directives
+
+
+def test_file_belongs_refuses_a_file_already_in_a_kyc_slot(portal, db):
+    from api.routes.portal_files import file_belongs
+    from portal_helpers import kyc_profile, seed_file
+    client, org_id, investor, _ = portal
+    written = kyc_profile(db, org_id, investor["id"], status="draft")
+    loose = seed_file(db, org_id, investor["id"], purpose="kyc_document")
+    with psycopg.connect(db, autocommit=True) as conn:
+        assert file_belongs(conn, org_id, investor["id"], loose, "kyc_document")
+        for slot in ("id_front_file_id", "id_back_file_id", "address_proof_file_id"):
+            assert not file_belongs(conn, org_id, investor["id"], written[slot], "kyc_document")
+        assert not file_belongs(conn, org_id, investor["id"], written["photo_file_id"], "kyc_photo")
