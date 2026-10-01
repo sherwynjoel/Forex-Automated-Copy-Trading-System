@@ -5,16 +5,18 @@ import Banner from './Banner'
 import Card from './Card'
 import Button from './Button'
 import Input from './Input'
+import PinConfirmDialog from './PinConfirmDialog'
 import PinInput from './PinInput'
 
 /**
- * Your own login, not the org's: rotate the password and cut every other
- * session loose. Both live here rather than behind a role check -- every
- * member owns their own credentials.
+ * Your own login, not the org's: rotate the password (confirmed with the
+ * MPIN), change the MPIN, and cut every other session loose. Every member
+ * owns their own credentials, so none of this sits behind a role check.
  */
 export default function AccountSecurity() {
   const [current, setCurrent] = useState('')
   const [next, setNext] = useState('')
+  const [pinOpen, setPinOpen] = useState(false)
   const [currentMpin, setCurrentMpin] = useState('')
   const [newMpin, setNewMpin] = useState('')
   const [confirmMpin, setConfirmMpin] = useState('')
@@ -23,21 +25,26 @@ export default function AccountSecurity() {
   const [problem, setProblem] = useState<string | null>(null)
   const navigate = useNavigate()
 
-  const submit = async (e: React.FormEvent) => {
+  const submit = (e: React.FormEvent) => {
     e.preventDefault()
     setNotice(null)
     setProblem(null)
+    setPinOpen(true)
+  }
+
+  // Rejections propagate: PinConfirmDialog shows them inline (a wrong MPIN,
+  // or the server's "Current password is incorrect") and clears the PIN.
+  const changePassword = async (mpin: string) => {
     setBusy(true)
     try {
       await api('/api/me/password', {
         method: 'POST',
-        body: JSON.stringify({ current_password: current, new_password: next }),
-      })
+        body: JSON.stringify({ current_password: current, new_password: next, mpin }),
+      }, { redirectOn401: false })
+      setPinOpen(false)
       setCurrent('')
       setNext('')
       setNotice('Password changed. Any other device signed in as you has been signed out.')
-    } catch (err) {
-      setProblem(err instanceof Error ? err.message : 'Could not change the password')
     } finally {
       setBusy(false)
     }
@@ -86,8 +93,8 @@ export default function AccountSecurity() {
   }
 
   return (
-    // The card is the section: both the Members page and the investor
-    // Account page show it as "Your login"; the two forms are its parts.
+    // The card is the section: the Members page and the investor Security
+    // page show it as "Your login"; the forms are its parts.
     <Card title="Your login">
     <div className="space-y-4">
       {notice && <Banner kind="notice" onDismiss={() => setNotice(null)}>{notice}</Banner>}
@@ -129,7 +136,8 @@ export default function AccountSecurity() {
         <div className="flex flex-wrap items-start gap-4">
           <PinInput id="current-mpin" label="Current MPIN" value={currentMpin} onChange={setCurrentMpin} disabled={busy} />
           <PinInput id="new-mpin" label="New MPIN" value={newMpin} onChange={setNewMpin} disabled={busy} />
-          <PinInput id="confirm-mpin" label="Confirm new MPIN" value={confirmMpin} onChange={setConfirmMpin} disabled={busy} />
+          {/* Not "confirm-mpin": PinConfirmDialog's own box carries that id. */}
+          <PinInput id="confirm-new-mpin" label="Confirm new MPIN" value={confirmMpin} onChange={setConfirmMpin} disabled={busy} />
         </div>
         <Button type="submit" disabled={busy || currentMpin.length !== 6 || newMpin.length !== 6 || confirmMpin.length !== 6}>
           Change MPIN
@@ -145,6 +153,17 @@ export default function AccountSecurity() {
           Use it if you think a login was stolen.
         </p>
       </div>
+
+      <PinConfirmDialog
+        open={pinOpen}
+        title="Change your password?"
+        confirmLabel="Confirm"
+        busy={busy}
+        onConfirm={changePassword}
+        onCancel={() => setPinOpen(false)}
+      >
+        <p>Every other device you use will have to sign in again.</p>
+      </PinConfirmDialog>
     </div>
     </Card>
   )

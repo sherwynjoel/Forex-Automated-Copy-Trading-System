@@ -4,7 +4,6 @@ import { useOrg } from '../../lib/org'
 import { errorText, money } from '../../lib/format'
 import { ACCOUNT_CURRENCY } from '../../lib/investor'
 import { useHiddenBalances } from '../../lib/hideBalances'
-import AccountSecurity from '../../components/AccountSecurity'
 import Banner from '../../components/Banner'
 import Card from '../../components/Card'
 import Loading from '../../components/Loading'
@@ -188,8 +187,6 @@ export default function InvestorAccount() {
       )}
 
       {analytics && <AnalyticsPanel analytics={analytics} unit={unit} />}
-
-      <AccountSecurity />
     </div>
   )
 }

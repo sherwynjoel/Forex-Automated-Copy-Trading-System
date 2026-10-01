@@ -22,6 +22,7 @@ beforeEach(() => {
                              role: 'viewer', joined_at: '2026-09-01T00:00:00Z' }])
     }
     if (url.includes('/invites')) return jsonResponse([])
+    if (url.includes('/sign-ins')) return jsonResponse([])
     return jsonResponse({})
   }))
 })

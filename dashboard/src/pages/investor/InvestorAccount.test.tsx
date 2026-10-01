@@ -57,17 +57,15 @@ beforeEach(() => { useOrgMock.mockReturnValue(mockUseOrg('investor')) })
 // the store changes, no matter what order the hooks run in.
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); facts.supportEmail = ''; setHidden(false) })
 
-test('the Account page shows who you are, the login forms and its title', async () => {
+test('the Account page shows who you are and its title; the login forms moved to Security', async () => {
   mockRoutes(linked)
-  // AccountSecurity calls useNavigate, so the page needs a router.
   render(<MemoryRouter><InvestorAccount /></MemoryRouter>)
   expect(screen.getByRole('heading', { level: 1, name: 'Account' })).toBeInTheDocument()
   expect(screen.getByText('Test User')).toBeInTheDocument()
   expect(screen.getByText('user@example.com')).toBeInTheDocument()
   expect(screen.getByText('Acme')).toBeInTheDocument()
   expect(screen.getByText('Investor')).toBeInTheDocument()
-  expect(screen.getByRole('heading', { name: 'Your login' })).toBeInTheDocument()
-  expect(screen.getByRole('button', { name: 'Change MPIN' })).toBeInTheDocument()
+  expect(screen.queryByRole('heading', { name: 'Your login' })).not.toBeInTheDocument()
   expect(document.title).toBe('Account · MirrorFleet')
   await screen.findByText('XAUUSD')
 })
