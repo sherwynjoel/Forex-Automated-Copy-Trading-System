@@ -108,6 +108,18 @@ def test_cooldown_suppresses_repeats_per_action_and_account():
     assert len(recorded) == 3
 
 
+def test_money_routing_changes_are_never_cooled_down():
+    recorded = []
+    notifier = _make_notifier(recorded, clock=lambda: 1000.0)
+    for action in ("payment_method_changed", "investor_wallet_set"):
+        for i in range(2):
+            event = {"account_id": None, "category": "control", "severity": "warning",
+                     "payload": {"action": action, "user_id": 7, "summary": f"change {i}"},
+                     "org_id": 1}
+            assert _run(notifier.consider(event)) is True, (action, i)
+    assert len(recorded) == 4
+
+
 def test_send_failure_does_not_raise():
     def callback(request):
         raise httpx.ConnectError("no network")

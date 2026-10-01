@@ -19,6 +19,9 @@ logger = logging.getLogger(__name__)
 
 RESEND_URL = "https://api.resend.com/emails"
 COOLDOWN_S = 900  # one email per (action, account) per 15 minutes
+# Admin money-routing changes carry no account, so an (action, None) key
+# would let a label edit hide an address swap minutes later. Always send.
+NO_COOLDOWN = {"payment_method_changed", "investor_wallet_set"}
 
 # (category, severity, payload.action) -> subject prefix. Matched exactly;
 # everything else is ignored.
@@ -103,7 +106,7 @@ class EmailAlerter:
         scope = payload.get("user_id") if action.startswith("investor_") else event.get("account_id")
         cooldown_key = (action, scope)
         now = self._clock()
-        last = self._last_sent.get(cooldown_key)
+        last = None if action in NO_COOLDOWN else self._last_sent.get(cooldown_key)
         if last is not None and (now - last) < COOLDOWN_S:
             return False
 
