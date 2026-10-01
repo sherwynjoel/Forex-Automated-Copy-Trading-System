@@ -6,7 +6,10 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import ApiConfig, DEFAULT_UPLOAD_DIR
@@ -137,6 +140,13 @@ def create_app(http_transport: Optional[httpx.BaseTransport] = None) -> FastAPI:
         await app.state.http.aclose()
 
     app = FastAPI(lifespan=lifespan)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+        # FastAPI's default 422 echoes the request body back as "input":
+        # passwords and MPINs included. Same shape, minus the echo.
+        errors = [{k: v for k, v in e.items() if k != "input"} for e in exc.errors()]
+        return JSONResponse(status_code=422, content={"detail": jsonable_encoder(errors)})
 
     # Store rate limiter in app state
     app.state.rate_limiter = rate_limiter
