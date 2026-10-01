@@ -52,17 +52,20 @@ CHOICES: dict[str, tuple[str, ...]] = {
     "id_type": ("passport", "national_id", "driving_licence"),
 }
 COUNTRY_FIELDS = ("country_residence", "country_citizenship")
-COUNTRY_RE = re.compile(r"[A-Z]{2}")
+COUNTRY_RE = re.compile(r"[A-Za-z]{2}")  # ASCII only: "ß".upper() is "SS"
+MAX_FILE_ID = 2**63 - 1  # BIGINT
 
 
 def clean_profile_field(field: str, raw: object) -> Any:
     """One profile value, normalised for storage. '' and None mean "clear
     it" (None). Raises LedgerError with the message the route returns as a
     400."""
+    if field not in PROFILE_FIELDS:
+        raise LedgerError(f"unknown field: {field}")
     if field in FILE_SLOTS:
         if raw is None or raw == "":
             return None
-        if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+        if isinstance(raw, bool) or not isinstance(raw, int) or not 0 < raw <= MAX_FILE_ID:
             raise LedgerError(f"{field} must be a file id")
         return raw
     text = clean_text(raw, field, max_len=TEXT_LIMITS.get(field, 128), required=False)
@@ -74,10 +77,9 @@ def clean_profile_field(field: str, raw: object) -> Any:
             raise LedgerError(f"{field} must be one of {', '.join(CHOICES[field])}")
         return value
     if field in COUNTRY_FIELDS:
-        value = text.upper()
-        if not COUNTRY_RE.fullmatch(value):
+        if not COUNTRY_RE.fullmatch(text):
             raise LedgerError(f"{field} must be a two-letter country code")
-        return value
+        return text.upper()
     if field == "date_of_birth":
         try:
             born = date.fromisoformat(text)

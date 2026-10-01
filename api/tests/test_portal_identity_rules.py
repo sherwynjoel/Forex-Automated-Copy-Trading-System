@@ -47,6 +47,9 @@ def test_clean_profile_field_normalises(field, raw, expected):
     ("id_front_file_id", "12", "id_front_file_id must be a file id"),
     ("id_front_file_id", True, "id_front_file_id must be a file id"),
     ("postal_code", "1" * 17, "postal_code must be at most 16 characters"),
+    ("country_residence", "ß", "country_residence must be a two-letter country code"),
+    ("id_front_file_id", 2**63, "id_front_file_id must be a file id"),
+    ("status", "approved", "unknown field: status"),
 ])
 def test_clean_profile_field_refuses(field, raw, message):
     with pytest.raises(LedgerError) as exc:
