@@ -16,6 +16,8 @@ from typing import Any, Callable
 
 import httpx
 
+from .alerts import ALERT_RULES
+
 logger = logging.getLogger(__name__)
 
 TELEGRAM_URL = "https://api.telegram.org/bot{token}/sendMessage"
@@ -91,6 +93,13 @@ class TelegramNotifier:
 
         if action.startswith("investor_"):
             text = f"💰 Copy Desk: {payload.get('summary') or action}"
+        elif action != "cutoff_approaching":
+            # Not a cutoff: the cutoff template would read "account None
+            # reaches its cutoff on None". Use the email subject + summary.
+            title = ALERT_RULES.get(
+                (event.get("category"), event.get("severity"), action), action)
+            summary = payload.get("summary")
+            text = f"⚠️ Copy Desk: {title}" + (f" — {summary}" if summary else "")
         else:
             name = payload.get("nickname") or f"account {event.get('account_id')}"
             login = payload.get("trader_login")

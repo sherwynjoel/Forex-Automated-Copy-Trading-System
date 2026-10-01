@@ -146,6 +146,19 @@ def test_a_changed_deposit_wallet_notifies():
     assert "TNew" in json.loads(recorded[0].content)["text"]
 
 
+def test_non_cutoff_alerts_use_title_and_summary_not_cutoff_text():
+    recorded = []
+    notifier = _make_notifier(recorded)
+    event = {"category": "control", "severity": "warning",
+             "payload": {"action": "payment_method_changed",
+                         "summary": "Payment method updated: HDFC (bank) by a@x.com"},
+             "org_id": 1}
+    assert _run(notifier.consider(event)) is True
+    text = json.loads(recorded[0].content)["text"]
+    assert "Payment method changed" in text and "HDFC" in text
+    assert "cutoff" not in text
+
+
 def test_lifespan_wires_telegram_to_broadcaster(app_client_with_lifespan, monkeypatch):
     """create_app's lifespan hands the broadcaster a TelegramNotifier built
     from the environment, alongside the EmailAlerter (wiring is
