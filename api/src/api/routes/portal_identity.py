@@ -55,7 +55,8 @@ class PackagePatch(BaseModel):
 
 
 class AccountRequestBody(BaseModel):
-    package_id: int
+    # Any, checked after the MPIN: a typed field would 422 first.
+    package_id: Any = None
     leverage: Any = None
     main_password: Any = None
     investor_password: Any = None
@@ -361,9 +362,12 @@ def create_portal_identity_router() -> APIRouter:
         if conn.execute("SELECT 1 FROM account_requests WHERE org_id = %s AND user_id = %s "
                         "AND status = 'requested'", (ctx.org_id, ctx.user_id)).fetchone():
             raise HTTPException(status_code=409, detail="a request is already open")
+        package_id = body.package_id
+        if isinstance(package_id, bool) or not isinstance(package_id, int):
+            raise HTTPException(status_code=404, detail="Package not found")
         row = conn.execute(
             f"SELECT {pid.PACKAGE_COLS} FROM account_packages WHERE id = %s AND org_id = %s "
-            "AND enabled", (body.package_id, ctx.org_id)).fetchone()
+            "AND enabled", (package_id, ctx.org_id)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Package not found")
         package = pid.package_json(row)

@@ -81,6 +81,21 @@ def test_the_mpin_comes_first(portal):
     assert r.status_code == 400 and r.json()["detail"] == "MPIN must be exactly 6 digits"
 
 
+def test_a_bad_package_id_is_refused_after_the_mpin_and_echoes_no_password(portal):
+    client, org_id, _, _, _ = portal
+    r = _request(client, org_id, None, package_id="nope", mpin=None)
+    assert r.status_code == 400 and r.json()["detail"] == "MPIN must be exactly 6 digits"
+    r = _request(client, org_id, None, package_id="nope")
+    assert r.status_code == 404 and "Main1234" not in r.text
+
+
+def test_a_422_never_echoes_the_request_body(portal):
+    client, org_id, _, _, _ = portal
+    r = client.post("/api/me/password", json=["Main1234"], headers=csrf(client))
+    assert r.status_code == 422 and "Main1234" not in r.text
+    assert r.json()["detail"][0]["loc"] == ["body"]
+
+
 def test_an_unverified_investor_is_sent_to_verify(portal, db):
     client, org_id, investor, package_id, _ = portal
     with psycopg.connect(db, autocommit=True) as conn:
