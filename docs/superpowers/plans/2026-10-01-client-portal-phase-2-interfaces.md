@@ -184,7 +184,7 @@ Refusal strings (LedgerError text, surfaced as 400 detail):
 class MpinBody(BaseModel): mpin: Any = None
 class PackageBody(BaseModel): name: str; min_deposit: Any = "0"; currency: str = "USD"; spread_label: Optional[str] = None; leverage_options: Any = None; enabled: bool = True; sort_order: int = 0
 class PackagePatch(BaseModel): name/min_deposit/currency/spread_label/leverage_options/enabled/sort_order all Optional (spread_label "" clears)
-class AccountRequestBody(BaseModel): package_id: int; leverage: Any = None; main_password: Any = None; investor_password: Any = None; mpin: Any = None
+class AccountRequestBody(BaseModel): package_id: Any = None  # checked after the MPIN; leverage: Any = None; main_password: Any = None; investor_password: Any = None; mpin: Any = None
 class FulfilBody(BaseModel): mt5_login: Any = None; mt5_server: Any = None; account_id: Optional[int] = None; note: Optional[str] = None
 class RejectBody(BaseModel): note: Optional[str] = None
 ```
