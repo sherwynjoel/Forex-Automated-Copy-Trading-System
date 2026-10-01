@@ -20,7 +20,7 @@ from fastapi.responses import Response
 
 from ..auth import LoginRateLimiter
 from ..db import get_conn
-from ..rbac import OrgContext, require_org_role
+from ..rbac import OrgContext, require_investor, require_org_role
 from ..uploads import (ALLOWED, MAX_UPLOAD_BYTES, PHASE1_PURPOSES, UPLOADS_PER_HOUR,
                        UploadStore, detect_type)
 
@@ -88,7 +88,7 @@ def create_portal_files_router() -> APIRouter:
                           # absent purpose fall through to the 400 below.
                           purpose: str = Form(""),
                           file: UploadFile = File(...),
-                          ctx: OrgContext = Depends(require_org_role("investor")),
+                          ctx: OrgContext = Depends(require_investor),
                           conn: psycopg.Connection = Depends(get_conn)):
         if purpose not in PHASE1_PURPOSES:
             raise HTTPException(status_code=400, detail="purpose is not accepted yet")
@@ -125,7 +125,7 @@ def create_portal_files_router() -> APIRouter:
 
     @router.get("/investor/files/{file_id}")
     async def read_own_file(file_id: int, request: Request,
-                            ctx: OrgContext = Depends(require_org_role("investor")),
+                            ctx: OrgContext = Depends(require_investor),
                             conn: psycopg.Connection = Depends(get_conn)):
         return _serve(request, conn, ctx.org_id, file_id, user_id=ctx.user_id)
 

@@ -15,10 +15,8 @@ written so that the FIRST allowed role really performs the change and the
 later ones get a 409 or 400 from the row's state or the body — never a
 403/404 — so what the row proves is authorization, never business rules.
 `{investor}` in a path is the investor member's user id, substituted per test.
-Investor routes take `require_org_role("investor")`, the lowest rank, so
-every member passes them; the bodies are chosen so a desk member's call
-still answers after the role check (a 400 from validation, or a 409
-duplicate).
+Investor routes take `require_investor` ("investor_only" below): only the
+investor role passes them, and desk members get 403 (spec §14).
 """
 import psycopg
 import pytest
@@ -69,26 +67,26 @@ MATRIX = [
     ("PATCH",  "",                               {"name": "Renamed"},            "admin"),
     ("DELETE", "",                               None,                           "admin"),
     # ---- investor portal, investor side
-    ("GET",    "investor/summary",               None,                          "investor"),
-    ("GET",    "investor/payment-methods",       None,                          "investor"),
-    ("GET",    "investor/deposits",              None,                          "investor"),
-    ("GET",    "investor/payout-destinations",   None,                          "investor"),
-    ("GET",    "investor/withdrawals",           None,                          "investor"),
-    ("GET",    "investor/transfers",             None,                          "investor"),
-    ("GET",    "investor/wallet-entries",        None,                          "investor"),
-    ("GET",    "investor/positions",             None,                          "investor"),
+    ("GET",    "investor/summary",               None,                          "investor_only"),
+    ("GET",    "investor/payment-methods",       None,                          "investor_only"),
+    ("GET",    "investor/deposits",              None,                          "investor_only"),
+    ("GET",    "investor/payout-destinations",   None,                          "investor_only"),
+    ("GET",    "investor/withdrawals",           None,                          "investor_only"),
+    ("GET",    "investor/transfers",             None,                          "investor_only"),
+    ("GET",    "investor/wallet-entries",        None,                          "investor_only"),
+    ("GET",    "investor/positions",             None,                          "investor_only"),
     ("POST",   "investor/deposits",              {"method_id": 1, "amount": "10",
                                                   "reference": "matrix-filed",
-                                                  "target": "wallet"},          "investor"),
+                                                  "target": "wallet"},          "investor_only"),
     ("POST",   "investor/payout-destinations",   {"kind": "crypto", "nickname": "Matrix",
                                                   "details": {"coin": "USDT", "network": "TRC20",
                                                               "address": "TMatrix"},
-                                                  "mpin": MPIN},                "investor"),
+                                                  "mpin": MPIN},                "investor_only"),
     ("POST",   "investor/withdrawals",           {"destination_id": 1, "amount": "0",
-                                                  "mpin": MPIN},                "investor"),
+                                                  "mpin": MPIN},                "investor_only"),
     ("POST",   "investor/transfers",             {"source": {"kind": "wallet", "wallet": "main"},
                                                   "target": {"kind": "wallet", "wallet": "pamm"},
-                                                  "amount": "10", "mpin": MPIN}, "investor"),
+                                                  "amount": "10", "mpin": MPIN}, "investor_only"),
     # ---- investor portal, admin side
     ("GET",    "investors",                      None,                          "admin"),
     ("GET",    "investors/{investor}/wallet-entries", None,                     "admin"),
@@ -194,7 +192,8 @@ def test_role_thresholds(matrix_org, login_as, method, tail, body, min_role):
     # keep the fixture intact per param.
     destructive = (method == "DELETE")
     for role in ROLES:
-        allowed = RANK[role] >= RANK[min_role]
+        allowed = (role == "investor" if min_role == "investor_only"
+                   else RANK[role] >= RANK[min_role])
         if destructive and allowed:
             continue
         login_as(client, users[role])

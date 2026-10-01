@@ -55,6 +55,17 @@ def require_org_role(min_role: str):
     return dependency
 
 
+_any_member = require_org_role("investor")
+
+
+def require_investor(ctx: OrgContext = Depends(_any_member)) -> OrgContext:
+    """The investor portal's own routes: investors only (spec §14). Desk
+    members pass require_org_role("investor") by rank, so refuse them here."""
+    if ctx.role != "investor":
+        raise HTTPException(status_code=403, detail="Insufficient role")
+    return ctx
+
+
 def require_account_in_org(conn: psycopg.Connection, org_id: int, account_id: int) -> None:
     """404 unless the broker account belongs to this org. Every org-scoped
     route that takes an account_id (path or body) must call this before

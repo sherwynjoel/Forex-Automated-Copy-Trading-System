@@ -104,3 +104,25 @@ def test_the_two_request_actions_reach_both_alerters():
     for rules in (ALERT_RULES, TELEGRAM_RULES):
         assert ("control", "warning", "investor_deposit_noticed") in rules
         assert ("control", "warning", "investor_withdrawal_requested") in rules
+
+
+def test_investor_routes_refuse_desk_members(org_client, make_user, login_as, db):
+    """Spec §14: the investor portal is for investors only. A viewer and an
+    admin are members, but filing money requests as themselves is refused."""
+    client, org_id, _seed = org_client
+    viewer = make_user(email="viewer@example.com")
+    member(db, org_id, viewer["id"], "viewer")
+    investor = make_user(email="inv@example.com")
+    member(db, org_id, investor["id"], "investor")
+    body = {"method_id": 1, "amount": "10", "reference": "x", "target": "wallet"}
+    for user in (None, viewer):  # None = the org admin, already logged in
+        if user:
+            login_as(client, user)
+        r = client.get(f"/api/orgs/{org_id}/investor/summary")
+        assert r.status_code == 403 and r.json()["detail"] == "Insufficient role"
+        r = client.post(f"/api/orgs/{org_id}/investor/deposits", json=body, headers=csrf(client))
+        assert r.status_code == 403 and r.json()["detail"] == "Insufficient role"
+        r = client.get(f"/api/orgs/{org_id}/investor/files/1")
+        assert r.status_code == 403
+    login_as(client, investor)
+    assert client.get(f"/api/orgs/{org_id}/investor/summary").status_code == 200

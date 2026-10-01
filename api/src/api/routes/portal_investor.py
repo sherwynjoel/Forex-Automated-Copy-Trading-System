@@ -23,7 +23,7 @@ from ..auth import LoginRateLimiter
 from ..config import ApiConfig
 from ..db import get_conn
 from ..mpin_core import require_mpin
-from ..rbac import OrgContext, require_org_role
+from ..rbac import OrgContext, require_investor
 from .. import portal_common as pc
 # Controller ruling (Task 10): account_card/org_state/equity_from already
 # live in portal_common (Task 5); imported under these underscore names
@@ -192,7 +192,7 @@ def create_portal_investor_router() -> APIRouter:
     hourly = LoginRateLimiter(max_attempts=REQUESTS_PER_HOUR, window_s=3600)
 
     @router.get("/investor/payment-methods", response_model=List[Dict[str, Any]])
-    async def my_payment_methods(ctx: OrgContext = Depends(require_org_role("investor")),
+    async def my_payment_methods(ctx: OrgContext = Depends(require_investor),
                                  conn: psycopg.Connection = Depends(get_conn)) -> List[Dict[str, Any]]:
         """Where this workspace receives money: enabled methods only, in
         the admin's display order."""
@@ -204,7 +204,7 @@ def create_portal_investor_router() -> APIRouter:
     # ------------------------------------------------------------ deposits
 
     @router.get("/investor/deposits", response_model=List[Dict[str, Any]])
-    async def my_deposits(ctx: OrgContext = Depends(require_org_role("investor")),
+    async def my_deposits(ctx: OrgContext = Depends(require_investor),
                           conn: psycopg.Connection = Depends(get_conn)) -> List[Dict[str, Any]]:
         rows = conn.execute(
             f"SELECT {pc.DEPOSIT_COLS} FROM deposits WHERE org_id = %s AND user_id = %s "
@@ -213,7 +213,7 @@ def create_portal_investor_router() -> APIRouter:
 
     @router.post("/investor/deposits", status_code=201, response_model=Dict[str, Any])
     async def file_deposit(body: DepositNotice,
-                           ctx: OrgContext = Depends(require_org_role("investor")),
+                           ctx: OrgContext = Depends(require_investor),
                            conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
         """'I have sent it': a notice against one enabled payment method.
         The method's kind and label are snapshotted and its fee_pct applied
@@ -313,7 +313,7 @@ def create_portal_investor_router() -> APIRouter:
 
     @router.post("/investor/deposits/{deposit_id}/cancel", response_model=Dict[str, Any])
     async def cancel_deposit(deposit_id: int,
-                             ctx: OrgContext = Depends(require_org_role("investor")),
+                             ctx: OrgContext = Depends(require_investor),
                              conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
         """The investor's own move, allowed only while pending. The row is
         kept as cancelled so the history stays whole; the reference is
@@ -343,7 +343,7 @@ def create_portal_investor_router() -> APIRouter:
     # ------------------------------------------------- payout destinations
 
     @router.get("/investor/payout-destinations", response_model=List[Dict[str, Any]])
-    async def my_destinations(ctx: OrgContext = Depends(require_org_role("investor")),
+    async def my_destinations(ctx: OrgContext = Depends(require_investor),
                               conn: psycopg.Connection = Depends(get_conn)) -> List[Dict[str, Any]]:
         rows = conn.execute(
             f"SELECT {pc.DESTINATION_COLS} FROM payout_destinations "
@@ -353,7 +353,7 @@ def create_portal_investor_router() -> APIRouter:
 
     @router.post("/investor/payout-destinations", status_code=201, response_model=Dict[str, Any])
     async def add_destination(body: DestinationBody,
-                              ctx: OrgContext = Depends(require_org_role("investor")),
+                              ctx: OrgContext = Depends(require_investor),
                               conn: psycopg.Connection = Depends(get_conn)):
         failure = require_mpin(conn, ctx.user_id, body.mpin)
         if failure is not None:
@@ -387,7 +387,7 @@ def create_portal_investor_router() -> APIRouter:
 
     @router.post("/investor/payout-destinations/{dest_id}/remove", response_model=Dict[str, Any])
     async def remove_destination(dest_id: int,
-                                 ctx: OrgContext = Depends(require_org_role("investor")),
+                                 ctx: OrgContext = Depends(require_investor),
                                  conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
         current = conn.execute(
             "SELECT status FROM payout_destinations WHERE id = %s AND org_id = %s AND user_id = %s",
@@ -420,7 +420,7 @@ def create_portal_investor_router() -> APIRouter:
     # ------------------------------------------------------------ withdrawals
 
     @router.get("/investor/withdrawals", response_model=List[Dict[str, Any]])
-    async def my_withdrawals(ctx: OrgContext = Depends(require_org_role("investor")),
+    async def my_withdrawals(ctx: OrgContext = Depends(require_investor),
                              conn: psycopg.Connection = Depends(get_conn)) -> List[Dict[str, Any]]:
         rows = conn.execute(
             f"SELECT {pc.WITHDRAWAL_COLS} FROM withdrawals "
@@ -430,7 +430,7 @@ def create_portal_investor_router() -> APIRouter:
 
     @router.post("/investor/withdrawals", status_code=201, response_model=Dict[str, Any])
     async def request_withdrawal(body: WithdrawalRequest,
-                                 ctx: OrgContext = Depends(require_org_role("investor")),
+                                 ctx: OrgContext = Depends(require_investor),
                                  conn: psycopg.Connection = Depends(get_conn)):
         failure = require_mpin(conn, ctx.user_id, body.mpin)
         if failure is not None:
@@ -488,7 +488,7 @@ def create_portal_investor_router() -> APIRouter:
 
     @router.post("/investor/withdrawals/{wd_id}/cancel", response_model=Dict[str, Any])
     async def cancel_withdrawal(wd_id: int,
-                                ctx: OrgContext = Depends(require_org_role("investor")),
+                                ctx: OrgContext = Depends(require_investor),
                                 conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
         current = conn.execute(
             "SELECT status, amount FROM withdrawals WHERE id = %s AND org_id = %s AND user_id = %s",
@@ -514,7 +514,7 @@ def create_portal_investor_router() -> APIRouter:
     # -------------------------------------------------------------- transfers
 
     @router.get("/investor/transfers", response_model=List[Dict[str, Any]])
-    async def my_transfers(ctx: OrgContext = Depends(require_org_role("investor")),
+    async def my_transfers(ctx: OrgContext = Depends(require_investor),
                            conn: psycopg.Connection = Depends(get_conn)) -> List[Dict[str, Any]]:
         rows = conn.execute(
             f"SELECT {pc.TRANSFER_COLS} FROM transfers "
@@ -524,7 +524,7 @@ def create_portal_investor_router() -> APIRouter:
 
     @router.post("/investor/transfers", status_code=201, response_model=Dict[str, Any])
     async def request_transfer(body: TransferRequest, http_request: Request,
-                               ctx: OrgContext = Depends(require_org_role("investor")),
+                               ctx: OrgContext = Depends(require_investor),
                                conn: psycopg.Connection = Depends(get_conn)):
         failure = require_mpin(conn, ctx.user_id, body.mpin)
         if failure is not None:
@@ -619,7 +619,7 @@ def create_portal_investor_router() -> APIRouter:
 
     @router.post("/investor/transfers/{tr_id}/cancel", response_model=Dict[str, Any])
     async def cancel_transfer(tr_id: int,
-                              ctx: OrgContext = Depends(require_org_role("investor")),
+                              ctx: OrgContext = Depends(require_investor),
                               conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
         current = conn.execute(
             "SELECT status FROM transfers WHERE id = %s AND org_id = %s AND user_id = %s",
@@ -652,7 +652,7 @@ def create_portal_investor_router() -> APIRouter:
 
     @router.get("/investor/summary", response_model=Dict[str, Any])
     async def investor_summary(http_request: Request,
-                               ctx: OrgContext = Depends(require_org_role("investor")),
+                               ctx: OrgContext = Depends(require_investor),
                                conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
         org_name, display_name, member_since = conn.execute(
             "SELECT o.name, u.display_name, m.created_at FROM org_memberships m "
@@ -735,7 +735,7 @@ def create_portal_investor_router() -> APIRouter:
                                 date_to: Optional[str] = Query(None, alias="to"),
                                 limit: int = ENTRIES_DEFAULT_LIMIT,
                                 before: Optional[int] = None,
-                                ctx: OrgContext = Depends(require_org_role("investor")),
+                                ctx: OrgContext = Depends(require_investor),
                                 conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
         try:
             return entries_page(conn, ctx.org_id, ctx.user_id, wallet=wallet, kind=kind,
@@ -748,7 +748,7 @@ def create_portal_investor_router() -> APIRouter:
 
     @router.get("/investor/positions", response_model=Dict[str, Any])
     async def my_positions(http_request: Request,
-                           ctx: OrgContext = Depends(require_org_role("investor")),
+                           ctx: OrgContext = Depends(require_investor),
                            conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
         account_id = _require_linked(conn, ctx)
         _equity, source, positions = await pc.equity_for(http_request, conn, ctx.org_id,
@@ -760,7 +760,7 @@ def create_portal_investor_router() -> APIRouter:
 
     @router.get("/investor/analytics", response_model=Dict[str, Any])
     async def my_analytics(http_request: Request, weeks: int = 4,
-                           ctx: OrgContext = Depends(require_org_role("investor")),
+                           ctx: OrgContext = Depends(require_investor),
                            conn: psycopg.Connection = Depends(get_conn),
                            cfg: ApiConfig = Depends(ApiConfig.from_env)) -> Dict[str, Any]:
         account_id = _require_linked(conn, ctx)
@@ -774,7 +774,7 @@ def create_portal_investor_router() -> APIRouter:
     async def my_history(kind: str, http_request: Request,
                          from_ms: int = Query(..., alias="from"),
                          to_ms: int = Query(..., alias="to"),
-                         ctx: OrgContext = Depends(require_org_role("investor")),
+                         ctx: OrgContext = Depends(require_investor),
                          conn: psycopg.Connection = Depends(get_conn),
                          cfg: ApiConfig = Depends(ApiConfig.from_env)) -> Dict[str, Any]:
         if kind not in ("deals", "orders", "cashflow"):
