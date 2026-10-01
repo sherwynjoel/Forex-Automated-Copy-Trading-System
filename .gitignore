@@ -1,4 +1,5 @@
-.superpowers/
+/.superpowers/
+/.worktrees/
 .claude/
 .env
 .venv/
