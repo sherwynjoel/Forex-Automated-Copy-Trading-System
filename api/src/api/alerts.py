@@ -47,6 +47,12 @@ ALERT_RULES: dict[tuple[str, str, str], str] = {
     # to send money. Both are what a stolen admin session would do.
     ("control", "warning", "investor_ledger_adjusted"): "Investor ledger adjusted",
     ("control", "warning", "payment_method_changed"): "Payment method changed",
+    # Phase 2: identity documents and a trading account request wait on an
+    # admin; an admin read an investor's MT5 passwords (what a stolen admin
+    # session would do).
+    ("control", "warning", "investor_kyc_submitted"): "Investor verification submitted",
+    ("control", "warning", "investor_account_requested"): "Investor trading account request",
+    ("control", "warning", "account_request_passwords_revealed"): "Account request passwords revealed",
     # Where every investor is told to send money. Changed by an admin --
     # or by whoever stole an admin's session. The payload carries the new
     # and the previous address. No payload.user_id: this is about the

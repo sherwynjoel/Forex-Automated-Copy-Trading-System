@@ -169,3 +169,183 @@ def test_desk_members_cannot_use_the_investor_routes(portal, login_as):
     login_as(client, ADMIN)
     assert _request(client, org_id, package_id).status_code == 403
     assert client.get(f"/api/orgs/{org_id}/investor/account-requests").status_code == 403
+
+
+# ------------------------------------------------------------ admin
+
+from cryptography.fernet import Fernet
+
+from api.alerts import ALERT_RULES
+from api.telegram import TELEGRAM_RULES
+
+
+class _FakeAlerter:
+    def __init__(self):
+        self.sent = []
+
+    async def send_to(self, to_addr, subject, text):
+        self.sent.append((to_addr, subject, text))
+        return True
+
+
+@pytest.fixture
+def desk(portal, login_as):
+    """Task 8's portal with one open request filed through the API and the
+    admin logged in. Returns (client, org_id, investor, package_id, seed, req_id)."""
+    client, org_id, investor, package_id, seed = portal
+    req_id = _request(client, org_id, package_id).json()["id"]
+    client.cookies.clear()
+    login_as(client, ADMIN)
+    return client, org_id, investor, package_id, seed, req_id
+
+
+def _act(client, org_id, req_id, verb, **body):
+    return client.post(f"/api/orgs/{org_id}/account-requests/{req_id}/{verb}", json=body,
+                       headers=csrf(client))
+
+
+def test_the_admin_queue_lists_open_requests_first_without_passwords(desk, db, make_user):
+    client, org_id, investor, package_id, _, req_id = desk
+    other = make_user(email="other@example.com")
+    member(db, org_id, other["id"], "investor")
+    older = open_account_request(db, org_id, other["id"], package_id)
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute("UPDATE account_requests SET status = 'cancelled', main_password_enc = NULL, "
+                     "investor_password_enc = NULL WHERE id = %s", (older,))
+    rows = client.get(f"/api/orgs/{org_id}/account-requests").json()
+    assert [r["id"] for r in rows] == [req_id, older]
+    assert rows[0]["email"] == "inv@example.com" and rows[0]["display_name"] == "Inv One"
+    assert "password" not in str(rows)
+    assert [r["id"] for r in client.get(
+        f"/api/orgs/{org_id}/account-requests?status=cancelled").json()] == [older]
+
+
+def test_reveal_needs_the_admins_mpin_and_is_audited_every_time(desk, db):
+    client, org_id, investor, _, _, req_id = desk
+    r = _act(client, org_id, req_id, "reveal", mpin="000000")
+    assert r.status_code == 401 and r.json()["detail"] == "Invalid MPIN"
+    for _ in range(2):
+        r = _act(client, org_id, req_id, "reveal", mpin="123456")
+        assert r.status_code == 200
+        assert r.json() == {"main_password": "Main1234", "investor_password": "Look1234"}
+    rows = _events(db, org_id, "account_request_passwords_revealed")
+    assert len(rows) == 2
+    severity, payload = rows[-1]
+    assert severity == "warning" and payload["user_id"] == investor["id"]
+    assert payload["request_id"] == req_id and "Main1234" not in str(payload)
+    r = _act(client, org_id, 999, "reveal", mpin="123456")
+    assert r.status_code == 404 and r.json()["detail"] == "Request not found"
+
+
+def test_reveal_after_a_key_change_says_what_to_do(desk, db):
+    client, org_id, _, _, _, req_id = desk
+    foreign = Fernet(Fernet.generate_key())
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute("UPDATE account_requests SET main_password_enc = %s WHERE id = %s",
+                     (foreign.encrypt(b"Main1234").decode(), req_id))
+    r = _act(client, org_id, req_id, "reveal", mpin="123456")
+    assert r.status_code == 409
+    assert r.json()["detail"] == ("the passwords can no longer be read; "
+                                  "reject this request and ask for a new one")
+
+
+def test_fulfil_hands_over_the_login_wipes_the_passwords_and_emails(desk, db, monkeypatch):
+    client, org_id, investor, _, _, req_id = desk
+    fake = _FakeAlerter()
+    monkeypatch.setattr(ws_module.broadcaster, "alerter", fake, raising=False)
+    r = _act(client, org_id, req_id, "fulfil", mt5_login=0, mt5_server="Broker-Live")
+    assert r.status_code == 400 and r.json()["detail"] == "mt5_login must be a whole number above zero"
+    r = _act(client, org_id, req_id, "fulfil", mt5_login=5001)
+    assert r.status_code == 400 and r.json()["detail"] == "mt5_server is required"
+    r = _act(client, org_id, req_id, "fulfil", mt5_login=5001, mt5_server=" Broker-Live ",
+             note="opened")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "fulfilled" and body["mt5_login"] == 5001
+    assert body["mt5_server"] == "Broker-Live" and body["account_id"] is None
+    assert body["decision_note"] == "opened" and body["decided_by"] is not None
+    assert _sealed(db, req_id) == (None, None)
+    to, subject, text = fake.sent[-1]
+    assert (to, subject) == ("inv@example.com", "Your trading account is ready")
+    assert "Login: 5001" in text and "Server: Broker-Live" in text and "Main1234" not in text
+    payload = _events(db, org_id, "investor_account_request_decided")[-1][1]
+    assert payload["status"] == "fulfilled" and payload["user_id"] == investor["id"]
+    r = _act(client, org_id, req_id, "fulfil", mt5_login=5001, mt5_server="Broker-Live")
+    assert r.status_code == 409 and r.json()["detail"] == "request is already fulfilled"
+    r = _act(client, org_id, req_id, "reveal", mpin="123456")
+    assert r.status_code == 409
+
+
+def test_fulfil_can_link_an_account_under_the_phase_1_rules(desk, db, make_user):
+    client, org_id, investor, package_id, seed, req_id = desk
+    seed(100, role="master")
+    seed(1001, role="slave")
+    seed(1002, role="slave")
+    other = make_user(email="other@example.com")
+    member(db, org_id, other["id"], "investor")
+    link(db, org_id, other["id"], 1002)
+    r = _act(client, org_id, req_id, "fulfil", mt5_login=5001, mt5_server="B", account_id=100)
+    assert r.status_code == 400
+    assert r.json()["detail"] == "The master account cannot be linked to an investor"
+    r = _act(client, org_id, req_id, "fulfil", mt5_login=5001, mt5_server="B", account_id=1002)
+    assert r.status_code == 404
+    assert r.json()["detail"] == "Account not found in this workspace, or already linked"
+    r = _act(client, org_id, req_id, "fulfil", mt5_login=5001, mt5_server="B", account_id=1001)
+    assert r.status_code == 200 and r.json()["account_id"] == 1001
+    with psycopg.connect(db, autocommit=True) as conn:
+        (owner,) = conn.execute("SELECT investor_user_id FROM accounts "
+                                "WHERE ctid_trader_account_id = 1001").fetchone()
+    assert owner == investor["id"]
+    with psycopg.connect(db, autocommit=True) as conn:
+        # audit_control files account_id in the events column, not the payload.
+        (linked,) = conn.execute("SELECT account_id FROM events WHERE org_id = %s AND "
+                                 "payload->>'action' = 'investor_account_linked' "
+                                 "ORDER BY id DESC LIMIT 1", (org_id,)).fetchone()
+    assert linked == 1001
+
+
+def test_fulfil_refuses_a_second_account_for_a_linked_investor(desk, db):
+    client, org_id, investor, _, seed, req_id = desk
+    seed(1001, role="slave")
+    seed(1003, role="slave")
+    link(db, org_id, investor["id"], 1003)
+    r = _act(client, org_id, req_id, "fulfil", mt5_login=5001, mt5_server="B", account_id=1001)
+    assert r.status_code == 409 and r.json()["detail"] == "the investor already has a linked account"
+    with psycopg.connect(db, autocommit=True) as conn:
+        (status,) = conn.execute("SELECT status FROM account_requests WHERE id = %s",
+                                 (req_id,)).fetchone()
+    assert status == "requested"
+
+
+def test_reject_needs_a_note_wipes_and_lets_the_investor_try_again(desk, db, login_as,
+                                                                   monkeypatch):
+    client, org_id, investor, package_id, _, req_id = desk
+    fake = _FakeAlerter()
+    monkeypatch.setattr(ws_module.broadcaster, "alerter", fake, raising=False)
+    r = _act(client, org_id, req_id, "reject")
+    assert r.status_code == 400 and r.json()["detail"] == "note is required"
+    r = _act(client, org_id, req_id, "reject", note="Broker paused new accounts")
+    assert r.status_code == 200 and r.json()["status"] == "rejected"
+    assert _sealed(db, req_id) == (None, None)
+    assert fake.sent[-1][1] == "Your trading account request was rejected"
+    assert "Broker paused new accounts" in fake.sent[-1][2]
+    client.cookies.clear()
+    login_as(client, investor)
+    assert _request(client, org_id, package_id).status_code == 201
+
+
+def test_the_requests_summary_counts_verifications_and_account_requests(desk, db, make_user):
+    client, org_id, _, _, _, _ = desk
+    other = make_user(email="other@example.com")
+    member(db, org_id, other["id"], "investor")
+    kyc_profile(db, org_id, other["id"], status="submitted")
+    summary = client.get(f"/api/orgs/{org_id}/requests/summary").json()
+    assert summary["kyc"] == 1 and summary["account_requests"] == 1
+    assert summary["total"] == 2
+
+
+def test_the_three_phase_2_warnings_reach_both_alerters():
+    for action in ("investor_kyc_submitted", "investor_account_requested",
+                   "account_request_passwords_revealed"):
+        assert ("control", "warning", action) in ALERT_RULES, action
+        assert ("control", "warning", action) in TELEGRAM_RULES, action

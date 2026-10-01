@@ -14,6 +14,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 import psycopg
+from cryptography.fernet import InvalidToken
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
@@ -61,6 +62,54 @@ class AccountRequestBody(BaseModel):
     main_password: Any = None
     investor_password: Any = None
     mpin: Any = None
+
+
+class FulfilBody(BaseModel):
+    mt5_login: Any = None
+    mt5_server: Any = None
+    account_id: Optional[int] = None
+    note: Optional[str] = None
+
+
+class RejectBody(BaseModel):
+    note: Optional[str] = None
+
+
+def _open_request(conn: psycopg.Connection, org_id: int, req_id: int):
+    """(status, user_id, package_name, main_password_enc, investor_password_enc)
+    of a request still waiting on an admin; 404 / 409 otherwise."""
+    row = conn.execute(
+        "SELECT status, user_id, package_name, main_password_enc, investor_password_enc "
+        "FROM account_requests WHERE id = %s AND org_id = %s", (req_id, org_id)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Request not found")
+    if row[0] != "requested":
+        raise HTTPException(status_code=409, detail=f"request is already {row[0]}")
+    return row
+
+
+def _link_account(conn: psycopg.Connection, org_id: int, user_id: int, account_id: int) -> None:
+    """Phase 1's link rule (routes/portal_admin.link_account), run inside the
+    caller's transaction: never the master, never an account linked to
+    someone else, and one account per investor."""
+    linked = pc.linked_account(conn, org_id, user_id)
+    if linked == account_id:
+        return
+    if linked is not None:
+        raise HTTPException(status_code=409, detail="the investor already has a linked account")
+    role_row = conn.execute(
+        "SELECT role FROM accounts WHERE ctid_trader_account_id = %s AND org_id = %s",
+        (account_id, org_id)).fetchone()
+    if role_row and role_row[0] == "master":
+        raise HTTPException(status_code=400,
+                            detail="The master account cannot be linked to an investor")
+    updated = conn.execute(
+        "UPDATE accounts SET investor_user_id = %s "
+        "WHERE ctid_trader_account_id = %s AND org_id = %s AND investor_user_id IS NULL "
+        "RETURNING ctid_trader_account_id", (user_id, account_id, org_id)).fetchone()
+    if not updated:
+        raise HTTPException(status_code=404,
+                            detail="Account not found in this workspace, or already linked")
 
 
 def _profile_row(conn: psycopg.Connection, org_id: int, user_id: int):
@@ -427,6 +476,117 @@ def create_portal_identity_router() -> APIRouter:
         await pc.audit_control(
             conn, org_id=ctx.org_id, action="investor_account_request_cancelled",
             actor_email=ctx.user_email, user_id=ctx.user_id, request_id=req_id)
+        return pid.request_json(row)
+
+    # ------------------------------------------------------------ account requests, admin
+
+    @router.get("/account-requests", response_model=List[Dict[str, Any]])
+    async def account_request_queue(status: Optional[str] = None,
+                                    ctx: OrgContext = Depends(require_org_role("admin")),
+                                    conn: psycopg.Connection = Depends(get_conn)) -> List[Dict[str, Any]]:
+        where = "r.org_id = %s" + (" AND r.status = %s" if status else "")
+        params = (ctx.org_id, status) if status else (ctx.org_id,)
+        # ponytail: LIMIT 500, paginate when a workspace has that many requests
+        rows = conn.execute(
+            f"SELECT {pc.qualify(pid.REQUEST_COLS, 'r')}, u.email, u.display_name "
+            "FROM account_requests r JOIN users u ON u.id = r.user_id "
+            f"WHERE {where} ORDER BY (r.status = 'requested') DESC, r.created_at DESC, r.id DESC "
+            "LIMIT 500", params).fetchall()
+        return [pid.request_json(r) for r in rows]
+
+    @router.post("/account-requests/{req_id}/reveal", response_model=Dict[str, Any])
+    async def reveal_passwords(req_id: int, body: MpinBody,
+                               ctx: OrgContext = Depends(require_org_role("admin")),
+                               conn: psycopg.Connection = Depends(get_conn),
+                               cfg: ApiConfig = Depends(ApiConfig.from_env)):
+        """The two passwords, for the admin to type into the broker's
+        manager. The ADMIN's MPIN confirms it and every reveal is a warning
+        in the audit feed; once the request is decided they are gone."""
+        failure = require_mpin(conn, ctx.user_id, body.mpin)
+        if failure is not None:
+            return failure
+        _status, user_id, _name, main_enc, investor_enc = _open_request(conn, ctx.org_id, req_id)
+        try:
+            if main_enc is None or investor_enc is None:
+                raise InvalidToken
+            out = {"main_password": pid.unseal(cfg.fernet_key, main_enc),
+                   "investor_password": pid.unseal(cfg.fernet_key, investor_enc)}
+        except InvalidToken:
+            raise HTTPException(status_code=409, detail=(
+                "the passwords can no longer be read; reject this request and ask for a new one"))
+        await pc.audit_control(
+            conn, org_id=ctx.org_id, action="account_request_passwords_revealed",
+            actor_email=ctx.user_email, user_id=user_id, severity="warning", request_id=req_id,
+            summary=f"Passwords of account request #{req_id} revealed by {ctx.user_email}")
+        return out
+
+    @router.post("/account-requests/{req_id}/fulfil", response_model=Dict[str, Any])
+    async def fulfil_request(req_id: int, body: FulfilBody, http_request: Request,
+                             ctx: OrgContext = Depends(require_org_role("admin")),
+                             conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
+        login = body.mt5_login
+        if isinstance(login, bool) or not isinstance(login, int) or login <= 0:
+            raise HTTPException(status_code=400,
+                                detail="mt5_login must be a whole number above zero")
+        try:
+            server = pc.clean_text(body.mt5_server, "mt5_server", max_len=64)
+            note = pc.clean_text(body.note, "note", max_len=500, required=False)
+        except pc.LedgerError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        _status, user_id, package_name, _m, _i = _open_request(conn, ctx.org_id, req_id)
+        # The link and the status change land together or not at all.
+        with conn.transaction():
+            if body.account_id is not None:
+                _link_account(conn, ctx.org_id, user_id, body.account_id)
+            row = conn.execute(
+                "UPDATE account_requests SET status = 'fulfilled', mt5_login = %s, "
+                "mt5_server = %s, account_id = %s, decided_by = %s, decided_at = now(), "
+                "decision_note = %s, main_password_enc = NULL, investor_password_enc = NULL "
+                "WHERE id = %s AND org_id = %s AND status = 'requested' "
+                f"RETURNING {pid.REQUEST_COLS}",
+                (login, server, body.account_id, ctx.user_id, note, req_id,
+                 ctx.org_id)).fetchone()
+            if not row:
+                raise HTTPException(status_code=409, detail="decided by someone else")
+        out = pid.request_json(row)
+        await pc.audit_control(
+            conn, org_id=ctx.org_id, action="investor_account_request_decided",
+            actor_email=ctx.user_email, user_id=user_id, account_id=body.account_id,
+            request_id=req_id, status="fulfilled", mt5_login=login, mt5_server=server, note=note)
+        if body.account_id is not None:
+            await pc.audit_control(
+                conn, org_id=ctx.org_id, action="investor_account_linked",
+                actor_email=ctx.user_email, user_id=user_id, account_id=body.account_id)
+        await pc.notify_investor(
+            conn, http_request, user_id, "Your trading account is ready",
+            f"Login: {login}\nServer: {server}\nPackage: {package_name}\n"
+            "Sign in to MetaTrader 5 with the passwords you chose when you requested it.\n\n"
+            "Open the portal for details.")
+        return out
+
+    @router.post("/account-requests/{req_id}/reject", response_model=Dict[str, Any])
+    async def reject_request(req_id: int, body: RejectBody, http_request: Request,
+                             ctx: OrgContext = Depends(require_org_role("admin")),
+                             conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
+        try:
+            note = pc.clean_text(body.note, "note", max_len=500)
+        except pc.LedgerError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        _status, user_id, package_name, _m, _i = _open_request(conn, ctx.org_id, req_id)
+        row = conn.execute(
+            "UPDATE account_requests SET status = 'rejected', decided_by = %s, "
+            "decided_at = now(), decision_note = %s, main_password_enc = NULL, "
+            "investor_password_enc = NULL WHERE id = %s AND org_id = %s AND status = 'requested' "
+            f"RETURNING {pid.REQUEST_COLS}", (ctx.user_id, note, req_id, ctx.org_id)).fetchone()
+        if not row:
+            raise HTTPException(status_code=409, detail="decided by someone else")
+        await pc.audit_control(
+            conn, org_id=ctx.org_id, action="investor_account_request_decided",
+            actor_email=ctx.user_email, user_id=user_id, request_id=req_id, status="rejected",
+            note=note)
+        await pc.notify_investor(
+            conn, http_request, user_id, "Your trading account request was rejected",
+            f"Package: {package_name}\nNote: {note}\n\nOpen the portal for details.")
         return pid.request_json(row)
 
     return router

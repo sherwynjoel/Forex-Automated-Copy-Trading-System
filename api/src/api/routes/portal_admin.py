@@ -855,10 +855,14 @@ def create_portal_admin_router() -> APIRouter:
                  (SELECT count(*) FROM transfers
                    WHERE org_id = %(o)s AND status IN ('requested', 'approved')),
                  (SELECT count(*) FROM payout_destinations
-                   WHERE org_id = %(o)s AND status = 'pending')""",
+                   WHERE org_id = %(o)s AND status = 'pending'),
+                 (SELECT count(*) FROM kyc_profiles WHERE org_id = %(o)s AND status = 'submitted'),
+                 (SELECT count(*) FROM account_requests
+                   WHERE org_id = %(o)s AND status = 'requested')""",
             {"o": ctx.org_id}).fetchone()
         counts = {"deposits": int(row[0]), "withdrawals": int(row[1]),
-                  "transfers": int(row[2]), "payout_destinations": int(row[3])}
+                  "transfers": int(row[2]), "payout_destinations": int(row[3]),
+                  "kyc": int(row[4]), "account_requests": int(row[5])}
         return {**counts, "total": sum(counts.values())}
 
     return router
