@@ -24,6 +24,7 @@ from ..db import get_conn
 from ..mpin_core import require_mpin
 from ..rbac import OrgContext, require_org_role
 from .portal_investor import WALLET_LABELS, entries_page, money_ref_label, pending_counts
+from .portal_support import WAITING_ON_DESK
 from .. import portal_common as pc
 # Controller ruling (Task 10): org_state/equity_from already live in
 # portal_common (Task 5); imported under these underscore names rather than
@@ -895,11 +896,14 @@ def create_portal_admin_router() -> APIRouter:
                    WHERE org_id = %(o)s AND status = 'pending'),
                  (SELECT count(*) FROM kyc_profiles WHERE org_id = %(o)s AND status = 'submitted'),
                  (SELECT count(*) FROM account_requests
-                   WHERE org_id = %(o)s AND status = 'requested')""",
+                   WHERE org_id = %(o)s AND status = 'requested'),
+                 (SELECT count(*) FROM tickets t
+                   WHERE t.org_id = %(o)s AND """ + WAITING_ON_DESK + ")",
             {"o": ctx.org_id}).fetchone()
         counts = {"deposits": int(row[0]), "withdrawals": int(row[1]),
                   "transfers": int(row[2]), "payout_destinations": int(row[3]),
-                  "kyc": int(row[4]), "account_requests": int(row[5])}
+                  "kyc": int(row[4]), "account_requests": int(row[5]),
+                  "tickets": int(row[6])}
         return {**counts, "total": sum(counts.values())}
 
     return router

@@ -62,11 +62,16 @@ class DeskReply(BaseModel):
     body: Any = None
 
 
-def ticket_json(row) -> Dict[str, Any]:
+def ticket_json(row, viewer_id: Optional[int] = None) -> Dict[str, Any]:
     """A TICKET_SELECT row, optionally followed by the investor's email and
-    display_name."""
+    display_name. `viewer_id` narrows an investor's own view: closed_by is
+    hidden (set to None) unless it names the viewer themselves, so a desk
+    close never names the desk user to the investor. Omitted (the desk's
+    own queue and thread) keeps the real identity."""
     (ticket_id, user_id, subject_id, subject_label, status, created_at, updated_at,
      last_message_at, closed_at, closed_by, last_from_desk, waiting_on_desk) = row[:12]
+    if viewer_id is not None and closed_by not in (None, viewer_id):
+        closed_by = None
     out = {"id": ticket_id, "user_id": user_id, "subject_id": subject_id,
            "subject_label": subject_label, "status": status, "created_at": pc._iso(created_at),
            "updated_at": pc._iso(updated_at), "last_message_at": pc._iso(last_message_at),
@@ -144,10 +149,8 @@ def load_thread(conn: psycopg.Connection, org_id: int, ticket_id: int,
         f"SELECT {pc.qualify(MESSAGE_COLS, 'm')}, a.display_name FROM ticket_messages m "
         "LEFT JOIN users a ON a.id = m.author_id WHERE m.ticket_id = %s ORDER BY m.id",
         (ticket_id,)).fetchall()
-    thread = {**ticket_json(row), "messages": [message_json(m) for m in messages]}
+    thread = {**ticket_json(row, user_id), "messages": [message_json(m) for m in messages]}
     if user_id is not None:
-        if thread["closed_by"] not in (None, user_id):
-            thread["closed_by"] = None
         for message in thread["messages"]:
             if message["from_desk"]:
                 message["author_id"] = message["author_name"] = None
@@ -358,7 +361,7 @@ def create_portal_support_router() -> APIRouter:
             f"WHERE t.org_id = %s AND t.user_id = %s{where} "
             "ORDER BY t.last_message_at DESC, t.id DESC LIMIT 500",
             (ctx.org_id, ctx.user_id, *params)).fetchall()
-        return [ticket_json(r) for r in rows]
+        return [ticket_json(r, ctx.user_id) for r in rows]
 
     @router.get("/investor/tickets/{ticket_id}", response_model=Dict[str, Any])
     async def my_ticket(ticket_id: int, ctx: OrgContext = Depends(require_investor),
@@ -401,5 +404,69 @@ def create_portal_support_router() -> APIRouter:
                                 conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
         await _close(conn, ctx, ticket_id, owner=ctx.user_id)
         return load_thread(conn, ctx.org_id, ticket_id, ctx.user_id)
+
+    # ------------------------------------------------------------ tickets, desk
+
+    @router.get("/tickets", response_model=List[Dict[str, Any]])
+    async def ticket_queue(status: Optional[str] = None, q: Optional[str] = None,
+                           ctx: OrgContext = Depends(require_org_role("admin")),
+                           conn: psycopg.Connection = Depends(get_conn)) -> List[Dict[str, Any]]:
+        where, params = search_clause(q, status)
+        # ponytail: LIMIT 500, add paging when an org has more tickets than that
+        rows = conn.execute(
+            f"SELECT {TICKET_SELECT}, u.email, u.display_name "
+            "FROM tickets t JOIN users u ON u.id = t.user_id "
+            f"WHERE t.org_id = %s{where} "
+            "ORDER BY (t.status <> 'closed') DESC, t.last_message_at DESC, t.id DESC LIMIT 500",
+            (ctx.org_id, *params)).fetchall()
+        return [ticket_json(r) for r in rows]
+
+    @router.get("/tickets/{ticket_id}", response_model=Dict[str, Any])
+    async def ticket_thread(ticket_id: int, ctx: OrgContext = Depends(require_org_role("admin")),
+                            conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
+        return load_thread(conn, ctx.org_id, ticket_id)
+
+    @router.post("/tickets/{ticket_id}/messages", status_code=201, response_model=Dict[str, Any])
+    async def reply_as_desk(ticket_id: int, body: DeskReply, http_request: Request,
+                            ctx: OrgContext = Depends(require_org_role("admin")),
+                            conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
+        """The first desk reply moves new -> open; a closed ticket is refused
+        (the investor opens it again by replying)."""
+        try:
+            text = pc.clean_text(body.body, "body", max_len=4000)
+        except pc.LedgerError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        with conn.transaction():
+            row = conn.execute(
+                "UPDATE tickets SET status = CASE WHEN status = 'new' THEN 'open' ELSE status END, "
+                "last_message_at = now(), updated_at = now() "
+                "WHERE id = %s AND org_id = %s AND status <> 'closed' "
+                "RETURNING user_id, subject_label", (ticket_id, ctx.org_id)).fetchone()
+            if not row:
+                exists = conn.execute("SELECT 1 FROM tickets WHERE id = %s AND org_id = %s",
+                                      (ticket_id, ctx.org_id)).fetchone()
+                if exists:
+                    raise HTTPException(status_code=409, detail="ticket is closed")
+                raise HTTPException(status_code=404, detail="Ticket not found")
+            add_message(conn, ctx.org_id, ticket_id, ctx.user_id, True, text, [])
+        investor_id, label = row
+        await pc.audit_control(
+            conn, org_id=ctx.org_id, action="ticket_replied", actor_email=ctx.user_email,
+            user_id=investor_id, ticket_id=ticket_id, from_desk=True, images=0)
+        await pc.notify(conn, http_request, ctx.org_id, investor_id, "support",
+                        f"New reply on ticket #{ticket_id}: {label}", text,
+                        pc.investor_link(ctx.org_id, f"support?ticket={ticket_id}"))
+        return load_thread(conn, ctx.org_id, ticket_id)
+
+    @router.post("/tickets/{ticket_id}/close", response_model=Dict[str, Any])
+    async def close_as_desk(ticket_id: int, http_request: Request,
+                            ctx: OrgContext = Depends(require_org_role("admin")),
+                            conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
+        investor_id, label = await _close(conn, ctx, ticket_id, owner=None)
+        await pc.notify(conn, http_request, ctx.org_id, investor_id, "support",
+                        f"Ticket #{ticket_id} was closed",
+                        f"Subject: {label}\nReply on the ticket to open it again.",
+                        pc.investor_link(ctx.org_id, f"support?ticket={ticket_id}"))
+        return load_thread(conn, ctx.org_id, ticket_id)
 
     return router

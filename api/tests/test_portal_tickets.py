@@ -262,3 +262,115 @@ def test_sixty_replies_an_hour(portal, monkeypatch):
     thread = client.get(f"/api/orgs/{org_id}/investor/tickets/{t['id']}").json()
     assert len(thread["messages"]) == 61
     assert _open(client, org_id, subjects["deposits"]).status_code == 201, "tickets count apart"
+
+
+# ------------------------------------------------------------ desk side
+
+
+def test_the_desk_answers_and_the_status_and_summary_follow(portal, db, login_as):
+    client, org_id, investor, subjects = portal
+    t = _open(client, org_id, subjects["deposits"]).json()
+    client.cookies.clear()
+    login_as(client, ADMIN)
+
+    def summary():
+        return client.get(f"/api/orgs/{org_id}/requests/summary").json()
+
+    assert summary()["tickets"] == 1 and summary()["total"] == 1
+    queue = client.get(f"/api/orgs/{org_id}/tickets").json()
+    assert [(q["id"], q["status"], q["email"], q["last_from_desk"], q["waiting_on_desk"])
+            for q in queue] == [(t["id"], "new", "inv@example.com", False, True)]
+    r = _reply(client, org_id, t["id"], "We are checking", desk=True)
+    assert r.status_code == 201, r.text
+    thread = r.json()
+    assert thread["status"] == "open" and thread["last_from_desk"] is True
+    assert thread["waiting_on_desk"] is False
+    last = thread["messages"][-1]
+    assert (last["from_desk"], last["author_name"], last["file_ids"]) == (True, "User", [])
+    assert last["author_id"] == _user_id(db, "admin@example.com"), "the desk sees who answered"
+    assert summary()["tickets"] == 0           # answered: waiting on the investor
+    client.cookies.clear()
+    login_as(client, investor)
+    r = _reply(client, org_id, t["id"], "Thanks, any update?")
+    assert r.status_code == 201 and r.json()["waiting_on_desk"] is True
+    client.cookies.clear()
+    login_as(client, ADMIN)
+    assert summary()["tickets"] == 1           # the investor spoke last
+    r = client.post(f"/api/orgs/{org_id}/tickets/{t['id']}/close", headers=csrf(client))
+    assert r.status_code == 200 and r.json()["status"] == "closed"
+    assert r.json()["waiting_on_desk"] is False
+    assert r.json()["closed_by"] == _user_id(db, "admin@example.com")
+    assert summary()["tickets"] == 0
+    r = _reply(client, org_id, t["id"], "late", desk=True)
+    assert r.status_code == 409 and r.json()["detail"] == "ticket is closed"
+    assert _reply(client, org_id, 999999, "x", desk=True).status_code == 404
+    link = f"/org/{org_id}/invest/support?ticket={t['id']}"
+    with psycopg.connect(db, autocommit=True) as conn:
+        to_investor = conn.execute("SELECT topic, title, link FROM notifications WHERE user_id = %s "
+                                   "ORDER BY id", (investor["id"],)).fetchall()
+        to_desk = [r[0] for r in conn.execute(
+            "SELECT title FROM notifications WHERE user_id = %s ORDER BY id",
+            (_user_id(db, "admin@example.com"),)).fetchall()]
+    assert to_investor == [("support", f"New reply on ticket #{t['id']}: Deposits", link),
+                           ("support", f"Ticket #{t['id']} was closed", link)]
+    assert to_desk == [f"New ticket #{t['id']}: Deposits", f"Reply on ticket #{t['id']}: Deposits"]
+    replies = [(e[1]["from_desk"], e[1]["user_id"]) for e in _events(db, org_id, "ticket_replied")]
+    assert replies == [(True, investor["id"]), (False, investor["id"])]
+
+
+def test_the_investor_thread_never_names_desk_staff(portal, db, login_as):
+    client, org_id, investor, subjects = portal
+    t = _open(client, org_id, subjects["deposits"]).json()
+    client.cookies.clear()
+    login_as(client, ADMIN)
+    assert _reply(client, org_id, t["id"], "We are checking", desk=True).status_code == 201
+    assert client.post(f"/api/orgs/{org_id}/tickets/{t['id']}/close",
+                       headers=csrf(client)).status_code == 200
+    client.cookies.clear()
+    login_as(client, investor)
+    thread = client.get(f"/api/orgs/{org_id}/investor/tickets/{t['id']}").json()
+    assert thread["closed_by"] is None and thread["closed_at"] is not None
+    mine, desk = thread["messages"]
+    assert (mine["author_id"], mine["author_name"]) == (investor["id"], "Inv One")
+    assert (desk["from_desk"], desk["author_id"], desk["author_name"]) == (True, None, None)
+    reopened = _reply(client, org_id, t["id"], "Still missing").json()
+    assert reopened["messages"][1]["author_name"] is None
+    # The investor's own close keeps closed_by: it names nobody else.
+    r = client.post(f"/api/orgs/{org_id}/investor/tickets/{t['id']}/close", headers=csrf(client))
+    assert r.json()["closed_by"] == investor["id"]
+
+
+def test_the_desk_queue_filters_and_shows_the_thread(portal, db, login_as):
+    client, org_id, investor, subjects = portal
+    image = seed_file(db, org_id, investor["id"], purpose="ticket_attachment")
+    a = _open(client, org_id, subjects["deposits"], body="Card payment", file_ids=[image]).json()
+    b = _open(client, org_id, subjects["deposits"], body="Wire transfer").json()
+    client.cookies.clear()
+    login_as(client, ADMIN)
+    url = f"/api/orgs/{org_id}/tickets"
+    assert [t["id"] for t in client.get(url).json()] == [b["id"], a["id"]]
+    assert [t["id"] for t in client.get(url + "?q=wire").json()] == [b["id"]]
+    assert client.get(url + "?status=open").json() == []
+    thread = client.get(f"{url}/{a['id']}").json()
+    assert thread["messages"][0]["file_ids"] == [image] and thread["email"] == "inv@example.com"
+    assert client.get(f"{url}/999999").status_code == 404
+
+
+def test_the_investor_list_masks_a_desk_close_too(portal, db, login_as):
+    """Controller ruling: load_thread already masks a desk close's identity;
+    the investor's ticket LIST must do the same, or a desk close leaks the
+    desk user's id through the one route that forgot to mask it. The desk's
+    own list keeps the real id."""
+    client, org_id, investor, subjects = portal
+    t = _open(client, org_id, subjects["deposits"]).json()
+    client.cookies.clear()
+    login_as(client, ADMIN)
+    r = client.post(f"/api/orgs/{org_id}/tickets/{t['id']}/close", headers=csrf(client))
+    assert r.status_code == 200
+    admin_id = _user_id(db, "admin@example.com")
+    desk_queue = client.get(f"/api/orgs/{org_id}/tickets").json()
+    assert desk_queue[0]["closed_by"] == admin_id
+    client.cookies.clear()
+    login_as(client, investor)
+    mine = client.get(f"/api/orgs/{org_id}/investor/tickets").json()
+    assert mine[0]["id"] == t["id"] and mine[0]["closed_by"] is None
