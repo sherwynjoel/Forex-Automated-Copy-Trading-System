@@ -4,6 +4,7 @@ import { api } from '../lib/api'
 import { useOrg } from '../lib/org'
 import { useTheme } from '../hooks/useTheme'
 import { useRequestsBadge } from '../hooks/useRequestsBadge'
+import { useUnreadCount } from '../hooks/useUnreadCount'
 import type { Account } from '../lib/types'
 import Button from './Button'
 import Drawer from './Drawer'
@@ -15,6 +16,7 @@ import ChunkBoundary from './ChunkBoundary'
 import NavRail from './layout/NavRail'
 import BottomBar from './layout/BottomBar'
 import DeskStrip from './layout/DeskStrip'
+import NotificationBell from './layout/NotificationBell'
 import { consumePendingFocus, markNavigated } from '../lib/navigationFocus'
 import { adminNav, investorNav } from './layout/nav'
 import { platformCaption } from '../lib/platform'
@@ -50,6 +52,12 @@ export default function Layout() {
   // Open requests behind the Requests link; undefined for everyone below admin.
   const requestsBadge = useRequestsBadge(orgId, role)
   const groups = investor ? investorNav(orgId) : adminNav(orgId, role, requestsBadge)
+  // One poll feeds both bells (desktop rail and phone top bar).
+  const unread = useUnreadCount(orgId)
+  const bell = (
+    <NotificationBell orgId={orgId} count={unread.count} onChange={unread.refresh}
+                      pageHref={investor ? `/org/${orgId}/invest/notifications` : `/org/${orgId}/notifications`} />
+  )
   const portalRoot = `/org/${orgId}/invest`
   const strayed = investor
     && location.pathname !== portalRoot
@@ -88,10 +96,13 @@ export default function Layout() {
     markNavigated()
   }, [location.pathname])
 
-  const railChrome = (
+  const railChrome = (withBell: boolean) => (
     <>
       <div className="px-5 pt-5 pb-4 border-b">
-        <Logo size={26} />
+        <div className="flex items-center justify-between gap-2">
+          <Logo size={26} />
+          {withBell && bell}
+        </div>
         <Select
           aria-label="Organization"
           value={orgId}
@@ -124,13 +135,13 @@ export default function Layout() {
 
       {/* Floating glass rail — desktop only */}
       <aside className="hidden lg:flex w-60 shrink-0 m-4 mr-0 flex-col rounded-card glass shadow-card border">
-        {railChrome}
+        {railChrome(true)}
       </aside>
 
       {/* Full menu — phone and tablet, opened from More or the top bar */}
       <div className="lg:hidden">
         <Drawer open={menuOpen} title="Menu" onClose={() => setMenuOpen(false)}>
-          {railChrome}
+          {railChrome(false)}
         </Drawer>
       </div>
 
@@ -143,6 +154,7 @@ export default function Layout() {
             </svg>
           </Button>
           <Logo size={22} textClass="text-base" />
+          <div className="ml-auto">{bell}</div>
         </div>
         {!investor && <DeskStrip onAccounts={handleAccounts} />}
         <main id="main" tabIndex={-1} className="flex-1 overflow-y-auto p-4 md:px-6 md:pt-6 pb-24 lg:pb-6 outline-none">

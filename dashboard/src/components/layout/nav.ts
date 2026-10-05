@@ -79,6 +79,7 @@ export function investorNav(orgId: number): NavGroup[] {
         { path: `${p}/open-account`, label: 'Open account' },
         { path: `${p}/security`, label: 'Security' },
         { path: `${p}/history`, label: 'History' },
+        { path: `${p}/notifications`, label: 'Notifications' },
       ],
     },
   ]

@@ -78,6 +78,7 @@ function mockRoutes(overrides: Record<string, unknown> = {}) {
       new Response(JSON.stringify(payload), {
         status: 200, headers: { 'Content-Type': 'application/json' },
       })
+    if (url.includes('/notifications/unread-count')) return respond(overrides['unread'] ?? { count: 0 })
     if (url.includes('/requests/summary')) {
       return respond(overrides['requests']
         ?? { deposits: 0, withdrawals: 0, transfers: 0, payout_destinations: 0, total: 0 })
@@ -1057,4 +1058,23 @@ test('a failed dry-run switch says, in sentence case, that dry-run is still off'
   await userEvent.click(await screen.findByTestId('dry-run-toggle'))
 
   expect(await screen.findByText(/^Dry-run is still off — the change failed: /)).toHaveAttribute('role', 'alert')
+})
+
+test('the bell carries the unread count and links to the desk or portal page', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
+  mockRoutes({ unread: { count: 4 } })
+  const view = renderShell('/org/1')
+  const [deskBell] = await screen.findAllByRole('button', { name: 'Notifications, 4 unread' })
+  await userEvent.click(deskBell)
+  expect(await screen.findByRole('link', { name: 'See all notifications' }))
+    .toHaveAttribute('href', '/org/1/notifications')
+  view.unmount()
+
+  useOrgMock.mockReturnValue(makeOrgValue('investor'))
+  mockRoutes()
+  renderShell('/org/1/invest')
+  const [portalBell] = await screen.findAllByRole('button', { name: 'Notifications' })
+  await userEvent.click(portalBell)
+  expect(await screen.findByRole('link', { name: 'See all notifications' }))
+    .toHaveAttribute('href', '/org/1/invest/notifications')
 })
