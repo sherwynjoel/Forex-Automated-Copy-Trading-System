@@ -78,6 +78,8 @@ MATRIX = [
     ("GET",    "investor/transfers",             None,                          "investor_only"),
     ("GET",    "investor/wallet-entries",        None,                          "investor_only"),
     ("GET",    "investor/positions",             None,                          "investor_only"),
+    ("GET",    "investor/analytics",             None,                          "investor_only"),
+    ("GET",    "investor/history/deals?from=0&to=1", None,                      "investor_only"),
     ("POST",   "investor/deposits",              {"method_id": 1, "amount": "10",
                                                   "reference": "matrix-filed",
                                                   "target": "wallet"},          "investor_only"),

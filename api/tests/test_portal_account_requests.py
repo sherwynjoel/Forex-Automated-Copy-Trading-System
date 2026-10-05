@@ -339,9 +339,12 @@ def test_fulfil_links_a_second_account_up_to_the_cap(desk, db):
     assert r.status_code == 409
     assert r.json()["detail"] == "you have reached the limit of 1 live accounts"
     with psycopg.connect(db, autocommit=True) as conn:
-        (status,) = conn.execute("SELECT status FROM account_requests WHERE id = %s",
-                                 (req_id,)).fetchone()
+        status, main_enc, inv_enc = conn.execute(
+            "SELECT status, main_password_enc, investor_password_enc FROM account_requests "
+            "WHERE id = %s", (req_id,)).fetchone()
     assert status == "requested"
+    assert main_enc is not None and inv_enc is not None, (
+        "a refused fulfil must not clear the sealed passwords")
     # The open request being fulfilled does not count against itself.
     _set_cap(db, org_id, 2)
     r = _act(client, org_id, req_id, "fulfil", mt5_login=5001, mt5_server="B", account_id=second)
