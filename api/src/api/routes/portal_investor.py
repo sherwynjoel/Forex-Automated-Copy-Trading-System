@@ -270,12 +270,14 @@ def create_portal_investor_router() -> APIRouter:
                 raise HTTPException(status_code=400, detail="receipt file not found")
         target_account_id: Optional[int] = None
         if target == "account":
-            linked = pc.linked_account(conn, ctx.org_id, ctx.user_id)
-            if linked is None:
+            # The 409 is checked before pick_account so owning none wins
+            # over a foreign id too (today's order; pick_account alone
+            # would 404 a foreign id first, which the read routes want but
+            # deposits do not).
+            if not pc.linked_accounts(conn, ctx.org_id, ctx.user_id):
                 raise HTTPException(status_code=409, detail="no account linked yet")
-            if body.target_account_id is not None and body.target_account_id != linked:
-                raise HTTPException(status_code=404, detail="Account not found")
-            target_account_id = linked
+            target_account_id = pc.pick_account(conn, ctx.org_id, ctx.user_id,
+                                                body.target_account_id, field="target_account_id")
         if hourly.is_limited(f"portal-deposit:{ctx.org_id}:{ctx.user_id}"):
             raise HTTPException(status_code=429, detail=RATE_LIMITED)
         fee = pc.fee_for(amount, Decimal(fee_pct))
@@ -539,12 +541,12 @@ def create_portal_investor_router() -> APIRouter:
             raise HTTPException(status_code=400, detail=str(exc))
         account_id: Optional[int] = None
         if "account" in (source_kind, target_kind):
-            account_id = pc.linked_account(conn, ctx.org_id, ctx.user_id)
-            if account_id is None:
-                raise HTTPException(status_code=409, detail="no account linked yet")
             named = body.source.account_id if source_kind == "account" else body.target.account_id
-            if named != account_id:
+            if not pc.owns_account(conn, ctx.org_id, ctx.user_id, named):
+                if not pc.linked_accounts(conn, ctx.org_id, ctx.user_id):
+                    raise HTTPException(status_code=409, detail="no account linked yet")
                 raise HTTPException(status_code=404, detail="Account not found")
+            account_id = named
         # The equity lookup is a network round trip to the copier and must
         # run BEFORE the lock is taken: nothing may be awaited while it is
         # held (lock_investor_ledger's docstring). The cap check itself
@@ -646,12 +648,6 @@ def create_portal_investor_router() -> APIRouter:
 
     # ---------------------------------------------------------------- summary
 
-    def _require_linked(conn: psycopg.Connection, ctx: OrgContext) -> int:
-        account_id = pc.linked_account(conn, ctx.org_id, ctx.user_id)
-        if account_id is None:
-            raise HTTPException(status_code=409, detail="no account linked yet")
-        return account_id
-
     @router.get("/investor/summary", response_model=Dict[str, Any])
     async def investor_summary(http_request: Request,
                                ctx: OrgContext = Depends(require_investor),
@@ -747,13 +743,13 @@ def create_portal_investor_router() -> APIRouter:
             raise HTTPException(status_code=400, detail=str(exc))
 
     # ---------------------------------------------------------- read-throughs
-    # Moved from the old investor router unchanged in behaviour.
+    # One account per call: ?account_id=, optional while the investor owns one.
 
     @router.get("/investor/positions", response_model=Dict[str, Any])
-    async def my_positions(http_request: Request,
+    async def my_positions(http_request: Request, account_id: Optional[int] = None,
                            ctx: OrgContext = Depends(require_investor),
                            conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
-        account_id = _require_linked(conn, ctx)
+        account_id = pc.pick_account(conn, ctx.org_id, ctx.user_id, account_id)
         _equity, source, positions = await pc.equity_for(http_request, conn, ctx.org_id,
                                                           account_id)
         keys = ("position_id", "symbol", "side", "volume", "entry_price", "current_price",
@@ -763,10 +759,11 @@ def create_portal_investor_router() -> APIRouter:
 
     @router.get("/investor/analytics", response_model=Dict[str, Any])
     async def my_analytics(http_request: Request, weeks: int = 4,
+                           account_id: Optional[int] = None,
                            ctx: OrgContext = Depends(require_investor),
                            conn: psycopg.Connection = Depends(get_conn),
                            cfg: ApiConfig = Depends(ApiConfig.from_env)) -> Dict[str, Any]:
-        account_id = _require_linked(conn, ctx)
+        account_id = pc.pick_account(conn, ctx.org_id, ctx.user_id, account_id)
         weeks = max(1, min(weeks, 12))
         return await _proxy_to_copier(
             http_request.app.state.http,
@@ -777,12 +774,13 @@ def create_portal_investor_router() -> APIRouter:
     async def my_history(kind: str, http_request: Request,
                          from_ms: int = Query(..., alias="from"),
                          to_ms: int = Query(..., alias="to"),
+                         account_id: Optional[int] = None,
                          ctx: OrgContext = Depends(require_investor),
                          conn: psycopg.Connection = Depends(get_conn),
                          cfg: ApiConfig = Depends(ApiConfig.from_env)) -> Dict[str, Any]:
         if kind not in ("deals", "orders", "cashflow"):
             raise HTTPException(status_code=400, detail="kind must be deals, orders or cashflow")
-        account_id = _require_linked(conn, ctx)
+        account_id = pc.pick_account(conn, ctx.org_id, ctx.user_id, account_id)
         return await _proxy_to_copier(
             http_request.app.state.http,
             f"{cfg.copier_control_url}/history/{kind}"
