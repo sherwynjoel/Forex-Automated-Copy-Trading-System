@@ -4,7 +4,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi, afterEach, beforeEach } from 'vitest'
 import InvestorTransfer, { pairAllowed, transferOptions } from './InvestorTransfer'
 import { mockUseOrg } from '../../test/orgMock'
-import { summaryFixture, transferFixture } from '../../test/portalFixtures'
+import { accountSummaryFixture, summaryFixture, transferFixture } from '../../test/portalFixtures'
 import type { InvestorSummary, PortalTransfer } from '../../lib/types'
 
 const { useOrgMock } = vi.hoisted(() => ({ useOrgMock: vi.fn() }))
@@ -16,20 +16,20 @@ function jsonResponse(payload: unknown, status = 200) {
   })
 }
 
+const inv = accountSummaryFixture({
+  account_id: 1001, nickname: 'Inv', mt5_login: null, mt5_server: null, equity: 2500, account_available: 2500,
+})
 const linked: InvestorSummary = {
-  ...summaryFixture(), currency: 'USD', link_state: 'linked',
-  account: { account_id: 1001, nickname: 'Inv', platform: 'mt5', status: 'ok', last_error: null, connected: true },
+  ...summaryFixture(), currency: 'USD', accounts: [inv],
   wallets: {
     main: { balance: 5120.5, on_hold: 100, available: 5020.5 },
     credit: { balance: 0, on_hold: 0, available: 0 },
     pamm: { balance: 300, on_hold: 0, available: 300 },
     social: { balance: 0, on_hold: 0, available: 0 },
   },
-  equity_source: 'live', equity: 2500, account_available: 2500,
+  equity_source: 'live', equity: 2500,
 }
-const unlinked: InvestorSummary = {
-  ...linked, link_state: 'unlinked', account: null, equity_source: 'unknown', equity: null, account_available: null,
-}
+const unlinked: InvestorSummary = { ...linked, accounts: [], equity_source: 'unknown', equity: null }
 const requested: PortalTransfer = transferFixture({
   id: 9, user_id: 1, source: { kind: 'wallet', wallet: 'main' }, target: { kind: 'account', account_id: 1001 },
   amount: 1000, status: 'requested', equity_at_request: null, equity_verified: false,
@@ -205,4 +205,25 @@ test('dismissing a load error shows the empty state, not an endless skeleton', a
   expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   expect(screen.queryByRole('status')).not.toBeInTheDocument()
   expect(screen.getByText('No transfers yet')).toBeInTheDocument()
+})
+
+test('several accounts each become a choice with their own available figure, named in the review', async () => {
+  const swing = accountSummaryFixture({ account_id: 1002, nickname: 'Swing', mt5_login: 6002, account_available: 300 })
+  const fetchMock = mockRoutes({ summary: { ...linked, accounts: [inv, swing] } })
+  render(<MemoryRouter><InvestorTransfer /></MemoryRouter>)
+  const to = await screen.findByLabelText('To')
+  expect(within(to).getAllByRole('option').map((o) => o.textContent))
+    .toEqual(['Trading account Inv', 'Trading account MT5 6002'])
+  await userEvent.selectOptions(screen.getByLabelText('From'), 'account:1002')
+  expect(screen.getByText('300.00 USD')).toBeInTheDocument()
+  await userEvent.type(screen.getByLabelText('Amount in USD'), '100')
+  await userEvent.click(screen.getByRole('button', { name: 'Request transfer' }))
+  const dialog = await screen.findByRole('dialog', { name: 'Move 100.00 USD from Trading account MT5 6002 to My wallet?' })
+  await enterPin(dialog, '123456')
+  await userEvent.click(within(dialog).getByRole('button', { name: 'Confirm transfer' }))
+  await waitFor(() => expect(posts(fetchMock)).toHaveLength(1))
+  expect(JSON.parse((posts(fetchMock)[0][1] as RequestInit).body as string)).toEqual({
+    source: { kind: 'account', account_id: 1002 }, target: { kind: 'wallet', wallet: 'main' },
+    amount: '100', mpin: '123456',
+  })
 })

@@ -5,8 +5,8 @@ import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi, afterEach, beforeEach } from 'vitest'
 import InvestorDeposit from './InvestorDeposit'
 import { mockUseOrg } from '../../test/orgMock'
-import { depositFixture, methodFixture, summaryFixture } from '../../test/portalFixtures'
-import type { InvestorSummary, PaymentMethod, PortalDeposit } from '../../lib/types'
+import { accountSummaryFixture, depositFixture, methodFixture, summaryFixture } from '../../test/portalFixtures'
+import type { AccountSummary, InvestorSummary, PaymentMethod, PortalDeposit } from '../../lib/types'
 
 const { useOrgMock } = vi.hoisted(() => ({ useOrgMock: vi.fn() }))
 vi.mock('../../lib/org', () => ({ useOrg: useOrgMock }))
@@ -26,8 +26,8 @@ function jsonResponse(payload: unknown, status = 200) {
 }
 
 const summary: InvestorSummary = {
-  ...summaryFixture(), currency: 'USD', deposits_open: true, link_state: 'linked',
-  account: { account_id: 1001, nickname: 'Inv', platform: 'mt5', status: 'ok', last_error: null, connected: true },
+  ...summaryFixture(), currency: 'USD', deposits_open: true,
+  accounts: [accountSummaryFixture({ account_id: 1001, nickname: 'Inv', mt5_login: null })],
 }
 const crypto: PaymentMethod = methodFixture({
   id: 5, kind: 'crypto', label: 'USDT on TRC20', enabled: true, currency: 'USD',
@@ -48,6 +48,7 @@ const notice: PortalDeposit = depositFixture({
 
 function mockRoutes(opts: {
   open?: boolean; linked?: boolean; rows?: PortalDeposit[]; fail?: boolean; methods?: PaymentMethod[]
+  accounts?: AccountSummary[]
 } = {}) {
   const deposits: PortalDeposit[] = [...(opts.rows ?? [])]
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -56,7 +57,8 @@ function mockRoutes(opts: {
     if (url.endsWith('/investor/summary')) {
       return jsonResponse({
         ...summary, deposits_open: opts.open ?? true,
-        ...(opts.linked === false ? { link_state: 'unlinked', account: null } : {}),
+        ...(opts.linked === false ? { accounts: [] } : {}),
+        ...(opts.accounts ? { accounts: opts.accounts } : {}),
       })
     }
     if (url.endsWith('/investor/payment-methods')) {
@@ -192,6 +194,7 @@ test('Trading account is offered as the target when an account is linked, and is
   render(<MemoryRouter><InvestorDeposit /></MemoryRouter>)
   await screen.findByText('TAddr123')
   await userEvent.click(screen.getByRole('radio', { name: 'Trading account' }))
+  expect(screen.queryByLabelText('Which trading account')).not.toBeInTheDocument()
   await userEvent.click(screen.getByRole('button', { name: '250' }))
   await userEvent.type(screen.getByLabelText('Transaction hash'), 'abc')
   await userEvent.click(screen.getByRole('button', { name: 'File deposit notice' }))
@@ -199,6 +202,28 @@ test('Trading account is offered as the target when an account is linked, and is
   expect(JSON.parse((posts(fetchMock)[0][1] as RequestInit).body as string)).toEqual({
     method_id: 5, amount: '250', reference: 'abc', receipt_file_id: null,
     target: 'account', target_account_id: 1001, note: null,
+  })
+})
+
+test('with several accounts the notice names the one picked', async () => {
+  const fetchMock = mockRoutes({ accounts: [
+    accountSummaryFixture({ account_id: 1001, nickname: 'Inv', mt5_login: null }),
+    accountSummaryFixture({ account_id: 1002, nickname: 'Swing', mt5_login: 6002 }),
+  ] })
+  render(<MemoryRouter><InvestorDeposit /></MemoryRouter>)
+  await screen.findByText('TAddr123')
+  expect(screen.queryByLabelText('Which trading account')).not.toBeInTheDocument()
+  await userEvent.click(screen.getByRole('radio', { name: 'Trading account' }))
+  const which = screen.getByLabelText('Which trading account')
+  expect(within(which).getAllByRole('option').map((o) => o.textContent)).toEqual(['Inv', 'MT5 6002'])
+  await userEvent.selectOptions(which, '1002')
+  await userEvent.click(screen.getByRole('button', { name: '250' }))
+  await userEvent.type(screen.getByLabelText('Transaction hash'), 'abc')
+  await userEvent.click(screen.getByRole('button', { name: 'File deposit notice' }))
+  await waitFor(() => expect(posts(fetchMock)).toHaveLength(1))
+  expect(JSON.parse((posts(fetchMock)[0][1] as RequestInit).body as string)).toEqual({
+    method_id: 5, amount: '250', reference: 'abc', receipt_file_id: null,
+    target: 'account', target_account_id: 1002, note: null,
   })
 })
 

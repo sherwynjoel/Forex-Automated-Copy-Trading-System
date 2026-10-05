@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { orgApi, orgUpload } from '../../lib/api'
 import { useOrg } from '../../lib/org'
 import { errorText, formatWhen, money } from '../../lib/format'
-import { ACCOUNT_CURRENCY, BADGE_TONE, statusLabel, statusTone } from '../../lib/investor'
+import { ACCOUNT_CURRENCY, BADGE_TONE, accountName, statusLabel, statusTone } from '../../lib/investor'
 import Badge from '../../components/Badge'
 import Banner from '../../components/Banner'
 import Button from '../../components/Button'
@@ -13,6 +13,7 @@ import Input from '../../components/Input'
 import Loading from '../../components/Loading'
 import Money from '../../components/Money'
 import PageHeader from '../../components/PageHeader'
+import Select from '../../components/Select'
 import Tabs from '../../components/Tabs'
 import NextStep from './NextStep'
 import type { InvestorSummary, PaymentMethod, PortalDeposit, UploadedFile } from '../../lib/types'
@@ -36,7 +37,8 @@ const BANK_FIELDS: { key: string; label: string }[] = [
   { key: 'country', label: 'Country' },
 ]
 
-const EMPTY_FORM = { amount: '', reference: '', note: '', target: 'wallet' as Target }
+// `account` is the picked trading account's id as a string; '' = the first.
+const EMPTY_FORM = { amount: '', reference: '', note: '', target: 'wallet' as Target, account: '' }
 
 type Copied = { key: string; label: string; how: 'copied' | 'selected' }
 
@@ -82,7 +84,9 @@ export default function InvestorDeposit() {
   const ofKind = methods.filter((m) => m.kind === activeKind)
   const selected = ofKind.find((m) => m.id === methodId) ?? ofKind[0] ?? null
   const address = selected?.kind === 'crypto' ? selected.details.address : null
-  const linked = summary?.link_state === 'linked' && summary.account != null
+  const accounts = summary?.accounts ?? []
+  const linked = accounts.length > 0
+  const accountId = form.account ? Number(form.account) : (accounts[0]?.account_id ?? null)
   const unit = selected?.currency ?? summary?.currency ?? ACCOUNT_CURRENCY
   const refLabel = selected?.kind === 'bank' ? 'Bank transaction ID' : 'Transaction hash'
 
@@ -171,7 +175,7 @@ export default function InvestorDeposit() {
           reference: form.reference.trim(),
           receipt_file_id,
           target: form.target,
-          target_account_id: form.target === 'account' ? (summary?.account?.account_id ?? null) : null,
+          target_account_id: form.target === 'account' ? accountId : null,
           note: form.note.trim() || null,
         }),
       })
@@ -361,6 +365,15 @@ export default function InvestorDeposit() {
                   )}
                 </div>
               </fieldset>
+              {form.target === 'account' && accounts.length > 1 && (
+                <label className="block">
+                  <span className="desk-label block mb-1">Which trading account</span>
+                  <Select aria-label="Which trading account" block value={accountId ?? ''}
+                          onChange={(e) => setForm({ ...form, account: e.target.value })}>
+                    {accounts.map((a) => <option key={a.account_id} value={a.account_id}>{accountName(a)}</option>)}
+                  </Select>
+                </label>
+              )}
               <label className="block">
                 <span className="desk-label block mb-1">Note (optional)</span>
                 <Input aria-label="Note" value={form.note}
