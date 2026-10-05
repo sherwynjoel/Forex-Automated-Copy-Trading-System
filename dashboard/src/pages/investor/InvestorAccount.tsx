@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { orgApi } from '../../lib/api'
 import { useOrg } from '../../lib/org'
 import { errorText, money } from '../../lib/format'
-import { ACCOUNT_CURRENCY } from '../../lib/investor'
+import { ACCOUNT_CURRENCY, accountName, pickAccount } from '../../lib/investor'
 import { useHiddenBalances } from '../../lib/hideBalances'
 import Banner from '../../components/Banner'
 import Card from '../../components/Card'
@@ -12,7 +13,8 @@ import PageHeader from '../../components/PageHeader'
 import StatTile from '../../components/StatTile'
 import { EquityCurve } from '../../components/charts'
 import NextStep from './NextStep'
-import type { AccountRequest, Analytics, InvestorPositions, InvestorSummary } from '../../lib/types'
+import AccountSwitcher from './AccountSwitcher'
+import type { Analytics, InvestorPositions, InvestorSummary } from '../../lib/types'
 
 const POLL_MS = 10000
 
@@ -59,38 +61,39 @@ function AnalyticsPanel({ analytics, unit }: { analytics: Analytics; unit: strin
 
 export default function InvestorAccount() {
   const { me, org, orgId } = useOrg()
+  const [params, setParams] = useSearchParams()
+  const wanted = params.get('account')
   const [summary, setSummary] = useState<InvestorSummary | null>(null)
   const [positions, setPositions] = useState<InvestorPositions | null>(null)
   const [analytics, setAnalytics] = useState<Analytics | null>(null)
-  const [login, setLogin] = useState<AccountRequest | null>(null)
   const [error, setError] = useState<string | null>(null)
   // True once the first load has settled, success or failure: the skeleton
   // is for "not asked yet", never for "asked and failed".
   const [loaded, setLoaded] = useState(false)
+  // Bumped per load: a switch starts a new load while the previous
+  // account's figures may still be in flight; only the newest may land.
+  const seq = useRef(0)
 
   const refresh = useCallback(async () => {
+    const mine = ++seq.current
     try {
-      const [s, requests] = await Promise.all([
-        orgApi<InvestorSummary>(orgId, 'investor/summary'),
-        orgApi<AccountRequest[]>(orgId, 'investor/account-requests'),
-      ])
-      setSummary(s)
-      setLogin(requests.find((r) => r.status === 'fulfilled') ?? null)
-      if (s.link_state === 'linked') {
-        const [p, a] = await Promise.all([
-          orgApi<InvestorPositions>(orgId, 'investor/positions'),
-          orgApi<Analytics>(orgId, 'investor/analytics?weeks=4'),
-        ])
-        setPositions(p); setAnalytics(a)
-      } else {
-        setPositions(null); setAnalytics(null)
-      }
+      const s = await orgApi<InvestorSummary>(orgId, 'investor/summary')
+      const a = pickAccount(s.accounts, wanted)
+      const [p, an] = a
+        ? await Promise.all([
+            orgApi<InvestorPositions>(orgId, `investor/positions?account_id=${a.account_id}`),
+            orgApi<Analytics>(orgId, `investor/analytics?weeks=4&account_id=${a.account_id}`),
+          ])
+        : [null, null] as const
+      if (mine !== seq.current) return
+      setSummary(s); setPositions(p); setAnalytics(an)
       setError(null)
     } catch (err) {
+      if (mine !== seq.current) return
       setError(errorText(err, 'Could not load your account'))
     }
     setLoaded(true)
-  }, [orgId])
+  }, [orgId, wanted])
 
   useEffect(() => {
     refresh()
@@ -99,11 +102,17 @@ export default function InvestorAccount() {
   }, [refresh])
 
   const unit = summary?.currency ?? ACCOUNT_CURRENCY
+  const account = summary ? pickAccount(summary.accounts, wanted) : null
 
   return (
     <div className="space-y-6 max-w-5xl">
       <PageHeader title="Account" />
       {error && <Banner kind="error" onDismiss={() => setError(null)}>{error}</Banner>}
+
+      {summary && (
+        <AccountSwitcher accounts={summary.accounts} value={account?.account_id ?? null}
+                         onChange={(id) => setParams({ account: String(id) }, { replace: true })} />
+      )}
 
       <Card title="Profile">
         <dl className="grid gap-3 md:grid-cols-2 text-sm">
@@ -114,48 +123,53 @@ export default function InvestorAccount() {
         </dl>
       </Card>
 
-      {login && (
+      {account?.mt5_login != null && (
         <Card title="Your MT5 login">
-          <dl className="inset p-4 grid gap-3 sm:grid-cols-3 text-sm">
-            <div><dt className="desk-label">Login</dt><dd className="num text-ink">{login.mt5_login}</dd></div>
-            <div><dt className="desk-label">Server</dt><dd className="num text-ink">{login.mt5_server}</dd></div>
-            <div><dt className="desk-label">Package</dt>
-              <dd className="text-ink">{`${login.package_name} · 1:${login.leverage}`}</dd></div>
+          <dl className="inset p-4 grid gap-3 sm:grid-cols-2 text-sm">
+            <div><dt className="desk-label">Login</dt><dd className="num text-ink">{account.mt5_login}</dd></div>
+            <div><dt className="desk-label">Server</dt><dd className="num text-ink">{account.mt5_server ?? '—'}</dd></div>
           </dl>
         </Card>
       )}
 
       {!loaded && <Loading lines={3} />}
 
-      {summary && summary.link_state !== 'linked' && (
+      {summary && summary.accounts.length === 0 && (
         <NextStep title="Your account is being set up">
           Your admin links your trading account; positions and performance appear here once it is linked.
         </NextStep>
       )}
 
-      {summary?.account && (
-        <Card title="Trading account">
+      {account && (
+        // Titled "Trading account details", not "Trading account": the
+        // AccountSwitcher control above is labelled exactly "Trading
+        // account" (brief, Step 3), and getByLabelText also matches any
+        // element whose aria-labelledby content equals the query text --
+        // this Card's own <section aria-labelledby> would tie for that
+        // name otherwise, making the switcher ambiguous to find and this
+        // card impossible to rule out when it is hidden.
+        <Card title="Trading account details">
           <dl className="inset p-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4 text-sm">
             <div><dt className="desk-label">Account</dt>
-              <dd className="text-ink">{summary.account.nickname ?? summary.account.account_id}</dd></div>
+              <dd className="text-ink">{accountName(account)}</dd></div>
             <div><dt className="desk-label">Platform</dt>
-              <dd className="text-ink uppercase">{summary.account.platform}</dd></div>
+              <dd className="text-ink uppercase">{account.platform}</dd></div>
             <div><dt className="desk-label">Connection</dt>
-              <dd className={summary.account.connected ? 'text-profit' : 'text-warn-deep'}>
-                {summary.account.connected ? 'connected' : 'terminal offline'}
+              <dd className={account.connected ? 'text-profit' : 'text-warn-deep'}>
+                {account.connected ? 'connected' : 'terminal offline'}
               </dd></div>
             <div><dt className="desk-label">Open positions</dt>
-              <dd className="num text-ink">{summary.open_positions}</dd></div>
+              <dd className="num text-ink">{account.open_positions}</dd></div>
             <div><dt className="desk-label">Equity</dt>
-              <dd className="text-ink"><Money value={summary.equity} unit={unit} />
-                <span className="text-xs text-ink-soft"> {summary.equity_source}</span></dd></div>
+              <dd className="text-ink"><Money value={account.equity} unit={unit} />
+                <span className="text-xs text-ink-soft"> {account.equity_source}</span></dd></div>
             <div><dt className="desk-label">Net funded</dt>
-              <dd className="text-ink"><Money value={summary.net_funded} unit={unit} /></dd></div>
+              <dd className="text-ink"><Money value={account.net_funded} unit={unit} /></dd></div>
             <div><dt className="desk-label">Profit</dt>
-              <dd className={summary.profit != null && summary.profit < 0 ? 'text-loss' : 'text-profit'}>
-                <Money value={summary.profit} unit={unit} /></dd></div>
+              <dd className={account.profit != null && account.profit < 0 ? 'text-loss' : 'text-profit'}>
+                <Money value={account.profit} unit={unit} /></dd></div>
             <div><dt className="desk-label">Available to move</dt>
-              <dd className="text-ink"><Money value={summary.account_available} unit={unit} /></dd></div>
+              <dd className="text-ink"><Money value={account.account_available} unit={unit} /></dd></div>
           </dl>
         </Card>
       )}

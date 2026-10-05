@@ -1,15 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { orgApi } from '../../lib/api'
 import { useOrg } from '../../lib/org'
 import { errorText, formatWhen } from '../../lib/format'
-import { ACCOUNT_CURRENCY } from '../../lib/investor'
+import { ACCOUNT_CURRENCY, pickAccount } from '../../lib/investor'
 import Banner from '../../components/Banner'
 import Button from '../../components/Button'
 import Card from '../../components/Card'
 import Loading from '../../components/Loading'
 import Money from '../../components/Money'
 import PageHeader from '../../components/PageHeader'
-import type { Deal } from '../../lib/types'
+import AccountSwitcher from './AccountSwitcher'
+import type { AccountSummary, Deal, InvestorSummary } from '../../lib/types'
 
 const WEEK_MS = 7 * 24 * 3600 * 1000
 
@@ -20,6 +22,9 @@ function netOf(d: Deal): number | null {
 
 export default function InvestorHistory() {
   const { orgId } = useOrg()
+  const [params, setParams] = useSearchParams()
+  const wanted = params.get('account')
+  const [accounts, setAccounts] = useState<AccountSummary[]>([])
   // Fixed once at mount: this page has no "refresh" action, so "now" for
   // paging purposes is "when the page was opened", not a moving target.
   // Reading Date.now() again inside goLater (instead of against this
@@ -38,15 +43,21 @@ export default function InvestorHistory() {
     setLoading(true); setError(null)
     setDeals([])
     try {
+      // The summary names the accounts; with none the history call answers
+      // 409 "no account linked yet", shown as today.
+      const s = await orgApi<InvestorSummary>(orgId, 'investor/summary')
+      setAccounts(s.accounts)
+      const a = pickAccount(s.accounts, wanted)
       const r = await orgApi<{ deals: Deal[]; has_more: boolean }>(
-        orgId, `investor/history/deals?from=${windowEnd - WEEK_MS}&to=${windowEnd}`)
+        orgId, `investor/history/deals?from=${windowEnd - WEEK_MS}&to=${windowEnd}`
+          + (a ? `&account_id=${a.account_id}` : ''))
       setDeals(r.deals.filter((d) => d.close != null))
     } catch (err) {
       setError(errorText(err, 'Could not load your history'))
     } finally {
       setLoading(false)
     }
-  }, [orgId, windowEnd])
+  }, [orgId, windowEnd, wanted])
 
   useEffect(() => { load() }, [load])
 
@@ -82,6 +93,9 @@ export default function InvestorHistory() {
         }
       />
       {error && <Banner kind="error" onDismiss={() => setError(null)}>{error}</Banner>}
+
+      <AccountSwitcher accounts={accounts} value={pickAccount(accounts, wanted)?.account_id ?? null}
+                       onChange={(id) => setParams({ account: String(id) }, { replace: true })} />
 
       {/* Deal figures are in the account's deposit currency; the summary
           names none, so the labelled default applies (lib/investor.ts).
