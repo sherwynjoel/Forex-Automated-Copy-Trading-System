@@ -169,3 +169,49 @@ test('with several accounts a switcher picks one, keeps it in the URL and loads 
   expect(screen.getByTestId('search')).toHaveTextContent('?account=1001')
   await waitFor(() => expect(screen.queryByRole('heading', { name: 'Your MT5 login' })).not.toBeInTheDocument())
 })
+
+test('switching accounts clears the old positions and analytics before the new ones land', async () => {
+  const swing = { ...inv, account_id: 1002, nickname: 'Swing', mt5_login: 6002, mt5_server: 'Broker-Live' }
+  // 1001's figures are held back on purpose: while they are in flight, the
+  // page must already have dropped 1002's XAUUSD row and win rate, never
+  // show them underneath the still-loading new account.
+  let releasePositions1001: (() => void) | null = null
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input)
+    if (url.endsWith('/investor/summary')) return jsonResponse({ ...linked, accounts: [inv, swing] })
+    if (url.includes('/investor/positions') && url.includes('account_id=1001')) {
+      await new Promise<void>((resolve) => { releasePositions1001 = resolve })
+      return jsonResponse({ equity_source: 'live', positions: [] })
+    }
+    if (url.includes('/investor/positions')) {
+      return jsonResponse({ equity_source: 'live', positions: [
+        { position_id: 7, symbol: 'XAUUSD', side: 'BUY', volume: 1, entry_price: 4350,
+          current_price: 4360, stop_loss: 4300, take_profit: 4400, pnl_quote: 10 }] })
+    }
+    if (url.includes('/investor/analytics')) {
+      return jsonResponse({ closed_trades: 3, wins: 2, losses: 1, win_rate: 66.7,
+        profit_factor: 2.1, best_trade: 50, worst_trade: -20, avg_win: 40, avg_loss: -20,
+        net_pnl: 120.5, gross_wins: 140.5, gross_losses: 20, max_drawdown: 30,
+        max_drawdown_pct: 0.6, equity_curve: [{ timestamp: 1, balance: 5000 },
+        { timestamp: 2, balance: 5120.5 }], per_symbol: [], weekly: [], weeks: 4, truncated: false })
+    }
+    return jsonResponse({})
+  })
+  vi.stubGlobal('fetch', fetchMock)
+
+  render(
+    <MemoryRouter initialEntries={['/org/1/invest/account?account=1002']}>
+      <InvestorAccount />
+    </MemoryRouter>)
+  expect(await screen.findByText('XAUUSD')).toBeInTheDocument()
+  expect(await screen.findByText(/66\.7%/)).toBeInTheDocument()
+
+  const picker = await screen.findByLabelText('Trading account')
+  await userEvent.selectOptions(picker, '1001')
+
+  expect(screen.queryByText('XAUUSD')).not.toBeInTheDocument()
+  expect(screen.queryByText(/66\.7%/)).not.toBeInTheDocument()
+
+  releasePositions1001?.()
+  await waitFor(() => expect(screen.getByText('No open positions')).toBeInTheDocument())
+})

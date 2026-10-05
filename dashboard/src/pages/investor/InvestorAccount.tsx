@@ -95,6 +95,15 @@ export default function InvestorAccount() {
     setLoaded(true)
   }, [orgId, wanted])
 
+  // Switching accounts (wanted changes) drops the previous account's
+  // positions and analytics before refresh's fetch lands, so its card
+  // never sits under the new account's data for a frame; a plain poll on
+  // the same account leaves them in place until the fresher figures arrive.
+  useEffect(() => {
+    setPositions(null)
+    setAnalytics(null)
+  }, [wanted])
+
   useEffect(() => {
     refresh()
     const id = window.setInterval(refresh, POLL_MS)

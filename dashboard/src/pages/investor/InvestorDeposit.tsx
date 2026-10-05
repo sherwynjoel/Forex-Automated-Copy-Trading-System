@@ -86,7 +86,11 @@ export default function InvestorDeposit() {
   const address = selected?.kind === 'crypto' ? selected.details.address : null
   const accounts = summary?.accounts ?? []
   const linked = accounts.length > 0
-  const accountId = form.account ? Number(form.account) : (accounts[0]?.account_id ?? null)
+  // A refresh may drop the picked account (an admin unlinked it); fall back
+  // to the first one so a submit never names an account that is gone.
+  const pickedStillOwned = accounts.some((a) => String(a.account_id) === form.account)
+  const accountId = form.account && pickedStillOwned
+    ? Number(form.account) : (accounts[0]?.account_id ?? null)
   const unit = selected?.currency ?? summary?.currency ?? ACCOUNT_CURRENCY
   const refLabel = selected?.kind === 'bank' ? 'Bank transaction ID' : 'Transaction hash'
 

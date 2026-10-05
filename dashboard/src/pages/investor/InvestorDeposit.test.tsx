@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs'
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi, afterEach, beforeEach } from 'vitest'
@@ -227,6 +227,52 @@ test('with several accounts the notice names the one picked', async () => {
   })
 })
 
+test('a submit never names an account a refresh no longer owns', async () => {
+  // Account 1002 is picked while it is still linked; a refresh afterwards
+  // (here, the one `cancel` triggers) finds the investor down to just
+  // 1001 -- an admin unlinked 1002 meanwhile. The stale pick must not reach
+  // the server: the next submit falls back to the account that is still there.
+  let summaryCalls = 0
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input)
+    if (url.endsWith('/investor/summary')) {
+      summaryCalls += 1
+      const accounts = summaryCalls === 1
+        ? [accountSummaryFixture({ account_id: 1001, nickname: 'Inv', mt5_login: null }),
+           accountSummaryFixture({ account_id: 1002, nickname: 'Swing', mt5_login: 6002 })]
+        : [accountSummaryFixture({ account_id: 1001, nickname: 'Inv', mt5_login: null })]
+      return jsonResponse({ ...summary, accounts })
+    }
+    if (url.endsWith('/investor/payment-methods')) return jsonResponse([crypto, bank])
+    if (url.endsWith('/investor/deposits') && init?.method === 'POST') return jsonResponse(notice, 201)
+    if (url.endsWith('/investor/deposits')) return jsonResponse([{ ...notice, status: 'pending' }])
+    if (/\/investor\/deposits\/\d+\/cancel$/.test(url) && init?.method === 'POST') {
+      return jsonResponse({ ...notice, status: 'cancelled' })
+    }
+    return jsonResponse({})
+  })
+  vi.stubGlobal('fetch', fetchMock)
+
+  render(<MemoryRouter><InvestorDeposit /></MemoryRouter>)
+  await screen.findByText('TAddr123')
+  await userEvent.click(screen.getByRole('radio', { name: 'Trading account' }))
+  await userEvent.selectOptions(screen.getByLabelText('Which trading account'), '1002')
+
+  await userEvent.click(screen.getByRole('button', { name: 'Cancel deposit 1' }))
+  await userEvent.click(screen.getByRole('button', { name: 'Yes, cancel it' }))
+  await waitFor(() => expect(screen.getByText('Notice cancelled.')).toBeInTheDocument())
+  expect(screen.queryByLabelText('Which trading account')).not.toBeInTheDocument()
+
+  await userEvent.click(screen.getByRole('button', { name: '250' }))
+  await userEvent.type(screen.getByLabelText('Transaction hash'), 'xyz')
+  await userEvent.click(screen.getByRole('button', { name: 'File deposit notice' }))
+  await waitFor(() => expect(posts(fetchMock).some(([u]) => String(u).endsWith('/investor/deposits'))).toBe(true))
+  const post = posts(fetchMock).find(([u]) => String(u).endsWith('/investor/deposits'))!
+  expect(JSON.parse((post[1] as RequestInit).body as string)).toMatchObject({
+    target: 'account', target_account_id: 1001,
+  })
+})
+
 test('without a linked account only My wallet is offered', async () => {
   mockRoutes({ linked: false })
   render(<MemoryRouter><InvestorDeposit /></MemoryRouter>)
@@ -251,7 +297,7 @@ test('Copy address copies, says so, and reverts after two seconds', async () => 
   expect(await screen.findByRole('button', { name: 'Copied' })).toBeInTheDocument()
   expect(screen.getByText('Address copied to the clipboard.')).toBeInTheDocument()
 
-  await vi.advanceTimersByTimeAsync(2000)
+  await act(async () => { await vi.advanceTimersByTimeAsync(2000) })
   expect(await screen.findByRole('button', { name: 'Copy address' })).toBeInTheDocument()
 })
 
