@@ -148,10 +148,16 @@ def link_account(conn: psycopg.Connection, org_id: int, user_id: int, account_id
     role_row = conn.execute(
         "SELECT role, platform FROM accounts WHERE ctid_trader_account_id = %s AND org_id = %s",
         (account_id, org_id)).fetchone()
-    if role_row and role_row[0] == "master":
+    # Existence (and the master/mt5_only checks, which need the row) are
+    # settled BEFORE the cap: an unknown id is 404 even while the investor
+    # is already at the limit, never the limit's 409.
+    if not role_row:
+        raise HTTPException(status_code=404,
+                            detail="Account not found in this workspace, or already linked")
+    if role_row[0] == "master":
         raise HTTPException(status_code=400,
                             detail="The master account cannot be linked to an investor")
-    if mt5_only and role_row and role_row[1] != "mt5":
+    if mt5_only and role_row[1] != "mt5":
         raise HTTPException(status_code=400, detail="Only an MT5 account can be linked here")
     limit = portal_settings(conn, org_id)["max_live_accounts"]
     # ponytail: count then update, no lock -- two admins linking to the same

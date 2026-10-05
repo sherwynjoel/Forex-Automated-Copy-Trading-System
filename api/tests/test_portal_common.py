@@ -300,6 +300,8 @@ def test_link_account_keeps_the_link_rules_and_the_cap(org_client, make_user, db
         conn.execute("UPDATE portal_settings SET max_live_accounts = 1 WHERE org_id = %s",
                      (org_id,))
         assert refused(second) == (409, "you have reached the limit of 1 live accounts")
+        # Even at the cap, an unknown id is still 404, never the limit's 409.
+        assert refused(999) == (404, "Account not found in this workspace, or already linked")
         conn.execute("UPDATE portal_settings SET max_live_accounts = 2 WHERE org_id = %s",
                      (org_id,))
         with conn.transaction():
