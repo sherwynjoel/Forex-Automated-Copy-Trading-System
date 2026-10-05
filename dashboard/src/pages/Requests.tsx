@@ -277,11 +277,11 @@ export default function Requests() {
                   open dialog/drawer and any revealed passwords are dropped. */}
               {tab === 'kyc' && (
                 <VerificationTab key={orgId} orgId={orgId} control={control} show={show}
-                                 onDone={tabDone} onError={setError} />
+                                 onDone={tabDone} />
               )}
               {tab === 'account_requests' && (
                 <AccountRequestsTab key={orgId} orgId={orgId} control={control} show={show}
-                                    onDone={tabDone} onError={setError} />
+                                    onDone={tabDone} />
               )}
             </div>
           </Card>

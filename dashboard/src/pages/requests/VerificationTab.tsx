@@ -16,7 +16,6 @@ export interface DeskTabProps {
   control: boolean
   show: 'open' | 'all'
   onDone: (message: string) => void
-  onError: (message: string) => void
 }
 
 const TH = 'desk-label px-4 py-2 font-semibold'

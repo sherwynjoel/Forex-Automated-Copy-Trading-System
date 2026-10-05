@@ -80,7 +80,9 @@ test('/ redirects to /welcome when the user has no orgs', async () => {
   await waitFor(() => {
     expect(window.location.pathname).toBe('/welcome')
   })
-  expect(await screen.findByText(/create an organization/i)).toBeInTheDocument()
+  // Welcome is a lazy chunk; under a full parallel run its first import can
+  // outlast the default 1s wait.
+  expect(await screen.findByText(/create an organization/i, {}, { timeout: 5000 })).toBeInTheDocument()
 })
 
 test('an /org/:orgId route redirects to /welcome when the user is not a member of that org', async () => {

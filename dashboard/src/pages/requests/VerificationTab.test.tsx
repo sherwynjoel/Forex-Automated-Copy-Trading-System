@@ -37,11 +37,11 @@ afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 test('the open view lists submitted profiles; All adds the decided ones', async () => {
   mockRoutes()
-  const { rerender } = render(<VerificationTab orgId={1} control show="open" onDone={vi.fn()} onError={vi.fn()} />)
+  const { rerender } = render(<VerificationTab orgId={1} control show="open" onDone={vi.fn()} />)
   expect(await screen.findByText('Ada')).toBeInTheDocument()
   expect(screen.getByText('Under review')).toBeInTheDocument()
   expect(screen.queryByText('Bob')).not.toBeInTheDocument()
-  rerender(<VerificationTab orgId={1} control show="all" onDone={vi.fn()} onError={vi.fn()} />)
+  rerender(<VerificationTab orgId={1} control show="all" onDone={vi.fn()} />)
   expect(screen.getByText('Bob')).toBeInTheDocument()
   expect(screen.getByText('Verified')).toBeInTheDocument()
   expect(screen.queryByRole('button', { name: 'Approve verification 6' })).not.toBeInTheDocument()
@@ -49,7 +49,7 @@ test('the open view lists submitted profiles; All adds the decided ones', async 
 
 test('details show every field and the four documents', async () => {
   mockRoutes()
-  render(<VerificationTab orgId={1} control show="open" onDone={vi.fn()} onError={vi.fn()} />)
+  render(<VerificationTab orgId={1} control show="open" onDone={vi.fn()} />)
   await userEvent.click(await screen.findByRole('button', { name: 'Details of verification 5' }))
   const drawer = await screen.findByRole('dialog', { name: 'Verification of Ada' })
   expect(within(drawer).getByText('P1234567')).toBeInTheDocument()
@@ -62,7 +62,7 @@ test('details show every field and the four documents', async () => {
 test('a rejection needs a note; an approval posts and reports back', async () => {
   const fetchMock = mockRoutes()
   const onDone = vi.fn()
-  render(<VerificationTab orgId={1} control show="open" onDone={onDone} onError={vi.fn()} />)
+  render(<VerificationTab orgId={1} control show="open" onDone={onDone} />)
   await userEvent.click(await screen.findByRole('button', { name: 'Reject verification 5' }))
   let dialog = await screen.findByRole('dialog', { name: 'Reject the verification of Ada' })
   expect(within(dialog).getByRole('button', { name: 'Reject' })).toBeDisabled()
@@ -78,7 +78,7 @@ test('a rejection needs a note; an approval posts and reports back', async () =>
 
 test('a viewer sees the queue but no decisions', async () => {
   mockRoutes()
-  render(<VerificationTab orgId={1} control={false} show="open" onDone={vi.fn()} onError={vi.fn()} />)
+  render(<VerificationTab orgId={1} control={false} show="open" onDone={vi.fn()} />)
   expect(await screen.findByText('Ada')).toBeInTheDocument()
   expect(screen.queryByRole('button', { name: 'Approve verification 5' })).not.toBeInTheDocument()
   expect(screen.getByRole('button', { name: 'Details of verification 5' })).toBeInTheDocument()
@@ -89,7 +89,7 @@ test('a failed load stays in the tab with Retry, never an empty queue', async ()
   vi.stubGlobal('fetch', vi.fn(async () => fail
     ? jsonResponse({ detail: 'boom' }, 500)
     : jsonResponse([{ ...submitted }])))
-  render(<VerificationTab orgId={1} control show="open" onDone={vi.fn()} onError={vi.fn()} />)
+  render(<VerificationTab orgId={1} control show="open" onDone={vi.fn()} />)
   expect(await screen.findByText('boom')).toBeInTheDocument()
   expect(screen.queryByText('No open verifications')).not.toBeInTheDocument()
   fail = false

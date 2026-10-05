@@ -51,7 +51,7 @@ afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
 test('reveal with the MPIN, then fulfil with login, server and a linked MT5 account', async () => {
   const fetchMock = mockRoutes()
   const onDone = vi.fn()
-  render(<AccountRequestsTab orgId={1} control show="open" onDone={onDone} onError={vi.fn()} />)
+  render(<AccountRequestsTab orgId={1} control show="open" onDone={onDone} />)
   expect(await screen.findByText('Ada')).toBeInTheDocument()
   expect(screen.getByText('Standard')).toBeInTheDocument()
   await userEvent.click(screen.getByRole('button', { name: 'Fulfil account request 7' }))
@@ -78,7 +78,7 @@ test('reveal with the MPIN, then fulfil with login, server and a linked MT5 acco
 
 test('fulfil needs a login number and a server before anything is sent', async () => {
   const fetchMock = mockRoutes()
-  render(<AccountRequestsTab orgId={1} control show="open" onDone={vi.fn()} onError={vi.fn()} />)
+  render(<AccountRequestsTab orgId={1} control show="open" onDone={vi.fn()} />)
   await userEvent.click(await screen.findByRole('button', { name: 'Fulfil account request 7' }))
   const drawer = await screen.findByRole('dialog', { name: 'Fulfil request #7' })
   await userEvent.click(within(drawer).getByRole('button', { name: 'Fulfil request' }))
@@ -92,7 +92,7 @@ test('fulfil needs a login number and a server before anything is sent', async (
 test('a rejection needs a note and posts it', async () => {
   const fetchMock = mockRoutes()
   const onDone = vi.fn()
-  render(<AccountRequestsTab orgId={1} control show="open" onDone={onDone} onError={vi.fn()} />)
+  render(<AccountRequestsTab orgId={1} control show="open" onDone={onDone} />)
   await userEvent.click(await screen.findByRole('button', { name: 'Reject account request 7' }))
   const dialog = await screen.findByRole('dialog', { name: 'Reject the account request of Ada' })
   expect(within(dialog).getByRole('button', { name: 'Reject' })).toBeDisabled()
@@ -104,7 +104,7 @@ test('a rejection needs a note and posts it', async () => {
 
 test('a viewer sees the queue but no actions', async () => {
   mockRoutes()
-  render(<AccountRequestsTab orgId={1} control={false} show="open" onDone={vi.fn()} onError={vi.fn()} />)
+  render(<AccountRequestsTab orgId={1} control={false} show="open" onDone={vi.fn()} />)
   expect(await screen.findByText('Ada')).toBeInTheDocument()
   expect(screen.queryByRole('button', { name: 'Fulfil account request 7' })).not.toBeInTheDocument()
 })
@@ -119,7 +119,7 @@ test('a failed load stays in the tab with Retry, never an empty queue', async ()
     }
     return jsonResponse([])
   }))
-  render(<AccountRequestsTab orgId={1} control show="open" onDone={vi.fn()} onError={vi.fn()} />)
+  render(<AccountRequestsTab orgId={1} control show="open" onDone={vi.fn()} />)
   expect(await screen.findByText('boom')).toBeInTheDocument()
   expect(screen.queryByText('No open account requests')).not.toBeInTheDocument()
   fail = false
@@ -140,7 +140,7 @@ test('a fulfil 409 clears the passwords and reloads the queue', async () => {
     return jsonResponse([])
   })
   vi.stubGlobal('fetch', fetchMock)
-  render(<AccountRequestsTab orgId={1} control show="open" onDone={vi.fn()} onError={vi.fn()} />)
+  render(<AccountRequestsTab orgId={1} control show="open" onDone={vi.fn()} />)
   await userEvent.click(await screen.findByRole('button', { name: 'Fulfil account request 7' }))
   const drawer = await screen.findByRole('dialog', { name: 'Fulfil request #7' })
   await enterPin(drawer, '123456')
@@ -157,7 +157,7 @@ test('a fulfil 409 clears the passwords and reloads the queue', async () => {
 
 test('a login beyond the safe integer range is refused inline', async () => {
   const fetchMock = mockRoutes()
-  render(<AccountRequestsTab orgId={1} control show="open" onDone={vi.fn()} onError={vi.fn()} />)
+  render(<AccountRequestsTab orgId={1} control show="open" onDone={vi.fn()} />)
   await userEvent.click(await screen.findByRole('button', { name: 'Fulfil account request 7' }))
   const drawer = await screen.findByRole('dialog', { name: 'Fulfil request #7' })
   await userEvent.type(within(drawer).getByLabelText('MT5 login'), '9007199254740993')
@@ -169,7 +169,7 @@ test('a login beyond the safe integer range is refused inline', async () => {
 
 test('closing the drawer forgets the passwords; reopening asks for the MPIN again', async () => {
   mockRoutes()
-  render(<AccountRequestsTab orgId={1} control show="open" onDone={vi.fn()} onError={vi.fn()} />)
+  render(<AccountRequestsTab orgId={1} control show="open" onDone={vi.fn()} />)
   await userEvent.click(await screen.findByRole('button', { name: 'Fulfil account request 7' }))
   let drawer = await screen.findByRole('dialog', { name: 'Fulfil request #7' })
   await enterPin(drawer, '000000')
