@@ -336,11 +336,33 @@ def net_funded(conn: psycopg.Connection, org_id: int, user_id: int, account_id: 
     return Decimal(total)
 
 
+def credit_transfer_open(conn: psycopg.Connection, org_id: int, user_id: int,
+                         account_id: int) -> bool:
+    """True while a requested/approved credit->account transfer is still
+    moving money into this account. Mutual exclusion with an outflow out of
+    the same account (request_transfer, ruling on the Task 11 fix round,
+    Finding 1): while either direction is open the other is refused, so a
+    credit transfer can never land `done` in between two outflows that each
+    looked capped alone and together moved more bonus principal out than
+    the account ever held clear of it."""
+    return conn.execute(
+        "SELECT 1 FROM transfers WHERE org_id = %s AND user_id = %s AND status = ANY(%s) "
+        "AND source_kind = 'wallet' AND source_wallet = 'credit' "
+        "AND target_kind = 'account' AND target_account_id = %s LIMIT 1",
+        (org_id, user_id, list(OPEN_TRANSFER_STATUSES), account_id)).fetchone() is not None
+
+
 def credit_funded(conn: psycopg.Connection, org_id: int, user_id: int,
                   account_id: int) -> Decimal:
     """Bonus credit this investor moved into this account: done transfers
     from the Credit wallet. The desk funds them as broker credit; that
-    principal never moves back out to a wallet (profit made on it may)."""
+    principal never moves back out to a wallet (profit made on it may).
+
+    ponytail: keyed on (user_id, account_id) over `transfers` rows, so
+    deleting and re-adding the account (its transfers' account_id is ON
+    DELETE SET NULL) or relinking it to a different investor resets this
+    floor to 0 for whoever holds it next. Both are admin-only actions;
+    accepted rather than guarded against."""
     (total,) = conn.execute(
         "SELECT COALESCE(SUM(amount), 0) FROM transfers WHERE org_id = %s AND user_id = %s "
         "AND status = 'done' AND source_kind = 'wallet' AND source_wallet = 'credit' "
