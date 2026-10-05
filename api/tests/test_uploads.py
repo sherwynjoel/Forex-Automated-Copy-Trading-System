@@ -144,11 +144,20 @@ def test_the_kyc_purposes_are_accepted(portal, purpose):
     assert r.json()["purpose"] == purpose
 
 
-@pytest.mark.parametrize("purpose", ["ticket_attachment", "avatar", "selfie", ""])
+@pytest.mark.parametrize("purpose", ["avatar", "selfie", ""])
 def test_only_the_accepted_purposes_are_stored(portal, purpose):
     client, org_id, _, _ = portal
     r = upload(client, org_id, purpose=purpose)
     assert r.status_code == 400 and r.json()["detail"] == "purpose is not accepted yet"
+
+
+def test_ticket_attachments_are_images_only(portal):
+    client, org_id, _, _ = portal
+    r = upload(client, org_id, purpose="ticket_attachment")
+    assert r.status_code == 201 and r.json()["purpose"] == "ticket_attachment"
+    r = upload(client, org_id, PDF, purpose="ticket_attachment", name="a.pdf",
+               claimed="application/pdf")
+    assert r.status_code == 400 and r.json()["detail"] == "attachments must be images"
 
 
 def test_thirty_uploads_an_hour_per_investor(portal):

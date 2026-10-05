@@ -245,6 +245,9 @@ def create_app(http_transport: Optional[httpx.BaseTransport] = None) -> FastAPI:
     from .routes.portal_notifications import create_portal_notifications_router
     app.include_router(create_portal_notifications_router())
 
+    from .routes.portal_support import create_portal_support_router
+    app.include_router(create_portal_support_router())
+
     # Include events router
     events_router = create_events_router()
     app.include_router(events_router)

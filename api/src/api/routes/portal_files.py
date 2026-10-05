@@ -34,7 +34,8 @@ def file_belongs(conn: psycopg.Connection, org_id: int, user_id: int,
     """Whether file_id is this investor's file of this purpose in this org,
     and not yet attached anywhere: not to a deposit or a payout destination
     (spec section 9: a file is referenced by at most one request row) and
-    not to any slot of a KYC profile (phase 2: one file per document slot).
+    not to any slot of a KYC profile (phase 2: one file per document slot)
+    and not to any support-ticket message (phase 4).
     None (no file attached) is fine. Routes call this before storing a file
     id, so this is the one gate that rule needs."""
     if file_id is None:
@@ -44,7 +45,10 @@ def file_belongs(conn: psycopg.Connection, org_id: int, user_id: int,
         "  AND NOT EXISTS (SELECT 1 FROM deposits d WHERE d.receipt_file_id = files.id) "
         "  AND NOT EXISTS (SELECT 1 FROM payout_destinations p WHERE p.proof_file_id = files.id) "
         "  AND NOT EXISTS (SELECT 1 FROM kyc_profiles k WHERE files.id IN "
-        "      (k.id_front_file_id, k.id_back_file_id, k.address_proof_file_id, k.photo_file_id))",
+        "      (k.id_front_file_id, k.id_back_file_id, k.address_proof_file_id, k.photo_file_id)) "
+        # ponytail: scans the ticket messages per check; add a GIN index on
+        # file_ids if threads ever grow into the hundreds of thousands.
+        "  AND NOT EXISTS (SELECT 1 FROM ticket_messages t WHERE files.id = ANY(t.file_ids))",
         (file_id, org_id, user_id, purpose)).fetchone()
     return row is not None
 
@@ -106,6 +110,8 @@ def create_portal_files_router() -> APIRouter:
         if detected is None:
             raise HTTPException(status_code=400, detail="unsupported file type")
         content_type, ext = detected
+        if purpose == "ticket_attachment" and not content_type.startswith("image/"):
+            raise HTTPException(status_code=400, detail="attachments must be images")
         # Only a well-formed upload spends a slot in the hourly budget.
         if limiter.is_limited(f"portal-upload:{ctx.org_id}:{ctx.user_id}"):
             raise HTTPException(status_code=429, detail="too many uploads; try again later")
