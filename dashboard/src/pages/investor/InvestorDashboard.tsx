@@ -3,6 +3,7 @@ import { orgApi } from '../../lib/api'
 import { useOrg } from '../../lib/org'
 import { errorText, formatWhen, money } from '../../lib/format'
 import { ACCOUNT_CURRENCY, entryLabel, walletLabel } from '../../lib/investor'
+import { kycBadge, kycLabel } from '../../lib/identity'
 import { useHiddenBalances } from '../../lib/hideBalances'
 import Badge from '../../components/Badge'
 import Banner from '../../components/Banner'
@@ -15,7 +16,7 @@ import StatTile from '../../components/StatTile'
 import Tabs from '../../components/Tabs'
 import { PnlBars } from '../../components/charts'
 import NextStep from './NextStep'
-import type { InvestorSummary, WalletEntriesPage, WalletEntry } from '../../lib/types'
+import type { InvestorSummary, KycStatus, WalletEntriesPage, WalletEntry } from '../../lib/types'
 
 const POLL_MS = 10000
 const DAY_MS = 24 * 3600 * 1000
@@ -135,6 +136,29 @@ function Sparkline({ values, label }: { values: number[]; label: string }) {
   )
 }
 
+const KYC_TEXT: Record<KycStatus, string> = {
+  draft: 'Complete your profile and upload your ID to open a trading account.',
+  submitted: 'An admin is reviewing your documents.',
+  approved: 'You are verified.',
+  rejected: 'Your verification was rejected. Open your profile to see why and submit again.',
+}
+
+/** The reference's KYC ring, as one card: status, one sentence, one link. */
+function VerificationCard({ status, linked, base }: { status: KycStatus; linked: boolean; base: string }) {
+  const action = status === 'draft' || status === 'rejected' ? { label: 'Verify now', to: `${base}/profile` }
+    : status === 'submitted' ? { label: 'View profile', to: `${base}/profile` }
+    : linked ? null
+    : { label: 'Open account', to: `${base}/open-account` }
+  return (
+    <Card title="Identity verification" actions={<Badge tone={kycBadge(status)}>{kycLabel(status)}</Badge>}>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <p className="text-sm text-ink-soft">{KYC_TEXT[status]}</p>
+        {action && <Button variant="secondary" size="sm" to={action.to}>{action.label}</Button>}
+      </div>
+    </Card>
+  )
+}
+
 export default function InvestorDashboard() {
   const { orgId } = useOrg()
   const base = `/org/${orgId}/invest`
@@ -227,6 +251,8 @@ export default function InvestorDashboard() {
               </div>
             </div>
           </Card>
+
+          <VerificationCard status={summary.kyc_status} linked={summary.link_state === 'linked'} base={base} />
 
           <WalletTiles summary={summary} unit={unit} />
 

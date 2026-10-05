@@ -3,9 +3,9 @@ import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi, afterEach, beforeEach } from 'vitest'
 import InvestorAccount from './InvestorAccount'
 import { mockUseOrg } from '../../test/orgMock'
-import { summaryFixture } from '../../test/portalFixtures'
+import { accountRequestFixture, summaryFixture } from '../../test/portalFixtures'
 import { setHidden } from '../../lib/hideBalances'
-import type { InvestorSummary } from '../../lib/types'
+import type { AccountRequest, InvestorSummary } from '../../lib/types'
 
 const { useOrgMock } = vi.hoisted(() => ({ useOrgMock: vi.fn() }))
 vi.mock('../../lib/org', () => ({ useOrg: useOrgMock }))
@@ -28,9 +28,10 @@ const unlinked: InvestorSummary = {
   equity: null, profit: null, account_available: null, open_positions: 0,
 }
 
-function mockRoutes(summary: InvestorSummary) {
+function mockRoutes(summary: InvestorSummary, requests: AccountRequest[] = []) {
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input)
+    if (url.endsWith('/investor/account-requests')) return jsonResponse(requests)
     if (url.endsWith('/investor/summary')) return jsonResponse(summary)
     if (url.endsWith('/investor/positions')) {
       return jsonResponse({ equity_source: 'live', positions: [
@@ -57,17 +58,15 @@ beforeEach(() => { useOrgMock.mockReturnValue(mockUseOrg('investor')) })
 // the store changes, no matter what order the hooks run in.
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); facts.supportEmail = ''; setHidden(false) })
 
-test('the Account page shows who you are, the login forms and its title', async () => {
+test('the Account page shows who you are and its title; the login forms moved to Security', async () => {
   mockRoutes(linked)
-  // AccountSecurity calls useNavigate, so the page needs a router.
   render(<MemoryRouter><InvestorAccount /></MemoryRouter>)
   expect(screen.getByRole('heading', { level: 1, name: 'Account' })).toBeInTheDocument()
   expect(screen.getByText('Test User')).toBeInTheDocument()
   expect(screen.getByText('user@example.com')).toBeInTheDocument()
   expect(screen.getByText('Acme')).toBeInTheDocument()
   expect(screen.getByText('Investor')).toBeInTheDocument()
-  expect(screen.getByRole('heading', { name: 'Your login' })).toBeInTheDocument()
-  expect(screen.getByRole('button', { name: 'Change MPIN' })).toBeInTheDocument()
+  expect(screen.queryByRole('heading', { name: 'Your login' })).not.toBeInTheDocument()
   expect(document.title).toBe('Account · MirrorFleet')
   await screen.findByText('XAUUSD')
 })
@@ -130,4 +129,14 @@ test('unlinked investors see the setup notice instead of positions', async () =>
   expect(screen.queryByText('XAUUSD')).not.toBeInTheDocument()
   expect(screen.queryByText(/66\.7%/)).not.toBeInTheDocument()
   expect(screen.queryByText(/questions\?/i)).not.toBeInTheDocument()
+})
+
+test('a fulfilled account request shows its MT5 login on the Account page', async () => {
+  mockRoutes(linked, [accountRequestFixture({ status: 'fulfilled', mt5_login: 5001, mt5_server: 'Broker-Live' })])
+  render(<MemoryRouter><InvestorAccount /></MemoryRouter>)
+  const card = (await screen.findByRole('heading', { name: 'Your MT5 login' })).closest('section')!
+  expect(within(card).getByText('5001')).toBeInTheDocument()
+  expect(within(card).getByText('Broker-Live')).toBeInTheDocument()
+  expect(within(card).getByText('Standard · 1:200')).toBeInTheDocument()
+  await screen.findByText('XAUUSD')
 })

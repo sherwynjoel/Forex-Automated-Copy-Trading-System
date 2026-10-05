@@ -14,9 +14,11 @@ import PageHeader from '../components/PageHeader'
 import Select from '../components/Select'
 import Tabs from '../components/Tabs'
 import {
-  DepositsTable, DestinationsTable, REQUEST_KINDS, TransfersTable, WithdrawalsTable,
-  isOpen, moneyRefLabel, tabItems, type RequestKind,
+  DESK_TABS, DepositsTable, DestinationsTable, TransfersTable, WithdrawalsTable,
+  isOpen, moneyRefLabel, tabItems, type DeskTab, type RequestKind,
 } from './requests/RequestTabs'
+import AccountRequestsTab from './requests/AccountRequestsTab'
+import VerificationTab from './requests/VerificationTab'
 import RequestDetailsDrawer, { type Details } from './requests/RequestDetailsDrawer'
 import type {
   PayoutDestination, PortalDeposit, PortalTransfer, PortalWithdrawal, RequestsSummary,
@@ -40,17 +42,17 @@ interface Pending {
   run: (text: string, credited: string) => Promise<void>
 }
 
-function isKind(v: string | null): v is RequestKind {
-  return REQUEST_KINDS.includes(v as RequestKind)
+function isTab(v: string | null): v is DeskTab {
+  return DESK_TABS.includes(v as DeskTab)
 }
 
 export default function Requests() {
   const { orgId, role } = useOrg()
   const [searchParams] = useSearchParams()
   // The Investors page's chips deep-link here with ?tab=<kind>.
-  const [tab, setTab] = useState<RequestKind>(() => {
+  const [tab, setTab] = useState<DeskTab>(() => {
     const t = searchParams.get('tab')
-    return isKind(t) ? t : 'deposits'
+    return isTab(t) ? t : 'deposits'
   })
   const [show, setShow] = useState<'open' | 'all'>('open')
   const [summary, setSummary] = useState<RequestsSummary | null>(null)
@@ -123,6 +125,9 @@ export default function Requests() {
   useLiveRefresh(refresh, orgId)
 
   const control = can(role, 'control')
+  // The identity tabs load their own queues; a decision there refreshes the
+  // summary counts here and is announced on the page banner.
+  const tabDone = (message: string) => { setNotice(message); void refresh() }
 
   /** Runs one decision POST for the open dialog. On success the dialog
    *  closes, a page notice announces it and the queues refetch. On failure
@@ -215,7 +220,7 @@ export default function Requests() {
     <div className="space-y-6 max-w-5xl">
       <PageHeader
         title="Requests"
-        subtitle="Every money request waiting on you: deposit notices to confirm, withdrawals to approve and pay, transfers to fund, payout accounts to vet. The app records; you move the funds."
+        subtitle="Every request waiting on you: deposit notices to confirm, withdrawals to approve and pay, transfers to fund, payout accounts to vet, identities to verify and trading accounts to open. The app records; you move the funds."
         actions={
           <Select aria-label="Show" value={show} onChange={(e) => setShow(e.target.value as 'open' | 'all')}>
             <option value="open">Open</option>
@@ -230,7 +235,7 @@ export default function Requests() {
         idBase="requests"
         label="Request types"
         value={tab}
-        onChange={(k) => setTab(k as RequestKind)}
+        onChange={(k) => setTab(k as DeskTab)}
         items={tabItems(summary)}
       />
 
@@ -267,6 +272,16 @@ export default function Requests() {
                                    onApprove={(p) => decideDestination(p, 'approved')}
                                    onReject={(p) => decideDestination(p, 'rejected')}
                                    onDetails={(row) => setDetails({ kind: 'payout_destinations', row })} />
+              )}
+              {/* key={orgId}: an org switch remounts the tab, so its queue,
+                  open dialog/drawer and any revealed passwords are dropped. */}
+              {tab === 'kyc' && (
+                <VerificationTab key={orgId} orgId={orgId} control={control} show={show}
+                                 onDone={tabDone} />
+              )}
+              {tab === 'account_requests' && (
+                <AccountRequestsTab key={orgId} orgId={orgId} control={control} show={show}
+                                    onDone={tabDone} />
               )}
             </div>
           </Card>

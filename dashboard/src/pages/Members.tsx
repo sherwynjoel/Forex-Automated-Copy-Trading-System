@@ -10,6 +10,7 @@ import Button from '../components/Button'
 import Input from '../components/Input'
 import Select from '../components/Select'
 import AccountSecurity from '../components/AccountSecurity'
+import SignInHistory from '../components/SignInHistory'
 import Card from '../components/Card'
 import PageHeader from '../components/PageHeader'
 
@@ -194,6 +195,7 @@ export default function Members() {
       )}
 
       <AccountSecurity />
+      <SignInHistory path="/api/me/sign-ins?limit=50" />
 
       {can(role, 'manage_members') && (
         <Card title="Organization">

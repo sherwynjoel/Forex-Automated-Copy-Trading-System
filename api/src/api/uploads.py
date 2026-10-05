@@ -2,8 +2,9 @@
 one file per `files` row, and the type sniffer that decides what a file is
 from its first bytes (never from the client's header or extension).
 
-Phase 1 stores deposit receipts and payout proofs; the other purposes are
-in the database CHECK already and are accepted here in their phase.
+Phase 1 stores deposit receipts and payout proofs, phase 2 identity
+documents and photos; the other purposes are in the database CHECK already
+and are accepted here in their phase.
 """
 from __future__ import annotations
 
@@ -18,8 +19,10 @@ ALLOWED = {
     "image/webp": "webp",
     "application/pdf": "pdf",
 }
-PHASE1_PURPOSES = {"deposit_receipt", "payout_proof"}
-ALL_PURPOSES = PHASE1_PURPOSES | {"kyc_document", "kyc_photo", "ticket_attachment", "avatar"}
+# What the upload route stores today. The files CHECK already lists every
+# purpose of every phase; the rest are accepted in their phase.
+ACCEPTED_PURPOSES = {"deposit_receipt", "payout_proof", "kyc_document", "kyc_photo"}
+ALL_PURPOSES = ACCEPTED_PURPOSES | {"ticket_attachment", "avatar"}
 UPLOADS_PER_HOUR = 30
 
 

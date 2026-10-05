@@ -12,8 +12,8 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from ..auth import (LoginRateLimiter, SessionInfo, _is_proxy_address, _issue_session,
-                    get_client_ip, hash_password, require_half_session, require_user,
-                    verify_password)
+                    get_client_ip, hash_password, record_login, require_half_session,
+                    require_user, verify_password)
 from ..config import ApiConfig
 from ..db import get_conn
 from ..mpin_core import MPIN_RE, audit_auth, check_mpin, lock_state
@@ -73,7 +73,7 @@ def create_mpin_router(rate_limiter: LoginRateLimiter) -> APIRouter:
         return response
 
     @router.post("/api/mpin/verify", status_code=204)
-    async def verify_mpin(body: VerifyRequest,
+    async def verify_mpin(body: VerifyRequest, request: Request,
                           info: SessionInfo = Depends(require_half_session),
                           cfg: ApiConfig = Depends(ApiConfig.from_env),
                           conn: psycopg.Connection = Depends(get_conn)):
@@ -82,6 +82,7 @@ def create_mpin_router(rate_limiter: LoginRateLimiter) -> APIRouter:
         failure = check_mpin(conn, info.user_id, body.mpin)
         if failure is not None:
             return failure
+        record_login(conn, info.user_id, request, cfg, "mpin_ok")
         response = Response(status_code=204)
         _issue_session(response, cfg, info.user_id, info.session_version, pin=True)
         return response

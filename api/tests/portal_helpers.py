@@ -117,3 +117,63 @@ def set_copier_down(client) -> None:
             return httpx.Response(502, json={"detail": "down"})
         return default_mock_callback(request)
     client.app.state.mock_transport.set_callback(callback)
+
+
+# ------------------------------------------------------------ phase 2
+
+COMPLETE_PROFILE = {
+    "full_name": "Investor One", "gender": "male", "date_of_birth": "1990-04-02",
+    "phone": "+91 98765 43210", "address_line": "12 Lake Road", "city": "Coimbatore",
+    "state": "Tamil Nadu", "postal_code": "641001", "country_residence": "IN",
+    "country_citizenship": "IN", "id_type": "passport", "id_number": "P1234567"}
+
+
+def add_package(db, org_id, *, name="Standard", min_deposit="100", leverage=(100, 200, 500),
+                spread_label="20-25", enabled=True, sort_order=0) -> int:
+    """An account package the org offers."""
+    with psycopg.connect(db, autocommit=True) as conn:
+        (package_id,) = conn.execute(
+            "INSERT INTO account_packages (org_id, name, min_deposit, spread_label, "
+            "leverage_options, enabled, sort_order) VALUES (%s, %s, %s, %s, %s, %s, %s) "
+            "RETURNING id",
+            (org_id, name, Decimal(str(min_deposit)), spread_label, list(leverage), enabled,
+             sort_order)).fetchone()
+    return int(package_id)
+
+
+def kyc_profile(db, org_id, user_id, *, status="approved", **over) -> dict:
+    """A complete profile with its four documents seeded as files rows.
+    Returns the column values written (file ids included)."""
+    files = {
+        "id_front_file_id": seed_file(db, org_id, user_id, purpose="kyc_document"),
+        "id_back_file_id": seed_file(db, org_id, user_id, purpose="kyc_document"),
+        "address_proof_file_id": seed_file(db, org_id, user_id, purpose="kyc_document"),
+        "photo_file_id": seed_file(db, org_id, user_id, purpose="kyc_photo"),
+    }
+    row = {**COMPLETE_PROFILE, **files, **over}
+    cols = ", ".join(row)
+    marks = ", ".join(["%s"] * len(row))
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute(
+            f"INSERT INTO kyc_profiles (org_id, user_id, status, submitted_at, {cols}) "
+            f"VALUES (%s, %s, %s, CASE WHEN %s::text = 'draft' THEN NULL ELSE now() END, {marks})",
+            (org_id, user_id, status, status, *row.values()))
+    return row
+
+
+def open_account_request(db, org_id, user_id, package_id, *, main="Main1234",
+                         investor="Inv12345", leverage=100, package_name="Standard") -> int:
+    """A 'requested' account request with both passwords sealed under the
+    app's Fernet key (os.environ['FERNET_KEY'], which app_client sets)."""
+    import os
+    from cryptography.fernet import Fernet
+    cipher = Fernet(os.environ["FERNET_KEY"].encode())
+    with psycopg.connect(db, autocommit=True) as conn:
+        (req_id,) = conn.execute(
+            "INSERT INTO account_requests (org_id, user_id, package_id, package_name, leverage, "
+            "main_password_enc, investor_password_enc) VALUES (%s, %s, %s, %s, %s, %s, %s) "
+            "RETURNING id",
+            (org_id, user_id, package_id, package_name, leverage,
+             cipher.encrypt(main.encode()).decode(),
+             cipher.encrypt(investor.encode()).decode())).fetchone()
+    return int(req_id)

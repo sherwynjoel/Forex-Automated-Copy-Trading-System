@@ -5,7 +5,7 @@ import os
 import secrets
 import time
 from collections import defaultdict
-from typing import Optional
+from typing import Any, Optional
 
 import psycopg
 from argon2 import PasswordHasher
@@ -245,6 +245,41 @@ def _is_proxy_address(ip: str) -> bool:
     return ip in ("127.0.0.1", "::1", "localhost", "unknown")
 
 
+LOGIN_HISTORY_DAYS = 180
+SIGN_INS_MAX = 200
+
+
+def record_login(conn, user_id: int, request: Request, cfg: ApiConfig, outcome: str) -> None:
+    """One sign-in history row (login_events). Best effort: a failed write is
+    logged and never fails the sign-in. Only callers that already know the
+    user exists call this, so the table never answers "is this email
+    registered?"."""
+    ip = get_client_ip(request, trust_proxy=cfg.trust_proxy)
+    agent = (request.headers.get("user-agent") or "")[:256] or None
+    try:
+        # ponytail: delete-on-write, a nightly job if writes ever get hot
+        conn.execute(
+            "DELETE FROM login_events WHERE user_id = %s "
+            "AND created_at < now() - make_interval(days => %s)",
+            (user_id, LOGIN_HISTORY_DAYS))
+        conn.execute(
+            "INSERT INTO login_events (user_id, ip, user_agent, outcome) VALUES (%s, %s, %s, %s)",
+            (user_id, ip, agent, outcome))
+    except Exception:
+        logger.exception("failed to record a sign-in for user %s", user_id)
+
+
+def sign_ins(conn, user_id: int, limit: int = 50) -> list[dict]:
+    """The user's own sign-ins, newest first, at most SIGN_INS_MAX."""
+    size = max(1, min(int(limit), SIGN_INS_MAX))
+    rows = conn.execute(
+        "SELECT id, ip, user_agent, outcome, created_at FROM login_events "
+        "WHERE user_id = %s ORDER BY created_at DESC, id DESC LIMIT %s",
+        (user_id, size)).fetchall()
+    return [{"id": r[0], "ip": r[1], "user_agent": r[2], "outcome": r[3],
+             "created_at": r[4].isoformat()} for r in rows]
+
+
 CSRF_EXEMPT_PREFIXES = ("/api/webhooks/", "/api/mt5/")
 
 
@@ -411,7 +446,9 @@ def create_auth_router(rate_limiter: LoginRateLimiter) -> APIRouter:
             verify_password(_DUMMY_HASH, request_data.password)
             raise HTTPException(status_code=401, detail="Invalid email or password")
         if not verify_password(row[1], request_data.password):
+            record_login(conn, row[0], request, cfg, "failed")
             raise HTTPException(status_code=401, detail="Invalid email or password")
+        record_login(conn, row[0], request, cfg, "password_ok")
 
         response = Response(status_code=204)
         _issue_session(response, cfg, row[0], row[2], pin=False)
@@ -427,6 +464,9 @@ def create_auth_router(rate_limiter: LoginRateLimiter) -> APIRouter:
     class PasswordChangeRequest(BaseModel):
         current_password: str
         new_password: str
+        # The MPIN step-up (phase 2): a stolen session plus a guessed or
+        # phished password is still not enough.
+        mpin: Any = None
 
     @router.post("/me/password")
     async def change_password(
@@ -437,12 +477,17 @@ def create_auth_router(rate_limiter: LoginRateLimiter) -> APIRouter:
     ):
         """Rotate the caller's password and disown every other session.
 
-        Requires the current password (a stolen session alone must not be
-        enough to take an account over). Bumping session_version kills all
-        outstanding cookies -- including any the attacker holds -- and this
-        browser is handed a freshly versioned one so the user stays signed
-        in where they are.
+        Requires the MPIN first, then the current password (a stolen session
+        alone must not be enough to take an account over). Bumping
+        session_version kills all outstanding cookies -- including any the
+        attacker holds -- and this browser is handed a freshly versioned one
+        so the user stays signed in where they are.
         """
+        # Imported here: mpin_core imports from this module.
+        from .mpin_core import require_mpin
+        failure = require_mpin(conn, user_id, request_data.mpin)
+        if failure is not None:
+            return failure
         row = conn.execute(
             "SELECT password_hash FROM users WHERE id = %s", (user_id,)
         ).fetchone()
@@ -491,6 +536,15 @@ def create_auth_router(rate_limiter: LoginRateLimiter) -> APIRouter:
         response.delete_cookie("session")
         response.delete_cookie("csrf")
         return response
+
+    @router.get("/me/sign-ins")
+    async def my_sign_ins(
+        limit: int = 50,
+        user_id: int = Depends(require_user),
+        conn: psycopg.Connection = Depends(get_conn),
+    ):
+        """Where this account signed in from, for the desk's own Security card."""
+        return sign_ins(conn, user_id, limit)
 
     @router.get("/me")
     async def me(

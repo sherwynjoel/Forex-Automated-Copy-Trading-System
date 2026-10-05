@@ -34,6 +34,9 @@ TELEGRAM_RULES: set[tuple[str, str, str]] = {
     ("control", "warning", "investor_destination_added"),
     ("control", "warning", "investor_ledger_adjusted"),
     ("control", "warning", "payment_method_changed"),
+    ("control", "warning", "investor_kyc_submitted"),
+    ("control", "warning", "investor_account_requested"),
+    ("control", "warning", "account_request_passwords_revealed"),
     # The workspace's receiving address changed; the payload's summary line
     # names the new address and who set it. No payload.user_id, so this one
     # cools down per action rather than per investor.

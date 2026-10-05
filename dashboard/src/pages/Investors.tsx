@@ -16,12 +16,14 @@ import Select from '../components/Select'
 import Tabs from '../components/Tabs'
 import AdjustDialog from './investors/AdjustDialog'
 import LedgerDrawer from './investors/LedgerDrawer'
+import PackagesTab from './investors/PackagesTab'
 import PaymentMethodsTab, { type Runner } from './investors/PaymentMethodsTab'
+import { kycBadge, kycLabel } from '../lib/identity'
 import type { Account, InvestorRow, PaymentMethod, PortalSettings } from '../lib/types'
 
 const POLL_MS = 10000
 
-type Tab = 'investors' | 'methods'
+type Tab = 'investors' | 'methods' | 'packages'
 
 type PendingKind = keyof InvestorRow['pending']
 
@@ -126,6 +128,7 @@ export default function Investors() {
         items={[
           { key: 'investors', label: 'Investors' },
           { key: 'methods', label: 'Payment methods' },
+          { key: 'packages', label: 'Account packages' },
         ]}
       />
 
@@ -143,6 +146,7 @@ export default function Investors() {
                     <tr className="text-left border-b border-line">
                       <th className="desk-label px-5 py-2 font-semibold">Name</th>
                       <th className="desk-label px-5 py-2 font-semibold">Email</th>
+                      <th className="desk-label px-5 py-2 font-semibold">Verification</th>
                       <th className="desk-label px-5 py-2 font-semibold text-right">My wallet</th>
                       <th className="desk-label px-5 py-2 font-semibold text-right">Equity</th>
                       <th className="desk-label px-5 py-2 font-semibold">Linked account</th>
@@ -152,7 +156,7 @@ export default function Investors() {
                   </thead>
                   <tbody>
                     {rows.length === 0 && (
-                      <tr><td colSpan={7} className="text-center py-8 text-ink-faint">
+                      <tr><td colSpan={8} className="text-center py-8 text-ink-faint">
                         No investors yet — invite one from Members with the Investor role.
                       </td></tr>
                     )}
@@ -160,6 +164,9 @@ export default function Investors() {
                       <tr key={r.user_id} className="border-b border-line last:border-0 align-top">
                         <td data-label="Name" className="px-5 py-2.5 text-ink">{r.display_name}</td>
                         <td data-label="Email" className="px-5 py-2.5 text-ink-soft">{r.email}</td>
+                        <td data-label="Verification" className="px-5 py-2.5">
+                          <Badge tone={kycBadge(r.kyc_status)}>{kycLabel(r.kyc_status)}</Badge>
+                        </td>
                         <td data-label="My wallet" className="px-5 py-2.5 text-right">
                           {/* One child per cell: the stacked phone layout is a
                               flex row of label and value. */}
@@ -206,9 +213,11 @@ export default function Investors() {
                 </table>
               </div>
             </Card>
-          ) : (
+          ) : tab === 'methods' ? (
             <PaymentMethodsTab orgId={orgId} control={control} methods={methods}
                                settings={settings} busy={busy} run={run} />
+          ) : (
+            <PackagesTab orgId={orgId} control={control} />
           )}
         </div>
       )}

@@ -123,7 +123,8 @@ def test_password_change_requires_the_current_password(app_client, make_user):
     _pass_mpin(app_client)
 
     r = app_client.post("/api/me/password", json={
-        "current_password": "not-the-password", "new_password": "another-good-one"},
+        "current_password": "not-the-password", "new_password": "another-good-one",
+        "mpin": "123456"},
         headers=_csrf_headers(app_client))
     assert r.status_code == 403
     # The old password still works: nothing was rotated.
@@ -140,7 +141,8 @@ def test_password_change_rotates_and_disowns_other_sessions(app_client, make_use
     stolen = app_client.cookies.get("session")
 
     r = app_client.post("/api/me/password", json={
-        "current_password": "a-solid-password", "new_password": "brand-new-secret"},
+        "current_password": "a-solid-password", "new_password": "brand-new-secret",
+        "mpin": "123456"},
         headers=_csrf_headers(app_client))
     assert r.status_code == 204
 
@@ -164,7 +166,8 @@ def test_the_login_after_a_password_change_is_a_half_session(app_client, make_us
         "email": "rot3@example.com", "password": "a-solid-password"})
     _pass_mpin(app_client)
     r = app_client.post("/api/me/password", json={
-        "current_password": "a-solid-password", "new_password": "brand-new-secret"},
+        "current_password": "a-solid-password", "new_password": "brand-new-secret",
+        "mpin": "123456"},
         headers=_csrf_headers(app_client))
     assert r.status_code == 204
 
@@ -183,10 +186,12 @@ def test_password_change_rejects_short_or_unchanged(app_client, make_user):
     _pass_mpin(app_client)
 
     assert app_client.post("/api/me/password", json={
-        "current_password": "a-solid-password", "new_password": "short"},
+        "current_password": "a-solid-password", "new_password": "short",
+        "mpin": "123456"},
         headers=_csrf_headers(app_client)).status_code == 400
     assert app_client.post("/api/me/password", json={
-        "current_password": "a-solid-password", "new_password": "a-solid-password"},
+        "current_password": "a-solid-password", "new_password": "a-solid-password",
+        "mpin": "123456"},
         headers=_csrf_headers(app_client)).status_code == 400
 
 

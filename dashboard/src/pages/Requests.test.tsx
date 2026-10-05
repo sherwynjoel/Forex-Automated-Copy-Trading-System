@@ -76,6 +76,9 @@ function mockRoutes() {
     withdrawals: [{ ...approvedWd }, { ...requestedWd }],
     transfers: [{ ...transfer }],
     'payout-destinations': [{ ...destination }],
+    kyc: [],
+    'account-requests': [],
+    accounts: [],
   }
   const summary = () => {
     const deposits = rows.deposits.filter((r) => r.status === 'pending').length
@@ -580,4 +583,14 @@ test('the drawer header badge for an approved transfer reads Approved, in progre
   await userEvent.click(screen.getByRole('button', { name: 'Details of transfer 33' }))
   const drawer = await screen.findByRole('dialog', { name: 'Transfer #33' })
   expect(within(drawer).getByText('Approved, in progress')).toBeInTheDocument()
+})
+
+test('the desk has Verification and Account requests tabs, and ?tab= opens them', async () => {
+  mockRoutes()
+  renderPage('/org/1/requests?tab=account_requests')
+  expect(await screen.findByText('No open account requests')).toBeInTheDocument()
+  expect(screen.getByRole('tab', { name: 'Verification (0)' })).toBeInTheDocument()
+  expect(screen.getByRole('tab', { name: 'Account requests (0)' })).toHaveAttribute('aria-selected', 'true')
+  await userEvent.click(screen.getByRole('tab', { name: 'Verification (0)' }))
+  expect(await screen.findByText('No open verifications')).toBeInTheDocument()
 })

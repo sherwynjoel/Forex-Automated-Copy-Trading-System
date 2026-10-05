@@ -10,7 +10,9 @@ with a seeded account id 100 where needed.
 The mutating portal rows aim at seeded rows with deterministic ids (the db
 fixture TRUNCATEs with RESTART IDENTITY, and every parametrised case gets its
 own fixture): payment method 1, the investor's approved payout destination 1
-and pending destination 2, deposit 1, withdrawal 1, transfer 1. They are
+and pending destination 2, deposit 1, withdrawal 1, transfer 1, the
+investor's submitted KYC profile (files 1-4), account package 1 and the
+investor's open account request 1. They are
 written so that the FIRST allowed role really performs the change and the
 later ones get a 409 or 400 from the row's state or the body — never a
 403/404 — so what the row proves is authorization, never business rules.
@@ -21,7 +23,8 @@ investor role passes them, and desk members get 403 (spec §14).
 import psycopg
 import pytest
 from psycopg.types.json import Jsonb
-from portal_helpers import add_method, approved_destination
+from portal_helpers import (add_method, add_package, approved_destination, kyc_profile,
+                            open_account_request)
 
 ROLES = ["investor", "viewer", "admin"]
 
@@ -112,6 +115,29 @@ MATRIX = [
     ("POST",   "withdrawals/1/paid",             {"txid": "matrix"},             "admin"),
     ("POST",   "transfers/1/decision",           {"status": "rejected", "note": "matrix"}, "admin"),
     ("POST",   "payout-destinations/2/decision", {"status": "rejected", "note": "matrix"}, "admin"),
+    # ---- phase 2, investor side
+    ("GET",    "investor/profile",               None,                          "investor_only"),
+    ("PUT",    "investor/profile",               {"phone": "+91 1"},             "investor_only"),
+    ("POST",   "investor/profile/submit",        {"mpin": MPIN},                "investor_only"),
+    ("GET",    "investor/account-packages",      None,                          "investor_only"),
+    ("GET",    "investor/account-requests",      None,                          "investor_only"),
+    ("POST",   "investor/account-requests",      {"package_id": 1, "leverage": 100,
+                                                  "main_password": "Main1234",
+                                                  "investor_password": "Inv12345",
+                                                  "mpin": MPIN},                "investor_only"),
+    ("POST",   "investor/account-requests/1/cancel", None,                      "investor_only"),
+    # ---- phase 2, admin side
+    ("GET",    "kyc",                            None,                          "admin"),
+    ("POST",   "kyc/{investor}/decision",        {"status": "rejected", "note": "matrix"}, "admin"),
+    ("GET",    "account-packages",               None,                          "admin"),
+    ("POST",   "account-packages",               {"name": "Pro", "leverage_options": [100]}, "admin"),
+    ("PATCH",  "account-packages/1",             {"name": "Renamed"},           "admin"),
+    ("DELETE", "account-packages/1",             None,                          "admin"),
+    ("GET",    "account-requests",               None,                          "admin"),
+    ("POST",   "account-requests/1/reveal",      {"mpin": MPIN},                "admin"),
+    ("POST",   "account-requests/1/fulfil",      {"mt5_login": 5001,
+                                                  "mt5_server": "Broker-Live"}, "admin"),
+    ("POST",   "account-requests/1/reject",      {"note": "matrix"},            "admin"),
 ]
 
 RANK = {"investor": -1, "viewer": 0, "admin": 1}
@@ -127,6 +153,9 @@ def matrix_org(app_client, make_user, make_org, db, login_as):
     investor_id = users["investor"]["id"]
     method_id = add_method(db, org_id)                                    # id 1
     approved_id = approved_destination(db, org_id, investor_id)           # id 1
+    kyc_profile(db, org_id, investor_id, status="submitted")              # files 1-4
+    package_id = add_package(db, org_id)                                  # id 1
+    open_account_request(db, org_id, investor_id, package_id)             # id 1
     with psycopg.connect(db, autocommit=True) as conn:
         (connection_id,) = conn.execute(
             """INSERT INTO ctid_connections
@@ -223,6 +252,8 @@ def test_destructive_rows_allowed(matrix_org, login_as):
     (transfer,) = client.get(f"/api/orgs/{org_id}/transfers").json()
     assert transfer["id"] == 1
     assert transfer["target"] == {"kind": "account", "account_id": None}
+    r = _call(client, "DELETE", org_id, "account-packages/1", None)
+    assert r.status_code == 409   # open account request 1 still uses it
     r = _call(client, "DELETE", org_id, "", None)
     assert r.status_code == 204
 

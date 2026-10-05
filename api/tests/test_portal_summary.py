@@ -476,7 +476,8 @@ def test_requests_summary_counts_open_rows(org_client, make_user, db):
     uid = investor["id"]
     link(db, org_id, uid, 1001)
     assert client.get(f"/api/orgs/{org_id}/requests/summary").json() == {
-        "deposits": 0, "withdrawals": 0, "transfers": 0, "payout_destinations": 0, "total": 0}
+        "deposits": 0, "withdrawals": 0, "transfers": 0, "payout_destinations": 0,
+        "kyc": 0, "account_requests": 0, "total": 0}
     dest_id = approved_destination(db, org_id, uid)
     with psycopg.connect(db, autocommit=True) as conn:
         for reference, status in (("r1", "pending"), ("r2", "confirmed"), ("r3", "rejected")):
@@ -498,7 +499,8 @@ def test_requests_summary_counts_open_rows(org_client, make_user, db):
         _insert_transfer(db, org_id, uid, source="main", target="account", amount="1",
                          status=status, account_id=1001)
     assert client.get(f"/api/orgs/{org_id}/requests/summary").json() == {
-        "deposits": 1, "withdrawals": 2, "transfers": 2, "payout_destinations": 1, "total": 6}
+        "deposits": 1, "withdrawals": 2, "transfers": 2, "payout_destinations": 1,
+        "kyc": 0, "account_requests": 0, "total": 6}
 
 
 # ------------------------------------------------------------ read-throughs

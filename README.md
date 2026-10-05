@@ -452,6 +452,16 @@ script's second step (the uploads tarball) fails after the database dump is
 already written -- check the new `.sql.gz` is there and carry on; from then on
 both steps succeed.
 
+Migration 023 (client portal phase 2: identity verification, account packages,
+account requests, sign-in history) is additive -- it creates four tables and
+drops nothing -- so the same sequence applies and `migrate` prints
+`applied: ['023_portal_identity.sql']`. After the upgrade, an admin adds at least
+one package under **Investors → Account packages**; until then investors see
+"No account packages yet" on **Open account**. Changing the password now asks
+for the MPIN, on the desk and in the portal alike. The two MT5 passwords of an
+open account request are sealed with `FERNET_KEY`: rotating that key makes them
+unreadable, and the admin then rejects the request and asks for a new one.
+
 Then hard-reload any open dashboard tab (the old bundle is stale). Without a
 new migration the short form is `sudo docker compose build api && sudo docker
 compose up -d api`. The first deploy of the client portal also creates the

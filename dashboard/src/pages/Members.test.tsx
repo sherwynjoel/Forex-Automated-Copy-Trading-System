@@ -66,6 +66,7 @@ function mockRoutes(overrides: Record<string, (init?: RequestInit) => Response> 
     if (method === 'DELETE' && url.startsWith('/api/orgs/1/invites/')) return jsonResponse(null, 204)
     if (method === 'PATCH' && url === '/api/orgs/1') return jsonResponse({ id: 1, name: 'Acme' })
     if (method === 'DELETE' && url === '/api/orgs/1') return jsonResponse(null, 204)
+    if (method === 'GET' && url.startsWith('/api/me/sign-ins')) return jsonResponse([])
     return jsonResponse({})
   })
   vi.stubGlobal('fetch', fetchMock)
@@ -268,17 +269,21 @@ test('an admin sees delete-org with type-to-confirm; a viewer does not', async (
 
 // ---------- account security (session revocation, migration 010) ----------
 
-test('every member can change their own password', async () => {
+test('every member can change their own password with the MPIN, and sees their sign-ins', async () => {
   useOrgMock.mockReturnValue(makeOrgValue('viewer'))
   const fetchMock = mockRoutes({
     'POST /api/me/password': () => jsonResponse(null, 204),
   })
   renderMembers()
 
-  await userEvent.type(
-    await screen.findByLabelText(/current password/i), 'old-password-x')
+  expect(await screen.findByText('No sign-ins recorded yet')).toBeInTheDocument()
+  await userEvent.type(await screen.findByLabelText(/current password/i), 'old-password-x')
   await userEvent.type(screen.getByLabelText(/new password/i), 'new-password-y')
   await userEvent.click(screen.getByRole('button', { name: /change password/i }))
+  const dialog = await screen.findByRole('dialog', { name: 'Change your password?' })
+  await userEvent.click(within(dialog).getByLabelText('Your MPIN digit 1 of 6'))
+  await userEvent.keyboard('123456')
+  await userEvent.click(within(dialog).getByRole('button', { name: 'Confirm' }))
 
   await waitFor(() => {
     const call = fetchMock.mock.calls.find(
@@ -286,7 +291,7 @@ test('every member can change their own password', async () => {
         && (init as RequestInit)?.method === 'POST')
     expect(call).toBeTruthy()
     expect(JSON.parse(String((call![1] as RequestInit).body))).toEqual({
-      current_password: 'old-password-x', new_password: 'new-password-y',
+      current_password: 'old-password-x', new_password: 'new-password-y', mpin: '123456',
     })
   })
   // The user is told the blast radius: other devices were signed out.

@@ -234,9 +234,11 @@ def create_app(http_transport: Optional[httpx.BaseTransport] = None) -> FastAPI:
     # 2026-09-23 investor routers this replaced are gone (Task 10 of the
     # phase-1 plan).
     from .routes.portal_admin import create_portal_admin_router
+    from .routes.portal_identity import create_portal_identity_router
     from .routes.portal_investor import create_portal_investor_router
     app.include_router(create_portal_investor_router())
     app.include_router(create_portal_admin_router())
+    app.include_router(create_portal_identity_router())
 
     # Include events router
     events_router = create_events_router()
