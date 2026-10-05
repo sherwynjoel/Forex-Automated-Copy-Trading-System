@@ -27,7 +27,7 @@ COLUMNS = {
                         "min_amount", "fee_pct", "instructions", "sort_order", "created_by",
                         "created_at", "updated_at"],
     "portal_settings": ["org_id", "withdrawal_min", "withdrawal_fee_pct", "updated_by",
-                        "updated_at"],
+                        "updated_at", "max_live_accounts"],
     "payout_destinations": ["id", "org_id", "user_id", "kind", "nickname", "details",
                             "proof_file_id", "status", *AUDIT, "created_at"],
     "wallet_entries": ["id", "org_id", "user_id", "wallet", "amount", "kind", "ref_table",
