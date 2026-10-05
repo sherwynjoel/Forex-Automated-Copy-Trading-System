@@ -118,6 +118,10 @@ ENTRY_KINDS = ("deposit", "withdrawal", "transfer", "adjustment", "bonus", "comm
 ENTRIES_DEFAULT_LIMIT = 50
 ENTRIES_MAX_LIMIT = 200
 
+# Worst last: when accounts disagree the summary reports the worst source,
+# and one unknown equity makes the total unknown.
+EQUITY_RANK = {"live": 0, "last known": 1, "unknown": 2}
+
 
 def pending_counts(conn: psycopg.Connection, org_id: int, user_id: int) -> Dict[str, int]:
     """Open requests of one investor, per type: what the dashboard's
@@ -651,7 +655,8 @@ def create_portal_investor_router() -> APIRouter:
     @router.get("/investor/summary", response_model=Dict[str, Any])
     async def investor_summary(http_request: Request,
                                ctx: OrgContext = Depends(require_investor),
-                               conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
+                               conn: psycopg.Connection = Depends(get_conn),
+                               cfg: ApiConfig = Depends(ApiConfig.from_env)) -> Dict[str, Any]:
         org_name, display_name, member_since = conn.execute(
             "SELECT o.name, u.display_name, m.created_at FROM org_memberships m "
             "JOIN orgs o ON o.id = m.org_id JOIN users u ON u.id = m.user_id "
@@ -679,24 +684,38 @@ def create_portal_investor_router() -> APIRouter:
         deposits_open = conn.execute(
             "SELECT 1 FROM payment_methods WHERE org_id = %s AND enabled LIMIT 1",
             (ctx.org_id,)).fetchone() is not None
-        account_id = pc.linked_account(conn, ctx.org_id, ctx.user_id)
-        card = None
-        equity: Optional[Decimal] = None
-        source = "unknown"
-        positions: list = []
-        funded = Decimal("0")
-        profit: Optional[Decimal] = None
-        account_available: Optional[Decimal] = None
-        if account_id is not None:
-            card = _account_card(conn, ctx.org_id, account_id)
-            equity, source, positions = await pc.equity_for(http_request, conn, ctx.org_id,
-                                                             account_id)
+        owned = pc.linked_accounts(conn, ctx.org_id, ctx.user_id)
+        # One /state round trip for every account, never one per account.
+        state = await pc.org_state(http_request.app.state.http, cfg, ctx.org_id) if owned else None
+        # The login an account was handed over with; the latest decision wins.
+        logins = {int(a): (login, server) for a, login, server in conn.execute(
+            "SELECT account_id, mt5_login, mt5_server FROM account_requests "
+            "WHERE org_id = %s AND user_id = %s AND status = 'fulfilled' AND account_id IS NOT NULL "
+            "ORDER BY decided_at, id", (ctx.org_id, ctx.user_id)).fetchall()}
+        accounts = []
+        equity: Optional[Decimal] = Decimal("0") if owned else None
+        funded_total = Decimal("0")
+        sources = []
+        open_positions = 0
+        for account_id in owned:
+            account_equity, source, positions = pc.equity_from(state, conn, account_id)
             funded = pc.net_funded(conn, ctx.org_id, ctx.user_id, account_id)
-            if equity is not None:
-                profit = equity - funded
-                account_available = pc.floor_cents(
-                    equity - pc.open_account_transfers_out(conn, ctx.org_id, ctx.user_id,
-                                                            account_id))
+            available: Optional[Decimal] = None
+            if account_equity is not None:
+                available = pc.floor_cents(account_equity - pc.open_account_transfers_out(
+                    conn, ctx.org_id, ctx.user_id, account_id))
+            count = len([p for p in positions if isinstance(p, dict)])
+            login, server = logins.get(account_id, (None, None))
+            accounts.append({
+                **_account_card(conn, ctx.org_id, account_id),
+                "mt5_login": login, "mt5_server": server, "equity_source": source,
+                "equity": pc.money(account_equity), "net_funded": pc.money(funded),
+                "profit": pc.money(account_equity - funded if account_equity is not None else None),
+                "account_available": pc.money(available), "open_positions": count})
+            equity = None if equity is None or account_equity is None else equity + account_equity
+            funded_total += funded
+            sources.append(source)
+            open_positions += count
         words = (display_name or "").split()
         return {
             "org": {"id": ctx.org_id, "name": org_name},
@@ -717,14 +736,14 @@ def create_portal_investor_router() -> APIRouter:
             "deposits_open": deposits_open,
             "withdrawal_rules": {"min": pc.money(settings["withdrawal_min"]),
                                  "fee_pct": float(settings["withdrawal_fee_pct"])},
-            "link_state": "linked" if account_id is not None else "unlinked",
-            "account": card,
-            "equity_source": source,
+            "accounts": accounts,
+            "account_limit": {"max": settings["max_live_accounts"],
+                              "used": pc.accounts_used(conn, ctx.org_id, ctx.user_id)},
+            "equity_source": max(sources, key=EQUITY_RANK.__getitem__, default="unknown"),
             "equity": pc.money(equity),
-            "net_funded": pc.money(funded),
-            "profit": pc.money(profit),
-            "account_available": pc.money(account_available),
-            "open_positions": len([p for p in positions if isinstance(p, dict)]),
+            "net_funded": pc.money(funded_total),
+            "profit": pc.money(equity - funded_total if equity is not None else None),
+            "open_positions": open_positions,
             "kyc_status": pid.kyc_status(conn, ctx.org_id, ctx.user_id),
         }
 

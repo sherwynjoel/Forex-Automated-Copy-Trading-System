@@ -3,7 +3,7 @@
 
 Everything the investor and admin routers need in common lives here so the
 two route files stay about their routes: the ledger figures read from the
-database, the ONE idempotent settlement writer, the linked-account and
+database, the ONE idempotent settlement writer, the account ownership and
 equity resolvers moved from routes/investor.py, audit and email, the
 per-org portal settings row, and the row serialisers. Pure money rules
 (parsing, rounding, fees, state machines) live in portal_ledger and are
@@ -81,15 +81,6 @@ async def notify_investor(conn: psycopg.Connection, request: Request, user_id: i
 
 
 # ------------------------------------------------------------ accounts + equity
-
-
-def linked_account(conn: psycopg.Connection, org_id: int, user_id: int) -> Optional[int]:
-    """The ONE trading account linked to this investor in this workspace
-    (accounts.investor_user_id), or None while unlinked."""
-    row = conn.execute(
-        "SELECT ctid_trader_account_id FROM accounts "
-        "WHERE org_id = %s AND investor_user_id = %s", (org_id, user_id)).fetchone()
-    return int(row[0]) if row else None
 
 
 def linked_accounts(conn: psycopg.Connection, org_id: int, user_id: int) -> list[int]:

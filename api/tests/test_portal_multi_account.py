@@ -255,6 +255,7 @@ def test_admin_links_and_unlinks_one_account_at_a_time(org_client, make_user, db
 
 
 def test_the_cap_blocks_new_links_and_lowering_it_keeps_what_exists(
+
         org_client, make_user, login_as, db):
     client, org_id, _ = org_client
     first, second, third = (seed_mt5(db, org_id, f"key-{i}") for i in range(3))
@@ -286,3 +287,58 @@ def test_the_cap_blocks_new_links_and_lowering_it_keeps_what_exists(
     assert r.status_code == 409
     assert r.json()["detail"] == "you have reached the limit of 1 live accounts"
     assert client.get(f"/api/orgs/{org_id}/investor/positions?account_id={second}").status_code == 200
+
+
+# ------------------------------------------------------------ summary (Task 7)
+
+
+def test_the_summary_lists_every_account_with_totals_from_one_state_call(two, db):
+    client, org_id, investor = two
+    uid = investor["id"]
+    with psycopg.connect(db, autocommit=True) as conn:
+        # 1002 has no live figure, only what its MT5 terminal last reported.
+        conn.execute("INSERT INTO mt5_links (account_id, key_hash, equity, balance) "
+                     "VALUES (1002, 'h-1002', 250, 250)")
+        for aid, amount in ((1001, 600), (1002, 200)):
+            conn.execute(
+                "INSERT INTO transfers (org_id, user_id, source_kind, source_wallet, target_kind, "
+                "target_account_id, amount, status, done_at) "
+                "VALUES (%s, %s, 'wallet', 'main', 'account', %s, %s, 'done', now())",
+                (org_id, uid, aid, amount))
+        conn.execute(
+            "INSERT INTO transfers (org_id, user_id, source_kind, source_account_id, target_kind, "
+            "target_wallet, amount, status) VALUES (%s, %s, 'account', 1001, 'wallet', 'main', 50, "
+            "'requested')", (org_id, uid))
+        conn.execute(
+            "INSERT INTO account_requests (org_id, user_id, package_name, leverage, status, "
+            "mt5_login, mt5_server, account_id, decided_at) "
+            "VALUES (%s, %s, 'Standard', 100, 'fulfilled', 5001, 'Broker-Live', 1001, now())",
+            (org_id, uid))
+    open_account_request(db, org_id, uid, add_package(db, org_id))
+    seen = _copier(client, {1001: _live(700, [{"position_id": 7, "symbol": "XAUUSD"}])})
+    body = client.get(f"/api/orgs/{org_id}/investor/summary").json()
+    assert len([u for u in seen if "/state" in u]) == 1
+    first, second = body["accounts"]
+    assert first == {"account_id": 1001, "nickname": None, "platform": "ctrader", "status": "ok",
+                     "last_error": None, "connected": True, "mt5_login": 5001,
+                     "mt5_server": "Broker-Live", "equity_source": "live", "equity": 700.0,
+                     "net_funded": 600.0, "profit": 100.0, "account_available": 650.0,
+                     "open_positions": 1}
+    assert second["account_id"] == 1002 and second["mt5_login"] is None
+    assert second["mt5_server"] is None and second["equity_source"] == "last known"
+    assert second["equity"] == 250.0 and second["profit"] == 50.0
+    assert body["equity"] == 950.0 and body["equity_source"] == "last known"
+    assert body["net_funded"] == 800.0 and body["profit"] == 150.0
+    assert body["open_positions"] == 1
+    assert body["account_limit"] == {"max": 5, "used": 3}, "two accounts and one open request"
+    for gone in ("account", "link_state", "account_available"):
+        assert gone not in body
+
+
+def test_one_unknown_equity_makes_the_total_unknown(two):
+    client, org_id, _ = two
+    _copier(client, {1001: _live(700)})      # 1002: no live figure and no MT5 report
+    body = client.get(f"/api/orgs/{org_id}/investor/summary").json()
+    assert [a["equity_source"] for a in body["accounts"]] == ["live", "unknown"]
+    assert body["equity"] is None and body["profit"] is None
+    assert body["equity_source"] == "unknown" and body["net_funded"] == 0.0

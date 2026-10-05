@@ -110,10 +110,10 @@ def test_summary_before_an_account_is_linked(org_client, make_user, login_as, db
                                "payout_destinations": 0}
     assert body["deposits_open"] is False
     assert body["withdrawal_rules"] == {"min": 0.0, "fee_pct": 0.0}
-    assert body["link_state"] == "unlinked" and body["account"] is None
+    assert body["accounts"] == [] and body["account_limit"] == {"max": 5, "used": 0}
     assert body["equity_source"] == "unknown" and body["equity"] is None
     assert body["net_funded"] == 0.0 and body["profit"] is None
-    assert body["account_available"] is None and body["open_positions"] == 0
+    assert body["open_positions"] == 0
 
 
 def test_summary_figures_from_the_ledger_and_live_equity(org_client, make_user, login_as, db):
@@ -161,10 +161,11 @@ def test_summary_figures_from_the_ledger_and_live_equity(org_client, make_user, 
     assert body["cash_flow"] == [{"date": today, "deposits": 5120.5, "withdrawals": 100.0}]
     assert body["pending"] == {"deposits": 0, "withdrawals": 1, "transfers": 2,
                                "payout_destinations": 1}
-    assert body["link_state"] == "linked" and body["account"]["account_id"] == 1001
+    (account,) = body["accounts"]
+    assert account["account_id"] == 1001
     assert body["equity"] == 2120.5 and body["equity_source"] == "live"
     assert body["net_funded"] == 2000.0 and body["profit"] == 120.5
-    assert body["account_available"] == 2100.0, "equity minus the open account->wallet transfer"
+    assert account["account_available"] == 2100.0, "equity minus the open account->wallet transfer"
     assert body["open_positions"] == 1
 
 
@@ -185,9 +186,10 @@ def test_summary_falls_back_to_last_known_equity_when_the_copier_is_down(
     _state(client, down=True)
     login_as(client, investor)
     body = client.get(f"/api/orgs/{org_id}/investor/summary").json()
+    (account,) = body["accounts"]
     assert body["equity"] == 4990.25 and body["equity_source"] == "last known"
-    assert body["account"]["platform"] == "mt5" and body["account"]["connected"] is False
-    assert body["account_available"] == 4990.25 and body["profit"] == 4990.25
+    assert account["platform"] == "mt5" and account["connected"] is False
+    assert account["account_available"] == 4990.25 and body["profit"] == 4990.25
 
 
 def test_deposits_open_and_withdrawal_rules_reflect_admin_settings(

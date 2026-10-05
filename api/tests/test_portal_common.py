@@ -183,8 +183,8 @@ def test_net_funded_and_open_account_transfers_out(org_client, make_user, db):
                 "source_account_id, target_kind, target_wallet, target_account_id, amount, status) "
                 "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 (org_id, investor["id"], sk, sw, sa, tk, tw, ta, amount, status))
-        assert pc.linked_account(conn, org_id, investor["id"]) == 1001
-        assert pc.linked_account(conn, org_id, 999999) is None
+        assert pc.linked_accounts(conn, org_id, investor["id"]) == [1001]
+        assert pc.linked_accounts(conn, org_id, 999999) == []
         assert pc.net_funded(conn, org_id, investor["id"], 1001) == Decimal("380.00")
         assert pc.open_account_transfers_out(conn, org_id, investor["id"], 1001) == Decimal("42.50")
         card = pc.account_card(conn, org_id, 1001)
