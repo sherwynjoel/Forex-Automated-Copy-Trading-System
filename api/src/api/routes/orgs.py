@@ -35,6 +35,16 @@ class PatchMemberRequest(BaseModel):
     role: str
 
 
+def _cancel_open_account_requests(conn: psycopg.Connection, org_id: int, user_id: int) -> None:
+    """Someone who is no longer an investor here loses their open MT5 account
+    requests, and the sealed passwords go with them."""
+    conn.execute(
+        "UPDATE account_requests SET status = 'cancelled', decided_at = now(), "
+        "main_password_enc = NULL, investor_password_enc = NULL "
+        "WHERE org_id = %s AND user_id = %s AND status = 'requested'",
+        (org_id, user_id))
+
+
 def create_orgs_router() -> APIRouter:
     router = APIRouter(prefix="/api/orgs", tags=["orgs"])
 
@@ -176,6 +186,8 @@ def create_orgs_router() -> APIRouter:
                 "UPDATE org_memberships SET role = %s WHERE org_id = %s AND user_id = %s",
                 (body.role, ctx.org_id, member_user_id),
             )
+            if body.role != "investor":
+                _cancel_open_account_requests(conn, ctx.org_id, member_user_id)
         return {"user_id": member_user_id, "role": body.role}
 
     @router.delete("/{org_id}/members/{member_user_id}", status_code=204)
@@ -213,6 +225,7 @@ def create_orgs_router() -> APIRouter:
                 "DELETE FROM org_memberships WHERE org_id = %s AND user_id = %s",
                 (ctx.org_id, member_user_id),
             )
+            _cancel_open_account_requests(conn, ctx.org_id, member_user_id)
         # Covers both an admin removing someone else AND a member leaving on
         # their own -- either way membership is gone, so any open socket of
         # theirs on this org must stop streaming its live events now rather

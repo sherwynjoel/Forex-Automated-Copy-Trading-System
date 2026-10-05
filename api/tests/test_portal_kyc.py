@@ -230,6 +230,19 @@ def test_the_queue_lists_submitted_first_with_who(portal, db, make_user, login_a
         == [other["id"]]
 
 
+def test_an_ex_investors_profile_leaves_the_queue_and_cannot_be_decided(portal, db, login_as):
+    client, org_id, investor = portal
+    kyc_profile(db, org_id, investor["id"], status="submitted")
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute("DELETE FROM org_memberships WHERE org_id = %s AND user_id = %s",
+                     (org_id, investor["id"]))
+    client.cookies.clear()
+    login_as(client, ADMIN)
+    assert client.get(f"/api/orgs/{org_id}/kyc").json() == []
+    r = _decide(client, org_id, investor["id"], status="approved")
+    assert r.status_code == 404 and r.json()["detail"] == "Profile not found"
+
+
 def test_an_admin_approves_and_the_investor_is_emailed(portal, db, login_as, monkeypatch):
     client, org_id, investor = portal
     kyc_profile(db, org_id, investor["id"], status="submitted")

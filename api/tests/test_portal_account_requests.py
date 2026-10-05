@@ -8,6 +8,7 @@ import os
 import psycopg
 import pytest
 
+from conftest import seed_mt5
 from portal_helpers import (add_package, csrf, kyc_profile, link, member,
                             open_account_request)
 
@@ -283,28 +284,30 @@ def test_fulfil_can_link_an_account_under_the_phase_1_rules(desk, db, make_user)
     client, org_id, investor, package_id, seed, req_id = desk
     seed(100, role="master")
     seed(1001, role="slave")
-    seed(1002, role="slave")
+    mine, taken = seed_mt5(db, org_id, "key-a"), seed_mt5(db, org_id, "key-b")
     other = make_user(email="other@example.com")
     member(db, org_id, other["id"], "investor")
-    link(db, org_id, other["id"], 1002)
+    link(db, org_id, other["id"], taken)
     r = _act(client, org_id, req_id, "fulfil", mt5_login=5001, mt5_server="B", account_id=100)
     assert r.status_code == 400
     assert r.json()["detail"] == "The master account cannot be linked to an investor"
-    r = _act(client, org_id, req_id, "fulfil", mt5_login=5001, mt5_server="B", account_id=1002)
+    r = _act(client, org_id, req_id, "fulfil", mt5_login=5001, mt5_server="B", account_id=1001)
+    assert r.status_code == 400 and r.json()["detail"] == "Only an MT5 account can be linked here"
+    r = _act(client, org_id, req_id, "fulfil", mt5_login=5001, mt5_server="B", account_id=taken)
     assert r.status_code == 404
     assert r.json()["detail"] == "Account not found in this workspace, or already linked"
-    r = _act(client, org_id, req_id, "fulfil", mt5_login=5001, mt5_server="B", account_id=1001)
-    assert r.status_code == 200 and r.json()["account_id"] == 1001
+    r = _act(client, org_id, req_id, "fulfil", mt5_login=5001, mt5_server="B", account_id=mine)
+    assert r.status_code == 200 and r.json()["account_id"] == mine
     with psycopg.connect(db, autocommit=True) as conn:
         (owner,) = conn.execute("SELECT investor_user_id FROM accounts "
-                                "WHERE ctid_trader_account_id = 1001").fetchone()
+                                "WHERE ctid_trader_account_id = %s", (mine,)).fetchone()
     assert owner == investor["id"]
     with psycopg.connect(db, autocommit=True) as conn:
         # audit_control files account_id in the events column, not the payload.
         (linked,) = conn.execute("SELECT account_id FROM events WHERE org_id = %s AND "
                                  "payload->>'action' = 'investor_account_linked' "
                                  "ORDER BY id DESC LIMIT 1", (org_id,)).fetchone()
-    assert linked == 1001
+    assert linked == mine
 
 
 def test_fulfil_refuses_a_second_account_for_a_linked_investor(desk, db):
@@ -318,6 +321,47 @@ def test_fulfil_refuses_a_second_account_for_a_linked_investor(desk, db):
         (status,) = conn.execute("SELECT status FROM account_requests WHERE id = %s",
                                  (req_id,)).fetchone()
     assert status == "requested"
+
+
+def test_fulfil_needs_verification_still_approved_and_an_unused_login(desk, db, make_user):
+    client, org_id, investor, package_id, _, req_id = desk
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute("UPDATE kyc_profiles SET status = 'draft' WHERE user_id = %s",
+                     (investor["id"],))
+    r = _act(client, org_id, req_id, "fulfil", mt5_login=5001, mt5_server="B")
+    assert r.status_code == 409 and "no longer approved" in r.json()["detail"]
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute("UPDATE kyc_profiles SET status = 'approved' WHERE user_id = %s",
+                     (investor["id"],))
+    other = make_user(email="other@example.com")
+    member(db, org_id, other["id"], "investor")
+    kyc_profile(db, org_id, other["id"], status="approved")
+    other_req = open_account_request(db, org_id, other["id"], package_id)
+    assert _act(client, org_id, other_req, "fulfil", mt5_login=5001,
+                mt5_server="B").status_code == 200
+    r = _act(client, org_id, req_id, "fulfil", mt5_login=5001, mt5_server="B")
+    assert r.status_code == 409
+    assert r.json()["detail"] == "that MT5 login is already given to another request"
+    assert _act(client, org_id, req_id, "fulfil", mt5_login=5001,
+                mt5_server="Other-Server").status_code == 200
+
+
+@pytest.mark.parametrize("how", ["leave", "role"])
+def test_an_ex_investors_open_request_is_cancelled_and_its_passwords_go(desk, db, how):
+    client, org_id, investor, _, _, req_id = desk
+    if how == "leave":
+        r = client.delete(f"/api/orgs/{org_id}/members/{investor['id']}", headers=csrf(client))
+        assert r.status_code == 204
+    else:
+        r = client.patch(f"/api/orgs/{org_id}/members/{investor['id']}", json={"role": "viewer"},
+                         headers=csrf(client))
+        assert r.status_code == 200
+    assert _sealed(db, req_id) == (None, None)
+    assert client.get(f"/api/orgs/{org_id}/account-requests").json() == []
+    for verb, body in (("reveal", {"mpin": "123456"}),
+                       ("fulfil", {"mt5_login": 5001, "mt5_server": "B"}),
+                       ("reject", {"note": "gone"})):
+        assert _act(client, org_id, req_id, verb, **body).status_code == 404, verb
 
 
 def test_reject_needs_a_note_wipes_and_lets_the_investor_try_again(desk, db, login_as,

@@ -75,12 +75,20 @@ class RejectBody(BaseModel):
     note: Optional[str] = None
 
 
+# Joins a row aliased {t} to the org's CURRENT investor members only.
+INVESTOR_MEMBER_JOIN = ("JOIN org_memberships m ON m.org_id = {t}.org_id "
+                        "AND m.user_id = {t}.user_id AND m.role = 'investor'")
+
+
 def _open_request(conn: psycopg.Connection, org_id: int, req_id: int):
     """(status, user_id, package_name, main_password_enc, investor_password_enc)
-    of a request still waiting on an admin; 404 / 409 otherwise."""
+    of a request still waiting on an admin; 404 / 409 otherwise. The filer
+    must still be an investor member here (routes/orgs cancels on leaving)."""
     row = conn.execute(
-        "SELECT status, user_id, package_name, main_password_enc, investor_password_enc "
-        "FROM account_requests WHERE id = %s AND org_id = %s", (req_id, org_id)).fetchone()
+        "SELECT r.status, r.user_id, r.package_name, r.main_password_enc, "
+        "r.investor_password_enc FROM account_requests r "
+        f"{INVESTOR_MEMBER_JOIN.format(t='r')} WHERE r.id = %s AND r.org_id = %s",
+        (req_id, org_id)).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Request not found")
     if row[0] != "requested":
@@ -98,11 +106,13 @@ def _link_account(conn: psycopg.Connection, org_id: int, user_id: int, account_i
     if linked is not None:
         raise HTTPException(status_code=409, detail="the investor already has a linked account")
     role_row = conn.execute(
-        "SELECT role FROM accounts WHERE ctid_trader_account_id = %s AND org_id = %s",
+        "SELECT role, platform FROM accounts WHERE ctid_trader_account_id = %s AND org_id = %s",
         (account_id, org_id)).fetchone()
     if role_row and role_row[0] == "master":
         raise HTTPException(status_code=400,
                             detail="The master account cannot be linked to an investor")
+    if role_row and role_row[1] != "mt5":
+        raise HTTPException(status_code=400, detail="Only an MT5 account can be linked here")
     updated = conn.execute(
         "UPDATE accounts SET investor_user_id = %s "
         "WHERE ctid_trader_account_id = %s AND org_id = %s AND investor_user_id IS NULL "
@@ -228,6 +238,7 @@ def create_portal_identity_router() -> APIRouter:
         rows = conn.execute(
             f"SELECT {pc.qualify(pid.PROFILE_COLS, 'k')}, u.email, u.display_name "
             "FROM kyc_profiles k JOIN users u ON u.id = k.user_id "
+            f"{INVESTOR_MEMBER_JOIN.format(t='k')} "
             f"WHERE {where} ORDER BY (k.status = 'submitted') DESC, "
             "k.submitted_at DESC NULLS LAST, k.updated_at DESC LIMIT 500", params).fetchall()
         return [pid.profile_json(r) for r in rows]
@@ -244,8 +255,8 @@ def create_portal_identity_router() -> APIRouter:
         except pc.LedgerError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         current = conn.execute(
-            "SELECT status FROM kyc_profiles WHERE org_id = %s AND user_id = %s",
-            (ctx.org_id, user_id)).fetchone()
+            f"SELECT k.status FROM kyc_profiles k {INVESTOR_MEMBER_JOIN.format(t='k')} "
+            "WHERE k.org_id = %s AND k.user_id = %s", (ctx.org_id, user_id)).fetchone()
         if not current:
             raise HTTPException(status_code=404, detail="Profile not found")
         if current[0] != "submitted":
@@ -490,6 +501,7 @@ def create_portal_identity_router() -> APIRouter:
         rows = conn.execute(
             f"SELECT {pc.qualify(pid.REQUEST_COLS, 'r')}, u.email, u.display_name "
             "FROM account_requests r JOIN users u ON u.id = r.user_id "
+            f"{INVESTOR_MEMBER_JOIN.format(t='r')} "
             f"WHERE {where} ORDER BY (r.status = 'requested') DESC, r.created_at DESC, r.id DESC "
             "LIMIT 500", params).fetchall()
         return [pid.request_json(r) for r in rows]
@@ -535,6 +547,18 @@ def create_portal_identity_router() -> APIRouter:
             raise HTTPException(status_code=400, detail=str(exc))
         _status, user_id, package_name, _m, _i = _open_request(conn, ctx.org_id, req_id)
         # The link and the status change land together or not at all.
+        if pid.kyc_status(conn, ctx.org_id, user_id) != "approved":
+            raise HTTPException(status_code=409, detail=(
+                "the investor's verification is no longer approved; "
+                "decide it again before fulfilling"))
+        # ponytail: pre-check, not a unique index -- two admins fulfilling the
+        # same login at the same instant could both pass; add a partial unique
+        # index on (org_id, mt5_server, mt5_login) if that ever matters.
+        if conn.execute(
+                "SELECT 1 FROM account_requests WHERE org_id = %s AND status = 'fulfilled' "
+                "AND mt5_server = %s AND mt5_login = %s", (ctx.org_id, server, login)).fetchone():
+            raise HTTPException(status_code=409,
+                                detail="that MT5 login is already given to another request")
         with conn.transaction():
             if body.account_id is not None:
                 _link_account(conn, ctx.org_id, user_id, body.account_id)
