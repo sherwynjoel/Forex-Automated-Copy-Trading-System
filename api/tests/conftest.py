@@ -44,7 +44,9 @@ def database():
 def db(database):
     with psycopg.connect(database, autocommit=True) as conn:
         conn.execute(
-            "TRUNCATE login_events, account_requests, account_packages, kyc_profiles, "
+            "TRUNCATE bonuses, bonus_rules, ticket_messages, tickets, ticket_subjects, "
+            "user_settings, notification_prefs, notifications, "
+            "login_events, account_requests, account_packages, kyc_profiles, "
             "transfers, withdrawals, deposits, wallet_entries, payout_destinations, "
             "portal_settings, payment_methods, files, "
             "events, portfolio_snapshots, mappings, symbol_cache, "
