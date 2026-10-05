@@ -71,6 +71,7 @@ class MethodPatch(BaseModel):
 class SettingsBody(BaseModel):
     withdrawal_min: Any
     withdrawal_fee_pct: Any
+    max_live_accounts: Any = None   # omitted: keep the current cap
 
 
 class DepositDecision(BaseModel):
@@ -289,7 +290,8 @@ def create_portal_admin_router() -> APIRouter:
 
     def _settings_json(settings: dict) -> Dict[str, Any]:
         return {"withdrawal_min": pc.money(settings["withdrawal_min"]),
-                "withdrawal_fee_pct": float(settings["withdrawal_fee_pct"])}
+                "withdrawal_fee_pct": float(settings["withdrawal_fee_pct"]),
+                "max_live_accounts": settings["max_live_accounts"]}
 
     @router.get("/portal-settings", response_model=Dict[str, Any])
     async def get_settings(ctx: OrgContext = Depends(require_org_role("admin")),
@@ -305,17 +307,23 @@ def create_portal_admin_router() -> APIRouter:
             fee_pct = parse_pct(body.withdrawal_fee_pct, "withdrawal_fee_pct")
         except pc.LedgerError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
-        previous = _settings_json(pc.portal_settings(conn, ctx.org_id))
+        current = pc.portal_settings(conn, ctx.org_id)
+        cap = current["max_live_accounts"] if body.max_live_accounts is None else body.max_live_accounts
+        if isinstance(cap, bool) or not isinstance(cap, int) or not 1 <= cap <= 50:
+            raise HTTPException(status_code=400,
+                                detail="max_live_accounts must be a whole number from 1 to 50")
+        previous = _settings_json(current)
         conn.execute(
             "UPDATE portal_settings SET withdrawal_min = %s, withdrawal_fee_pct = %s, "
-            "updated_by = %s, updated_at = now() WHERE org_id = %s",
-            (withdrawal_min, fee_pct, ctx.user_id, ctx.org_id))
-        out = {"withdrawal_min": pc.money(withdrawal_min), "withdrawal_fee_pct": float(fee_pct)}
+            "max_live_accounts = %s, updated_by = %s, updated_at = now() WHERE org_id = %s",
+            (withdrawal_min, fee_pct, cap, ctx.user_id, ctx.org_id))
+        out = {"withdrawal_min": pc.money(withdrawal_min), "withdrawal_fee_pct": float(fee_pct),
+               "max_live_accounts": cap}
         await pc.audit_control(
             conn, org_id=ctx.org_id, action="portal_settings_changed",
             actor_email=ctx.user_email, user_id=ctx.user_id, previous=previous, **out,
-            summary=f"Withdrawal rules set to min {withdrawal_min:.2f} USD, fee {fee_pct}% "
-                    f"by {ctx.user_email}")
+            summary=f"Withdrawal rules set to min {withdrawal_min:.2f} USD, fee {fee_pct}%, "
+                    f"max {cap} live accounts per investor by {ctx.user_email}")
         return out
 
     # ------------------------------------------------------------ deposits

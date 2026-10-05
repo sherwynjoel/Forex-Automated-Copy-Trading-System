@@ -1,5 +1,5 @@
 # api/tests/test_portal_account_requests.py
-"""Live account requests: a verified investor with no trading account asks
+"""Live account requests: a verified investor under the workspace's cap asks
 for one from a package, with two MT5 passwords sealed until an admin acts;
 the admin reveals them, then fulfils (login, server, optional link) or
 rejects (Task 9). Decisions wipe the passwords and email the investor."""
@@ -106,15 +106,35 @@ def test_an_unverified_investor_is_sent_to_verify(portal, db):
     assert r.status_code == 409 and r.json()["detail"] == "verify your identity first"
 
 
-def test_an_investor_with_an_account_or_an_open_request_is_refused(portal, db):
+def _set_cap(db, org_id, cap):
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute("INSERT INTO portal_settings (org_id, max_live_accounts) VALUES (%s, %s) "
+                     "ON CONFLICT (org_id) DO UPDATE SET max_live_accounts = EXCLUDED.max_live_accounts",
+                     (org_id, cap))
+
+
+def _cancel_open(db, user_id):
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute("UPDATE account_requests SET status = 'cancelled', main_password_enc = NULL, "
+                     "investor_password_enc = NULL WHERE user_id = %s AND status = 'requested'",
+                     (user_id,))
+
+
+def test_one_open_request_at_a_time_and_the_cap_bounds_accounts(portal, db):
     client, org_id, investor, package_id, seed = portal
     assert _request(client, org_id, package_id).status_code == 201
     r = _request(client, org_id, package_id)
     assert r.status_code == 409 and r.json()["detail"] == "a request is already open"
+    _cancel_open(db, investor["id"])
     seed(1001, role="slave")
     link(db, org_id, investor["id"], 1001)
+    # An investor with an account may ask for another, under the cap.
+    assert _request(client, org_id, package_id).status_code == 201
+    _cancel_open(db, investor["id"])
+    _set_cap(db, org_id, 1)
     r = _request(client, org_id, package_id)
-    assert r.status_code == 409 and r.json()["detail"] == "you already have a trading account"
+    assert r.status_code == 409
+    assert r.json()["detail"] == "you have reached the limit of 1 live accounts"
 
 
 @pytest.mark.parametrize("over,status,detail", [
@@ -310,17 +330,27 @@ def test_fulfil_can_link_an_account_under_the_phase_1_rules(desk, db, make_user)
     assert linked == mine
 
 
-def test_fulfil_refuses_a_second_account_for_a_linked_investor(desk, db):
-    client, org_id, investor, _, seed, req_id = desk
-    seed(1001, role="slave")
-    seed(1003, role="slave")
-    link(db, org_id, investor["id"], 1003)
-    r = _act(client, org_id, req_id, "fulfil", mt5_login=5001, mt5_server="B", account_id=1001)
-    assert r.status_code == 409 and r.json()["detail"] == "the investor already has a linked account"
+def test_fulfil_links_a_second_account_up_to_the_cap(desk, db):
+    client, org_id, investor, _, _, req_id = desk
+    first, second = seed_mt5(db, org_id, "key-a"), seed_mt5(db, org_id, "key-b")
+    link(db, org_id, investor["id"], first)
+    _set_cap(db, org_id, 1)
+    r = _act(client, org_id, req_id, "fulfil", mt5_login=5001, mt5_server="B", account_id=second)
+    assert r.status_code == 409
+    assert r.json()["detail"] == "you have reached the limit of 1 live accounts"
     with psycopg.connect(db, autocommit=True) as conn:
         (status,) = conn.execute("SELECT status FROM account_requests WHERE id = %s",
                                  (req_id,)).fetchone()
     assert status == "requested"
+    # The open request being fulfilled does not count against itself.
+    _set_cap(db, org_id, 2)
+    r = _act(client, org_id, req_id, "fulfil", mt5_login=5001, mt5_server="B", account_id=second)
+    assert r.status_code == 200 and r.json()["account_id"] == second
+    with psycopg.connect(db, autocommit=True) as conn:
+        owned = [a for (a,) in conn.execute(
+            "SELECT ctid_trader_account_id FROM accounts WHERE investor_user_id = %s ORDER BY 1",
+            (investor["id"],)).fetchall()]
+    assert owned == sorted([first, second])
 
 
 def test_fulfil_needs_verification_still_approved_and_an_unused_login(desk, db, make_user):

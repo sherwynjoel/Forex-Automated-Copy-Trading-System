@@ -199,14 +199,17 @@ def test_delete_is_refused_while_a_pending_deposit_uses_the_method(org_client, m
 def test_portal_settings_default_to_zero_and_update_with_audit(org_client, db):
     client, org_id, seed = org_client
     url = f"/api/orgs/{org_id}/portal-settings"
-    assert client.get(url).json() == {"withdrawal_min": 0.0, "withdrawal_fee_pct": 0.0}
+    assert client.get(url).json() == {"withdrawal_min": 0.0, "withdrawal_fee_pct": 0.0,
+                                      "max_live_accounts": 5}
     with psycopg.connect(db, autocommit=True) as conn:
         assert conn.execute("SELECT count(*) FROM portal_settings WHERE org_id = %s",
                             (org_id,)).fetchone() == (1,)
     r = client.put(url, json={"withdrawal_min": "50", "withdrawal_fee_pct": "2.5"},
                    headers=csrf(client))
-    assert r.status_code == 200 and r.json() == {"withdrawal_min": 50.0, "withdrawal_fee_pct": 2.5}
-    assert client.get(url).json() == {"withdrawal_min": 50.0, "withdrawal_fee_pct": 2.5}
+    assert r.status_code == 200 and r.json() == {"withdrawal_min": 50.0, "withdrawal_fee_pct": 2.5,
+                                                 "max_live_accounts": 5}
+    assert client.get(url).json() == {"withdrawal_min": 50.0, "withdrawal_fee_pct": 2.5,
+                                      "max_live_accounts": 5}
     r = client.put(url, json={"withdrawal_min": "1.234", "withdrawal_fee_pct": "0"},
                    headers=csrf(client))
     assert r.status_code == 400 and r.json()["detail"] == "withdrawal_min may have at most two decimals"
@@ -217,7 +220,8 @@ def test_portal_settings_default_to_zero_and_update_with_audit(org_client, db):
     assert len(rows) == 1 and rows[0][0] == "info"
     payload = rows[0][1]
     assert payload["withdrawal_min"] == 50.0 and payload["withdrawal_fee_pct"] == 2.5
-    assert payload["previous"] == {"withdrawal_min": 0.0, "withdrawal_fee_pct": 0.0}
+    assert payload["previous"] == {"withdrawal_min": 0.0, "withdrawal_fee_pct": 0.0,
+                                   "max_live_accounts": 5}
     with psycopg.connect(db, autocommit=True) as conn:
         (updated_by,) = conn.execute(
             "SELECT updated_by FROM portal_settings WHERE org_id = %s", (org_id,)).fetchone()

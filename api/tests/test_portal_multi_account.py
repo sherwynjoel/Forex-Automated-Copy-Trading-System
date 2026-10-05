@@ -187,3 +187,22 @@ def test_confirming_funds_the_named_account_while_it_is_still_owned(two, db, log
         rows = conn.execute("SELECT target_account_id, amount, status FROM transfers "
                             "WHERE org_id = %s ORDER BY id", (org_id,)).fetchall()
     assert rows == [(1002, Decimal("100.00"), "approved")]
+
+
+# ------------------------------------------------------------ the cap (Task 5)
+
+
+def test_the_cap_is_a_portal_setting_from_1_to_50(org_client):
+    client, org_id, _ = org_client
+    url = f"/api/orgs/{org_id}/portal-settings"
+    base = {"withdrawal_min": "0", "withdrawal_fee_pct": "0"}
+    assert client.get(url).json()["max_live_accounts"] == 5
+    for bad in (0, 51, "5", True, 2.5):
+        r = client.put(url, json={**base, "max_live_accounts": bad}, headers=csrf(client))
+        assert r.status_code == 400, bad
+        assert r.json()["detail"] == "max_live_accounts must be a whole number from 1 to 50"
+    r = client.put(url, json={**base, "max_live_accounts": 2}, headers=csrf(client))
+    assert r.status_code == 200 and r.json()["max_live_accounts"] == 2
+    r = client.put(url, json=base, headers=csrf(client))         # omitted: kept
+    assert r.status_code == 200 and r.json()["max_live_accounts"] == 2
+    assert client.get(url).json()["max_live_accounts"] == 2
