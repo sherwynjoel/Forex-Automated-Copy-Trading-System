@@ -3,14 +3,14 @@
 refusal, and the account-linking edge cases -- recovered from the
 pre-022 test_investor_portal.py (deleted whole by migration 022, which
 dropped org_investor_wallets/investor_deposits/investor_withdrawals).
-These five never touched those tables -- PUT .../investors/{id}/account
-only ever wrote org_memberships and accounts -- so they still pass
-unmodified against the current schema; only the private _csrf/_member
-helpers are rewired onto the shared portal_helpers. The money-moving
+These five never touched those tables -- linking only ever wrote
+org_memberships and accounts; the two linking tests were rewritten onto
+POST .../investors/{id}/accounts in phase 3. The money-moving
 tests around wallets, deposits and withdrawals are re-tested per feature
 in Tasks 6-10 once their routes are rebuilt on the new tables."""
 import psycopg
 
+from conftest import seed_mt5
 from portal_helpers import csrf, member
 
 from api.alerts import ALERT_RULES
@@ -57,25 +57,18 @@ def test_linking_refuses_an_account_from_another_workspace_or_a_non_investor(
     client, org_id, seed = org_client
     other_owner = make_user(email="o@example.com")
     other_org = make_org(name="Other", members=[(other_owner, "admin")])
-    with psycopg.connect(db, autocommit=True) as conn:
-        (cid,) = conn.execute(
-            "INSERT INTO ctid_connections (org_id, access_token_enc, refresh_token_enc, "
-            "granted_at, expires_at) VALUES (%s, 'e', 'e', now(), now() + interval '1 day') "
-            "RETURNING id", (other_org,)).fetchone()
-        conn.execute("INSERT INTO accounts (ctid_trader_account_id, ctid_connection_id, org_id, "
-                     "trader_login, is_live, role) VALUES (2001, %s, %s, 2001, false, 'slave')",
-                     (cid, other_org))
+    foreign = seed_mt5(db, other_org, "key-foreign")
     investor = make_user(email="inv@example.com")
     member(db, org_id, investor["id"], "investor")
-    r = client.put(f"/api/orgs/{org_id}/investors/{investor['id']}/account",
-                   json={"account_id": 2001}, headers=csrf(client))
+    r = client.post(f"/api/orgs/{org_id}/investors/{investor['id']}/accounts",
+                    json={"account_id": foreign}, headers=csrf(client))
     assert r.status_code == 404
     viewer = make_user(email="v@example.com")
     member(db, org_id, viewer["id"], "viewer")
-    seed(1001, role="slave")
-    r = client.put(f"/api/orgs/{org_id}/investors/{viewer['id']}/account",
-                   json={"account_id": 1001}, headers=csrf(client))
-    assert r.status_code == 404
+    mine = seed_mt5(db, org_id, "key-mine")
+    r = client.post(f"/api/orgs/{org_id}/investors/{viewer['id']}/accounts",
+                    json={"account_id": mine}, headers=csrf(client))
+    assert r.status_code == 404 and r.json()["detail"] == "Investor not found"
 
 
 def test_the_master_account_cannot_be_linked_to_an_investor(org_client, make_user, db):
@@ -87,11 +80,11 @@ def test_the_master_account_cannot_be_linked_to_an_investor(org_client, make_use
     seed(1001, role="slave")
     investor = make_user(email="inv@example.com")
     member(db, org_id, investor["id"], "investor")
-    assert client.put(f"/api/orgs/{org_id}/investors/{investor['id']}/account",
-                      json={"account_id": 1001}, headers=csrf(client)).status_code == 200
+    assert client.post(f"/api/orgs/{org_id}/investors/{investor['id']}/accounts",
+                       json={"account_id": 1001}, headers=csrf(client)).status_code == 201
 
-    r = client.put(f"/api/orgs/{org_id}/investors/{investor['id']}/account",
-                   json={"account_id": 100}, headers=csrf(client))
+    r = client.post(f"/api/orgs/{org_id}/investors/{investor['id']}/accounts",
+                    json={"account_id": 100}, headers=csrf(client))
     assert r.status_code == 400 and "master" in r.json()["detail"]
     with psycopg.connect(db, autocommit=True) as conn:
         links = dict(conn.execute(

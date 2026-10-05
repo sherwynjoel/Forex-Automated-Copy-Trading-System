@@ -287,44 +287,15 @@ def test_the_investor_list_has_figures_and_asks_the_copier_once(org_client, make
     assert [r["email"] for r in rows] == ["inv1@example.com", "inv2@example.com"]
     ann, bob = rows
     assert ann["display_name"] == "Ann" and ann["joined_at"] is not None
-    assert ann["account_id"] == 1001 and ann["nickname"] is None
-    assert ann["equity"] == 100.0 and ann["equity_source"] == "live"
+    assert ann["accounts"] == [{"account_id": 1001, "nickname": None, "equity": 100.0,
+                                "equity_source": "live"}]
     assert ann["balances"] == {"main": 500.0, "credit": 25.0, "pamm": 0.0, "social": 0.0}
     assert ann["on_hold"] == 100.0 and ann["available"] == 400.0
     assert ann["pending"] == {"deposits": 0, "withdrawals": 0, "transfers": 1,
                               "payout_destinations": 0}
-    assert bob["account_id"] is None and bob["equity"] is None
-    assert bob["equity_source"] == "unknown"
+    assert bob["accounts"] == []
     assert bob["balances"] == {"main": 0.0, "credit": 0.0, "pamm": 0.0, "social": 0.0}
     assert bob["pending"]["payout_destinations"] == 1
-
-
-def test_admin_links_and_unlinks_an_account(org_client, make_user, db):
-    client, org_id, seed = org_client
-    seed(100, role="master")
-    seed(1001, role="slave")
-    investor = make_user(email="inv@example.com")
-    _member(db, org_id, investor, "investor")
-    _state(client, {1001: {"balance": 100.0, "equity": 100.0, "open_pnl": 0.0, "positions": []}})
-    r = client.put(f"/api/orgs/{org_id}/investors/{investor['id']}/account",
-                   json={"account_id": 1001}, headers=csrf(client))
-    assert r.status_code == 200 and r.json() == {"user_id": investor["id"], "account_id": 1001}
-    assert client.get(f"/api/orgs/{org_id}/investors").json()[0]["account_id"] == 1001
-    r = client.put(f"/api/orgs/{org_id}/investors/{investor['id']}/account",
-                   json={"account_id": 100}, headers=csrf(client))
-    assert r.status_code == 400 and "master" in r.json()["detail"]
-    assert client.get(f"/api/orgs/{org_id}/investors").json()[0]["account_id"] == 1001
-    r = client.put(f"/api/orgs/{org_id}/investors/{investor['id']}/account",
-                   json={"account_id": None}, headers=csrf(client))
-    assert r.status_code == 200 and r.json()["account_id"] is None
-    assert client.get(f"/api/orgs/{org_id}/investors").json()[0]["account_id"] is None
-    viewer = make_user(email="v@example.com")
-    _member(db, org_id, viewer, "viewer")
-    r = client.put(f"/api/orgs/{org_id}/investors/{viewer['id']}/account",
-                   json={"account_id": 1001}, headers=csrf(client))
-    assert r.status_code == 404 and r.json()["detail"] == "Investor not found"
-    actions = [p["action"] for _, p in _events(db, org_id)]
-    assert actions == ["investor_account_linked", "investor_account_linked"]
 
 
 def test_admin_reads_an_investors_ledger(org_client, make_user, login_as, db):

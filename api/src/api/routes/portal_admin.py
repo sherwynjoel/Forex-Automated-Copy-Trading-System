@@ -92,7 +92,7 @@ class AdjustmentBody(BaseModel):
 
 
 class LinkBody(BaseModel):
-    account_id: Optional[int] = None
+    account_id: int
 
 
 def clean_details(kind: str, raw: Any) -> dict:
@@ -714,27 +714,31 @@ def create_portal_admin_router() -> APIRouter:
                              conn: psycopg.Connection = Depends(get_conn),
                              cfg: ApiConfig = Depends(ApiConfig.from_env)) -> List[Dict[str, Any]]:
         rows = conn.execute(
-            """SELECT u.id, u.email, u.display_name, m.created_at, a.ctid_trader_account_id,
-                      a.nickname, COALESCE(k.status, 'draft')
+            """SELECT u.id, u.email, u.display_name, m.created_at, COALESCE(k.status, 'draft')
                FROM org_memberships m
                JOIN users u ON u.id = m.user_id
-               LEFT JOIN accounts a ON a.org_id = m.org_id AND a.investor_user_id = u.id
                LEFT JOIN kyc_profiles k ON k.org_id = m.org_id AND k.user_id = u.id
                WHERE m.org_id = %s AND m.role = 'investor'
                ORDER BY u.display_name, u.id""", (ctx.org_id,)).fetchall()
-        # One /state round trip for the whole list, never one per investor.
+        owned: Dict[int, list] = {}
+        for user_id, account_id, nickname in conn.execute(
+                "SELECT investor_user_id, ctid_trader_account_id, nickname FROM accounts "
+                "WHERE org_id = %s AND investor_user_id IS NOT NULL "
+                "ORDER BY ctid_trader_account_id", (ctx.org_id,)).fetchall():
+            owned.setdefault(user_id, []).append((int(account_id), nickname))
+        # One /state round trip for the whole list, never one per investor or account.
         state = await _org_state(http_request.app.state.http, cfg, ctx.org_id)
         out = []
-        for user_id, email, name, joined_at, account_id, nickname, kyc in rows:
+        for user_id, email, name, joined_at, kyc in rows:
             figures = pc.wallet_figures(conn, ctx.org_id, user_id)
-            equity, source = None, "unknown"
-            if account_id is not None:
-                equity, source, _positions = _equity_from(state, conn, int(account_id))
+            accounts = []
+            for account_id, nickname in owned.get(user_id, []):
+                equity, source, _positions = _equity_from(state, conn, account_id)
+                accounts.append({"account_id": account_id, "nickname": nickname,
+                                 "equity": pc.money(equity), "equity_source": source})
             out.append({
                 "user_id": user_id, "email": email, "display_name": name,
-                "joined_at": joined_at.isoformat(),
-                "account_id": int(account_id) if account_id is not None else None,
-                "nickname": nickname, "equity": pc.money(equity), "equity_source": source,
+                "joined_at": joined_at.isoformat(), "accounts": accounts,
                 "balances": {w: pc.money(figures[w]["balance"]) for w in pc.WALLETS},
                 "on_hold": pc.money(figures["main"]["on_hold"]),
                 "available": pc.money(figures["main"]["available"]),
@@ -743,38 +747,39 @@ def create_portal_admin_router() -> APIRouter:
             })
         return out
 
-    @router.put("/investors/{user_id}/account", response_model=Dict[str, Any])
-    async def link_account(user_id: int, body: LinkBody,
-                           ctx: OrgContext = Depends(require_org_role("admin")),
-                           conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
+    @router.post("/investors/{user_id}/accounts", status_code=201, response_model=Dict[str, Any])
+    async def link_investor_account(user_id: int, body: LinkBody,
+                                    ctx: OrgContext = Depends(require_org_role("admin")),
+                                    conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
+        """Add one account to an investor under pc.link_account's rules: not
+        the master, nobody else's, and under max_live_accounts (any platform,
+        as before; only fulfil insists on MT5)."""
         _require_investor(conn, ctx.org_id, user_id)
         with conn.transaction():
-            conn.execute("UPDATE accounts SET investor_user_id = NULL "
-                         "WHERE org_id = %s AND investor_user_id = %s", (ctx.org_id, user_id))
-            if body.account_id is not None:
-                # The master is the desk's own account. Linked to an investor
-                # it would show them the desk's equity as their balance.
-                # Checked inside the transaction, so the unlink rolls back.
-                role_row = conn.execute(
-                    "SELECT role FROM accounts WHERE ctid_trader_account_id = %s AND org_id = %s",
-                    (body.account_id, ctx.org_id)).fetchone()
-                if role_row and role_row[0] == "master":
-                    raise HTTPException(
-                        status_code=400,
-                        detail="The master account cannot be linked to an investor")
-                updated = conn.execute(
-                    "UPDATE accounts SET investor_user_id = %s "
-                    "WHERE ctid_trader_account_id = %s AND org_id = %s "
-                    "AND investor_user_id IS NULL RETURNING ctid_trader_account_id",
-                    (user_id, body.account_id, ctx.org_id)).fetchone()
-                if not updated:
-                    raise HTTPException(
-                        status_code=404,
-                        detail="Account not found in this workspace, or already linked")
+            pc.link_account(conn, ctx.org_id, user_id, body.account_id)
         await pc.audit_control(
             conn, org_id=ctx.org_id, action="investor_account_linked",
             actor_email=ctx.user_email, user_id=user_id, account_id=body.account_id)
         return {"user_id": user_id, "account_id": body.account_id}
+
+    @router.delete("/investors/{user_id}/accounts/{account_id}", status_code=204)
+    async def unlink_investor_account(user_id: int, account_id: int,
+                                      ctx: OrgContext = Depends(require_org_role("admin")),
+                                      conn: psycopg.Connection = Depends(get_conn)):
+        """Remove one link. Open transfers on the account keep their phase 1
+        handling: an unlink never touched them, and the investor can no
+        longer name the account in a new request."""
+        _require_investor(conn, ctx.org_id, user_id)
+        row = conn.execute(
+            "UPDATE accounts SET investor_user_id = NULL WHERE org_id = %s "
+            "AND investor_user_id = %s AND ctid_trader_account_id = %s "
+            "RETURNING ctid_trader_account_id", (ctx.org_id, user_id, account_id)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Account not found")
+        await pc.audit_control(
+            conn, org_id=ctx.org_id, action="investor_account_unlinked",
+            actor_email=ctx.user_email, user_id=user_id, account_id=account_id)
+        return Response(status_code=204)
 
     @router.get("/investors/{user_id}/wallet-entries", response_model=Dict[str, Any])
     async def investor_wallet_entries(user_id: int, wallet: Optional[str] = None,

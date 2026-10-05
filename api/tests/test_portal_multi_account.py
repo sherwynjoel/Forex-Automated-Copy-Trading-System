@@ -206,3 +206,83 @@ def test_the_cap_is_a_portal_setting_from_1_to_50(org_client):
     r = client.put(url, json=base, headers=csrf(client))         # omitted: kept
     assert r.status_code == 200 and r.json()["max_live_accounts"] == 2
     assert client.get(url).json()["max_live_accounts"] == 2
+
+
+# ------------------------------------------------------------ admin link / unlink (Task 6)
+
+
+def _events(db, org_id, actions):
+    """(events.account_id, action, payload user_id) of these actions, in order."""
+    with psycopg.connect(db, autocommit=True) as conn:
+        return conn.execute(
+            "SELECT account_id, payload->>'action', (payload->>'user_id')::bigint FROM events "
+            "WHERE org_id = %s AND payload->>'action' = ANY(%s) ORDER BY id",
+            (org_id, list(actions))).fetchall()
+
+
+def test_admin_links_and_unlinks_one_account_at_a_time(org_client, make_user, db):
+    client, org_id, seed = org_client
+    first, second, third = (seed_mt5(db, org_id, f"key-{i}") for i in range(3))
+    investor = make_user(email="inv@example.com")
+    member(db, org_id, investor["id"], "investor")
+    uid = investor["id"]
+    _copier(client, down=True)
+    base = f"/api/orgs/{org_id}/investors/{uid}/accounts"
+    for aid in (first, second):
+        r = client.post(base, json={"account_id": aid}, headers=csrf(client))
+        assert r.status_code == 201 and r.json() == {"user_id": uid, "account_id": aid}
+    (row,) = client.get(f"/api/orgs/{org_id}/investors").json()
+    assert [a["account_id"] for a in row["accounts"]] == [first, second]
+    r = client.delete(f"{base}/{third}", headers=csrf(client))
+    assert r.status_code == 404 and r.json()["detail"] == "Account not found"
+    r = client.delete(f"{base}/{first}", headers=csrf(client))
+    assert r.status_code == 204
+    (row,) = client.get(f"/api/orgs/{org_id}/investors").json()
+    assert [a["account_id"] for a in row["accounts"]] == [second]
+    r = client.put(f"/api/orgs/{org_id}/investors/{uid}/account", json={"account_id": None},
+                   headers=csrf(client))
+    assert r.status_code in (404, 405), "the single-link route is gone"
+    viewer = make_user(email="v@example.com")
+    member(db, org_id, viewer["id"], "viewer")
+    for r in (client.post(f"/api/orgs/{org_id}/investors/{viewer['id']}/accounts",
+                          json={"account_id": third}, headers=csrf(client)),
+              client.delete(f"/api/orgs/{org_id}/investors/{viewer['id']}/accounts/{third}",
+                            headers=csrf(client))):
+        assert r.status_code == 404 and r.json()["detail"] == "Investor not found"
+    assert _events(db, org_id, ("investor_account_linked", "investor_account_unlinked")) == [
+        (first, "investor_account_linked", uid), (second, "investor_account_linked", uid),
+        (first, "investor_account_unlinked", uid)]
+
+
+def test_the_cap_blocks_new_links_and_lowering_it_keeps_what_exists(
+        org_client, make_user, login_as, db):
+    client, org_id, _ = org_client
+    first, second, third = (seed_mt5(db, org_id, f"key-{i}") for i in range(3))
+    investor = make_user(email="inv@example.com")
+    member(db, org_id, investor["id"], "investor")
+    _copier(client, down=True)
+    settings = f"/api/orgs/{org_id}/portal-settings"
+    rules = {"withdrawal_min": "0", "withdrawal_fee_pct": "0"}
+    base = f"/api/orgs/{org_id}/investors/{investor['id']}/accounts"
+    assert client.put(settings, json={**rules, "max_live_accounts": 2},
+                      headers=csrf(client)).status_code == 200
+    for aid in (first, second):
+        assert client.post(base, json={"account_id": aid}, headers=csrf(client)).status_code == 201
+    r = client.post(base, json={"account_id": third}, headers=csrf(client))
+    assert r.status_code == 409
+    assert r.json()["detail"] == "you have reached the limit of 2 live accounts"
+    assert client.put(settings, json={**rules, "max_live_accounts": 1},
+                      headers=csrf(client)).status_code == 200
+    (row,) = client.get(f"/api/orgs/{org_id}/investors").json()
+    assert len(row["accounts"]) == 2, "lowering the cap unlinks nothing"
+    kyc_profile(db, org_id, investor["id"], status="approved")
+    package_id = add_package(db, org_id)
+    client.cookies.clear()
+    login_as(client, investor)
+    r = client.post(f"/api/orgs/{org_id}/investor/account-requests",
+                    json={"package_id": package_id, "leverage": 100, "main_password": "Main1234",
+                          "investor_password": "Look1234", "mpin": "123456"},
+                    headers=csrf(client))
+    assert r.status_code == 409
+    assert r.json()["detail"] == "you have reached the limit of 1 live accounts"
+    assert client.get(f"/api/orgs/{org_id}/investor/positions?account_id={second}").status_code == 200
