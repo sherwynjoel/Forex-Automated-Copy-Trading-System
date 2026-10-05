@@ -274,3 +274,44 @@ test('a save that fails after uploading reuses the id on retry instead of re-upl
   expect(puts).toHaveLength(2)
   expect(JSON.parse(String((puts[1][1] as RequestInit).body))).toEqual({ id_front_file_id: 91 })
 })
+
+test('saving another step keeps a pending upload from the step that failed', async () => {
+  let profile: KycProfile = { ...profileFixture(), id_front_file_id: null, photo_file_id: null,
+                              missing: ['id_front_file_id', 'photo_file_id'] }
+  let uploads = 90
+  let putAttempts = 0
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input)
+    const method = init?.method ?? 'GET'
+    if (url.endsWith('/investor/profile') && method === 'GET') return jsonResponse(profile)
+    if (url.endsWith('/investor/files') && method === 'POST') {
+      uploads += 1
+      return jsonResponse({ id: uploads, purpose: (init!.body as FormData).get('purpose'),
+                            content_type: 'image/png', size_bytes: 3, created_at: '2026-10-01T10:00:00Z' }, 201)
+    }
+    if (url.endsWith('/investor/profile') && method === 'PUT') {
+      putAttempts += 1
+      if (putAttempts === 1) return jsonResponse({ detail: 'server hiccup' }, 500)
+      const body = JSON.parse(String(init!.body)) as Partial<KycProfile>
+      profile = { ...profile, ...body }
+      return jsonResponse(profile)
+    }
+    return jsonResponse({})
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  renderPage()
+  await userEvent.click(await screen.findByRole('button', { name: '2. Identity' }))
+  await userEvent.upload(screen.getByLabelText('ID front'), new File(['x'], 'front.png', { type: 'image/png' }))
+  await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }))
+  expect(await screen.findByText('server hiccup')).toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: '4. Photo' }))
+  await userEvent.upload(screen.getByLabelText('Your photo'), new File(['y'], 'me.png', { type: 'image/png' }))
+  await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }))
+  await waitFor(() => expect(calls(fetchMock, '/investor/profile', 'PUT')).toHaveLength(2))
+  await userEvent.click(await screen.findByRole('button', { name: '2. Identity' }))
+  await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }))
+  await waitFor(() => expect(calls(fetchMock, '/investor/profile', 'PUT')).toHaveLength(3))
+  const puts = calls(fetchMock, '/investor/profile', 'PUT')
+  expect(JSON.parse(String((puts[2][1] as RequestInit).body))).toEqual({ id_front_file_id: 91 })
+  expect(calls(fetchMock, '/investor/files', 'POST')).toHaveLength(2)
+})

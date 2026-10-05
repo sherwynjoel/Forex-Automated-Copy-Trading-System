@@ -179,8 +179,12 @@ export default function InvestorProfile() {
           : 'Saved')
         setProfile(saved)
         setForm(formOf(saved))
-        setFiles({})
-        setPendingFileIds({})
+        // Only this step's slots: another step's picked or pending file is
+        // still waiting for its own save.
+        const savedSlots = STEP_FIELDS[s].files
+        setFiles((f) => ({ ...f, ...Object.fromEntries(savedSlots.map((k) => [k, null])) }))
+        setPendingFileIds((p) => Object.fromEntries(
+          Object.entries(p).filter(([k]) => !(savedSlots as readonly string[]).includes(k))))
       }
       return true
     } catch (err) {
