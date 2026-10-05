@@ -636,6 +636,23 @@ export interface WalletEntriesPage { entries: WalletEntry[]; has_more: boolean; 
 
 export interface WalletFigures { balance: number; on_hold: number; available: number }
 
+export type EquitySource = 'live' | 'last known' | 'unknown'
+
+/** One of the investor's live accounts on GET investor/summary, oldest first. */
+export interface AccountSummary {
+  account_id: number; nickname: string | null; platform: string
+  status: string; last_error: string | null; connected: boolean
+  /** From the fulfilled account request that linked it, else null. */
+  mt5_login: number | null; mt5_server: string | null
+  equity_source: EquitySource; equity: number | null; net_funded: number; profit: number | null
+  /** Equity less open account -> wallet transfers, floored to cents; null while equity is unknown. */
+  account_available: number | null
+  open_positions: number
+}
+
+/** One account on a row of the admin's GET investors. */
+export interface InvestorAccount { account_id: number; nickname: string | null; equity: number | null; equity_source: EquitySource }
+
 /** GET investor/summary. `available` figures are floored to cents server-side. */
 export interface InvestorSummary {
   org: { id: number; name: string }
@@ -647,6 +664,11 @@ export interface InvestorSummary {
   pending: { deposits: number; withdrawals: number; transfers: number; payout_destinations: number }
   deposits_open: boolean
   withdrawal_rules: { min: number; fee_pct: number }
+  /** The top-level equity, net_funded, profit, open_positions and equity_source are totals over these. */
+  accounts: AccountSummary[]
+  /** used = owned accounts + open account requests. */
+  account_limit: { max: number; used: number }
+  // Transitional (phase 3 Task 15 removes them): link_state, account, account_available.
   link_state: 'linked' | 'unlinked'
   account: {
     account_id: number; nickname: string | null; platform: string
@@ -667,6 +689,8 @@ export interface InvestorRow {
   email: string
   display_name: string
   joined_at: string
+  accounts: InvestorAccount[]
+  // Transitional (phase 3 Task 15 removes them): account_id, nickname, equity, equity_source.
   account_id: number | null
   nickname: string | null
   equity: number | null
@@ -678,7 +702,7 @@ export interface InvestorRow {
   kyc_status: KycStatus
 }
 
-export interface PortalSettings { withdrawal_min: number; withdrawal_fee_pct: number }
+export interface PortalSettings { withdrawal_min: number; withdrawal_fee_pct: number; max_live_accounts: number }
 
 export interface RequestsSummary {
   deposits: number; withdrawals: number; transfers: number; payout_destinations: number
