@@ -25,7 +25,7 @@ from pydantic import BaseModel
 
 from .config import ApiConfig
 from .portal_ledger import *  # noqa: F401,F403  -- re-exported for the routers
-from .portal_ledger import WALLETS, available, balance, clean_text, holds, money
+from .portal_ledger import WALLETS, available, balance, clean_text, deposit_bonus, holds, money
 from .routes.mt5 import MT5_OFFLINE_AFTER_S
 from .routes.settings_control import _proxy_to_copier
 from .ws import broadcaster
@@ -394,6 +394,116 @@ def settle(conn: psycopg.Connection, *, org_id: int, user_id: int, wallet: str, 
         "RETURNING id",
         (org_id, user_id, wallet, amount, kind, ref_table, ref_id, note, created_by)).fetchone()
     return row is not None
+
+
+# ------------------------------------------------------------ bonuses
+
+
+BONUS_SOURCES = ("signup", "kyc", "deposit", "manual")
+BONUS_NAMES = {"signup": "welcome bonus", "kyc": "verification bonus",
+               "deposit": "deposit bonus", "manual": "bonus"}
+
+
+def bonus_rules(conn: psycopg.Connection, org_id: int) -> dict:
+    """The org's bonus rules; the row is created with every rule off on first
+    read. Flags as bools, amounts and pct as Decimals, deposit_cap Decimal or None."""
+    conn.execute("INSERT INTO bonus_rules (org_id) VALUES (%s) ON CONFLICT (org_id) DO NOTHING",
+                 (org_id,))
+    row = conn.execute(
+        "SELECT signup_enabled, signup_amount, kyc_enabled, kyc_amount, deposit_enabled, "
+        "deposit_pct, deposit_cap, updated_at FROM bonus_rules WHERE org_id = %s",
+        (org_id,)).fetchone()
+    return {"signup_enabled": bool(row[0]), "signup_amount": Decimal(row[1]),
+            "kyc_enabled": bool(row[2]), "kyc_amount": Decimal(row[3]),
+            "deposit_enabled": bool(row[4]), "deposit_pct": Decimal(row[5]),
+            "deposit_cap": Decimal(row[6]) if row[6] is not None else None,
+            "updated_at": row[7]}
+
+
+def rule_bonus(conn: psycopg.Connection, org_id: int, source: str,
+               base: Optional[Decimal] = None) -> Decimal:
+    """What the org's rule pays for this event NOW (rules are never applied
+    backwards): 0 while the rule is off; the deposit rule takes `base`, the
+    confirmed amount."""
+    rules = bonus_rules(conn, org_id)
+    if not rules[f"{source}_enabled"]:
+        return Decimal("0")
+    if source == "deposit":
+        return deposit_bonus(base, rules["deposit_pct"], rules["deposit_cap"])
+    return rules[f"{source}_amount"]
+
+
+def pay_bonus(conn: psycopg.Connection, org_id: int, user_id: int, source: str, amount: Decimal,
+              source_id: Optional[int] = None, note: Optional[str] = None,
+              created_by: Optional[int] = None) -> Optional[int]:
+    """Record one bonus and credit it, inside the caller's transaction (which
+    took lock_investor_ledger first). The bonuses unique indexes make each
+    rule pay at most once: a second signup or kyc bonus for the investor, or
+    a second one for the same deposit, inserts nothing and returns None. A
+    zero amount pays nothing. Returns the bonuses id when paid."""
+    if conn.info.transaction_status != psycopg.pq.TransactionStatus.INTRANS:
+        raise RuntimeError("pay_bonus must run inside the caller's transaction")
+    if amount == 0:
+        return None
+    row = conn.execute(
+        "INSERT INTO bonuses (org_id, user_id, source, source_id, amount, note, created_by) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING RETURNING id",
+        (org_id, user_id, source, source_id, amount, note, created_by)).fetchone()
+    if row is None:
+        return None
+    settle(conn, org_id=org_id, user_id=user_id, wallet="credit", amount=amount, kind="bonus",
+           ref_table="bonuses", ref_id=int(row[0]), note=note, created_by=created_by)
+    return int(row[0])
+
+
+async def announce_bonus(conn: psycopg.Connection, request: Request, *, org_id: int,
+                         user_id: int, bonus_id: int, source: str, amount: Decimal,
+                         actor_email: str, note: Optional[str] = None) -> None:
+    """Audit one paid bonus and tell the investor (topic bonus). A hand-posted
+    bonus is a warning, so it reaches the alerters like a ledger adjustment;
+    a rule's bonus is info. Run after the paying transaction."""
+    name = BONUS_NAMES[source]
+    row = conn.execute("SELECT email FROM users WHERE id = %s", (user_id,)).fetchone()
+    who = row[0] if row else f"user {user_id}"
+    await audit_control(
+        conn, org_id=org_id, action="investor_bonus_paid", actor_email=actor_email,
+        user_id=user_id, severity="warning" if source == "manual" else "info",
+        bonus_id=bonus_id, source=source, amount=money(amount), note=note,
+        summary=f"Bonus {amount:+.2f} USD ({name}) for {who} by {actor_email}")
+    noted = f"\nNote: {note}" if note else ""
+    if amount > 0:
+        title = f"You received a {amount:.2f} USD {name}"
+        body = (f"{amount:.2f} USD was paid into your Credit wallet.{noted}\n"
+                "Bonus credit can be moved to one of your trading accounts from Transfer.")
+    else:
+        title = f"A bonus of {-amount:.2f} USD was taken back"
+        body = f"{-amount:.2f} USD was taken from your Credit wallet.{noted}"
+    await notify(conn, request, org_id, user_id, "bonus", title, body,
+                 investor_link(org_id, "bonus"))
+
+
+async def award_rule_bonus(conn: psycopg.Connection, request: Request, org_id: int,
+                           user_id: int, source: str, *, actor_email: str) -> Optional[int]:
+    """The signup or kyc rule's bonus, in its own transaction (ledger lock
+    first), then audit + notify. Paid at most once per investor; nothing
+    while the rule is off. Returns the bonuses id when paid.
+
+    Best effort, like notify: it runs after the join, role change or KYC
+    approval has committed, so a failure here is logged and returns None
+    rather than answering 500 for a change that already landed. A missed
+    bonus is visible in the log and can be granted by hand."""
+    try:
+        with conn.transaction():
+            lock_investor_ledger(conn, org_id, user_id)
+            amount = rule_bonus(conn, org_id, source)
+            bonus_id = pay_bonus(conn, org_id, user_id, source, amount)
+    except Exception:
+        logger.exception("%s bonus failed for user %s in org %s", source, user_id, org_id)
+        return None
+    if bonus_id is not None:
+        await announce_bonus(conn, request, org_id=org_id, user_id=user_id, bonus_id=bonus_id,
+                             source=source, amount=amount, actor_email=actor_email)
+    return bonus_id
 
 
 # ------------------------------------------------------------ settings

@@ -80,6 +80,13 @@ def fee_for(amount: Decimal, fee_pct: Decimal) -> Decimal:
     return round_cents(amount * fee_pct / Decimal(100))
 
 
+def deposit_bonus(amount: Decimal, pct: Decimal, cap: Optional[Decimal]) -> Decimal:
+    """The deposit rule's bonus: pct of the confirmed amount, half-up to the
+    cent, never above cap (None = no cap). Zero means nothing is paid."""
+    bonus = round_cents(amount * pct / Decimal(100))
+    return bonus if cap is None else min(bonus, cap)
+
+
 def money(value: Optional[Decimal]) -> Optional[float]:
     """The JSON form: a float rounded to cents, or None."""
     return None if value is None else float(round_cents(value))

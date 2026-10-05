@@ -506,3 +506,41 @@ def test_clip_and_investor_link():
     assert pc.clip("abcd", 3) == "ab…"
     assert pc.investor_link(7, "deposit") == "/org/7/invest/deposit"
     assert pc.TOPICS == ("money", "identity", "support", "bonus")
+
+
+def test_pay_bonus_pays_once_into_credit(org_user, db):
+    org_id, user_id = org_user
+    with psycopg.connect(db, autocommit=True) as conn:
+        with pytest.raises(RuntimeError):
+            pc.pay_bonus(conn, org_id, user_id, "signup", Decimal("5"))
+        with conn.transaction():
+            pc.lock_investor_ledger(conn, org_id, user_id)
+            first = pc.pay_bonus(conn, org_id, user_id, "signup", Decimal("50"))
+            again = pc.pay_bonus(conn, org_id, user_id, "signup", Decimal("50"))
+            nothing = pc.pay_bonus(conn, org_id, user_id, "kyc", Decimal("0"))
+            dep = pc.pay_bonus(conn, org_id, user_id, "deposit", Decimal("10"), source_id=7,
+                               note="deposit #7")
+            dep_again = pc.pay_bonus(conn, org_id, user_id, "deposit", Decimal("10"), source_id=7)
+        assert isinstance(first, int) and isinstance(dep, int)
+        assert again is None and nothing is None and dep_again is None
+        rows = conn.execute(
+            "SELECT wallet, amount, kind, ref_table, ref_id, note FROM wallet_entries "
+            "WHERE user_id = %s ORDER BY id", (user_id,)).fetchall()
+        assert rows == [("credit", Decimal("50.00"), "bonus", "bonuses", first, None),
+                        ("credit", Decimal("10.00"), "bonus", "bonuses", dep, "deposit #7")]
+        assert pc.wallet_figures(conn, org_id, user_id)["credit"]["available"] == Decimal("60.00")
+
+
+def test_rule_bonus_follows_the_rules(org_user, db):
+    org_id, _user_id = org_user
+    with psycopg.connect(db, autocommit=True) as conn:
+        assert pc.rule_bonus(conn, org_id, "signup") == 0          # creates the row, all off
+        assert pc.bonus_rules(conn, org_id)["deposit_cap"] is None
+        conn.execute(
+            "UPDATE bonus_rules SET signup_enabled = true, signup_amount = 25, "
+            "deposit_enabled = true, deposit_pct = 10, deposit_cap = 30 WHERE org_id = %s",
+            (org_id,))
+        assert pc.rule_bonus(conn, org_id, "signup") == Decimal("25.00")
+        assert pc.rule_bonus(conn, org_id, "kyc") == 0
+        assert pc.rule_bonus(conn, org_id, "deposit", Decimal("100")) == Decimal("10.00")
+        assert pc.rule_bonus(conn, org_id, "deposit", Decimal("1000")) == Decimal("30.00")
