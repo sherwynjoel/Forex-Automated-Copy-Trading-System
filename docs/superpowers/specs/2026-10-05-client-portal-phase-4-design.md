@@ -136,7 +136,10 @@ CHECK (cardinality(file_ids) <= 3), created_at`. INDEX (ticket_id, created_at, i
 - **Using credit**: `TRANSFER_PAIRS` gains `("credit", "account")` only. The transfer is
   an account transfer like main->account (requested, admin decision, MPIN, cap on
   credit available). Credit never moves to main/pamm/social and is never withdrawn
-  (withdrawals already only debit main).
+  (withdrawals already only debit main). Nor does it come back out through the account:
+  an account -> main transfer may take at most equity less open account transfers out
+  less the credit funded into that account (done credit -> account transfers), floored
+  at 0, so the principal stays as broker credit while profit made on it may leave.
 - Investor `GET investor/bonuses?source=&from=&to=` (own history: date, source, amount,
   note) and the Credit wallet balance (already in the summary wallets).
 

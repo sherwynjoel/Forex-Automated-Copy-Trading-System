@@ -49,9 +49,10 @@
 | File | Change |
 |---|---|
 | `db/migrations/025_portal_engagement.sql` (new), `api/tests/test_migration_025.py` (new), `api/tests/conftest.py` | eight tables; TRUNCATE list |
-| `api/src/api/portal_common.py`, `api/tests/test_portal_common.py` | `notify`, `notify_admins`, `email_wanted`, `clip`, `investor_link`; bonus helpers; `notify_investor` removed |
+| `api/src/api/portal_common.py`, `api/tests/test_portal_common.py` | `notify`, `notify_admins`, `email_wanted`, `clip`, `investor_link`; bonus helpers; `credit_funded`, `account_movable`; `notify_investor` removed |
 | `api/src/api/portal_ledger.py`, `api/tests/test_portal_ledger.py` | `deposit_bonus`; `("credit", "account")` |
-| `api/src/api/routes/portal_admin.py` | notify calls, deposit bonus, `parse_signed_amount`, summary `tickets` |
+| `api/src/api/routes/portal_admin.py` | notify calls, deposit bonus, `parse_signed_amount`, summary `tickets`, transfer decision re-check of bonus credit |
+| `api/src/api/routes/portal_investor.py` | account -> wallet cap and summary `account_available` exclude bonus credit |
 | `api/src/api/routes/portal_identity.py` | notify calls, KYC bonus |
 | `api/src/api/routes/orgs.py` | signup bonus on join and role change |
 | `api/src/api/routes/portal_notifications.py` (new), `api/tests/test_portal_notifications.py` (new), `api/tests/test_portal_settings.py` (new) | notifications, `/api/me/settings`, prefs |
@@ -62,12 +63,12 @@
 | `api/src/api/alerts.py`, `api/src/api/telegram.py` | `investor_bonus_paid` warning |
 | `api/tests/test_portal_notify_callers.py` (new), `test_portal_summary.py`, `test_portal_account_requests.py`, `test_portal_transfers.py`, `test_rbac_matrix.py` | updated to the new rules and shapes |
 | `dashboard/src/lib/types.ts`, `lib/engagement.ts` (+ test), `test/portalFixtures.ts` (+ test) | phase 4 types, labels, fixtures |
-| `dashboard/src/hooks/useUnreadCount.ts` (+ test), `components/layout/NotificationBell.tsx` (+ test), `pages/Notifications.tsx` (+ test), `components/Layout.tsx` (+ test) | bell and page |
+| `dashboard/src/hooks/useUnreadCount.ts` (+ test), `lib/notificationActions.ts` (+ test), `components/layout/NotificationBell.tsx` (+ test), `pages/Notifications.tsx` (+ test), `components/Layout.tsx` (+ test) | bell and page |
 | `dashboard/src/hooks/useTheme.ts` (+ test), `lib/themeSync.ts` (+ test), `pages/Settings.tsx` (+ test) | settings and theme sync |
 | `dashboard/src/pages/support/TicketMessages.tsx`, `pages/investor/InvestorSupport.tsx` (+ test) | investor support |
 | `dashboard/src/pages/requests/SupportTab.tsx` (+ test), `RequestTabs.tsx`, `pages/Requests.tsx`, `pages/investors/TicketSubjectsCard.tsx` (+ test), `PaymentMethodsTab.tsx`, `pages/Investors.tsx`, `pages/Investors.test.tsx`, `pages/Requests.test.tsx` | desk support |
 | `dashboard/src/pages/investor/InvestorBonus.tsx` (+ test), `InvestorTransfer.tsx` (+ test) | bonus page, credit transfer |
-| `dashboard/src/pages/investors/BonusRulesCard.tsx` (+ test), `GrantBonusDialog.tsx` (+ test) | admin bonus |
+| `dashboard/src/pages/investors/BonusRulesCard.tsx` (+ test), `GrantBonusDialog.tsx` (+ test), `AdjustDialog.tsx` | admin bonus; shared signed-amount check |
 | `dashboard/src/App.tsx`, `pages/groups/admin.ts`, `pages/groups/investor.ts`, `components/layout/nav.ts` (+ test) | routes and nav |
 | `README.md`, spec status line | runbook, status |
 
@@ -85,7 +86,7 @@
 | 8 | Bonus core: `deposit_bonus`, `pay_bonus` and friends, bonus rules routes |
 | 9 | Bonus triggers: signup, KYC, deposit |
 | 10 | Manual grant and claw-back; the investor's bonus history; alert rules |
-| 11 | Credit -> trading account transfers |
+| 11 | Credit -> trading account transfers; bonus credit never moves back out |
 | 12 | RBAC matrix rows; the full API suite |
 | 13 | Dashboard foundation: types, `lib/engagement.ts`, fixtures |
 | 14 | The bell and the Notifications page |
@@ -1540,7 +1541,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 
 **Interfaces:**
 - Consumes: Task 5's router and helpers; `routes/portal_files.file_belongs`; `routes/portal_investor.RATE_LIMITED`; `auth.LoginRateLimiter`; `pc.notify_admins`, `pc.qualify`.
-- Produces (module level in `portal_support.py`): `TICKETS_PER_HOUR = 10`, `MAX_IMAGES = 3`, `STATUSES`, `TICKET_COLS`, `MESSAGE_COLS`, `LAST_FROM_DESK`, `TicketBody`, `MessageBody`, `DeskReply`, `ticket_json(row)`, `message_json(row)`, `clean_attachments(conn, org_id, user_id, raw) -> list[int]`, `search_clause(q, status) -> tuple[str, list]`, `load_thread(conn, org_id, ticket_id, user_id=None) -> dict`, `add_message(conn, org_id, ticket_id, author_id, from_desk, body, file_ids)`, `desk_link(org_id, ticket_id) -> str`; inside the router `_close(conn, ctx, ticket_id, *, owner) -> (investor_id, subject_label)`. Routes `POST investor/tickets`, `GET investor/tickets?status=&q=`, `GET investor/tickets/{ticket_id}`, `POST investor/tickets/{ticket_id}/messages`, `POST investor/tickets/{ticket_id}/close`; audits `ticket_opened`, `ticket_replied`, `ticket_closed`. Test helpers: fixture `portal` -> `(client, org_id, investor, {"deposits": id, "old": id})`, `_open`, `_reply`.
+- Produces (module level in `portal_support.py`): `TICKETS_PER_HOUR = 10`, `REPLIES_PER_HOUR = 60`, `MAX_IMAGES = 3`, `STATUSES`, `TICKET_COLS`, `MESSAGE_COLS`, `LAST_FROM_DESK`, `WAITING_ON_DESK` (the one SQL rule for "waiting on the desk", on tickets aliased `t`), `TICKET_SELECT`, `TicketBody`, `MessageBody`, `DeskReply`, `ticket_json(row)`, `message_json(row)`, `clean_attachments(conn, org_id, user_id, raw) -> list[int]`, `search_clause(q, status) -> tuple[str, list]`, `load_thread(conn, org_id, ticket_id, user_id=None) -> dict` (with `user_id` set, the investor's view: desk messages carry no `author_id`/`author_name` and a desk close no `closed_by`), `add_message(conn, org_id, ticket_id, author_id, from_desk, body, file_ids)`, `desk_link(org_id, ticket_id) -> str`; inside the router `_close(conn, ctx, ticket_id, *, owner) -> (investor_id, subject_label)`. Routes `POST investor/tickets`, `GET investor/tickets?status=&q=`, `GET investor/tickets/{ticket_id}`, `POST investor/tickets/{ticket_id}/messages` (60 replies per hour, 429), `POST investor/tickets/{ticket_id}/close`; every Ticket carries `waiting_on_desk`; audits `ticket_opened`, `ticket_replied`, `ticket_closed`. Test helpers: fixture `portal` -> `(client, org_id, investor, {"deposits": id, "old": id})`, `_open`, `_reply`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1585,6 +1586,7 @@ def test_an_investor_opens_a_ticket_with_images(portal, db):
     t = r.json()
     assert (t["status"], t["subject_label"], t["user_id"]) == ("new", "Deposits", investor["id"])
     assert t["last_from_desk"] is False and t["closed_at"] is None
+    assert t["waiting_on_desk"] is True
     (m,) = t["messages"]
     assert (m["body"], m["file_ids"], m["from_desk"], m["author_name"]) == (
         "My deposit is missing", images, False, "Inv One")
@@ -1690,6 +1692,27 @@ def test_ten_tickets_an_hour(portal):
         assert _open(client, org_id, subjects["deposits"]).status_code == 201
     r = _open(client, org_id, subjects["deposits"])
     assert r.status_code == 429 and r.json()["detail"] == "too many requests; try again later"
+
+
+async def _no_notify(*_args, **_kwargs):
+    """Skips the admin emails the reply rate-limit test would otherwise send."""
+    return None
+
+
+def test_sixty_replies_an_hour(portal, monkeypatch):
+    """Each reply emails every admin, so replies are limited too: 60 per
+    investor per hour, counted apart from new tickets."""
+    from api import portal_common
+    monkeypatch.setattr(portal_common, "notify_admins", _no_notify)
+    client, org_id, _investor, subjects = portal
+    t = _open(client, org_id, subjects["deposits"]).json()
+    for _ in range(60):
+        assert _reply(client, org_id, t["id"]).status_code == 201
+    r = _reply(client, org_id, t["id"])
+    assert r.status_code == 429 and r.json()["detail"] == "too many requests; try again later"
+    thread = client.get(f"/api/orgs/{org_id}/investor/tickets/{t['id']}").json()
+    assert len(thread["messages"]) == 61
+    assert _open(client, org_id, subjects["deposits"]).status_code == 201, "tickets count apart"
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -1717,6 +1740,9 @@ and below `SUBJECT_COLS = …`:
 
 ```python
 TICKETS_PER_HOUR = 10
+# Each investor reply emails every admin: a looser limit than new tickets,
+# but a limit (keyed portal-ticket-reply:<org>:<user>).
+REPLIES_PER_HOUR = 60
 MAX_IMAGES = 3
 STATUSES = ("new", "open", "closed")
 TICKET_COLS = ("id, user_id, subject_id, subject_label, status, created_at, updated_at, "
@@ -1726,6 +1752,12 @@ MESSAGE_COLS = "id, author_id, from_desk, body, file_ids, created_at"
 # the ticket aliased t.
 LAST_FROM_DESK = ("(SELECT m.from_desk FROM ticket_messages m WHERE m.ticket_id = t.id "
                   "ORDER BY m.id DESC LIMIT 1)")
+# The ONE "waiting on the desk" rule: not closed, and the investor spoke
+# last. Every Ticket's waiting_on_desk flag and requests/summary's tickets
+# count read it; the dashboard only reads the flag.
+WAITING_ON_DESK = f"(t.status <> 'closed' AND NOT COALESCE({LAST_FROM_DESK}, false))"
+# Every ticket read selects these, in ticket_json's order.
+TICKET_SELECT = f"{pc.qualify(TICKET_COLS, 't')}, {LAST_FROM_DESK}, {WAITING_ON_DESK}"
 
 
 class TicketBody(BaseModel):
@@ -1746,15 +1778,17 @@ class DeskReply(BaseModel):
 
 
 def ticket_json(row) -> Dict[str, Any]:
+    """A TICKET_SELECT row, optionally followed by the investor's email and
+    display_name."""
     (ticket_id, user_id, subject_id, subject_label, status, created_at, updated_at,
-     last_message_at, closed_at, closed_by, last_from_desk) = row[:11]
+     last_message_at, closed_at, closed_by, last_from_desk, waiting_on_desk) = row[:12]
     out = {"id": ticket_id, "user_id": user_id, "subject_id": subject_id,
            "subject_label": subject_label, "status": status, "created_at": pc._iso(created_at),
            "updated_at": pc._iso(updated_at), "last_message_at": pc._iso(last_message_at),
            "closed_at": pc._iso(closed_at), "closed_by": closed_by,
-           "last_from_desk": bool(last_from_desk)}
-    if len(row) > 11:
-        out["email"], out["display_name"] = row[11], row[12]
+           "last_from_desk": bool(last_from_desk), "waiting_on_desk": bool(waiting_on_desk)}
+    if len(row) > 12:
+        out["email"], out["display_name"] = row[12], row[13]
     return out
 
 
@@ -1808,8 +1842,11 @@ def load_thread(conn: psycopg.Connection, org_id: int, ticket_id: int,
                 user_id: Optional[int] = None) -> Dict[str, Any]:
     """The ticket with its investor's email/name and every message, oldest
     first. `user_id` narrows to the owner (investor routes): another
-    investor's ticket is the same 404 as a missing one."""
-    sql = (f"SELECT {pc.qualify(TICKET_COLS, 't')}, {LAST_FROM_DESK}, u.email, u.display_name "
+    investor's ticket is the same 404 as a missing one, and the investor's
+    view never names desk staff -- desk messages carry no author_id or
+    author_name (the page shows "Support desk") and a desk close no
+    closed_by."""
+    sql = (f"SELECT {TICKET_SELECT}, u.email, u.display_name "
            "FROM tickets t JOIN users u ON u.id = t.user_id WHERE t.id = %s AND t.org_id = %s")
     params: list = [ticket_id, org_id]
     if user_id is not None:
@@ -1822,7 +1859,14 @@ def load_thread(conn: psycopg.Connection, org_id: int, ticket_id: int,
         f"SELECT {pc.qualify(MESSAGE_COLS, 'm')}, a.display_name FROM ticket_messages m "
         "LEFT JOIN users a ON a.id = m.author_id WHERE m.ticket_id = %s ORDER BY m.id",
         (ticket_id,)).fetchall()
-    return {**ticket_json(row), "messages": [message_json(m) for m in messages]}
+    thread = {**ticket_json(row), "messages": [message_json(m) for m in messages]}
+    if user_id is not None:
+        if thread["closed_by"] not in (None, user_id):
+            thread["closed_by"] = None
+        for message in thread["messages"]:
+            if message["from_desk"]:
+                message["author_id"] = message["author_name"] = None
+    return thread
 
 
 def add_message(conn: psycopg.Connection, org_id: int, ticket_id: int, author_id: int,
@@ -1843,7 +1887,8 @@ In `create_portal_support_router()`, directly after `router = APIRouter(...)`, a
 
 ```python
     # Ten new tickets per investor per hour, keyed portal-ticket:<org>:<user>;
-    # its own instance, as each portal router keeps one.
+    # its own instance, as each portal router keeps one. Replies share the
+    # instance under their own key with REPLIES_PER_HOUR.
     hourly = LoginRateLimiter(max_attempts=TICKETS_PER_HOUR, window_s=3600)
 
     async def _close(conn: psycopg.Connection, ctx: OrgContext, ticket_id: int, *,
@@ -1918,7 +1963,7 @@ and before `return router` add:
         where, params = search_clause(q, status)
         # ponytail: LIMIT 500, page when one investor has more tickets than that
         rows = conn.execute(
-            f"SELECT {pc.qualify(TICKET_COLS, 't')}, {LAST_FROM_DESK} FROM tickets t "
+            f"SELECT {TICKET_SELECT} FROM tickets t "
             f"WHERE t.org_id = %s AND t.user_id = %s{where} "
             "ORDER BY t.last_message_at DESC, t.id DESC LIMIT 500",
             (ctx.org_id, ctx.user_id, *params)).fetchall()
@@ -1940,6 +1985,9 @@ and before `return router` add:
             files = clean_attachments(conn, ctx.org_id, ctx.user_id, body.file_ids)
         except pc.LedgerError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+        if hourly.is_limited(f"portal-ticket-reply:{ctx.org_id}:{ctx.user_id}",
+                             max_attempts=REPLIES_PER_HOUR):
+            raise HTTPException(status_code=429, detail=RATE_LIMITED)
         with conn.transaction():
             row = conn.execute(
                 "UPDATE tickets SET status = CASE WHEN status = 'closed' THEN 'open' "
@@ -2011,23 +2059,28 @@ def test_the_desk_answers_and_the_status_and_summary_follow(portal, db, login_as
 
     assert summary()["tickets"] == 1 and summary()["total"] == 1
     queue = client.get(f"/api/orgs/{org_id}/tickets").json()
-    assert [(q["id"], q["status"], q["email"], q["last_from_desk"]) for q in queue] == [
-        (t["id"], "new", "inv@example.com", False)]
+    assert [(q["id"], q["status"], q["email"], q["last_from_desk"], q["waiting_on_desk"])
+            for q in queue] == [(t["id"], "new", "inv@example.com", False, True)]
     r = _reply(client, org_id, t["id"], "We are checking", desk=True)
     assert r.status_code == 201, r.text
     thread = r.json()
     assert thread["status"] == "open" and thread["last_from_desk"] is True
+    assert thread["waiting_on_desk"] is False
     last = thread["messages"][-1]
     assert (last["from_desk"], last["author_name"], last["file_ids"]) == (True, "User", [])
+    assert last["author_id"] == _user_id(db, "admin@example.com"), "the desk sees who answered"
     assert summary()["tickets"] == 0           # answered: waiting on the investor
     client.cookies.clear()
     login_as(client, investor)
-    assert _reply(client, org_id, t["id"], "Thanks, any update?").status_code == 201
+    r = _reply(client, org_id, t["id"], "Thanks, any update?")
+    assert r.status_code == 201 and r.json()["waiting_on_desk"] is True
     client.cookies.clear()
     login_as(client, ADMIN)
     assert summary()["tickets"] == 1           # the investor spoke last
     r = client.post(f"/api/orgs/{org_id}/tickets/{t['id']}/close", headers=csrf(client))
     assert r.status_code == 200 and r.json()["status"] == "closed"
+    assert r.json()["waiting_on_desk"] is False
+    assert r.json()["closed_by"] == _user_id(db, "admin@example.com")
     assert summary()["tickets"] == 0
     r = _reply(client, org_id, t["id"], "late", desk=True)
     assert r.status_code == 409 and r.json()["detail"] == "ticket is closed"
@@ -2044,6 +2097,28 @@ def test_the_desk_answers_and_the_status_and_summary_follow(portal, db, login_as
     assert to_desk == [f"New ticket #{t['id']}: Deposits", f"Reply on ticket #{t['id']}: Deposits"]
     replies = [(e[1]["from_desk"], e[1]["user_id"]) for e in _events(db, org_id, "ticket_replied")]
     assert replies == [(True, investor["id"]), (False, investor["id"])]
+
+
+def test_the_investor_thread_never_names_desk_staff(portal, db, login_as):
+    client, org_id, investor, subjects = portal
+    t = _open(client, org_id, subjects["deposits"]).json()
+    client.cookies.clear()
+    login_as(client, ADMIN)
+    assert _reply(client, org_id, t["id"], "We are checking", desk=True).status_code == 201
+    assert client.post(f"/api/orgs/{org_id}/tickets/{t['id']}/close",
+                       headers=csrf(client)).status_code == 200
+    client.cookies.clear()
+    login_as(client, investor)
+    thread = client.get(f"/api/orgs/{org_id}/investor/tickets/{t['id']}").json()
+    assert thread["closed_by"] is None and thread["closed_at"] is not None
+    mine, desk = thread["messages"]
+    assert (mine["author_id"], mine["author_name"]) == (investor["id"], "Inv One")
+    assert (desk["from_desk"], desk["author_id"], desk["author_name"]) == (True, None, None)
+    reopened = _reply(client, org_id, t["id"], "Still missing").json()
+    assert reopened["messages"][1]["author_name"] is None
+    # The investor's own close keeps closed_by: it names nobody else.
+    r = client.post(f"/api/orgs/{org_id}/investor/tickets/{t['id']}/close", headers=csrf(client))
+    assert r.json()["closed_by"] == investor["id"]
 
 
 def test_the_desk_queue_filters_and_shows_the_thread(portal, db, login_as):
@@ -2095,7 +2170,7 @@ In `api/src/api/routes/portal_support.py`, before `return router` add:
         where, params = search_clause(q, status)
         # ponytail: LIMIT 500, add paging when an org has more tickets than that
         rows = conn.execute(
-            f"SELECT {pc.qualify(TICKET_COLS, 't')}, {LAST_FROM_DESK}, u.email, u.display_name "
+            f"SELECT {TICKET_SELECT}, u.email, u.display_name "
             "FROM tickets t JOIN users u ON u.id = t.user_id "
             f"WHERE t.org_id = %s{where} "
             "ORDER BY (t.status <> 'closed') DESC, t.last_message_at DESC, t.id DESC LIMIT 500",
@@ -2153,7 +2228,13 @@ In `api/src/api/routes/portal_support.py`, before `return router` add:
 
 - [ ] **Step 4: Count tickets waiting on the desk**
 
-In `api/src/api/routes/portal_admin.py`, in `requests_summary`, replace the last subquery of the SELECT
+In `api/src/api/routes/portal_admin.py`, below `from .portal_investor import WALLET_LABELS, entries_page, money_ref_label, pending_counts` add
+
+```python
+from .portal_support import WAITING_ON_DESK
+```
+
+(no cycle: `portal_support` imports `portal_investor` and `portal_files`, never `portal_admin`). In `requests_summary`, replace the last subquery of the SELECT
 
 ```python
                  (SELECT count(*) FROM account_requests
@@ -2166,10 +2247,10 @@ with
                  (SELECT count(*) FROM account_requests
                    WHERE org_id = %(o)s AND status = 'requested'),
                  (SELECT count(*) FROM tickets t
-                   WHERE t.org_id = %(o)s AND (t.status = 'new' OR (t.status = 'open'
-                     AND NOT COALESCE((SELECT m.from_desk FROM ticket_messages m
-                       WHERE m.ticket_id = t.id ORDER BY m.id DESC LIMIT 1), false))))""",
+                   WHERE t.org_id = %(o)s AND """ + WAITING_ON_DESK + ")",
 ```
+
+(the same rule every Ticket's `waiting_on_desk` flag uses, written once in `portal_support`).
 
 and the `counts` dict with
 
@@ -2342,7 +2423,7 @@ def test_rules_default_off_and_round_trip(org_client, db):
     ({"kyc_amount": "-1"}, "kyc_amount must be greater than 0"),
     ({"kyc_amount": "1.234"}, "kyc_amount may have at most two decimals"),
     ({"deposit_pct": "100.5"}, "deposit_pct must be between 0 and 100"),
-    ({"deposit_pct": "1.2345"}, "deposit_pct must be between 0 and 100"),
+    ({"deposit_pct": "1.2345"}, "deposit_pct may have at most three decimals"),
     ({"deposit_cap": "0"}, "deposit_cap must be greater than 0"),
     ({"signup_enabled": True}, "signup_amount must be above 0 while the signup rule is on"),
     ({"deposit_enabled": True}, "deposit_pct must be above 0 while the deposit rule is on"),
@@ -2471,11 +2552,20 @@ async def award_rule_bonus(conn: psycopg.Connection, request: Request, org_id: i
                            user_id: int, source: str, *, actor_email: str) -> Optional[int]:
     """The signup or kyc rule's bonus, in its own transaction (ledger lock
     first), then audit + notify. Paid at most once per investor; nothing
-    while the rule is off. Returns the bonuses id when paid."""
-    with conn.transaction():
-        lock_investor_ledger(conn, org_id, user_id)
-        amount = rule_bonus(conn, org_id, source)
-        bonus_id = pay_bonus(conn, org_id, user_id, source, amount)
+    while the rule is off. Returns the bonuses id when paid.
+
+    Best effort, like notify: it runs after the join, role change or KYC
+    approval has committed, so a failure here is logged and returns None
+    rather than answering 500 for a change that already landed. A missed
+    bonus is visible in the log and can be granted by hand."""
+    try:
+        with conn.transaction():
+            lock_investor_ledger(conn, org_id, user_id)
+            amount = rule_bonus(conn, org_id, source)
+            bonus_id = pay_bonus(conn, org_id, user_id, source, amount)
+    except Exception:
+        logger.exception("%s bonus failed for user %s in org %s", source, user_id, org_id)
+        return None
     if bonus_id is not None:
         await announce_bonus(conn, request, org_id=org_id, user_id=user_id, bonus_id=bonus_id,
                              source=source, amount=amount, actor_email=actor_email)
@@ -2539,8 +2629,10 @@ def parse_deposit_pct(raw: object) -> Decimal:
         value = Decimal(str(raw))
     except (InvalidOperation, ValueError):
         raise pc.LedgerError(message)
-    if not value.is_finite() or value < 0 or value > 100 or value != value.quantize(Decimal("0.001")):
+    if not value.is_finite() or value < 0 or value > 100:
         raise pc.LedgerError(message)
+    if value != value.quantize(Decimal("0.001")):
+        raise pc.LedgerError("deposit_pct may have at most three decimals")
     return value
 
 
@@ -2723,6 +2815,36 @@ def test_the_kyc_bonus_pays_once_on_approval(org_client, make_user, db):
     assert _credit_entries(db, rejected["id"]) == []
 
 
+def test_a_failing_rule_bonus_never_fails_the_join_or_the_approval(org_client, make_user,
+                                                                   login_as, db, monkeypatch):
+    """award_rule_bonus runs after the primary change committed: a failure is
+    logged and the request still answers as if no rule were on."""
+    from api import portal_common
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("ledger down")
+
+    client, org_id, _seed = org_client
+    _rules(client, org_id, signup_enabled=True, signup_amount="50", kyc_enabled=True,
+           kyc_amount="25")
+    token = _invite(client, org_id)
+    monkeypatch.setattr(portal_common, "pay_bonus", boom)
+    joiner = make_user(email="joiner@example.com")
+    r = _join(client, login_as, joiner, token)
+    assert r.status_code == 200 and r.json()["role"] == "investor"
+    with psycopg.connect(db, autocommit=True) as conn:
+        assert conn.execute("SELECT role FROM org_memberships WHERE org_id = %s AND user_id = %s",
+                            (org_id, joiner["id"])).fetchone() == ("investor",)
+    client.cookies.clear()
+    login_as(client, ADMIN)
+    kyc_profile(db, org_id, joiner["id"], status="submitted")
+    r = client.post(f"/api/orgs/{org_id}/kyc/{joiner['id']}/decision",
+                    json={"status": "approved", "note": None}, headers=csrf(client))
+    assert r.status_code == 200 and r.json()["status"] == "approved"
+    assert _credit_entries(db, joiner["id"]) == []
+    assert _events(db, org_id, "investor_bonus_paid") == []
+
+
 def _pending_deposit(db, org_id, user_id, amount, reference):
     with psycopg.connect(db, autocommit=True) as conn:
         return conn.execute(
@@ -2736,6 +2858,7 @@ def test_the_deposit_bonus_rounds_caps_and_pays_once(org_client, make_user, db):
     uid = _investor(make_user, db, org_id)["id"]
     _rules(client, org_id, deposit_enabled=True, deposit_pct="12.5", deposit_cap="100")
     small = _pending_deposit(db, org_id, uid, "33.33", "d-1")
+    mid = _pending_deposit(db, org_id, uid, "500", "d-mid")
     big = _pending_deposit(db, org_id, uid, "5000", "d-2")
     tiny = _pending_deposit(db, org_id, uid, "0.03", "d-3")
 
@@ -2745,13 +2868,18 @@ def test_the_deposit_bonus_rounds_caps_and_pays_once(org_client, make_user, db):
 
     assert confirm(small).status_code == 200
     assert confirm(small).status_code == 409          # a double confirm pays nothing more
-    assert confirm(big, credited_amount="4000").status_code == 200   # pct of what was confirmed
+    # Below the cap, so the base shows: 12.5 % of the credited 400 is 50.00,
+    # where the 500 notice amount would have paid 62.50.
+    assert confirm(mid, credited_amount="400").status_code == 200
+    assert confirm(big, credited_amount="4000").status_code == 200   # capped at 100
     assert confirm(tiny).status_code == 200            # 0.00375 rounds to 0: nothing paid
-    assert _credit_entries(db, uid) == [("deposit", 4.17), ("deposit", 100.0)]
+    assert _credit_entries(db, uid) == [("deposit", 4.17), ("deposit", 50.0),
+                                        ("deposit", 100.0)]
     with psycopg.connect(db, autocommit=True) as conn:
         rows = conn.execute("SELECT source_id, amount, note FROM bonuses WHERE user_id = %s "
                             "ORDER BY id", (uid,)).fetchall()
     assert rows == [(small, Decimal("4.17"), f"deposit #{small}"),
+                    (mid, Decimal("50.00"), f"deposit #{mid}"),
                     (big, Decimal("100.00"), f"deposit #{big}")]
 ```
 
@@ -3161,15 +3289,18 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 
 ---
 
-### Task 11: Credit -> trading account transfers
+### Task 11: Credit -> trading account transfers; bonus credit never moves back out
 
 **Files:**
 - Modify: `api/src/api/portal_ledger.py` (`TRANSFER_PAIRS`, `transfer_pair` docstring)
+- Modify: `api/src/api/portal_common.py` (`credit_funded`, `account_movable` after `net_funded`)
+- Modify: `api/src/api/routes/portal_investor.py` (`request_transfer` cap, `summary` `account_available`)
+- Modify: `api/src/api/routes/portal_admin.py` (`decide_transfer` re-checks the cap on approve/done)
 - Modify: `api/tests/test_portal_ledger.py`, `api/tests/test_portal_transfers.py`
 
 **Interfaces:**
-- Consumes: `routes/portal_investor.request_transfer` and `routes/portal_admin.decide_transfer` unchanged (they already hold and settle any source wallet); `portal_helpers.approved_destination`.
-- Produces: `TRANSFER_PAIRS` = main->account, account->main, pamm->main, social->main, credit->account.
+- Consumes: `routes/portal_investor.request_transfer` and `routes/portal_admin.decide_transfer` (they already hold and settle any source wallet); `pc.open_account_transfers_out`, `pc.floor_cents`; `portal_helpers.approved_destination`.
+- Produces: `TRANSFER_PAIRS` = main->account, account->main, pamm->main, social->main, credit->account. `pc.credit_funded(conn, org_id, user_id, account_id) -> Decimal` (sum of `done` transfers with `source_wallet = 'credit'` into that account by that investor). `pc.account_movable(conn, org_id, user_id, account_id, equity) -> Decimal` = `floor_cents(equity - open_account_transfers_out - credit_funded)`, never below 0. The account -> wallet cap in `request_transfer`, the summary's per-account `account_available`, and a new re-check in `decide_transfer` (approve or done of an account -> wallet transfer: `equity_at_request - credit_funded`, 409 when exceeded) all exclude bonus credit. Principal credit stays at the broker; profits made on it may leave.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -3216,12 +3347,109 @@ def test_credit_moves_only_to_a_trading_account(org_client, make_user, login_as,
                     json={"destination_id": dest, "amount": "10", "mpin": "123456"},
                     headers=csrf(client))
     assert r.status_code == 400 and r.json()["detail"] == "amount exceeds what is available (0.00)"
+
+
+def _credit_funded(db, org_id, user_id, account_id):
+    from api.portal_common import credit_funded
+    with psycopg.connect(db, autocommit=True) as conn:
+        return float(credit_funded(conn, org_id, user_id, account_id))
+
+
+def test_bonus_credit_moved_into_an_account_cannot_move_out(org_client, make_user, login_as, db):
+    client, org_id, investor = _funded(org_client, make_user, login_as, db, main="0",
+                                       link_to=1001, equity="1000")
+    credit(db, org_id, investor["id"], Decimal("100"), wallet="credit")
+    tr_id = _transfer(client, org_id, W("credit"), A(1001), "100").json()["id"]
+    assert _credit_funded(db, org_id, investor["id"], 1001) == 0.0, "requested is not funded"
+    client.cookies.clear()
+    login_as(client, ADMIN)
+    assert _decide(client, org_id, tr_id, "done").status_code == 200
+    assert _credit_funded(db, org_id, investor["id"], 1001) == 100.0
+    assert _credit_funded(db, org_id, investor["id"], 1002) == 0.0, "only that account"
+    client.cookies.clear()
+    login_as(client, investor)
+    (account,) = client.get(f"/api/orgs/{org_id}/investor/summary").json()["accounts"]
+    assert account["account_available"] == 900.0, "equity 1000 minus the 100 bonus credit"
+    r = _transfer(client, org_id, A(1001), W("main"), "950")
+    assert r.status_code == 400
+    assert r.json()["detail"] == "amount exceeds the account's available equity (900.00)"
+    assert _transfer(client, org_id, A(1001), W("main"), "900").status_code == 201
+    # Profit made on top of the credit may leave: equity 1300 less the 900
+    # already requested less the 100 credit leaves 300.
+    _state(client, {1001: {"balance": 1300.0, "equity": 1300.0, "open_pnl": 0.0,
+                           "positions": []}})
+    (account,) = client.get(f"/api/orgs/{org_id}/investor/summary").json()["accounts"]
+    assert account["account_available"] == 300.0
+    r = _transfer(client, org_id, A(1001), W("main"), "300.01")
+    assert r.status_code == 400
+    assert r.json()["detail"] == "amount exceeds the account's available equity (300.00)"
+    assert _transfer(client, org_id, A(1001), W("main"), "300").status_code == 201
+
+
+def test_account_available_never_goes_below_zero(org_client, make_user, login_as, db):
+    client, org_id, investor = _funded(org_client, make_user, login_as, db, main="0",
+                                       link_to=1001, equity="100")
+    credit(db, org_id, investor["id"], Decimal("100"), wallet="credit")
+    tr_id = _transfer(client, org_id, W("credit"), A(1001), "100").json()["id"]
+    client.cookies.clear()
+    login_as(client, ADMIN)
+    assert _decide(client, org_id, tr_id, "done").status_code == 200
+    client.cookies.clear()
+    login_as(client, investor)
+    # The account lost money: equity 60 is below the 100 credit funded.
+    _state(client, {1001: {"balance": 60.0, "equity": 60.0, "open_pnl": 0.0, "positions": []}})
+    (account,) = client.get(f"/api/orgs/{org_id}/investor/summary").json()["accounts"]
+    assert account["account_available"] == 0.0
+    r = _transfer(client, org_id, A(1001), W("main"), "0.01")
+    assert r.status_code == 400
+    assert r.json()["detail"] == "amount exceeds the account's available equity (0.00)"
+
+
+def test_credit_funded_after_the_request_blocks_the_decision(org_client, make_user, login_as, db):
+    """The desk funds the broker credit before marking the credit transfer
+    done, so equity can include the credit while credit_funded is still 0.
+    The decision re-checks against the equity seen at request time."""
+    client, org_id, investor = _funded(org_client, make_user, login_as, db, main="0",
+                                       link_to=1001, equity="1000")
+    credit(db, org_id, investor["id"], Decimal("100"), wallet="credit")
+    credit_id = _transfer(client, org_id, W("credit"), A(1001), "100").json()["id"]
+    r = _transfer(client, org_id, A(1001), W("main"), "1000")
+    assert r.status_code == 201, "credit not yet funded: the whole equity is movable"
+    out_id = r.json()["id"]
+    client.cookies.clear()
+    login_as(client, ADMIN)
+    assert _decide(client, org_id, credit_id, "done").status_code == 200
+    r = _decide(client, org_id, out_id, "approved")
+    assert r.status_code == 409
+    assert r.json()["detail"] == ("bonus credit cannot leave the account (at most 900.00 "
+                                  "may move out); reject this transfer instead")
+    r = _decide(client, org_id, out_id, "done")
+    assert r.status_code == 409 and "900.00" in r.json()["detail"]
+    r = _decide(client, org_id, out_id, "rejected", "bonus credit stays")
+    assert r.status_code == 200 and r.json()["status"] == "rejected"
+    assert _entries(db, org_id, investor["id"])[-1][0] == "credit", "nothing reached main"
+
+
+def test_a_decision_within_the_cap_is_unaffected(org_client, make_user, login_as, db):
+    client, org_id, investor = _funded(org_client, make_user, login_as, db, main="0",
+                                       link_to=1001, equity="1000")
+    credit(db, org_id, investor["id"], Decimal("100"), wallet="credit")
+    credit_id = _transfer(client, org_id, W("credit"), A(1001), "100").json()["id"]
+    out_id = _transfer(client, org_id, A(1001), W("main"), "900").json()["id"]
+    client.cookies.clear()
+    login_as(client, ADMIN)
+    assert _decide(client, org_id, credit_id, "done").status_code == 200
+    assert _decide(client, org_id, out_id, "approved").status_code == 200
+    r = _decide(client, org_id, out_id, "done")
+    assert r.status_code == 200 and r.json()["status"] == "done"
+    assert _entries(db, org_id, investor["id"])[-1] == ("main", 900.0, "transfer", "transfers",
+                                                        out_id)
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `"$PY" -m pytest tests/test_portal_ledger.py tests/test_portal_transfers.py -q -p no:cacheprovider`
-Expected: FAIL — `that transfer is not allowed` for credit -> account.
+Expected: FAIL — `that transfer is not allowed` for credit -> account, then `ImportError: cannot import name 'credit_funded'`.
 
 - [ ] **Step 3: Allow the pair**
 
@@ -3246,16 +3474,151 @@ TRANSFER_PAIRS: frozenset[tuple[str, str]] = frozenset({
 
 and in `transfer_pair`'s docstring replace `(credit never moves in phase 1)` with `(credit moves only to a trading account)`.
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [ ] **Step 4: Keep bonus credit inside the account**
 
-Run: `"$PY" -m pytest tests/test_portal_ledger.py tests/test_portal_transfers.py tests/test_portal_withdrawals.py tests/test_portal_multi_account.py -q -p no:cacheprovider`
-Expected: PASS.
+In `api/src/api/portal_common.py`, directly after the `net_funded` function (before `# ------------------------------------------------------------ locking`), add:
 
-- [ ] **Step 5: Commit**
+```python
+def credit_funded(conn: psycopg.Connection, org_id: int, user_id: int,
+                  account_id: int) -> Decimal:
+    """Bonus credit this investor moved into this account: done transfers
+    from the Credit wallet. The desk funds them as broker credit; that
+    principal never moves back out to a wallet (profit made on it may)."""
+    (total,) = conn.execute(
+        "SELECT COALESCE(SUM(amount), 0) FROM transfers WHERE org_id = %s AND user_id = %s "
+        "AND status = 'done' AND source_kind = 'wallet' AND source_wallet = 'credit' "
+        "AND target_kind = 'account' AND target_account_id = %s",
+        (org_id, user_id, account_id)).fetchone()
+    return Decimal(total)
+
+
+def account_movable(conn: psycopg.Connection, org_id: int, user_id: int, account_id: int,
+                    equity: Decimal) -> Decimal:
+    """What may still move from the account to a wallet: equity less open
+    account->wallet transfers less the bonus credit funded into it, floored
+    to the cent and never below zero."""
+    movable = floor_cents(equity - open_account_transfers_out(conn, org_id, user_id, account_id)
+                          - credit_funded(conn, org_id, user_id, account_id))
+    return max(movable, Decimal("0.00"))
+```
+
+and in the same file replace the import line Task 8 left
+
+```python
+from .portal_ledger import WALLETS, available, balance, clean_text, deposit_bonus, holds, money
+```
+
+with
+
+```python
+from .portal_ledger import (WALLETS, available, balance, clean_text, deposit_bonus,
+                            floor_cents, holds, money)
+```
+
+In `api/src/api/routes/portal_investor.py` `request_transfer`, replace
+
+```python
+                if equity is not None:
+                    account_available = pc.floor_cents(
+                        equity - pc.open_account_transfers_out(
+                            conn, ctx.org_id, ctx.user_id, account_id))
+                    if amount > account_available:
+```
+
+with
+
+```python
+                if equity is not None:
+                    # Bonus credit funded into the account never leaves it.
+                    account_available = pc.account_movable(
+                        conn, ctx.org_id, ctx.user_id, account_id, equity)
+                    if amount > account_available:
+```
+
+In the same file's summary route, replace
+
+```python
+            if account_equity is not None:
+                available = pc.floor_cents(account_equity - pc.open_account_transfers_out(
+                    conn, ctx.org_id, ctx.user_id, account_id))
+```
+
+with
+
+```python
+            if account_equity is not None:
+                available = pc.account_movable(conn, ctx.org_id, ctx.user_id, account_id,
+                                               account_equity)
+```
+
+In `api/src/api/routes/portal_admin.py` `decide_transfer`, replace
+
+```python
+        current = conn.execute(
+            "SELECT status, user_id, source_kind, source_wallet, source_account_id, "
+            "target_kind, target_wallet, target_account_id, amount FROM transfers "
+            "WHERE id = %s AND org_id = %s", (tr_id, ctx.org_id)).fetchone()
+        if not current:
+            raise HTTPException(status_code=404, detail="Transfer not found")
+        (status_now, user_id, source_kind, source_wallet, source_account, target_kind,
+         target_wallet, target_account, amount) = current
+```
+
+with
+
+```python
+        current = conn.execute(
+            "SELECT status, user_id, source_kind, source_wallet, source_account_id, "
+            "target_kind, target_wallet, target_account_id, amount, equity_at_request "
+            "FROM transfers WHERE id = %s AND org_id = %s", (tr_id, ctx.org_id)).fetchone()
+        if not current:
+            raise HTTPException(status_code=404, detail="Transfer not found")
+        (status_now, user_id, source_kind, source_wallet, source_account, target_kind,
+         target_wallet, target_account, amount, equity_at_request) = current
+```
+
+and, in the same function, replace
+
+```python
+        with conn.transaction():
+            pc.lock_investor_ledger(conn, ctx.org_id, user_id)
+            if new_status == "done":
+                # Done straight from requested also records the decision;
+```
+
+with
+
+```python
+        with conn.transaction():
+            pc.lock_investor_ledger(conn, ctx.org_id, user_id)
+            # Bonus credit may have been funded into the account after this
+            # request was checked (the desk funds the broker credit, then
+            # marks the credit transfer done). Re-check against the equity
+            # seen at request time, never the live equity: by `done` the
+            # desk has already taken the money out at the broker.
+            if (new_status in ("approved", "done") and source_kind == "account"
+                    and source_account is not None and equity_at_request is not None):
+                cap = max(pc.floor_cents(Decimal(equity_at_request) - pc.credit_funded(
+                    conn, ctx.org_id, user_id, source_account)), Decimal("0.00"))
+                if amount > cap:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"bonus credit cannot leave the account (at most {cap:.2f} "
+                               "may move out); reject this transfer instead")
+            if new_status == "done":
+                # Done straight from requested also records the decision;
+```
+
+- [ ] **Step 5: Run the tests to verify they pass**
+
+Run: `"$PY" -m pytest tests/test_portal_ledger.py tests/test_portal_transfers.py tests/test_portal_withdrawals.py tests/test_portal_multi_account.py tests/test_portal_summary.py -q -p no:cacheprovider`
+Expected: PASS (the summary and multi-account `account_available` figures are unchanged: they move no credit).
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add api/src/api/portal_ledger.py api/tests/test_portal_ledger.py api/tests/test_portal_transfers.py
-git commit -m "feat(api): bonus credit transfers to a trading account, and nowhere else
+git add api/src/api/portal_ledger.py api/src/api/portal_common.py api/src/api/routes/portal_investor.py api/src/api/routes/portal_admin.py api/tests/test_portal_ledger.py api/tests/test_portal_transfers.py
+git commit -m "feat(api): bonus credit transfers to a trading account and never moves back out
 
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
@@ -3427,7 +3790,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 
 **Interfaces:**
 - Consumes: the API shapes of Tasks 3-10 (interfaces doc, "Shapes").
-- Produces: the phase 4 types, `RequestsSummary.tickets`; `lib/engagement.ts` (`TOPICS`, `TOPIC_LABELS`, `TOPIC_EMAIL_LABELS`, `TICKET_STATUS_LABELS`, `TICKET_STATUS_TONES`, `BONUS_SOURCES`, `BONUS_SOURCE_LABELS`, `IMAGE_ACCEPT`, `MAX_IMAGES`, `safeLink`, `ticketsQuery`); fixtures `notificationFixture`, `ticketFixture`, `ticketMessageFixture`, `threadFixture`, `subjectFixture`, `bonusFixture`, `bonusRulesFixture`.
+- Produces: the phase 4 types, `RequestsSummary.tickets`; `lib/engagement.ts` (`TOPICS`, `TOPIC_LABELS`, `TOPIC_EMAIL_LABELS`, `TICKET_STATUS_LABELS`, `TICKET_STATUS_TONES`, `BONUS_SOURCES`, `BONUS_SOURCE_LABELS`, `IMAGE_ACCEPT`, `MAX_IMAGES`, `TEXTAREA` (the one textarea class the phase 4 forms share), `safeLink`, `ticketsQuery`); fixtures `notificationFixture`, `ticketFixture`, `ticketMessageFixture`, `threadFixture`, `subjectFixture`, `bonusFixture`, `bonusRulesFixture`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -3436,7 +3799,7 @@ Create `dashboard/src/lib/engagement.test.ts`:
 ```ts
 import { expect, test } from 'vitest'
 import {
-  BONUS_SOURCE_LABELS, TICKET_STATUS_LABELS, TOPIC_EMAIL_LABELS, TOPICS, safeLink, ticketsQuery,
+  BONUS_SOURCE_LABELS, TEXTAREA, TICKET_STATUS_LABELS, TOPIC_EMAIL_LABELS, TOPICS, safeLink, ticketsQuery,
 } from './engagement'
 
 test('safeLink keeps our own paths and drops anything else', () => {
@@ -3450,6 +3813,10 @@ test('ticketsQuery adds only the filters that are set', () => {
   expect(ticketsQuery('investor/tickets', 'all', '')).toBe('investor/tickets')
   expect(ticketsQuery('tickets', 'closed', '  wire 50% ')).toBe('tickets?status=closed&q=wire+50%25')
   expect(ticketsQuery('tickets', 'all', 'usdt')).toBe('tickets?q=usdt')
+})
+
+test('the shared textarea class stays on palette tokens', () => {
+  expect(TEXTAREA).toBe('w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink')
 })
 
 test('every topic, status and source has its words', () => {
@@ -3466,6 +3833,7 @@ In `dashboard/src/test/portalFixtures.test.ts`, add `bonusFixture, bonusRulesFix
 test('the phase 4 builders give complete rows and take overrides', () => {
   expect(notificationFixture({ id: 9 })).toMatchObject({ id: 9, topic: 'money', read_at: null })
   expect(ticketFixture().last_from_desk).toBe(false)
+  expect(ticketFixture().waiting_on_desk).toBe(true)
   expect(threadFixture().messages).toHaveLength(1)
   expect(threadFixture({ status: 'closed' }).status).toBe('closed')
   expect(subjectFixture({ enabled: false }).enabled).toBe(false)
@@ -3515,6 +3883,8 @@ export interface Ticket {
   closed_at: string | null; closed_by: number | null
   /** Who spoke last: true while the ticket waits on the investor. */
   last_from_desk: boolean
+  /** The server's one "waiting on the desk" rule (not closed, investor spoke last). */
+  waiting_on_desk: boolean
   /** On the desk queue and on every thread. */
   email?: string; display_name?: string | null
 }
@@ -3575,6 +3945,10 @@ export const BONUS_SOURCE_LABELS: Record<BonusSource, string> = {
 export const IMAGE_ACCEPT = ['image/jpeg', 'image/png', 'image/webp']
 export const MAX_IMAGES = 3
 
+/** The textarea look (the one PaymentMethodsTab and AccountRequestsTab
+ *  already use); every phase 4 message box takes it from here. */
+export const TEXTAREA = 'w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink'
+
 /** An in-app link from the server, or null for anything that is not one of
  *  our own paths: the column only ever holds paths, and this keeps a stray
  *  value from turning into an off-site navigation. */
@@ -3610,7 +3984,7 @@ export function ticketFixture(overrides: Partial<Ticket> = {}): Ticket {
   return {
     id: 7, user_id: 1, subject_id: 2, subject_label: 'Deposits', status: 'new',
     created_at: WHEN, updated_at: WHEN, last_message_at: WHEN, closed_at: null, closed_by: null,
-    last_from_desk: false,
+    last_from_desk: false, waiting_on_desk: true,
     ...overrides,
   }
 }
@@ -3673,6 +4047,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 
 **Files:**
 - Create: `dashboard/src/hooks/useUnreadCount.ts`, `dashboard/src/hooks/useUnreadCount.test.tsx`
+- Create: `dashboard/src/lib/notificationActions.ts`, `dashboard/src/lib/notificationActions.test.ts`
 - Create: `dashboard/src/components/layout/NotificationBell.tsx`, `dashboard/src/components/layout/NotificationBell.test.tsx`
 - Create: `dashboard/src/pages/Notifications.tsx`, `dashboard/src/pages/Notifications.test.tsx`
 - Modify: `dashboard/src/components/Layout.tsx`, `dashboard/src/components/Layout.test.tsx`
@@ -3681,7 +4056,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 
 **Interfaces:**
 - Consumes: `orgApi`; `safeLink`, `TOPIC_LABELS` (Task 13); `notificationFixture`; `Loading`, `Button`, `Badge`, `Card`, `Banner`, `PageHeader`.
-- Produces: `UNREAD_POLL_MS`, `useUnreadCount(orgId)`; `NotificationBell` (default) props `{ orgId; pageHref; count; onChange }`; `Notifications` page (default export, both groups export it as `Notifications`); routes `notifications` and `invest/notifications`; investor nav Account gains `Notifications`.
+- Produces: `UNREAD_POLL_MS`, `useUnreadCount(orgId)` (a `seq` ref: only the newest poll or refresh lands); `lib/notificationActions.ts` `markRead(orgId, n) -> Promise<PortalNotification>`, `markAllRead(orgId) -> Promise<void>`, `withAllRead(list, now?)` (the bell and the page share them); `NotificationBell` (default) props `{ orgId; pageHref; count; onChange }`; `Notifications` page (default export, both groups export it as `Notifications`); routes `notifications` and `invest/notifications`; investor nav Account gains `Notifications`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -3718,6 +4093,65 @@ test('an answer without a number leaves the count unknown', async () => {
   await waitFor(() => expect(fetchMock).toHaveBeenCalled())
   await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
   expect(result.current.count).toBeUndefined()
+})
+
+test('an older poll answering after a newer refresh never lands', async () => {
+  const json = (payload: unknown) => new Response(JSON.stringify(payload),
+    { status: 200, headers: { 'Content-Type': 'application/json' } })
+  let releaseFirst!: (r: Response) => void
+  const fetchMock = vi.fn()
+    .mockImplementationOnce(() => new Promise<Response>((res) => { releaseFirst = res }))
+    .mockImplementation(async () => json({ count: 0 }))
+  vi.stubGlobal('fetch', fetchMock)
+  const { result } = renderHook(() => useUnreadCount(7))
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+  act(() => { result.current.refresh() })      // e.g. after a mark-read
+  await waitFor(() => expect(result.current.count).toBe(0))
+  await act(async () => {
+    releaseFirst(json({ count: 5 }))
+    await new Promise((r) => setTimeout(r, 0))
+  })
+  expect(result.current.count).toBe(0)
+})
+```
+
+Create `dashboard/src/lib/notificationActions.test.ts`:
+
+```ts
+import { afterEach, expect, test, vi } from 'vitest'
+import { markAllRead, markRead, withAllRead } from './notificationActions'
+import { notificationFixture } from '../test/portalFixtures'
+
+const READ_AT = '2026-10-05T10:00:00Z'
+
+function stub(payload: unknown) {
+  const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(
+    JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+  vi.stubGlobal('fetch', fetchMock)
+  return fetchMock
+}
+
+afterEach(() => { vi.unstubAllGlobals() })
+
+test('markRead posts for an unread row and passes a read one straight through', async () => {
+  const unread = notificationFixture({ id: 31 })
+  const read = notificationFixture({ id: 30, read_at: READ_AT })
+  const fetchMock = stub({ ...unread, read_at: READ_AT })
+  expect(await markRead(1, read)).toBe(read)
+  expect(fetchMock).not.toHaveBeenCalled()
+  expect((await markRead(1, unread)).read_at).toBe(READ_AT)
+  expect(String(fetchMock.mock.calls[0][0])).toBe('/api/orgs/1/notifications/31/read')
+  expect(fetchMock.mock.calls[0][1]?.method).toBe('POST')
+})
+
+test('markAllRead posts read-all; withAllRead keeps each first read_at', async () => {
+  const fetchMock = stub({ updated: 1 })
+  await markAllRead(1)
+  expect(String(fetchMock.mock.calls[0][0])).toBe('/api/orgs/1/notifications/read-all')
+  expect(fetchMock.mock.calls[0][1]?.method).toBe('POST')
+  const list = withAllRead([notificationFixture({ id: 31 }),
+                            notificationFixture({ id: 30, read_at: '2026-10-01T10:00:00Z' })], READ_AT)
+  expect(list.map((n) => n.read_at)).toEqual([READ_AT, '2026-10-01T10:00:00Z'])
 })
 ```
 
@@ -3936,7 +4370,7 @@ test('a late answer for the previous org never lands', async () => {
 })
 ```
 
-In `dashboard/src/components/Layout.test.tsx`, make `mockRoutes` answer the unread count: add as the first branch inside its `fetchMock`:
+In `dashboard/src/components/Layout.test.tsx`, make `mockRoutes` answer the unread count: inside its `fetchMock`, directly after the `const respond = (payload: unknown) => …` declaration and before the `/requests/summary` branch (it must come after `respond` is declared, or it hits the temporal dead zone), add:
 
 ```tsx
     if (url.includes('/notifications/unread-count')) return respond(overrides['unread'] ?? { count: 0 })
@@ -3969,7 +4403,7 @@ In `dashboard/src/components/layout/nav.test.ts`, in the first test, add `['Noti
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `npx vitest run src/hooks/useUnreadCount.test.tsx src/components/layout/NotificationBell.test.tsx src/pages/Notifications.test.tsx src/components/Layout.test.tsx src/components/layout/nav.test.ts`
+Run: `npx vitest run src/hooks/useUnreadCount.test.tsx src/lib/notificationActions.test.ts src/components/layout/NotificationBell.test.tsx src/pages/Notifications.test.tsx src/components/Layout.test.tsx src/components/layout/nav.test.ts`
 Expected: FAIL — the modules do not exist; no bell in the shell; nav has 12 links.
 
 - [ ] **Step 3: `useUnreadCount`**
@@ -3986,19 +4420,20 @@ export const UNREAD_POLL_MS = 10000
  * The caller's unread notification count in this org, polled every 10 s
  * (the portal's usual cadence); undefined until the first answer. `refresh`
  * asks again at once, after a mark-read. Every member may ask, so there is
- * no role gate. Layout stays mounted across an org switch: an answer for
- * the previous org never lands on the new one.
+ * no role gate. Every poll and refresh bumps a `seq` ref and only the
+ * newest answer lands: an earlier poll that answers after a later refresh
+ * is dropped, and so is any answer for the previous org (Layout stays
+ * mounted across an org switch).
  */
 export function useUnreadCount(orgId: number): { count: number | undefined; refresh: () => void } {
   const [count, setCount] = useState<number | undefined>(undefined)
-  const currentOrg = useRef(orgId)
-  currentOrg.current = orgId
+  const seq = useRef(0)
 
   const refresh = useCallback(() => {
-    const forOrg = orgId
+    const mine = ++seq.current
     orgApi<{ count?: unknown }>(orgId, 'notifications/unread-count').then(
       (r) => {
-        if (currentOrg.current !== forOrg) return
+        if (mine !== seq.current) return
         setCount(typeof r?.count === 'number' ? r.count : undefined)
       },
       () => {
@@ -4018,6 +4453,32 @@ export function useUnreadCount(orgId: number): { count: number | undefined; refr
 }
 ```
 
+Create `dashboard/src/lib/notificationActions.ts`:
+
+```ts
+import { orgApi } from './api'
+import type { PortalNotification } from './types'
+
+/** Marks one notification read and answers the server's row; a row that is
+ *  read already is answered as it is, with no request. The bell and the
+ *  Notifications page both go through here. Throws the API error. */
+export async function markRead(orgId: number, n: PortalNotification): Promise<PortalNotification> {
+  if (n.read_at != null) return n
+  return orgApi<PortalNotification>(orgId, `notifications/${n.id}/read`, { method: 'POST' })
+}
+
+/** Marks every notification of the caller in this org read. */
+export async function markAllRead(orgId: number): Promise<void> {
+  await orgApi(orgId, 'notifications/read-all', { method: 'POST' })
+}
+
+/** A list after read-all: each row keeps its first read_at, as the server does. */
+export function withAllRead(list: PortalNotification[],
+                            now: string = new Date().toISOString()): PortalNotification[] {
+  return list.map((n) => ({ ...n, read_at: n.read_at ?? now }))
+}
+```
+
 - [ ] **Step 4: `NotificationBell`**
 
 Create `dashboard/src/components/layout/NotificationBell.tsx`:
@@ -4029,6 +4490,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { orgApi } from '../../lib/api'
 import { formatWhen } from '../../lib/format'
 import { safeLink } from '../../lib/engagement'
+import { markAllRead, markRead, withAllRead } from '../../lib/notificationActions'
 import type { NotificationsPage, PortalNotification } from '../../lib/types'
 import Button from '../Button'
 import Loading from '../Loading'
@@ -4042,7 +4504,8 @@ const PANEL_WIDTH = 320
  * "Mark all read" and a link to the full page. A row click marks it read
  * and follows its in-app link. The popover is portalled and fixed to the
  * trigger, as Menu's is, so no clipping ancestor cuts it off; Escape and an
- * outside click close it.
+ * outside click close it. The trigger is 44 px square at every width (a
+ * touch target in the tablet top bar as much as on the phone).
  */
 export default function NotificationBell({ orgId, pageHref, count, onChange }: {
   orgId: number
@@ -4100,7 +4563,7 @@ export default function NotificationBell({ orgId, pageHref, count, onChange }: {
     setOpen(false)
     if (n.read_at == null) {
       try {
-        await orgApi(orgId, `notifications/${n.id}/read`, { method: 'POST' })
+        await markRead(orgId, n)
       } catch {
         // The link still works; the badge catches up on the next poll.
       }
@@ -4112,9 +4575,8 @@ export default function NotificationBell({ orgId, pageHref, count, onChange }: {
 
   const readAll = async () => {
     try {
-      await orgApi(orgId, 'notifications/read-all', { method: 'POST' })
-      const now = new Date().toISOString()
-      setItems((list) => list?.map((n) => ({ ...n, read_at: n.read_at ?? now })) ?? null)
+      await markAllRead(orgId)
+      setItems((list) => (list ? withAllRead(list) : null))
     } catch {
       setFailed(true)
     }
@@ -4126,7 +4588,7 @@ export default function NotificationBell({ orgId, pageHref, count, onChange }: {
     <div className="relative inline-block">
       <Button ref={triggerRef} variant="ghost" tone="neutral" size="sm" aria-label={label}
               aria-haspopup="dialog" aria-expanded={open} onClick={toggle}
-              className="relative h-11 w-11 md:h-8 md:w-8 justify-center">
+              className="relative h-11 w-11 justify-center">
         <svg aria-hidden="true" viewBox="0 0 20 20" className="h-5 w-5">
           <path d="M10 3a5 5 0 0 0-5 5v3l-1.5 2.5h13L15 11V8a5 5 0 0 0-5-5zM8 16a2 2 0 0 0 4 0"
                 fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
@@ -4196,6 +4658,7 @@ import { orgApi } from '../lib/api'
 import { useOrg } from '../lib/org'
 import { errorText, formatWhen } from '../lib/format'
 import { TOPIC_LABELS, safeLink } from '../lib/engagement'
+import { markAllRead, markRead, withAllRead } from '../lib/notificationActions'
 import Badge from '../components/Badge'
 import Banner from '../components/Banner'
 import Button from '../components/Button'
@@ -4251,7 +4714,7 @@ export default function Notifications() {
   const open = async (n: PortalNotification) => {
     if (n.read_at == null) {
       try {
-        const updated = await orgApi<PortalNotification>(orgId, `notifications/${n.id}/read`, { method: 'POST' })
+        const updated = await markRead(orgId, n)
         setRows((r) => r.map((x) => (x.id === n.id ? updated : x)))
       } catch (err) {
         setError(errorText(err, 'Could not mark it read'))
@@ -4264,9 +4727,8 @@ export default function Notifications() {
 
   const readAll = async () => {
     try {
-      await orgApi(orgId, 'notifications/read-all', { method: 'POST' })
-      const now = new Date().toISOString()
-      setRows((r) => r.map((x) => ({ ...x, read_at: x.read_at ?? now })))
+      await markAllRead(orgId)
+      setRows((r) => withAllRead(r))
     } catch (err) {
       setError(errorText(err, 'Could not mark them read'))
     }
@@ -4370,13 +4832,13 @@ In `dashboard/src/components/layout/nav.ts`, `investorNav`, append to the Accoun
 
 - [ ] **Step 7: Run the tests and the type check**
 
-Run: `npx vitest run src/hooks/useUnreadCount.test.tsx src/components/layout src/pages/Notifications.test.tsx src/components/Layout.test.tsx src/App.test.tsx && npx tsc --noEmit -p tsconfig.app.json`
+Run: `npx vitest run src/hooks/useUnreadCount.test.tsx src/lib/notificationActions.test.ts src/components/layout src/pages/Notifications.test.tsx src/components/Layout.test.tsx src/App.test.tsx && npx tsc --noEmit -p tsconfig.app.json`
 Expected: PASS, no type errors, no `act(...)` warning.
 
 - [ ] **Step 8: Commit**
 
 ```bash
-git add dashboard/src/hooks/useUnreadCount.ts dashboard/src/hooks/useUnreadCount.test.tsx dashboard/src/components/layout/NotificationBell.tsx dashboard/src/components/layout/NotificationBell.test.tsx dashboard/src/pages/Notifications.tsx dashboard/src/pages/Notifications.test.tsx dashboard/src/components/Layout.tsx dashboard/src/components/Layout.test.tsx dashboard/src/App.tsx dashboard/src/pages/groups/admin.ts dashboard/src/pages/groups/investor.ts dashboard/src/components/layout/nav.ts dashboard/src/components/layout/nav.test.ts
+git add dashboard/src/hooks/useUnreadCount.ts dashboard/src/hooks/useUnreadCount.test.tsx dashboard/src/lib/notificationActions.ts dashboard/src/lib/notificationActions.test.ts dashboard/src/components/layout/NotificationBell.tsx dashboard/src/components/layout/NotificationBell.test.tsx dashboard/src/pages/Notifications.tsx dashboard/src/pages/Notifications.test.tsx dashboard/src/components/Layout.tsx dashboard/src/components/Layout.test.tsx dashboard/src/App.tsx dashboard/src/pages/groups/admin.ts dashboard/src/pages/groups/investor.ts dashboard/src/components/layout/nav.ts dashboard/src/components/layout/nav.test.ts
 git commit -m "feat(dashboard): the notification bell and the Notifications page
 
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
@@ -4939,8 +5401,8 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 - Modify: `dashboard/src/App.tsx`, `dashboard/src/pages/groups/investor.ts`, `dashboard/src/components/layout/nav.ts`, `dashboard/src/components/layout/nav.test.ts`
 
 **Interfaces:**
-- Consumes: Task 6 routes; `orgApi`, `orgUpload`; `FileInput`, `MAX_UPLOAD_BYTES`; `IMAGE_ACCEPT`, `MAX_IMAGES`, `TICKET_STATUS_LABELS`, `TICKET_STATUS_TONES`, `ticketsQuery`; fixtures `subjectFixture`, `ticketFixture`, `ticketMessageFixture`, `threadFixture`.
-- Produces: `TicketMessages` (default; props `{ messages; fileUrl; viewer }`); `InvestorSupport` (default) with named exports `ImageSlots`, `uploadImages(orgId, files) -> Promise<number[]>`; route `invest/support` (`?ticket=<id>` opens a thread); investor nav `Support`.
+- Consumes: Task 6 routes; `orgApi`, `orgUpload`; `FileInput`, `MAX_UPLOAD_BYTES`; `IMAGE_ACCEPT`, `MAX_IMAGES`, `TEXTAREA`, `TICKET_STATUS_LABELS`, `TICKET_STATUS_TONES`, `ticketsQuery`; fixtures `subjectFixture`, `ticketFixture`, `ticketMessageFixture`, `threadFixture`.
+- Produces: `TicketMessages` (default; props `{ messages; fileUrl; viewer }`); `InvestorSupport` (default; its image slots are private: `useImageSlots` keeps each uploaded id once the upload lands, so a send that fails afterwards neither re-uploads nor drops the image on retry, as `InvestorProfile` does); route `invest/support` (`?ticket=<id>` opens a thread); investor nav `Support`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -4977,7 +5439,8 @@ const thread7 = threadFixture({
   ],
 })
 
-function mockRoutes(opts: { slowAll?: Promise<Response> } = {}) {
+function mockRoutes(opts: { slowAll?: Promise<Response>; raiseFailsOnce?: boolean } = {}) {
+  let raiseFails = opts.raiseFailsOnce ?? false
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
     const method = init?.method ?? 'GET'
@@ -4987,6 +5450,10 @@ function mockRoutes(opts: { slowAll?: Promise<Response> } = {}) {
                             size_bytes: 3, created_at: '2026-10-05T10:00:00Z' }, 201)
     }
     if (url.endsWith('/investor/tickets') && method === 'POST') {
+      if (raiseFails) {
+        raiseFails = false
+        return jsonResponse({ detail: 'too many requests; try again later' }, 429)
+      }
       return jsonResponse({ ...thread7, id: 9, subject_label: 'Withdrawals' }, 201)
     }
     if (url.endsWith('/investor/tickets/7/messages') && method === 'POST') {
@@ -5076,6 +5543,27 @@ test('the thread shows the messages and images, sends a reply and closes', async
   expect(screen.getByText('This ticket is closed. A reply opens it again.')).toBeInTheDocument()
 })
 
+test('a failed send keeps the uploaded image, so the retry does not upload it again', async () => {
+  const fetchMock = mockRoutes({ raiseFailsOnce: true })
+  renderPage()
+  await screen.findByText('Deposits')
+  await userEvent.click(screen.getByRole('button', { name: 'Raise ticket' }))
+  const dialog = await screen.findByRole('dialog', { name: 'Raise a ticket' })
+  await userEvent.type(within(dialog).getByLabelText('Message'), 'Withdrawal stuck')
+  await userEvent.upload(within(dialog).getByLabelText('Image 1 (optional)'),
+    new File(['png'], 'shot.png', { type: 'image/png' }))
+  await userEvent.click(within(dialog).getByRole('button', { name: 'Send ticket' }))
+  expect(await within(dialog).findByText(/too many requests/)).toBeInTheDocument()
+  expect(within(dialog).getByText('Uploaded; it goes with your message')).toBeInTheDocument()
+  await userEvent.click(within(dialog).getByRole('button', { name: 'Send ticket' }))
+  expect(await screen.findByText('Ticket sent. The desk replies here and in your notifications.')).toBeInTheDocument()
+  const posts = (fragment: string) => fetchMock.mock.calls.filter(([u, i]) =>
+    String(u).endsWith(fragment) && (i as RequestInit | undefined)?.method === 'POST')
+  expect(posts('/investor/files')).toHaveLength(1)
+  expect(posts('/investor/tickets').map(([, i]) => JSON.parse((i as RequestInit).body as string).file_ids))
+    .toEqual([[91], [91]])
+})
+
 test('a slow list for an older filter never lands over the newer one', async () => {
   let release!: (r: Response) => void
   mockRoutes({ slowAll: new Promise<Response>((res) => { release = res }) })
@@ -5151,7 +5639,7 @@ import { orgApi, orgUpload } from '../../lib/api'
 import { useOrg } from '../../lib/org'
 import { errorText, formatWhen } from '../../lib/format'
 import {
-  IMAGE_ACCEPT, MAX_IMAGES, TICKET_STATUS_LABELS, TICKET_STATUS_TONES, ticketsQuery,
+  IMAGE_ACCEPT, MAX_IMAGES, TEXTAREA, TICKET_STATUS_LABELS, TICKET_STATUS_TONES, ticketsQuery,
 } from '../../lib/engagement'
 import Badge from '../../components/Badge'
 import Banner from '../../components/Banner'
@@ -5173,35 +5661,62 @@ const STATUS_TABS: { key: StatusTab; label: string }[] = [
   { key: 'open', label: 'Open' }, { key: 'closed', label: 'Closed' },
 ]
 const NO_FILES: (File | null)[] = Array(MAX_IMAGES).fill(null)
-const TEXTAREA = 'w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink'
+const NO_IDS: (number | null)[] = Array(MAX_IMAGES).fill(null)
 
-/** Uploads the chosen images as ticket attachments, in slot order. */
-export async function uploadImages(orgId: number, files: (File | null)[]): Promise<number[]> {
-  const ids: number[] = []
-  for (const f of files) {
-    if (!f) continue
-    const fd = new FormData()
-    fd.append('purpose', 'ticket_attachment')
-    fd.append('file', f)
-    ids.push((await orgUpload<UploadedFile>(orgId, 'investor/files', fd)).id)
+/**
+ * The three optional image slots of one message. A picked file uploads on
+ * send; as soon as an upload lands its id is kept and the slot cleared, so
+ * a send that fails afterwards neither uploads it again nor drops it on the
+ * retry (InvestorProfile's pending-ids pattern). Picking a new file for a
+ * slot replaces whatever it held.
+ */
+function useImageSlots(orgId: number) {
+  const [files, setFiles] = useState<(File | null)[]>(NO_FILES)
+  const [pending, setPending] = useState<(number | null)[]>(NO_IDS)
+  const at = <T,>(list: T[], i: number, value: T) => list.map((x, j) => (j === i ? value : x))
+
+  const pick = (i: number, next: File | null) => {
+    setFiles((f) => at(f, i, next))
+    setPending((p) => at(p, i, null))
   }
-  return ids
+
+  /** Uploads what is still a File; answers every id, in slot order. */
+  const upload = async (): Promise<number[]> => {
+    const ids = [...pending]
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i]
+      if (!f) continue
+      const fd = new FormData()
+      fd.append('purpose', 'ticket_attachment')
+      fd.append('file', f)
+      const id = (await orgUpload<UploadedFile>(orgId, 'investor/files', fd)).id
+      ids[i] = id
+      setFiles((x) => at(x, i, null))
+      setPending((x) => at(x, i, id))
+    }
+    return ids.filter((id): id is number => id != null)
+  }
+
+  const reset = () => { setFiles(NO_FILES); setPending(NO_IDS) }
+  return { files, pending, pick, upload, reset }
 }
 
-/** Up to three optional images for one message, one FileInput each. */
-export function ImageSlots({ idBase, files, onChange, disabled }: {
+type ImageSlotsState = ReturnType<typeof useImageSlots>
+
+/** One FileInput per slot; a slot whose image is already uploaded says so. */
+function ImageSlots({ idBase, slots, disabled }: {
   idBase: string
-  files: (File | null)[]
-  onChange: (files: (File | null)[]) => void
+  slots: ImageSlotsState
   disabled?: boolean
 }) {
   return (
     <div className="space-y-3">
-      {files.map((f, i) => (
+      {slots.files.map((f, i) => (
         <FileInput key={i} id={`${idBase}-${i + 1}`} label={`Image ${i + 1} (optional)`}
                    accept={IMAGE_ACCEPT} maxBytes={MAX_UPLOAD_BYTES} value={f} disabled={disabled}
-                   hint={i === 0 ? `JPEG, PNG or WebP, up to 5 MB; at most ${MAX_IMAGES} per message` : undefined}
-                   onChange={(next) => onChange(files.map((x, j) => (j === i ? next : x)))} />
+                   hint={slots.pending[i] != null ? 'Uploaded; it goes with your message'
+                     : i === 0 ? `JPEG, PNG or WebP, up to 5 MB; at most ${MAX_IMAGES} per message` : undefined}
+                   onChange={(next) => slots.pick(i, next)} />
       ))}
     </div>
   )
@@ -5286,7 +5801,7 @@ function TicketView({ orgId, ticketId, onBack, onNotice }: {
   const [thread, setThread] = useState<TicketThread | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [reply, setReply] = useState('')
-  const [files, setFiles] = useState<(File | null)[]>(NO_FILES)
+  const slots = useImageSlots(orgId)
   const [busy, setBusy] = useState(false)
   const [closing, setClosing] = useState(false)
   const seq = useRef(0)
@@ -5308,12 +5823,12 @@ function TicketView({ orgId, ticketId, onBack, onNotice }: {
     if (!reply.trim()) { setError('Write a message first'); return }
     setBusy(true); setError(null)
     try {
-      const file_ids = await uploadImages(orgId, files)
+      const file_ids = await slots.upload()
       const t = await orgApi<TicketThread>(orgId, `investor/tickets/${ticketId}/messages`, {
         method: 'POST', body: JSON.stringify({ body: reply.trim(), file_ids }) })
       const reopened = thread?.status === 'closed'
       seq.current++   // a load still in flight must not land over this answer
-      setThread(t); setReply(''); setFiles(NO_FILES)
+      setThread(t); setReply(''); slots.reset()
       onNotice(reopened ? 'Reply sent; the ticket is open again.' : 'Reply sent.')
     } catch (err) {
       setError(errorText(err, 'Could not send your reply'))
@@ -5368,7 +5883,7 @@ function TicketView({ orgId, ticketId, onBack, onNotice }: {
                 <textarea aria-label="Your reply" rows={4} maxLength={4000} value={reply} disabled={busy}
                           onChange={(e) => setReply(e.target.value)} className={TEXTAREA} />
               </label>
-              <ImageSlots idBase="reply-image" files={files} onChange={setFiles} disabled={busy} />
+              <ImageSlots idBase="reply-image" slots={slots} disabled={busy} />
               <Button type="submit" disabled={busy}>Send reply</Button>
             </form>
           </Card>
@@ -5395,7 +5910,7 @@ export default function InvestorSupport() {
   const [subjects, setSubjects] = useState<TicketSubject[] | null>(null)
   const [raising, setRaising] = useState(false)
   const [form, setForm] = useState({ subject: '', body: '' })
-  const [files, setFiles] = useState<(File | null)[]>(NO_FILES)
+  const slots = useImageSlots(orgId)
   const [busy, setBusy] = useState(false)
   const [dialogError, setDialogError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -5416,7 +5931,7 @@ export default function InvestorSupport() {
 
   const startRaise = () => {
     setForm({ subject: subjects?.[0] ? String(subjects[0].id) : '', body: '' })
-    setFiles(NO_FILES); setDialogError(null); setRaising(true)
+    slots.reset(); setDialogError(null); setRaising(true)
   }
 
   const raise = async () => {
@@ -5424,12 +5939,13 @@ export default function InvestorSupport() {
     if (!form.body.trim()) { setDialogError('Write a message'); return }
     setBusy(true); setDialogError(null)
     try {
-      const file_ids = await uploadImages(orgId, files)
+      const file_ids = await slots.upload()
       const t = await orgApi<TicketThread>(orgId, 'investor/tickets', {
         method: 'POST',
         body: JSON.stringify({ subject_id: Number(form.subject), body: form.body.trim(), file_ids }),
       })
       setRaising(false)
+      slots.reset()
       setNotice('Ticket sent. The desk replies here and in your notifications.')
       openTicket(t.id)
     } catch (err) {
@@ -5470,7 +5986,7 @@ export default function InvestorSupport() {
           <textarea aria-label="Message" rows={5} maxLength={4000} value={form.body}
                     onChange={(e) => setForm({ ...form, body: e.target.value })} className={TEXTAREA} />
         </label>
-        <ImageSlots idBase="ticket-image" files={files} onChange={setFiles} disabled={busy} />
+        <ImageSlots idBase="ticket-image" slots={slots} disabled={busy} />
       </ConfirmDialog>
     </div>
   )
@@ -5511,8 +6027,8 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 - Modify: `dashboard/src/pages/investors/PaymentMethodsTab.tsx`, `dashboard/src/pages/Investors.tsx`, `dashboard/src/pages/Investors.test.tsx`
 
 **Interfaces:**
-- Consumes: Tasks 5 and 7 routes; `TicketMessages` (Task 16); `Row`, `Section` from `RequestDetailsDrawer`; `DeskTabProps` from `VerificationTab`; `RequestsSummary.tickets`.
-- Produces: `SupportTab` (default; props `DeskTabProps & { initialTicket: number | null }`), `DeskTab` += `'support'`, tab `Support (<n>)`; `TicketSubjectsCard` (default; props `{ orgId; control }`); the Investors tab `Portal settings`; the settings card renamed `Withdrawal and account rules`.
+- Consumes: Tasks 5 and 7 routes; `TicketMessages` (Task 16); `TEXTAREA` (Task 13); `Ticket.waiting_on_desk` (Tasks 6/13); `Row`, `Section` from `RequestDetailsDrawer`; `DeskTabProps` from `VerificationTab`; `RequestsSummary.tickets`.
+- Produces: `SupportTab` (default; props `DeskTabProps & { initialTicket: number | null; onDrawerClosed: () => void }`; follows `initialTicket` whenever it changes), `DeskTab` += `'support'`, tab `Support (<n>)`; `Requests` keeps `?tab` in step with the selected tab, follows `?tab`/`?ticket` changes while mounted, and drops `?ticket` when the ticket drawer closes; `TicketSubjectsCard` (default; props `{ orgId; control }`); the Investors tab `Portal settings`; the settings card renamed `Withdrawal and account rules`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -5535,9 +6051,9 @@ const WHEN = '2026-10-05T10:00:00Z'
 const queue = [
   ticketFixture({ id: 7, email: 'inv@example.com', display_name: 'Ada Investor', status: 'new' }),
   ticketFixture({ id: 8, subject_label: 'Withdrawals', email: 'bo@example.com', display_name: 'Bo',
-                  status: 'open', last_from_desk: true }),
+                  status: 'open', last_from_desk: true, waiting_on_desk: false }),
   ticketFixture({ id: 9, subject_label: 'Old', email: 'cy@example.com', display_name: 'Cy',
-                  status: 'closed', closed_at: WHEN }),
+                  status: 'closed', closed_at: WHEN, waiting_on_desk: false }),
 ]
 const thread7 = threadFixture({
   id: 7, email: 'inv@example.com', display_name: 'Ada Investor',
@@ -5549,12 +6065,12 @@ function mockRoutes() {
     const url = String(input)
     const method = init?.method ?? 'GET'
     if (url.endsWith('/tickets/7/messages') && method === 'POST') {
-      return jsonResponse({ ...thread7, status: 'open', last_from_desk: true, messages: [
+      return jsonResponse({ ...thread7, status: 'open', last_from_desk: true, waiting_on_desk: false, messages: [
         ...thread7.messages,
         ticketMessageFixture({ id: 71, from_desk: true, author_name: 'Desk Admin', body: 'We are checking.' })] }, 201)
     }
     if (url.endsWith('/tickets/7/close') && method === 'POST') {
-      return jsonResponse({ ...thread7, status: 'closed', closed_at: WHEN })
+      return jsonResponse({ ...thread7, status: 'closed', closed_at: WHEN, waiting_on_desk: false })
     }
     if (url.endsWith('/tickets/7')) return jsonResponse(thread7)
     if (url.includes('/tickets?q=')) return jsonResponse([queue[1]])
@@ -5569,7 +6085,8 @@ afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 test('the open view hides closed tickets and marks the ones waiting on the desk', async () => {
   const fetchMock = mockRoutes()
-  render(<SupportTab orgId={1} control show="open" onDone={vi.fn()} initialTicket={null} />)
+  render(<SupportTab orgId={1} control show="open" onDone={vi.fn()} initialTicket={null}
+                     onDrawerClosed={vi.fn()} />)
   expect(await screen.findByText('#7 Deposits')).toBeInTheDocument()
   expect(screen.getByText('#8 Withdrawals')).toBeInTheDocument()
   expect(screen.queryByText('#9 Old')).not.toBeInTheDocument()
@@ -5583,7 +6100,8 @@ test('the open view hides closed tickets and marks the ones waiting on the desk'
 test('the drawer shows the thread, sends a reply and closes the ticket', async () => {
   const fetchMock = mockRoutes()
   const onDone = vi.fn()
-  render(<SupportTab orgId={1} control show="all" onDone={onDone} initialTicket={null} />)
+  render(<SupportTab orgId={1} control show="all" onDone={onDone} initialTicket={null}
+                     onDrawerClosed={vi.fn()} />)
   await userEvent.click(await screen.findByRole('button', { name: 'Open ticket 7' }))
   const drawer = await screen.findByRole('dialog', { name: 'Ticket #7: Deposits' })
   expect(within(drawer).getByText('My deposit has not arrived.')).toBeInTheDocument()
@@ -5602,8 +6120,24 @@ test('the drawer shows the thread, sends a reply and closes the ticket', async (
 
 test('a notification link opens its ticket straight away', async () => {
   mockRoutes()
-  render(<SupportTab orgId={1} control show="open" onDone={vi.fn()} initialTicket={7} />)
+  render(<SupportTab orgId={1} control show="open" onDone={vi.fn()} initialTicket={7}
+                     onDrawerClosed={vi.fn()} />)
   expect(await screen.findByRole('dialog', { name: 'Ticket #7: Deposits' })).toBeInTheDocument()
+})
+
+test('a later link is followed while mounted, and closing the drawer reports it', async () => {
+  mockRoutes()
+  const onDrawerClosed = vi.fn()
+  const { rerender } = render(<SupportTab orgId={1} control show="open" onDone={vi.fn()}
+                                          initialTicket={null} onDrawerClosed={onDrawerClosed} />)
+  await screen.findByText('#7 Deposits')
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  rerender(<SupportTab orgId={1} control show="open" onDone={vi.fn()} initialTicket={7}
+                       onDrawerClosed={onDrawerClosed} />)
+  const drawer = await screen.findByRole('dialog', { name: 'Ticket #7: Deposits' })
+  await userEvent.click(within(drawer).getByRole('button', { name: 'Close' }))
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  expect(onDrawerClosed).toHaveBeenCalledTimes(1)
 })
 ```
 
@@ -5720,7 +6254,51 @@ test('the Support tab carries the waiting count and opens a linked ticket', asyn
   expect(await screen.findByRole('tab', { name: 'Support (2)' })).toHaveAttribute('aria-selected', 'true')
   expect(await screen.findByRole('dialog', { name: 'Ticket #7: Deposits' })).toBeInTheDocument()
 })
+
+/** Stands in for the bell: navigates while Requests stays mounted. */
+function GoTo({ to }: { to: string }) {
+  const navigate = useNavigate()
+  return <button type="button" onClick={() => navigate(to)}>Follow link</button>
+}
+
+test('a support link followed while the page is open switches tab and opens the ticket every time', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input)
+    if (url.endsWith('/requests/summary')) {
+      return jsonResponse({ deposits: 0, withdrawals: 0, transfers: 0, payout_destinations: 0,
+                            kyc: 0, account_requests: 0, tickets: 1, total: 1 })
+    }
+    if (url.endsWith('/tickets/7')) return jsonResponse(threadFixture({ id: 7 }))
+    if (url.endsWith('/tickets')) {
+      return jsonResponse([ticketFixture({ id: 7, email: 'inv@example.com', display_name: 'Ada' })])
+    }
+    return jsonResponse([])
+  }))
+  render(
+    <MemoryRouter initialEntries={['/org/1/requests']}>
+      <GoTo to="/org/1/requests?tab=support&ticket=7" />
+      <Requests />
+    </MemoryRouter>,
+  )
+  expect(await screen.findByRole('tab', { name: /^Deposits/ })).toHaveAttribute('aria-selected', 'true')
+  await userEvent.click(screen.getByRole('button', { name: 'Follow link' }))
+  expect(await screen.findByRole('tab', { name: 'Support (1)' })).toHaveAttribute('aria-selected', 'true')
+  const drawer = await screen.findByRole('dialog', { name: 'Ticket #7: Deposits' })
+  await userEvent.click(within(drawer).getByRole('button', { name: 'Close' }))
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  // Closing dropped ?ticket, so the same link is a change again and reopens it.
+  await userEvent.click(screen.getByRole('button', { name: 'Follow link' }))
+  expect(await screen.findByRole('dialog', { name: 'Ticket #7: Deposits' })).toBeInTheDocument()
+  // Picking another tab moves ?tab with it, so the link switches back.
+  await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Close' }))
+  await userEvent.click(screen.getByRole('tab', { name: /^Deposits/ }))
+  await userEvent.click(screen.getByRole('button', { name: 'Follow link' }))
+  expect(await screen.findByRole('tab', { name: 'Support (1)' })).toHaveAttribute('aria-selected', 'true')
+  expect(await screen.findByRole('dialog', { name: 'Ticket #7: Deposits' })).toBeInTheDocument()
+})
 ```
+
+and change its `import { MemoryRouter } from 'react-router-dom'` line to `import { MemoryRouter, useNavigate } from 'react-router-dom'`.
 
 In `dashboard/src/pages/Investors.test.tsx`: replace every `getByRole('tab', { name: 'Payment methods' })` with `getByRole('tab', { name: 'Portal settings' })` (eleven places; the test titles may keep their words), and in `mockRoutes`, directly before `if (path.endsWith('/account-packages')) …`, add:
 
@@ -5741,7 +6319,7 @@ Create `dashboard/src/pages/requests/SupportTab.tsx`:
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { orgApi, type ApiError } from '../../lib/api'
 import { errorText, formatWhen } from '../../lib/format'
-import { TICKET_STATUS_LABELS, TICKET_STATUS_TONES, ticketsQuery } from '../../lib/engagement'
+import { TEXTAREA, TICKET_STATUS_LABELS, TICKET_STATUS_TONES, ticketsQuery } from '../../lib/engagement'
 import Badge from '../../components/Badge'
 import Banner from '../../components/Banner'
 import Button from '../../components/Button'
@@ -5755,21 +6333,17 @@ import type { Ticket, TicketThread } from '../../lib/types'
 
 const TH = 'desk-label px-4 py-2 font-semibold'
 const TD = 'px-4 py-2.5'
-const TEXTAREA = 'w-full rounded border border-line-strong px-3 py-2 text-sm bg-card text-ink'
-
-/** New, or open with the investor speaking last: what requests/summary counts. */
-function waitingOnDesk(t: Ticket): boolean {
-  return t.status === 'new' || (t.status === 'open' && !t.last_from_desk)
-}
 
 /**
  * The desk's tickets: the queue (open first), a search, and a drawer with
  * the thread, Reply and Close. Loads its own queue; the page's summary
  * refresh follows every action through onDone. `initialTicket` (?ticket=
- * from a support notification) opens that thread at once.
+ * from a support notification) opens that thread at once, and again
+ * whenever it changes while the tab is mounted; closing the drawer calls
+ * onDrawerClosed so the page can drop ?ticket from the URL.
  */
-export default function SupportTab({ orgId, control, show, onDone, initialTicket }:
-  DeskTabProps & { initialTicket: number | null }) {
+export default function SupportTab({ orgId, control, show, onDone, initialTicket, onDrawerClosed }:
+  DeskTabProps & { initialTicket: number | null; onDrawerClosed: () => void }) {
   const [rows, setRows] = useState<Ticket[] | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
@@ -5797,6 +6371,12 @@ export default function SupportTab({ orgId, control, show, onDone, initialTicket
   }, [orgId, q])
 
   useEffect(() => { void load() }, [load])
+
+  // A notification followed while this tab is already mounted changes only
+  // initialTicket: open that thread too.
+  useEffect(() => { if (initialTicket != null) setOpenId(initialTicket) }, [initialTicket])
+
+  const closeDrawer = () => { setOpenId(null); onDrawerClosed() }
 
   useEffect(() => {
     const mine = ++threadSeq.current
@@ -5883,7 +6463,8 @@ export default function SupportTab({ orgId, control, show, onDone, initialTicket
               <td data-label="Status" className={TD}>
                 <div className="flex flex-wrap gap-1.5">
                   <Badge tone={TICKET_STATUS_TONES[t.status]}>{TICKET_STATUS_LABELS[t.status]}</Badge>
-                  {waitingOnDesk(t) && <Badge tone="warn">Waiting on desk</Badge>}
+                  {/* The server's rule (portal_support.WAITING_ON_DESK), the one requests/summary counts. */}
+                  {t.waiting_on_desk && <Badge tone="warn">Waiting on desk</Badge>}
                 </div>
               </td>
               <td className={TD}>
@@ -5897,7 +6478,7 @@ export default function SupportTab({ orgId, control, show, onDone, initialTicket
         </tbody>
       </table>
 
-      <Drawer open={openId != null} busy={busy} onClose={() => setOpenId(null)}
+      <Drawer open={openId != null} busy={busy} onClose={closeDrawer}
               title={thread ? `Ticket #${thread.id}: ${thread.subject_label}` : `Ticket #${openId ?? ''}`}>
         <div className="space-y-4">
           {drawerError && <Banner kind="error" onDismiss={() => setDrawerError(null)}>{drawerError}</Banner>}
@@ -5943,13 +6524,47 @@ In `dashboard/src/pages/requests/RequestTabs.tsx`:
 
 In `dashboard/src/pages/Requests.tsx`:
 - add `import SupportTab from './requests/SupportTab'`;
-- below the `tab` state add `const initialTicket = Number(searchParams.get('ticket')) || null`;
+- replace `const [searchParams] = useSearchParams()` with `const [searchParams, setSearchParams] = useSearchParams()`;
+- directly below the `tab` state (the `useState<DeskTab>(() => { … })` block) add:
+
+```tsx
+  const urlTab = searchParams.get('tab')
+  const initialTicket = Number(searchParams.get('ticket')) || null
+  // The page is keyed by pathname only, so a link followed while it is open
+  // (a support notification from the bell) changes just the query string:
+  // follow its tab. `initialTicket` is a dependency so a link back to the
+  // tab already named in the URL still lands.
+  useEffect(() => { if (isTab(urlTab)) setTab(urlTab) }, [urlTab, initialTicket])
+  // ?tab mirrors the chosen tab, so the next link to ?tab=support is always
+  // a change; a tab change also drops ?ticket.
+  const chooseTab = (k: DeskTab) => {
+    setTab(k)
+    setSearchParams((p) => {
+      const next = new URLSearchParams(p)
+      next.set('tab', k)
+      next.delete('ticket')
+      return next
+    }, { replace: true })
+  }
+  // Closing the ticket drawer drops ?ticket, so returning to the tab does
+  // not reopen it and the same notification opens it again.
+  const dropTicket = useCallback(() => {
+    setSearchParams((p) => {
+      const next = new URLSearchParams(p)
+      next.delete('ticket')
+      return next
+    }, { replace: true })
+  }, [setSearchParams])
+```
+
+- in the `<Tabs idBase="requests" …>` element replace `onChange={(k) => setTab(k as DeskTab)}` with `onChange={(k) => chooseTab(k as DeskTab)}`;
 - after the `account_requests` tab block add:
 
 ```tsx
               {tab === 'support' && (
                 <SupportTab key={orgId} orgId={orgId} control={control} show={show}
-                            onDone={tabDone} initialTicket={initialTicket} />
+                            onDone={tabDone} initialTicket={initialTicket}
+                            onDrawerClosed={dropTicket} />
               )}
 ```
 
@@ -6481,11 +7096,12 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 **Files:**
 - Create: `dashboard/src/pages/investors/BonusRulesCard.tsx`, `dashboard/src/pages/investors/BonusRulesCard.test.tsx`
 - Create: `dashboard/src/pages/investors/GrantBonusDialog.tsx`, `dashboard/src/pages/investors/GrantBonusDialog.test.tsx`
+- Modify: `dashboard/src/pages/investors/AdjustDialog.tsx` (exports `SIGNED_AMOUNT` and `checkSignedAmount`)
 - Modify: `dashboard/src/pages/investors/PaymentMethodsTab.tsx`, `dashboard/src/pages/Investors.tsx`, `dashboard/src/pages/Investors.test.tsx`
 
 **Interfaces:**
 - Consumes: `GET/PUT bonus-rules` (Task 8), `POST investors/{id}/bonuses` (Task 10); `PinConfirmDialog`; `bonusRulesFixture`, `bonusFixture`, `investorRowFixture`.
-- Produces: `BonusRulesCard` (default; `{ orgId; control }`), `GrantBonusDialog` (default; `{ orgId; investor; onCancel; onGranted }`); the Investors row menu item `Grant bonus`.
+- Produces: `BonusRulesCard` (default; `{ orgId; control }`), `GrantBonusDialog` (default; `{ orgId; investor; onCancel; onGranted }`); the Investors row menu item `Grant bonus`; `AdjustDialog.tsx` named exports `SIGNED_AMOUNT` and `checkSignedAmount(amount, note) -> string` (the one client-side signed-amount check both MPIN dialogs run; the adjustment's messages unchanged).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -6804,6 +7420,56 @@ export default function BonusRulesCard({ orgId, control }: { orgId: number; cont
 
 - [ ] **Step 4: The Grant bonus dialog**
 
+In `dashboard/src/pages/investors/AdjustDialog.tsx`, replace
+
+```tsx
+/** A signed amount with at most two decimals: "-25.00", "100", "+12.5". */
+const SIGNED_AMOUNT = /^[-+]?\d+(\.\d{1,2})?$/
+```
+
+with
+
+```tsx
+/** A signed amount with at most two decimals: "-25.00", "100", "+12.5". */
+export const SIGNED_AMOUNT = /^[-+]?\d+(\.\d{1,2})?$/
+
+/**
+ * The checks every signed-amount MPIN dialog (Adjust, Grant bonus) runs
+ * before it posts. Throws the message PinConfirmDialog shows in its error
+ * line; answers the trimmed amount.
+ */
+export function checkSignedAmount(amount: string, note: string): string {
+  const raw = amount.trim()
+  if (!SIGNED_AMOUNT.test(raw)) {
+    throw new Error('Enter a signed amount with at most two decimals, for example -25.00 or 100')
+  }
+  if (Number(raw) === 0) throw new Error('amount must not be zero')
+  if (note.trim() === '') throw new Error('A note is required')
+  return raw
+}
+```
+
+and in its `confirm`, replace
+
+```tsx
+    const raw = amount.trim()
+    if (!SIGNED_AMOUNT.test(raw)) {
+      throw new Error('Enter a signed amount with at most two decimals, for example -25.00 or 100')
+    }
+    if (Number(raw) === 0) throw new Error('amount must not be zero')
+    if (note.trim() === '') throw new Error('A note is required')
+    setBusy(true)
+```
+
+with
+
+```tsx
+    const raw = checkSignedAmount(amount, note)
+    setBusy(true)
+```
+
+(its tests keep passing: the messages are the same).
+
 Create `dashboard/src/pages/investors/GrantBonusDialog.tsx`:
 
 ```tsx
@@ -6812,10 +7478,8 @@ import { api } from '../../lib/api'
 import { money } from '../../lib/format'
 import Input from '../../components/Input'
 import PinConfirmDialog from '../../components/PinConfirmDialog'
+import { checkSignedAmount } from './AdjustDialog'
 import type { Bonus, InvestorRow } from '../../lib/types'
-
-/** A signed amount with at most two decimals: "25", "-10.50", "+5". */
-const SIGNED_AMOUNT = /^[-+]?\d+(\.\d{1,2})?$/
 
 /**
  * Pays a bonus into the investor's Credit wallet (negative: takes one back,
@@ -6838,12 +7502,8 @@ export default function GrantBonusDialog({ orgId, investor, onCancel, onGranted 
 
   const confirm = async (mpin: string) => {
     if (!investor) return
-    const raw = amount.trim()
-    if (!SIGNED_AMOUNT.test(raw)) {
-      throw new Error('Enter an amount with at most two decimals, for example 25.00 or -10')
-    }
-    if (Number(raw) === 0) throw new Error('amount must not be zero')
-    if (note.trim() === '') throw new Error('A note is required')
+    // The same checks and messages as AdjustDialog (one copy, exported there).
+    const raw = checkSignedAmount(amount, note)
     setBusy(true)
     try {
       // redirectOn401 off: a wrong MPIN stays an inline error.
@@ -6916,7 +7576,7 @@ Expected: PASS, no type errors, no `act(...)` warning.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add dashboard/src/pages/investors/BonusRulesCard.tsx dashboard/src/pages/investors/BonusRulesCard.test.tsx dashboard/src/pages/investors/GrantBonusDialog.tsx dashboard/src/pages/investors/GrantBonusDialog.test.tsx dashboard/src/pages/investors/PaymentMethodsTab.tsx dashboard/src/pages/Investors.tsx dashboard/src/pages/Investors.test.tsx
+git add dashboard/src/pages/investors/BonusRulesCard.tsx dashboard/src/pages/investors/BonusRulesCard.test.tsx dashboard/src/pages/investors/GrantBonusDialog.tsx dashboard/src/pages/investors/GrantBonusDialog.test.tsx dashboard/src/pages/investors/AdjustDialog.tsx dashboard/src/pages/investors/PaymentMethodsTab.tsx dashboard/src/pages/Investors.tsx dashboard/src/pages/Investors.test.tsx
 git commit -m "feat(dashboard): bonus rules card and the Grant bonus dialog
 
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
@@ -6973,7 +7633,12 @@ so the same sequence applies and `migrate` prints
 least one subject under **Investors → Portal settings → Ticket subjects**
 (the tab formerly called Payment methods; until a subject exists investors
 cannot raise a ticket) and, if wanted, switches on **Bonus rules** in the
-same tab -- a rule pays only for events after it is switched on. Every
+same tab -- a rule pays only for events after it is switched on. Bonuses
+land in the investor's Credit wallet, which moves only to a trading account:
+fund every Credit -> trading account transfer at the broker as **credit**,
+never as balance, before marking it done. The portal keeps that principal
+inside the account (an account -> My wallet transfer may take equity less
+the credit funded into it; profit made on the credit may leave). Every
 portal email now also lands in the bell; each user mutes email per topic
 (money, identity, support, bonus) under **Settings**, and the theme follows
 the account across browsers. Deploy the api and the dashboard together.
@@ -7012,8 +7677,13 @@ Where the spec was silent or ambiguous:
 - **Search**: case-insensitive `ILIKE` on the subject label and every message body, with `%` and `_` taken literally. Lists are capped at 500 rows (`ponytail:` comments).
 - **Summary count**: `tickets` counts every org ticket that is `new` or `open` with the investor's message last, whoever the investor is now; it is part of `total`, so the rail's Requests pill counts tickets too.
 - **Desk notifications go to every admin** (the spec's "every admin"); viewers are not notified.
+- **The investor never sees desk staff** (preflight P5): the investor's thread carries no `author_id`/`author_name` on desk messages and no `closed_by` for a desk close; the page already shows "Support desk".
+- **"Waiting on the desk" is one server rule** (preflight P7): `portal_support.WAITING_ON_DESK` feeds every Ticket's `waiting_on_desk` and the summary count; the dashboard only reads the flag.
+- **Rule bonuses after a commit are best effort** (preflight P8): `award_rule_bonus` logs a failure and answers None, so the join, role change or KYC approval that already landed never answers 500.
+- **Links into an open page** (preflight P1): Requests follows `?tab`/`?ticket` changes while mounted and drops `?ticket` when the drawer closes, so a bell click always opens its ticket.
 - **Bonus rule validation**: flags must be booleans; amounts follow the portal's money rules (0 allowed, two decimals); `deposit_pct` is 0-100 inclusive with three decimals (portal fees stop below 100, a bonus may be 100%); `deposit_cap` is optional; a rule switched on with a zero amount is refused (`<field> must be above 0 while the <source> rule is on`).
 - **"Confirmed amount"** for the deposit rule is the credited amount the admin confirmed, not the notice amount.
+- **Bonus credit never leaves** (preflight P3): credit -> account is the only way out of the Credit wallet, and an account -> wallet transfer may take only equity less open account -> wallet transfers less `credit_funded` (done credit -> account transfers into that account), floored at 0, in `request_transfer`, the summary's `account_available` and a decision-time re-check against `equity_at_request`. Principal credit stays at the broker; profit made on it may leave, as brokers do.
 - **Signup trigger**: paid on a transition INTO investor (invite join with role investor, or a role change from viewer/admin to investor). It runs in its own transaction after the membership write, because the ledger lock must be the first statement of whatever writes `wallet_entries` and the join's transaction starts with the invite. The KYC bonus likewise runs after the approval; the deposit bonus is inside the confirmation's transaction.
 - **Audit and alerts**: every bonus audits `investor_bonus_paid`; a rule's bonus is `info`, a hand-paid one `warning` and added to `ALERT_RULES` and `TELEGRAM_RULES` like ledger adjustments (what a stolen admin session would do). Ticket subjects audit `ticket_subject_changed`.
 - **Manual grant amounts** follow the adjustment route's signed-amount rules; `parse_signed_amount` is extracted from `post_adjustment` and shared, with a test pinning the adjustment messages first.
@@ -7029,7 +7699,7 @@ Where the spec is wrong against the code:
 - **Theme values**: the spec offers light / dim / dark / system, but the dashboard has two palettes (light, and the night palette the toggle already calls "Dim", stored as `dark`). The database keeps the spec's four values; `dim` and `dark` both paint the night palette, and Settings offers Light / Dim / System (a saved `dark` shows as Dim). A real darker palette would need new tokens and `palette_check.mjs` rows.
 - **`ticket_attachment` was not accepted**: `files.purpose` allows it, but `uploads.ACCEPTED_PURPOSES` refused it and `test_uploads.py` pinned the refusal; Task 5 accepts it and changes that test.
 - **`file_belongs` did not know ticket messages**; without Task 5's clause one image could be attached to many messages.
-- **"The existing hourly limiter"** is a per-router `LoginRateLimiter` instance; the support router gets its own (10 per hour).
+- **"The existing hourly limiter"** is a per-router `LoginRateLimiter` instance; the support router gets its own (10 new tickets per hour, and 60 replies per hour under a separate key, since each reply emails every admin: preflight P4).
 - **Admins cannot upload**: the spec's "up to 3 images per message" holds for investor messages only (see above).
 - **`requests/summary` is pinned exactly** by `test_portal_summary.py`; both dicts gain `tickets: 0`.
 - **`TRANSFER_PAIRS` is pinned** by `test_portal_ledger.py` ("four allowed pairs") and `InvestorTransfer.test.tsx` (`transferOptions`); both are updated in Tasks 11 and 18.

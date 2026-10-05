@@ -35,20 +35,20 @@ helpers, never rename or reshape anything here. Spec (binding):
 | 3 | `routes/portal_notifications.py`: list, unread count, read one, read all | `note_json` |
 | 4 | `GET/PUT /api/me/settings`, `GET/PUT notification-prefs` | |
 | 5 | `routes/portal_support.py` subjects; uploads accept `ticket_attachment` (images only); `file_belongs` knows ticket messages | `subject_json`, test helpers `_subject`, `_events`, `_user_id` |
-| 6 | Investor tickets: open, list (status, q), thread, reply, close, 10/hour | `ticket_json`, `message_json`, `load_thread`, `desk_link`, fixture `portal`, `_open`, `_reply` |
-| 7 | Desk tickets: queue, thread, reply, close; `requests/summary.tickets` | |
-| 8 | `pl.deposit_bonus`; `pc.bonus_rules`, `rule_bonus`, `pay_bonus`, `announce_bonus`, `award_rule_bonus`; `routes/portal_bonus.py` rules GET/PUT | `_rules`, `_credit_entries` (tests) |
+| 6 | Investor tickets: open, list (status, q), thread, reply, close; 10 tickets/hour, 60 replies/hour; investor thread names no desk staff | `ticket_json`, `message_json`, `load_thread`, `desk_link`, `WAITING_ON_DESK`, `TICKET_SELECT`, fixture `portal`, `_open`, `_reply` |
+| 7 | Desk tickets: queue, thread, reply, close; `requests/summary.tickets` (counts `WAITING_ON_DESK`) | |
+| 8 | `pl.deposit_bonus`; `pc.bonus_rules`, `rule_bonus`, `pay_bonus`, `announce_bonus`, `award_rule_bonus` (best effort: logs, never raises); `routes/portal_bonus.py` rules GET/PUT | `_rules`, `_credit_entries` (tests) |
 | 9 | Triggers: signup (join, role change), kyc (approval), deposit (confirmation) | |
 | 10 | `parse_signed_amount` extracted; manual grant/claw-back; investor bonus history; alert rules | `bonus_json` |
-| 11 | `TRANSFER_PAIRS` gains `("credit", "account")` | |
+| 11 | `TRANSFER_PAIRS` gains `("credit", "account")`; `pc.credit_funded`, `pc.account_movable`; bonus credit never moves back out of an account (request cap, summary `account_available`, decision re-check) | |
 | 12 | RBAC rows; full API suite | complete API |
 | 13 | Dashboard types, `lib/engagement.ts`, fixtures | primitives |
-| 14 | `useUnreadCount`, `NotificationBell`, `Notifications` page, routes, nav | |
+| 14 | `useUnreadCount` (seq guard), `lib/notificationActions.ts`, `NotificationBell`, `Notifications` page, routes, nav | |
 | 15 | `useTheme.choose`, `lib/themeSync.ts`, `Settings` page, routes, nav, rail link | |
-| 16 | `pages/support/TicketMessages.tsx`, `InvestorSupport` | `ImageSlots`, `uploadImages` |
-| 17 | `SupportTab` in the Requests desk; `TicketSubjectsCard`; tab "Portal settings" | |
+| 16 | `pages/support/TicketMessages.tsx`, `InvestorSupport` (private image slots keep uploaded ids across a failed send) | |
+| 17 | `SupportTab` in the Requests desk (follows `?tab`/`?ticket` while mounted, drops `?ticket` on close); `TicketSubjectsCard`; tab "Portal settings" | |
 | 18 | `InvestorBonus`; Transfer offers Credit -> trading account | |
-| 19 | `BonusRulesCard`; `GrantBonusDialog`; Investors menu "Grant bonus" | |
+| 19 | `BonusRulesCard`; `GrantBonusDialog` (reuses `AdjustDialog`'s `checkSignedAmount`); Investors menu "Grant bonus" | |
 | 20 | Gates; README runbook for 025; spec status | |
 
 ## Database (Task 1) — `db/migrations/025_portal_engagement.sql`
@@ -89,16 +89,28 @@ async def announce_bonus(conn, request, *, org_id: int, user_id: int, bonus_id: 
                          source: str, amount: Decimal, actor_email: str,
                          note: Optional[str] = None) -> None       # audit investor_bonus_paid + notify
 async def award_rule_bonus(conn, request, org_id: int, user_id: int, source: str,
-                           *, actor_email: str) -> Optional[int]   # own transaction, lock first
+                           *, actor_email: str) -> Optional[int]   # own transaction, lock first;
+                                                                   # best effort: logs and answers None on failure
+
+def credit_funded(conn, org_id: int, user_id: int, account_id: int) -> Decimal   # Task 11: done credit->account
+def account_movable(conn, org_id: int, user_id: int, account_id: int,
+                    equity: Decimal) -> Decimal   # Task 11: floor_cents(equity - open out - credit_funded), >= 0
 ```
 
 `api/src/api/portal_ledger.py` (Task 8): `def deposit_bonus(amount: Decimal, pct: Decimal,
 cap: Optional[Decimal]) -> Decimal` (half-up cents, then `min(cap)`). Task 11:
-`TRANSFER_PAIRS` gains `("credit", "account")`.
+`TRANSFER_PAIRS` gains `("credit", "account")`; `request_transfer`'s account -> wallet cap and
+the summary's per-account `account_available` use `pc.account_movable`, and `decide_transfer`
+refuses to approve or mark done an account -> wallet transfer above `equity_at_request -
+credit_funded` (409).
 
 `api/src/api/routes/portal_admin.py` (Task 10): `def parse_signed_amount(raw: object) ->
 Decimal` (HTTPException 400 with the adjustment route's messages; `post_adjustment` uses it).
-Task 7: `requests/summary` gains `tickets`.
+Task 7: `requests/summary` gains `tickets`, counted with `portal_support.WAITING_ON_DESK`.
+
+`api/src/api/routes/portal_support.py` (Task 6): `WAITING_ON_DESK` is the one SQL rule for
+"waiting on the desk" (`t.status <> 'closed'` and the investor spoke last); `TICKET_SELECT`
+selects it into every Ticket as `waiting_on_desk`. `REPLIES_PER_HOUR = 60`.
 
 `api/src/api/uploads.py` (Task 5): `ACCEPTED_PURPOSES` gains `ticket_attachment`;
 `routes/portal_files.py` refuses a non-image `ticket_attachment` with 400
@@ -131,26 +143,28 @@ Under `/api/orgs/{org_id}` unless absolute.
 | `GET investor/ticket-subjects` | 5 | investor | enabled subjects only |
 | `POST investor/tickets` | 6 | investor | `{subject_id, body, file_ids}` 201 Thread; 400 `subject_id is required`, `body is required`, `body must be at most 4000 characters`, `file_ids must be a list of file ids`, `at most 3 images per message`, `each image may be attached once`, `image not found`; 404 `Subject not found` (unknown or disabled); 429 `too many requests; try again later` (10/hour); audit `ticket_opened`; notifies every admin |
 | `GET investor/tickets?status=&q=` | 6 | investor | own Ticket[] by `last_message_at DESC, id DESC`, LIMIT 500; 400 `status must be new, open or closed` |
-| `GET investor/tickets/{id}` | 6 | investor | Thread; 404 `Ticket not found` |
-| `POST investor/tickets/{id}/messages` | 6 | investor | `{body, file_ids}` 201 Thread; closed -> open; audit `ticket_replied`; notifies every admin |
+| `GET investor/tickets/{id}` | 6 | investor | Thread; 404 `Ticket not found`; desk messages carry `author_id`/`author_name` null and a desk close `closed_by` null (the investor never sees desk staff) |
+| `POST investor/tickets/{id}/messages` | 6 | investor | `{body, file_ids}` 201 Thread; closed -> open; 429 `too many requests; try again later` (60/hour, key `portal-ticket-reply`); audit `ticket_replied`; notifies every admin |
 | `POST investor/tickets/{id}/close` | 6/7 | investor | Thread; 409 `ticket is already closed`; audit `ticket_closed` |
 | `GET tickets?status=&q=` | 7 | admin | Ticket[] with `email, display_name`, open first then `last_message_at DESC` |
 | `GET tickets/{id}` | 7 | admin | Thread |
 | `POST tickets/{id}/messages` | 7 | admin | `{body}` (text only) 201 Thread; new -> open; 409 `ticket is closed`; notifies the investor |
 | `POST tickets/{id}/close` | 7 | admin | Thread; 409 `ticket is already closed`; notifies the investor |
-| `GET requests/summary` | 7 | admin | gains `tickets` = `new` + `open` whose last message is the investor's; in `total` |
+| `GET requests/summary` | 7 | admin | gains `tickets` = `WAITING_ON_DESK` (not closed, investor's message last); in `total` |
 | `GET bonus-rules` | 8 | admin | Rules |
-| `PUT bonus-rules` | 8 | admin | full Rules body; 400 per field (see plan Task 8); audit `bonus_rules_changed` |
+| `PUT bonus-rules` | 8 | admin | full Rules body; 400 per field (see plan Task 8; `deposit_pct` out of range `deposit_pct must be between 0 and 100`, more than three decimals `deposit_pct may have at most three decimals`); audit `bonus_rules_changed` |
 | `POST investors/{user_id}/bonuses` | 10 | admin | `{amount, note, mpin}` 201 Bonus; MPIN first; 404 `Investor not found`; 400 `a claw-back cannot take the Credit wallet below zero (available N)`; audit `investor_bonus_paid` (warning) |
 | `GET investor/bonuses?source=&from=&to=` | 10 | investor | own Bonus[] by id DESC, LIMIT 500; 400 `source must be one of signup, kyc, deposit, manual`, `from must be a date (YYYY-MM-DD)` |
-| `POST investor/transfers` | 11 | investor | source credit -> account allowed (requested, admin decides); credit -> anything else 400 `that transfer is not allowed` |
+| `POST investor/transfers` | 11 | investor | source credit -> account allowed (requested, admin decides); credit -> anything else 400 `that transfer is not allowed`; account -> wallet capped at `pc.account_movable` (bonus credit funded into the account excluded), 400 `amount exceeds the account's available equity (N)` |
+| `POST transfers/{id}/decision` | 11 | admin | approve/done of an account -> wallet transfer above `equity_at_request - credit_funded`: 409 `bonus credit cannot leave the account (at most N may move out); reject this transfer instead` |
+| `GET investor/summary` | 11 | investor | per-account `account_available` = `pc.account_movable` |
 
 Shapes:
 - Note = `{id, topic, title, body, link, read_at, created_at}`.
 - Subject = `{id, label, enabled, sort, created_at}`.
 - Ticket = `{id, user_id, subject_id, subject_label, status, created_at, updated_at,
-  last_message_at, closed_at, closed_by, last_from_desk}` (+ `email, display_name` on the
-  desk queue and every Thread).
+  last_message_at, closed_at, closed_by, last_from_desk, waiting_on_desk}` (+ `email,
+  display_name` on the desk queue and every Thread).
 - Message = `{id, author_id, author_name, from_desk, body, file_ids, created_at}`.
 - Thread = Ticket + `messages: Message[]` (oldest first).
 - Rules = `{signup_enabled, signup_amount, kyc_enabled, kyc_amount, deposit_enabled,
@@ -185,7 +199,7 @@ export type ThemePref = 'light' | 'dim' | 'dark' | 'system'
 export interface UserSettings { theme: ThemePref; updated_at: string | null }
 export type TicketStatus = 'new' | 'open' | 'closed'
 export interface TicketSubject { id: number; label: string; enabled: boolean; sort: number; created_at: string }
-export interface Ticket { id: number; user_id: number; subject_id: number | null; subject_label: string; status: TicketStatus; created_at: string; updated_at: string; last_message_at: string; closed_at: string | null; closed_by: number | null; last_from_desk: boolean; email?: string; display_name?: string | null }
+export interface Ticket { id: number; user_id: number; subject_id: number | null; subject_label: string; status: TicketStatus; created_at: string; updated_at: string; last_message_at: string; closed_at: string | null; closed_by: number | null; last_from_desk: boolean; waiting_on_desk: boolean; email?: string; display_name?: string | null }
 export interface TicketMessage { id: number; author_id: number | null; author_name: string | null; from_desk: boolean; body: string; file_ids: number[]; created_at: string }
 export interface TicketThread extends Ticket { messages: TicketMessage[] }
 export type BonusSource = 'signup' | 'kyc' | 'deposit' | 'manual'
@@ -197,7 +211,8 @@ RequestsSummary += tickets: number
 ### `src/lib/engagement.ts` (Task 13)
 
 `TOPICS`, `TOPIC_LABELS`, `TOPIC_EMAIL_LABELS`, `TICKET_STATUS_LABELS`, `TICKET_STATUS_TONES`,
-`BONUS_SOURCES`, `BONUS_SOURCE_LABELS`, `IMAGE_ACCEPT`, `MAX_IMAGES`,
+`BONUS_SOURCES`, `BONUS_SOURCE_LABELS`, `IMAGE_ACCEPT`, `MAX_IMAGES`, `TEXTAREA` (the one
+textarea class InvestorSupport and SupportTab share),
 `safeLink(link: string | null): string | null`,
 `ticketsQuery(base: string, status: TicketStatus | 'all', q: string): string`.
 
@@ -210,7 +225,8 @@ RequestsSummary += tickets: number
 
 | Where | Task | Names |
 |---|---|---|
-| `hooks/useUnreadCount.ts` | 14 | `UNREAD_POLL_MS = 10000`; `useUnreadCount(orgId): { count: number \| undefined; refresh: () => void }` |
+| `hooks/useUnreadCount.ts` | 14 | `UNREAD_POLL_MS = 10000`; `useUnreadCount(orgId): { count: number \| undefined; refresh: () => void }` (a `seq` ref: only the newest poll or refresh lands) |
+| `lib/notificationActions.ts` | 14 | `markRead(orgId, n): Promise<PortalNotification>` (no request for a read row), `markAllRead(orgId): Promise<void>`, `withAllRead(list, now?)`; the bell and the page both use them |
 | `hooks/useTheme.ts` | 15 | `Theme`, `paletteFor(pref: ThemePref): Theme`; `useTheme(): { theme; toggle: () => ThemePref; choose: (pref: ThemePref) => void }` |
 | `lib/themeSync.ts` | 15 | `THEME_PREFS`, `isThemePref`, `localPref(): ThemePref \| null`, `saveThemePref(pref): Promise<void>`, `syncThemeFromServer(choose): Promise<void>` |
 
@@ -218,21 +234,23 @@ RequestsSummary += tickets: number
 
 | Where | Task | Names |
 |---|---|---|
-| `components/layout/NotificationBell.tsx` (default) | 14 | props `{ orgId; pageHref; count: number \| undefined; onChange(): void }`; button aria-label `Notifications` / `Notifications, <n> unread`; popover `role="dialog"` aria-label `Latest notifications`; `Mark all read`; link `See all notifications` |
+| `components/layout/NotificationBell.tsx` (default) | 14 | props `{ orgId; pageHref; count: number \| undefined; onChange(): void }`; trigger 44 px square at every width; button aria-label `Notifications` / `Notifications, <n> unread`; popover `role="dialog"` aria-label `Latest notifications`; `Mark all read`; link `See all notifications` |
 | `components/Layout.tsx` | 14/15 | one `useUnreadCount`; bell in the desktop rail header and the phone top bar; desk-only rail button `Settings`; theme toggle saves `saveThemePref(toggle())` |
 | `pages/Notifications.tsx` (default; both groups export `Notifications`) | 14 | PageHeader `Notifications`; Card `Your notifications`; `Load more`; `Mark all read`; badges `Unread` + topic label |
 | `pages/Settings.tsx` (default; both groups export `Settings`) | 15 | PageHeader `Settings`; Card `Appearance` radios `Light`, `Dim`, `System` (server `dark` shows as Dim); Card `Email notifications` four `role="switch"` checkboxes named by `TOPIC_EMAIL_LABELS`; notices `Appearance saved`, `Email preferences saved` |
 | `pages/support/TicketMessages.tsx` (default) | 16 | props `{ messages; fileUrl(id): string; viewer: 'investor' \| 'desk' }`; images alt `Image <n>` |
-| `pages/investor/InvestorSupport.tsx` (default; exports `ImageSlots`, `uploadImages`) | 16 | PageHeader `Support`; button `Raise ticket`; dialog `Raise a ticket` (Select `Subject`, textarea `Message`, FileInputs `Image 1 (optional)`..`Image 3 (optional)`, confirm `Send ticket`); Tabs `Ticket status` All/New/Open/Closed; Input `Search tickets`; Card `Your tickets`; thread Card `#<id> <subject>`, textarea `Your reply`, button `Send reply`, button `Close ticket`, dialog confirm `Yes, close it`; `?ticket=<id>` |
-| `pages/requests/SupportTab.tsx` (default) | 17 | props `DeskTabProps & { initialTicket: number \| null }`; Input `Search tickets`; row button `Open ticket <id>`; badge `Waiting on desk`; Drawer `Ticket #<id>: <subject>`; textarea `Reply to the investor`; `Send reply`; `Close ticket`; done messages `Reply sent`, `Ticket closed` |
+| `pages/investor/InvestorSupport.tsx` (default; no named exports: `useImageSlots`/`ImageSlots` are private and keep an uploaded id once its upload lands, so a failed send neither re-uploads nor drops it; a slot holding one says `Uploaded; it goes with your message`) | 16 | PageHeader `Support`; button `Raise ticket`; dialog `Raise a ticket` (Select `Subject`, textarea `Message`, FileInputs `Image 1 (optional)`..`Image 3 (optional)`, confirm `Send ticket`); Tabs `Ticket status` All/New/Open/Closed; Input `Search tickets`; Card `Your tickets`; thread Card `#<id> <subject>`, textarea `Your reply`, button `Send reply`, button `Close ticket`, dialog confirm `Yes, close it`; `?ticket=<id>` |
+| `pages/requests/SupportTab.tsx` (default) | 17 | props `DeskTabProps & { initialTicket: number \| null; onDrawerClosed: () => void }` (opens `initialTicket` on mount and whenever it changes); badge reads `Ticket.waiting_on_desk`; Input `Search tickets`; row button `Open ticket <id>`; badge `Waiting on desk`; Drawer `Ticket #<id>: <subject>`; textarea `Reply to the investor`; `Send reply`; `Close ticket`; done messages `Reply sent`, `Ticket closed` |
 | `pages/requests/RequestTabs.tsx` | 17 | `DeskTab` += `'support'`; tab `Support (<tickets>)` |
+| `pages/Requests.tsx` | 17 | `?tab` follows the chosen tab (and drops `?ticket`); a `?tab`/`?ticket` change while mounted switches tab and opens the ticket; closing the ticket drawer drops `?ticket` |
 | `pages/investors/TicketSubjectsCard.tsx` (default) | 17 | props `{ orgId; control }`; Card `Ticket subjects`; Input `New subject`; `Add subject`; per row `Rename <label>` / Input `New name for <label>` / `Save name`, `Enable <label>` / `Disable <label>`, `Delete <label>` |
 | `pages/Investors.tsx` | 17/19 | tab `Portal settings` (was Payment methods); menu `Grant bonus` |
 | `pages/investors/PaymentMethodsTab.tsx` | 17/19 | the settings Card renamed `Withdrawal and account rules`; renders `TicketSubjectsCard`, `BonusRulesCard` |
 | `pages/investor/InvestorBonus.tsx` (default) | 18 | PageHeader `Bonus`; Card `Credit wallet`; filters Select `Source`, Inputs `From date`, `To date`, `Apply`; Card `Bonus history` |
 | `pages/investor/InvestorTransfer.tsx` | 18 | `PAIRS` += `['credit','account']`; wallets `main, credit, pamm, social` |
 | `pages/investors/BonusRulesCard.tsx` (default) | 19 | Card `Bonus rules`; checkboxes `Welcome bonus on`, `Verification bonus on`, `Deposit bonus on`; inputs `Welcome bonus amount`, `Verification bonus amount`, `Deposit bonus %`, `Deposit bonus cap`; `Save bonus rules`; notice `Bonus rules saved` |
-| `pages/investors/GrantBonusDialog.tsx` (default) | 19 | props `{ orgId; investor: InvestorRow \| null; onCancel(); onGranted(b: Bonus) }`; title `Grant <name> a bonus`; inputs `Bonus amount`, `Bonus note`; confirm `Pay bonus` |
+| `pages/investors/AdjustDialog.tsx` | 19 | named exports `SIGNED_AMOUNT`, `checkSignedAmount(amount, note): string` (throws the adjustment's messages) |
+| `pages/investors/GrantBonusDialog.tsx` (default; validates with `checkSignedAmount`) | 19 | props `{ orgId; investor: InvestorRow \| null; onCancel(); onGranted(b: Bonus) }`; title `Grant <name> a bonus`; inputs `Bonus amount`, `Bonus note`; confirm `Pay bonus` |
 | `components/layout/nav.ts` | 14-18 | investor Money += `Bonus`; Account += `Support`, `Notifications`, `Settings` (final order below) |
 
 Final investor nav: Dashboard | Money: Wallet, Deposit, Withdraw, Transfer, Transactions,
