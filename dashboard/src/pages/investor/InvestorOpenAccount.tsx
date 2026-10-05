@@ -14,7 +14,7 @@ import PageHeader from '../../components/PageHeader'
 import PinConfirmDialog from '../../components/PinConfirmDialog'
 import Select from '../../components/Select'
 import NextStep from './NextStep'
-import type { AccountPackage, AccountRequest, KycProfile, KycStatus } from '../../lib/types'
+import type { AccountPackage, AccountRequest, InvestorSummary, KycStatus } from '../../lib/types'
 
 function PasswordField({ id, label, hint, value, shown, onChange, onGenerate, generateLabel }: {
   id: string; label: string; hint?: string; value: string; shown: boolean
@@ -34,14 +34,16 @@ function PasswordField({ id, label, hint, value, shown, onChange, onGenerate, ge
 }
 
 /**
- * Request a live MT5 account. Verification comes first; then one request at
- * a time: the packages the workspace offers, a leverage and two passwords
- * the investor keeps, confirmed with the MPIN. The admin opens the account
- * at the broker by hand and the login appears here (and on Account).
+ * Request a live MT5 account. Verification comes first; then one request at a
+ * time, while the investor's accounts plus open requests stay under the
+ * workspace's cap: the packages the workspace offers, a leverage and two
+ * passwords the investor keeps, confirmed with the MPIN. The admin opens the
+ * account at the broker by hand and the login appears here (and on Account).
  */
 export default function InvestorOpenAccount() {
   const { orgId } = useOrg()
   const [kyc, setKyc] = useState<KycStatus | null>(null)
+  const [limit, setLimit] = useState<InvestorSummary['account_limit'] | null>(null)
   const [packages, setPackages] = useState<AccountPackage[]>([])
   const [requests, setRequests] = useState<AccountRequest[]>([])
   const [chosen, setChosen] = useState<AccountPackage | null>(null)
@@ -59,12 +61,12 @@ export default function InvestorOpenAccount() {
 
   const refresh = useCallback(async () => {
     try {
-      const [p, pk, rq] = await Promise.all([
-        orgApi<KycProfile>(orgId, 'investor/profile'),
+      const [s, pk, rq] = await Promise.all([
+        orgApi<InvestorSummary>(orgId, 'investor/summary'),
         orgApi<AccountPackage[]>(orgId, 'investor/account-packages'),
         orgApi<AccountRequest[]>(orgId, 'investor/account-requests'),
       ])
-      setKyc(p.status); setPackages(pk); setRequests(rq)
+      setKyc(s.kyc_status); setLimit(s.account_limit); setPackages(pk); setRequests(rq)
       setError(null)
     } catch (err) {
       setError(errorText(err, 'Could not load account opening'))
@@ -76,6 +78,7 @@ export default function InvestorOpenAccount() {
 
   const latest = requests[0] ?? null
   const current = latest && (latest.status === 'requested' || latest.status === 'fulfilled') ? latest : null
+  const atCap = limit != null && limit.used >= limit.max
 
   const choose = (p: AccountPackage) => {
     setChosen(p)
@@ -146,98 +149,107 @@ export default function InvestorOpenAccount() {
           </NextStep>
           <Button to={`/org/${orgId}/invest/profile`}>Go to Profile & verification</Button>
         </>
-      ) : current ? (
-        <Card title="Your request">
-          <dl className="inset p-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4 text-sm">
-            <div><dt className="desk-label">Package</dt><dd className="text-ink">{current.package_name}</dd></div>
-            <div><dt className="desk-label">Leverage</dt><dd className="num text-ink">{`1:${current.leverage}`}</dd></div>
-            <div><dt className="desk-label">Status</dt>
-              <dd><Badge tone={requestBadge(current.status)}>{requestLabel(current.status)}</Badge></dd></div>
-            <div><dt className="desk-label">Requested on</dt><dd className="num text-ink">{formatWhen(current.created_at)}</dd></div>
-            {current.status === 'fulfilled' && (
-              <>
-                <div><dt className="desk-label">MT5 login</dt><dd className="num text-ink">{current.mt5_login}</dd></div>
-                <div><dt className="desk-label">Server</dt><dd className="num text-ink">{current.mt5_server}</dd></div>
-              </>
-            )}
-          </dl>
-          {current.status === 'requested' ? (
-            <div className="mt-4 flex flex-wrap items-center gap-3">
-              <p className="text-sm text-ink-soft flex-1 min-w-0">
-                An admin is opening your account at the broker. You will get an email with your login.
-              </p>
-              <Button variant="secondary" tone="loss" onClick={() => setCancelOpen(true)} disabled={busy}>
-                Cancel request
-              </Button>
-            </div>
-          ) : (
-            <p className="mt-4 text-sm text-ink-soft">
-              Sign in to MetaTrader 5 with this login and the passwords you chose.
-            </p>
-          )}
-        </Card>
       ) : (
         <>
-          {latest?.status === 'rejected' && (
-            <Banner kind="warn" announce={false}>
-              {`Your last request was rejected: ${latest.decision_note ?? 'no reason given'}`}
-            </Banner>
+          {current && (
+            <Card title="Your request">
+              <dl className="inset p-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4 text-sm">
+                <div><dt className="desk-label">Package</dt><dd className="text-ink">{current.package_name}</dd></div>
+                <div><dt className="desk-label">Leverage</dt><dd className="num text-ink">{`1:${current.leverage}`}</dd></div>
+                <div><dt className="desk-label">Status</dt>
+                  <dd><Badge tone={requestBadge(current.status)}>{requestLabel(current.status)}</Badge></dd></div>
+                <div><dt className="desk-label">Requested on</dt><dd className="num text-ink">{formatWhen(current.created_at)}</dd></div>
+                {current.status === 'fulfilled' && (
+                  <>
+                    <div><dt className="desk-label">MT5 login</dt><dd className="num text-ink">{current.mt5_login}</dd></div>
+                    <div><dt className="desk-label">Server</dt><dd className="num text-ink">{current.mt5_server}</dd></div>
+                  </>
+                )}
+              </dl>
+              {current.status === 'requested' ? (
+                <div className="mt-4 flex flex-wrap items-center gap-3">
+                  <p className="text-sm text-ink-soft flex-1 min-w-0">
+                    An admin is opening your account at the broker. You will get an email with your login.
+                  </p>
+                  <Button variant="secondary" tone="loss" onClick={() => setCancelOpen(true)} disabled={busy}>
+                    Cancel request
+                  </Button>
+                </div>
+              ) : (
+                <p className="mt-4 text-sm text-ink-soft">
+                  Sign in to MetaTrader 5 with this login and the passwords you chose.
+                </p>
+              )}
+            </Card>
           )}
-          {packages.length === 0 ? (
-            <NextStep title="No account packages yet">
-              This workspace has not published any account packages yet.
+          {current?.status === 'requested' ? null : atCap ? (
+            <NextStep title="You have reached your account limit">
+              {`This workspace allows ${limit?.max} live accounts per investor. Ask your admin if you need another.`}
             </NextStep>
           ) : (
-            <div className="grid gap-4 md:grid-cols-2">
-              {packages.map((p) => (
-                <Card key={p.id} title={p.name}>
-                  <dl className="inset p-4 grid grid-cols-2 gap-3 text-sm">
-                    <div><dt className="desk-label">Minimum deposit</dt>
-                      <dd className="num text-ink">{money(p.min_deposit, p.currency)}</dd></div>
-                    <div><dt className="desk-label">Spread</dt>
-                      <dd className="num text-ink">{p.spread_label ?? '—'}</dd></div>
-                    <div className="col-span-2"><dt className="desk-label">Leverage</dt>
-                      <dd className="num text-ink">{p.leverage_options.map((l) => `1:${l}`).join(' · ')}</dd></div>
-                  </dl>
-                  <div className="mt-4">
-                    <Button aria-label={`Choose ${p.name}`} variant={chosen?.id === p.id ? 'primary' : 'secondary'}
-                            onClick={() => choose(p)}>
-                      {chosen?.id === p.id ? 'Chosen' : 'Choose'}
-                    </Button>
-                  </div>
-                </Card>
-              ))}
-            </div>
-          )}
+            <>
+              {latest?.status === 'rejected' && (
+                <Banner kind="warn" announce={false}>
+                  {`Your last request was rejected: ${latest.decision_note ?? 'no reason given'}`}
+                </Banner>
+              )}
+              {packages.length === 0 ? (
+                <NextStep title="No account packages yet">
+                  This workspace has not published any account packages yet.
+                </NextStep>
+              ) : (
+                <div className="grid gap-4 md:grid-cols-2">
+                  {packages.map((p) => (
+                    <Card key={p.id} title={p.name}>
+                      <dl className="inset p-4 grid grid-cols-2 gap-3 text-sm">
+                        <div><dt className="desk-label">Minimum deposit</dt>
+                          <dd className="num text-ink">{money(p.min_deposit, p.currency)}</dd></div>
+                        <div><dt className="desk-label">Spread</dt>
+                          <dd className="num text-ink">{p.spread_label ?? '—'}</dd></div>
+                        <div className="col-span-2"><dt className="desk-label">Leverage</dt>
+                          <dd className="num text-ink">{p.leverage_options.map((l) => `1:${l}`).join(' · ')}</dd></div>
+                      </dl>
+                      <div className="mt-4">
+                        <Button aria-label={`Choose ${p.name}`} variant={chosen?.id === p.id ? 'primary' : 'secondary'}
+                                onClick={() => choose(p)}>
+                          {chosen?.id === p.id ? 'Chosen' : 'Choose'}
+                        </Button>
+                      </div>
+                    </Card>
+                  ))}
+                </div>
+              )}
 
-          {chosen && (
-            <Card title={`Request a ${chosen.name} account`}>
-              <form onSubmit={review} noValidate className="space-y-4">
-                {formError && <Banner kind="error" onDismiss={() => setFormError(null)}>{formError}</Banner>}
-                <div>
-                  <label htmlFor="open-leverage" className="desk-label block mb-1">Leverage</label>
-                  <Select id="open-leverage" value={leverage} onChange={(e) => setLeverage(e.target.value)}>
-                    {chosen.leverage_options.map((l) => <option key={l} value={l}>{`1:${l}`}</option>)}
-                  </Select>
-                </div>
-                <PasswordField id="open-main" label="Main password" value={mainPassword} shown={shown}
-                               onChange={setMainPassword} generateLabel="Generate main password"
-                               onGenerate={() => { setMainPassword(generatePassword()); setShown(true) }} />
-                <PasswordField id="open-investor" label="Investor password" value={investorPassword} shown={shown}
-                               hint="Read-only access: for someone who should see the account but not trade."
-                               onChange={setInvestorPassword} generateLabel="Generate investor password"
-                               onGenerate={() => { setInvestorPassword(generatePassword()); setShown(true) }} />
-                <p className="text-xs text-ink-soft">
-                  {`Both: ${PASSWORD_RULE}. Write them down: the admin uses them once to create your account, then MirrorFleet deletes them.`}
-                </p>
-                <div className="flex flex-wrap gap-2">
-                  <Button type="button" variant="secondary" onClick={() => setShown(!shown)}>
-                    {shown ? 'Hide passwords' : 'Show passwords'}
-                  </Button>
-                  <Button type="submit" disabled={busy}>Request account</Button>
-                </div>
-              </form>
-            </Card>
+              {chosen && (
+                <Card title={`Request a ${chosen.name} account`}>
+                  <form onSubmit={review} noValidate className="space-y-4">
+                    {formError && <Banner kind="error" onDismiss={() => setFormError(null)}>{formError}</Banner>}
+                    <div>
+                      <label htmlFor="open-leverage" className="desk-label block mb-1">Leverage</label>
+                      <Select id="open-leverage" value={leverage} onChange={(e) => setLeverage(e.target.value)}>
+                        {chosen.leverage_options.map((l) => <option key={l} value={l}>{`1:${l}`}</option>)}
+                      </Select>
+                    </div>
+                    <PasswordField id="open-main" label="Main password" value={mainPassword} shown={shown}
+                                   onChange={setMainPassword} generateLabel="Generate main password"
+                                   onGenerate={() => { setMainPassword(generatePassword()); setShown(true) }} />
+                    <PasswordField id="open-investor" label="Investor password" value={investorPassword} shown={shown}
+                                   hint="Read-only access: for someone who should see the account but not trade."
+                                   onChange={setInvestorPassword} generateLabel="Generate investor password"
+                                   onGenerate={() => { setInvestorPassword(generatePassword()); setShown(true) }} />
+                    <p className="text-xs text-ink-soft">
+                      {`Both: ${PASSWORD_RULE}. Write them down: the admin uses them once to create your account, then MirrorFleet deletes them.`}
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      <Button type="button" variant="secondary" onClick={() => setShown(!shown)}>
+                        {shown ? 'Hide passwords' : 'Show passwords'}
+                      </Button>
+                      <Button type="submit" disabled={busy}>Request account</Button>
+                    </div>
+                  </form>
+                </Card>
+              )}
+            </>
           )}
         </>
       )}
