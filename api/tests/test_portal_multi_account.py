@@ -155,3 +155,35 @@ def test_an_account_deposit_names_an_owned_account_once_there_are_several(two, d
         assert r.status_code == 404 and r.json()["detail"] == "Account not found"
     r = notice("tx-3", target_account_id=1002)
     assert r.status_code == 201 and r.json()["target_account_id"] == 1002
+
+
+# ------------------------------------------------------------ deposit decision (Task 4)
+
+
+def test_confirming_funds_the_named_account_while_it_is_still_owned(two, db, login_as):
+    client, org_id, _ = two
+    method_id = add_method(db, org_id)
+    ids = []
+    for ref, account_id in (("tx-a", 1002), ("tx-b", 1001)):
+        r = client.post(f"/api/orgs/{org_id}/investor/deposits",
+                        json={"method_id": method_id, "amount": "100", "reference": ref,
+                              "target": "account", "target_account_id": account_id},
+                        headers=csrf(client))
+        assert r.status_code == 201, r.text
+        ids.append(r.json()["id"])
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute("UPDATE accounts SET investor_user_id = NULL WHERE ctid_trader_account_id = 1001")
+    client.cookies.clear()
+    login_as(client, ADMIN)
+    notes = []
+    for dep_id in ids:
+        r = client.post(f"/api/orgs/{org_id}/deposits/{dep_id}/decision",
+                        json={"status": "confirmed"}, headers=csrf(client))
+        assert r.status_code == 200, r.text
+        notes.append(r.json()["decision_note"])
+    # 1002 is still owned: funded. 1001 was unlinked since the notice: wallet.
+    assert notes == [None, "(no account linked; credited to wallet)"]
+    with psycopg.connect(db, autocommit=True) as conn:
+        rows = conn.execute("SELECT target_account_id, amount, status FROM transfers "
+                            "WHERE org_id = %s ORDER BY id", (org_id,)).fetchall()
+    assert rows == [(1002, Decimal("100.00"), "approved")]

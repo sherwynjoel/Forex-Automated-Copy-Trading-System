@@ -352,11 +352,11 @@ def create_portal_admin_router() -> APIRouter:
         except pc.LedgerError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         current = conn.execute(
-            "SELECT status, user_id, amount, fee, target FROM deposits "
+            "SELECT status, user_id, amount, fee, target, target_account_id FROM deposits "
             "WHERE id = %s AND org_id = %s", (deposit_id, ctx.org_id)).fetchone()
         if not current:
             raise HTTPException(status_code=404, detail="Deposit not found")
-        status_now, investor_id, amount, fee, target = current
+        status_now, investor_id, amount, fee, target, target_account_id = current
         if not pc.can_transition("deposits", status_now, new_status):
             raise HTTPException(status_code=409, detail=f"deposit is already {status_now}")
         credited: Optional[Decimal] = None
@@ -381,10 +381,12 @@ def create_portal_admin_router() -> APIRouter:
             # special-casing "only when new_status == confirmed".
             pc.lock_investor_ledger(conn, ctx.org_id, investor_id)
             if new_status == "confirmed" and target == "account":
-                # The link as it is NOW, not as it was when the notice was
-                # filed: the admin funds the account the investor has today.
-                linked = pc.linked_account(conn, ctx.org_id, investor_id)
-                if linked is None:
+                # The account the notice named, if the investor still owns it
+                # NOW; unlinked (or deleted, so NULL) since then -> the wallet.
+                if target_account_id is not None and pc.owns_account(
+                        conn, ctx.org_id, investor_id, int(target_account_id)):
+                    linked = int(target_account_id)
+                else:
                     suffix = "(no account linked; credited to wallet)"
                     note = f"{note} {suffix}" if note else suffix
             row = conn.execute(
