@@ -25,6 +25,13 @@ def test_settings_need_a_full_session(app_client):
     assert app_client.get("/api/me/settings").status_code == 401
 
 
+def test_settings_refuse_an_unknown_field(org_client):
+    client, _org_id, _seed = org_client
+    r = client.put("/api/me/settings", json={"theme": "dark", "role": "admin"},
+                   headers=csrf(client))
+    assert r.status_code == 400 and r.json()["detail"] == "unknown field: role"
+
+
 def test_prefs_default_on_round_trip_and_mute_the_email(org_client, make_user, login_as, db):
     client, org_id, _seed = org_client
     investor = make_user(email="inv@example.com")
@@ -43,6 +50,16 @@ def test_prefs_default_on_round_trip_and_mute_the_email(org_client, make_user, l
     with psycopg.connect(db, autocommit=True) as conn:
         assert pc.email_wanted(conn, org_id, investor["id"], "money") is False
         assert pc.email_wanted(conn, org_id, investor["id"], "identity") is True
+
+
+def test_prefs_refuse_an_unknown_field(org_client, make_user, login_as, db):
+    client, org_id, _seed = org_client
+    investor = make_user(email="inv@example.com")
+    member(db, org_id, investor["id"], "investor")
+    login_as(client, investor)
+    url = f"/api/orgs/{org_id}/notification-prefs"
+    r = client.put(url, json={**ALL_ON, "extra": True}, headers=csrf(client))
+    assert r.status_code == 400 and r.json()["detail"] == "unknown field: extra"
 
 
 def test_prefs_are_per_org(org_client, make_user, make_org, login_as, db):

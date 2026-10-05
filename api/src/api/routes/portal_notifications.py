@@ -96,6 +96,9 @@ def create_portal_notifications_router() -> APIRouter:
     async def save_settings(body: Dict[str, Any] = Body(...),
                             user_id: int = Depends(require_user),
                             conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
+        unknown = sorted(set(body) - {"theme"})
+        if unknown:
+            raise HTTPException(status_code=400, detail=f"unknown field: {unknown[0]}")
         theme = body.get("theme")
         if not isinstance(theme, str) or theme not in THEMES:
             raise HTTPException(status_code=400, detail="theme must be light, dim, dark or system")
@@ -120,6 +123,9 @@ def create_portal_notifications_router() -> APIRouter:
                          ctx: OrgContext = Depends(any_member),
                          conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
         """All four switches every time: the dashboard always sends the set."""
+        unknown = sorted(set(body) - set(pc.TOPICS))
+        if unknown:
+            raise HTTPException(status_code=400, detail=f"unknown field: {unknown[0]}")
         for topic in pc.TOPICS:
             if not isinstance(body.get(topic), bool):
                 raise HTTPException(status_code=400, detail=f"{topic} must be true or false")
