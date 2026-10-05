@@ -33,6 +33,7 @@ TELEGRAM_RULES: set[tuple[str, str, str]] = {
     ("control", "warning", "investor_transfer_requested"),
     ("control", "warning", "investor_destination_added"),
     ("control", "warning", "investor_ledger_adjusted"),
+    ("control", "warning", "investor_bonus_paid"),
     ("control", "warning", "payment_method_changed"),
     ("control", "warning", "investor_kyc_submitted"),
     ("control", "warning", "investor_account_requested"),

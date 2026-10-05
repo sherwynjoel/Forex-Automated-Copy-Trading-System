@@ -141,6 +141,23 @@ def parse_pct(raw: object, field: str) -> Decimal:
     return value
 
 
+def parse_signed_amount(raw: object) -> Decimal:
+    """A hand-posted amount (adjustments, manual bonuses): one optional sign,
+    at most two decimals, never zero. A run of signs ('+-5', '--5') is never
+    read as either sign. Raises HTTPException 400."""
+    text = "" if raw is None or isinstance(raw, bool) else str(raw).strip()
+    if text and not SIGNED_AMOUNT.fullmatch(text):
+        raise HTTPException(status_code=400, detail=(
+            "amount must be a signed number with at most two decimals, e.g. -25.00"))
+    if text and Decimal(text) == 0:
+        raise HTTPException(status_code=400, detail="amount must not be zero")
+    try:
+        magnitude = pc.parse_amount(text.lstrip("+-") if text else raw)
+    except pc.LedgerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return -magnitude if text.startswith("-") else magnitude
+
+
 def _require_investor(conn: psycopg.Connection, org_id: int, user_id: int) -> str:
     """The investor member's email, or 404 'Investor not found'."""
     row = conn.execute(
@@ -848,22 +865,11 @@ def create_portal_admin_router() -> APIRouter:
         if wallet not in pc.WALLETS:
             raise HTTPException(status_code=400,
                                 detail="wallet must be one of main, credit, pamm, social")
-        raw = "" if body.amount is None or isinstance(body.amount, bool) else str(body.amount).strip()
-        # One optional sign, then the number: a run of signs ('+-5', '--5')
-        # must never be read as either sign. An empty amount falls through
-        # to parse_amount's "is required".
-        if raw and not SIGNED_AMOUNT.fullmatch(raw):
-            raise HTTPException(status_code=400, detail=(
-                "amount must be a signed number with at most two decimals, e.g. -25.00"))
-        if raw and Decimal(raw) == 0:
-            raise HTTPException(status_code=400, detail="amount must not be zero")
-        negative = raw.startswith("-")
+        amount = parse_signed_amount(body.amount)
         try:
-            magnitude = pc.parse_amount(raw.lstrip("+-") if raw else body.amount)
             note = pc.clean_text(body.note, "note", max_len=500)
         except pc.LedgerError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
-        amount = -magnitude if negative else magnitude
         # An adjustment has no request row to reference, so it is a plain
         # insert rather than settle(): nothing to make idempotent against.
         # The per-investor ledger lock is the FIRST statement inside the

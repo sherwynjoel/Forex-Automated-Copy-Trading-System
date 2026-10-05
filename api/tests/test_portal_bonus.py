@@ -231,3 +231,96 @@ def test_the_deposit_bonus_rounds_caps_and_pays_once(org_client, make_user, db):
     assert rows == [(small, Decimal("4.17"), f"deposit #{small}"),
                     (mid, Decimal("50.00"), f"deposit #{mid}"),
                     (big, Decimal("100.00"), f"deposit #{big}")]
+
+
+# ------------------------------------------------------------ manual + history
+
+
+def test_manual_grant_and_the_claw_back_floor(org_client, make_user, db):
+    client, org_id, _seed = org_client
+    uid = _investor(make_user, db, org_id)["id"]
+    url = f"/api/orgs/{org_id}/investors/{uid}/bonuses"
+
+    def grant(amount, note="Promo", mpin="123456"):
+        return client.post(url, json={"amount": amount, "note": note, "mpin": mpin},
+                           headers=csrf(client))
+
+    assert grant("20", mpin="000000").status_code == 401
+    r = grant("20")
+    assert r.status_code == 201, r.text
+    assert {k: r.json()[k] for k in ("source", "source_id", "amount", "note", "currency")} == {
+        "source": "manual", "source_id": None, "amount": 20.0, "note": "Promo", "currency": "USD"}
+    r = grant("-25")
+    assert r.status_code == 400
+    assert r.json()["detail"] == "a claw-back cannot take the Credit wallet below zero (available 20.00)"
+    assert grant("-20", note="Reversed").status_code == 201
+    assert _credit_entries(db, uid) == [("manual", 20.0), ("manual", -20.0)]
+    for amount, note, detail in (
+            ("0", "x", "amount must not be zero"),
+            ("--5", "x", "amount must be a signed number with at most two decimals, e.g. -25.00"),
+            ("5", " ", "note is required")):
+        r = grant(amount, note=note)
+        assert (r.status_code, r.json()["detail"]) == (400, detail)
+    r = client.post(f"/api/orgs/{org_id}/investors/999/bonuses",
+                    json={"amount": "5", "note": "x", "mpin": "123456"}, headers=csrf(client))
+    assert r.status_code == 404 and r.json()["detail"] == "Investor not found"
+    assert [e[0] for e in _events(db, org_id, "investor_bonus_paid")] == ["warning", "warning"]
+    with psycopg.connect(db, autocommit=True) as conn:
+        titles = [r[0] for r in conn.execute(
+            "SELECT title FROM notifications WHERE user_id = %s ORDER BY id", (uid,)).fetchall()]
+    assert titles == ["You received a 20.00 USD bonus", "A bonus of 20.00 USD was taken back"]
+
+
+def test_the_adjustment_route_keeps_its_amount_rules(org_client, make_user, db):
+    client, org_id, _seed = org_client
+    uid = _investor(make_user, db, org_id)["id"]
+    url = f"/api/orgs/{org_id}/investors/{uid}/adjustments"
+    for amount, detail in (("0", "amount must not be zero"), (None, "amount is required, e.g. 250.00"),
+                           ("+-5", "amount must be a signed number with at most two decimals, "
+                                   "e.g. -25.00")):
+        r = client.post(url, json={"wallet": "main", "amount": amount, "note": "x",
+                                   "mpin": "123456"}, headers=csrf(client))
+        assert (r.status_code, r.json()["detail"]) == (400, detail)
+    r = client.post(url, json={"wallet": "main", "amount": "-12.5", "note": "x", "mpin": "123456"},
+                    headers=csrf(client))
+    assert r.status_code == 201 and r.json()["amount"] == -12.5
+
+
+def test_the_investor_reads_their_own_bonus_history(org_client, make_user, login_as, db):
+    client, org_id, _seed = org_client
+    investor = _investor(make_user, db, org_id)
+    other = _investor(make_user, db, org_id, email="other@example.com")
+    with psycopg.connect(db, autocommit=True) as conn:
+        for user_id, source, source_id, amount, when in (
+                (investor["id"], "signup", None, 50, "2026-09-01T12:00:00Z"),
+                (investor["id"], "deposit", 7, 10, "2026-09-15T12:00:00Z"),
+                (investor["id"], "manual", None, -5, "2026-09-20T12:00:00Z"),
+                (other["id"], "signup", None, 50, "2026-09-01T12:00:00Z")):
+            conn.execute(
+                "INSERT INTO bonuses (org_id, user_id, source, source_id, amount, note, created_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                (org_id, user_id, source, source_id, amount, f"{source} note", when))
+    client.cookies.clear()
+    login_as(client, investor)
+    url = f"/api/orgs/{org_id}/investor/bonuses"
+    rows = client.get(url).json()
+    assert [(b["source"], b["amount"]) for b in rows] == [
+        ("manual", -5.0), ("deposit", 10.0), ("signup", 50.0)]
+    assert rows[1] == {"id": rows[1]["id"], "source": "deposit", "source_id": 7, "amount": 10.0,
+                       "note": "deposit note", "created_at": rows[1]["created_at"],
+                       "currency": "USD"}
+    assert [b["source"] for b in client.get(url + "?source=signup").json()] == ["signup"]
+    assert [b["source"] for b in client.get(url + "?from=2026-09-10&to=2026-09-15").json()] == [
+        "deposit"]
+    r = client.get(url + "?source=bogus")
+    assert r.status_code == 400
+    assert r.json()["detail"] == "source must be one of signup, kyc, deposit, manual"
+    r = client.get(url + "?from=yesterday")
+    assert r.status_code == 400 and r.json()["detail"] == "from must be a date (YYYY-MM-DD)"
+
+
+def test_a_bonus_paid_by_hand_reaches_both_alerters():
+    from api.alerts import ALERT_RULES
+    from api.telegram import TELEGRAM_RULES
+    assert ("control", "warning", "investor_bonus_paid") in ALERT_RULES
+    assert ("control", "warning", "investor_bonus_paid") in TELEGRAM_RULES

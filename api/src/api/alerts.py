@@ -47,6 +47,7 @@ ALERT_RULES: dict[tuple[str, str, str], str] = {
     # An admin hand-posted a ledger row, or changed where investors are told
     # to send money. Both are what a stolen admin session would do.
     ("control", "warning", "investor_ledger_adjusted"): "Investor ledger adjusted",
+    ("control", "warning", "investor_bonus_paid"): "Investor bonus paid by hand",
     ("control", "warning", "payment_method_changed"): "Payment method changed",
     # Phase 2: identity documents and a trading account request wait on an
     # admin; an admin read an investor's MT5 passwords (what a stolen admin
