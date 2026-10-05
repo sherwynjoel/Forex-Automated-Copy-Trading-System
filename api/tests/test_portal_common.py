@@ -11,8 +11,10 @@ from types import SimpleNamespace
 import httpx
 import psycopg
 import pytest
-from conftest import default_mock_callback
-from portal_helpers import approved_destination, credit
+from conftest import default_mock_callback, seed_mt5
+from fastapi import HTTPException
+from portal_helpers import (add_package, approved_destination, credit, link, member,
+                            open_account_request)
 
 from api import portal_common as pc
 from api import ws as ws_module
@@ -215,6 +217,96 @@ def test_equity_for_prefers_live_then_last_known_then_unknown(org_client, make_u
     assert none == (None, "unknown", [])
 
 
+def test_linked_accounts_owns_account_and_pick_account(org_client, make_user, db):
+    client, org_id, seed = org_client
+    for aid in (1001, 1002, 1003):
+        seed(aid, role="slave")
+    investor = make_user(email="inv@example.com")
+    other = make_user(email="other@example.com")
+    member(db, org_id, investor["id"], "investor")
+    member(db, org_id, other["id"], "investor")
+    uid = investor["id"]
+
+    def refused(account_id):
+        with pytest.raises(HTTPException) as exc:
+            pc.pick_account(conn, org_id, uid, account_id)
+        return exc.value.status_code, exc.value.detail
+
+    with psycopg.connect(db, autocommit=True) as conn:
+        assert pc.linked_accounts(conn, org_id, uid) == []
+        assert refused(None) == (409, "no account linked yet")
+        assert refused(1001) == (404, "Account not found")
+    link(db, org_id, uid, 1002)
+    with psycopg.connect(db, autocommit=True) as conn:
+        assert pc.pick_account(conn, org_id, uid, None) == 1002
+    link(db, org_id, uid, 1001)
+    link(db, org_id, other["id"], 1003)
+    with psycopg.connect(db, autocommit=True) as conn:
+        assert pc.linked_accounts(conn, org_id, uid) == [1001, 1002]
+        assert pc.owns_account(conn, org_id, uid, 1001) is True
+        assert pc.owns_account(conn, org_id, uid, 1003) is False
+        assert pc.owns_account(conn, org_id, uid, 999) is False
+        assert pc.owns_account(conn, org_id, uid, None) is False
+        assert refused(None) == (400, "account_id is required")
+        assert pc.pick_account(conn, org_id, uid, 1001) == 1001
+        assert refused(1003) == (404, "Account not found")
+        assert refused(999) == (404, "Account not found")
+
+
+def test_accounts_used_counts_owned_accounts_and_open_requests(org_client, make_user, db):
+    client, org_id, seed = org_client
+    seed(1001, role="slave")
+    investor = make_user(email="inv@example.com")
+    member(db, org_id, investor["id"], "investor")
+    package_id = add_package(db, org_id)
+    with psycopg.connect(db, autocommit=True) as conn:
+        assert pc.accounts_used(conn, org_id, investor["id"]) == 0
+    link(db, org_id, investor["id"], 1001)
+    req_id = open_account_request(db, org_id, investor["id"], package_id)
+    with psycopg.connect(db, autocommit=True) as conn:
+        assert pc.accounts_used(conn, org_id, investor["id"]) == 2
+        conn.execute("UPDATE account_requests SET status = 'cancelled', main_password_enc = NULL, "
+                     "investor_password_enc = NULL WHERE id = %s", (req_id,))
+        assert pc.accounts_used(conn, org_id, investor["id"]) == 1
+    assert pc.account_limit_text(3) == "you have reached the limit of 3 live accounts"
+
+
+def test_link_account_keeps_the_link_rules_and_the_cap(org_client, make_user, db):
+    client, org_id, seed = org_client
+    seed(100, role="master")
+    seed(1001, role="slave")
+    first, second, taken = (seed_mt5(db, org_id, f"key-{i}") for i in range(3))
+    investor = make_user(email="inv@example.com")
+    other = make_user(email="other@example.com")
+    member(db, org_id, investor["id"], "investor")
+    member(db, org_id, other["id"], "investor")
+    link(db, org_id, other["id"], taken)
+    uid = investor["id"]
+
+    with psycopg.connect(db, autocommit=True) as conn:
+        def refused(account_id):
+            with pytest.raises(HTTPException) as exc:
+                with conn.transaction():
+                    pc.link_account(conn, org_id, uid, account_id, mt5_only=True)
+            return exc.value.status_code, exc.value.detail
+
+        assert refused(100) == (400, "The master account cannot be linked to an investor")
+        assert refused(1001) == (400, "Only an MT5 account can be linked here")
+        assert refused(taken) == (404, "Account not found in this workspace, or already linked")
+        assert refused(999) == (404, "Account not found in this workspace, or already linked")
+        with conn.transaction():
+            pc.link_account(conn, org_id, uid, first)
+            pc.link_account(conn, org_id, uid, first)   # already this investor's: a no-op
+        conn.execute("UPDATE portal_settings SET max_live_accounts = 1 WHERE org_id = %s",
+                     (org_id,))
+        assert refused(second) == (409, "you have reached the limit of 1 live accounts")
+        conn.execute("UPDATE portal_settings SET max_live_accounts = 2 WHERE org_id = %s",
+                     (org_id,))
+        with conn.transaction():
+            pc.link_account(conn, org_id, uid, second)
+        assert pc.linked_accounts(conn, org_id, uid) == sorted([first, second])
+
+
 # ------------------------------------------------------------ settings
 
 
@@ -227,8 +319,10 @@ def test_portal_settings_creates_the_default_row_once(db, org_user):
         second = pc.portal_settings(conn, org_id)
         (count,) = conn.execute("SELECT count(*) FROM portal_settings WHERE org_id = %s",
                                 (org_id,)).fetchone()
-    assert first == {"withdrawal_min": Decimal("0.00"), "withdrawal_fee_pct": Decimal("0.000")}
-    assert second == {"withdrawal_min": Decimal("50.00"), "withdrawal_fee_pct": Decimal("1.500")}
+    assert first == {"withdrawal_min": Decimal("0.00"), "withdrawal_fee_pct": Decimal("0.000"),
+                     "max_live_accounts": 5}
+    assert second == {"withdrawal_min": Decimal("50.00"), "withdrawal_fee_pct": Decimal("1.500"),
+                      "max_live_accounts": 5}
     assert count == 1
 
 

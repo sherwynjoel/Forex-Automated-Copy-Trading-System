@@ -92,6 +92,91 @@ def linked_account(conn: psycopg.Connection, org_id: int, user_id: int) -> Optio
     return int(row[0]) if row else None
 
 
+def linked_accounts(conn: psycopg.Connection, org_id: int, user_id: int) -> list[int]:
+    """Every trading account linked to this investor in this workspace
+    (accounts.investor_user_id), oldest id first; [] while none."""
+    rows = conn.execute(
+        "SELECT ctid_trader_account_id FROM accounts WHERE org_id = %s AND investor_user_id = %s "
+        "ORDER BY ctid_trader_account_id", (org_id, user_id)).fetchall()
+    return [int(r[0]) for r in rows]
+
+
+def owns_account(conn: psycopg.Connection, org_id: int, user_id: int,
+                 account_id: Optional[int]) -> bool:
+    """True when account_id is one of this investor's accounts here."""
+    return conn.execute(
+        "SELECT 1 FROM accounts WHERE org_id = %s AND investor_user_id = %s "
+        "AND ctid_trader_account_id = %s", (org_id, user_id, account_id)).fetchone() is not None
+
+
+def pick_account(conn: psycopg.Connection, org_id: int, user_id: int,
+                 account_id: Optional[int], *, field: str = "account_id") -> int:
+    """The account a read route works on: the named one (404 unless the
+    investor owns it -- no hint whether it exists), else the only one; 409
+    while there is none and 400 when there are several to choose from.
+    `field` names the body/query field in the 400 message (deposits pass
+    "target_account_id" so their refusal names the field they sent)."""
+    if account_id is not None:
+        if not owns_account(conn, org_id, user_id, account_id):
+            raise HTTPException(status_code=404, detail="Account not found")
+        return account_id
+    owned = linked_accounts(conn, org_id, user_id)
+    if not owned:
+        raise HTTPException(status_code=409, detail="no account linked yet")
+    if len(owned) > 1:
+        raise HTTPException(status_code=400, detail=f"{field} is required")
+    return owned[0]
+
+
+def accounts_used(conn: psycopg.Connection, org_id: int, user_id: int) -> int:
+    """What counts against portal_settings.max_live_accounts: the accounts
+    the investor owns plus their open ('requested') account requests."""
+    (used,) = conn.execute(
+        "SELECT (SELECT count(*) FROM accounts "
+        "        WHERE org_id = %(o)s AND investor_user_id = %(u)s) "
+        "     + (SELECT count(*) FROM account_requests "
+        "        WHERE org_id = %(o)s AND user_id = %(u)s AND status = 'requested')",
+        {"o": org_id, "u": user_id}).fetchone()
+    return int(used)
+
+
+def account_limit_text(limit: int) -> str:
+    return f"you have reached the limit of {limit} live accounts"
+
+
+def link_account(conn: psycopg.Connection, org_id: int, user_id: int, account_id: int,
+                 *, mt5_only: bool = False) -> None:
+    """Link one more account to an investor, inside the caller's
+    transaction (moved from routes/portal_identity._link_account; the admin
+    link route and fulfil both use it): never the master, MT5 only when
+    mt5_only (fulfil of an MT5 account request), never an
+    account linked to someone else, and at most max_live_accounts per
+    investor. Linking an account the investor already owns is a no-op."""
+    if owns_account(conn, org_id, user_id, account_id):
+        return
+    role_row = conn.execute(
+        "SELECT role, platform FROM accounts WHERE ctid_trader_account_id = %s AND org_id = %s",
+        (account_id, org_id)).fetchone()
+    if role_row and role_row[0] == "master":
+        raise HTTPException(status_code=400,
+                            detail="The master account cannot be linked to an investor")
+    if mt5_only and role_row and role_row[1] != "mt5":
+        raise HTTPException(status_code=400, detail="Only an MT5 account can be linked here")
+    limit = portal_settings(conn, org_id)["max_live_accounts"]
+    # ponytail: count then update, no lock -- two admins linking to the same
+    # investor at the same instant could pass the cap by one; take
+    # lock_investor_ledger here first if that ever matters.
+    if len(linked_accounts(conn, org_id, user_id)) >= limit:
+        raise HTTPException(status_code=409, detail=account_limit_text(limit))
+    updated = conn.execute(
+        "UPDATE accounts SET investor_user_id = %s "
+        "WHERE ctid_trader_account_id = %s AND org_id = %s AND investor_user_id IS NULL "
+        "RETURNING ctid_trader_account_id", (user_id, account_id, org_id)).fetchone()
+    if not updated:
+        raise HTTPException(status_code=404,
+                            detail="Account not found in this workspace, or already linked")
+
+
 def account_card(conn: psycopg.Connection, org_id: int, account_id: int) -> dict:
     """The account card the investor summary shows (moved from
     routes/investor.py). 404 when the account is not this org's."""
@@ -273,14 +358,15 @@ def settle(conn: psycopg.Connection, *, org_id: int, user_id: int, wallet: str, 
 
 
 def portal_settings(conn: psycopg.Connection, org_id: int) -> dict:
-    """{withdrawal_min, withdrawal_fee_pct} as Decimals; the row is created
-    with the zero defaults on first read."""
+    """{withdrawal_min, withdrawal_fee_pct} as Decimals and max_live_accounts
+    as an int; the row is created with the defaults on first read."""
     conn.execute("INSERT INTO portal_settings (org_id) VALUES (%s) ON CONFLICT (org_id) DO NOTHING",
                  (org_id,))
     row = conn.execute(
-        "SELECT withdrawal_min, withdrawal_fee_pct FROM portal_settings WHERE org_id = %s",
-        (org_id,)).fetchone()
-    return {"withdrawal_min": Decimal(row[0]), "withdrawal_fee_pct": Decimal(row[1])}
+        "SELECT withdrawal_min, withdrawal_fee_pct, max_live_accounts FROM portal_settings "
+        "WHERE org_id = %s", (org_id,)).fetchone()
+    return {"withdrawal_min": Decimal(row[0]), "withdrawal_fee_pct": Decimal(row[1]),
+            "max_live_accounts": int(row[2])}
 
 
 # ------------------------------------------------------------ text helpers
