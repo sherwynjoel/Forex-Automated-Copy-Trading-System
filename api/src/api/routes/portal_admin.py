@@ -766,16 +766,32 @@ def create_portal_admin_router() -> APIRouter:
     async def unlink_investor_account(user_id: int, account_id: int,
                                       ctx: OrgContext = Depends(require_org_role("admin")),
                                       conn: psycopg.Connection = Depends(get_conn)):
-        """Remove one link. Open transfers on the account keep their phase 1
-        handling: an unlink never touched them, and the investor can no
-        longer name the account in a new request."""
+        """Remove one link; refused while an open transfer still names the
+        account on either end -- the account may move to another investor
+        once unlinked, and a transfer that later settles (`done`) must
+        never credit or debit whoever owns it by then. The investor's
+        ledger lock is taken first, the same rule every other writer that
+        reads-then-decides against this investor's rows follows, so a
+        transfer cannot be approved (or the account re-linked) between the
+        check and the UPDATE."""
         _require_investor(conn, ctx.org_id, user_id)
-        row = conn.execute(
-            "UPDATE accounts SET investor_user_id = NULL WHERE org_id = %s "
-            "AND investor_user_id = %s AND ctid_trader_account_id = %s "
-            "RETURNING ctid_trader_account_id", (ctx.org_id, user_id, account_id)).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="Account not found")
+        with conn.transaction():
+            pc.lock_investor_ledger(conn, ctx.org_id, user_id)
+            if not pc.owns_account(conn, ctx.org_id, user_id, account_id):
+                raise HTTPException(status_code=404, detail="Account not found")
+            if conn.execute(
+                    "SELECT 1 FROM transfers WHERE org_id = %s AND user_id = %s "
+                    "AND status IN ('requested', 'approved') "
+                    "AND (source_account_id = %s OR target_account_id = %s)",
+                    (ctx.org_id, user_id, account_id, account_id)).fetchone():
+                raise HTTPException(status_code=409, detail=(
+                    "this account has open transfers; finish or reject them first"))
+            row = conn.execute(
+                "UPDATE accounts SET investor_user_id = NULL WHERE org_id = %s "
+                "AND investor_user_id = %s AND ctid_trader_account_id = %s "
+                "RETURNING ctid_trader_account_id", (ctx.org_id, user_id, account_id)).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Account not found")
         await pc.audit_control(
             conn, org_id=ctx.org_id, action="investor_account_unlinked",
             actor_email=ctx.user_email, user_id=user_id, account_id=account_id)

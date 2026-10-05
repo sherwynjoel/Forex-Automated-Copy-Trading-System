@@ -470,6 +470,8 @@ Admins now link and unlink accounts one at a time under **Investors → Actions 
 Manage accounts** (the row's account select is gone; any non-master account
 nobody owns can be linked, MT5 or cTrader; fulfilling a request still links
 MT5 only) and set the cap under **Investors → Payment methods → Portal settings**.
+Unlinking is refused with a 409 while the account still has an open
+(requested or approved) transfer on either end; finish or reject it first.
 An investor with several accounts picks one on Account, History, Transfer and
 Deposit. Deploy the api and the dashboard together: the old dashboard reads
 `account` from the investor summary, which no longer exists.

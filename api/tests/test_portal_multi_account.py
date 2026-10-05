@@ -254,8 +254,55 @@ def test_admin_links_and_unlinks_one_account_at_a_time(org_client, make_user, db
         (first, "investor_account_unlinked", uid)]
 
 
-def test_the_cap_blocks_new_links_and_lowering_it_keeps_what_exists(
+def test_unlink_is_refused_while_the_account_has_an_open_transfer(two, db, login_as):
+    """An open transfer may still be funding (target_account_id) or
+    withdrawing from (source_account_id) the account -- either end blocks
+    the unlink, and the account stays owned until the transfer is settled
+    one way or another (rejected here; 'done' clears it the same way)."""
+    client, org_id, investor = two
+    uid = investor["id"]
 
+    def transfer(**cols):
+        base = {"org_id": org_id, "user_id": uid, "amount": 50, "status": "requested"}
+        row = {**base, **cols}
+        cols_sql = ", ".join(row)
+        marks = ", ".join(["%s"] * len(row))
+        with psycopg.connect(db, autocommit=True) as conn:
+            (tr_id,) = conn.execute(
+                f"INSERT INTO transfers ({cols_sql}) VALUES ({marks}) RETURNING id",
+                tuple(row.values())).fetchone()
+        return tr_id
+
+    tr_target = transfer(source_kind="wallet", source_wallet="main",
+                         target_kind="account", target_account_id=1001)
+    tr_source = transfer(source_kind="account", source_account_id=1002,
+                         target_kind="wallet", target_wallet="main")
+
+    client.cookies.clear()
+    login_as(client, ADMIN)
+    base = f"/api/orgs/{org_id}/investors/{uid}/accounts"
+
+    for account_id, tr_id in ((1001, tr_target), (1002, tr_source)):
+        r = client.delete(f"{base}/{account_id}", headers=csrf(client))
+        assert r.status_code == 409
+        assert r.json()["detail"] == "this account has open transfers; finish or reject them first"
+        with psycopg.connect(db, autocommit=True) as conn:
+            conn.execute("UPDATE transfers SET status = 'approved' WHERE id = %s", (tr_id,))
+        r = client.delete(f"{base}/{account_id}", headers=csrf(client))
+        assert r.status_code == 409, "approved also keeps it open"
+        with psycopg.connect(db, autocommit=True) as conn:
+            (owner,) = conn.execute(
+                "SELECT investor_user_id FROM accounts WHERE ctid_trader_account_id = %s",
+                (account_id,)).fetchone()
+        assert owner == uid, "the refused unlink must not touch the link"
+
+        with psycopg.connect(db, autocommit=True) as conn:
+            conn.execute("UPDATE transfers SET status = 'rejected' WHERE id = %s", (tr_id,))
+        r = client.delete(f"{base}/{account_id}", headers=csrf(client))
+        assert r.status_code == 204
+
+
+def test_the_cap_blocks_new_links_and_lowering_it_keeps_what_exists(
         org_client, make_user, login_as, db):
     client, org_id, _ = org_client
     first, second, third = (seed_mt5(db, org_id, f"key-{i}") for i in range(3))
