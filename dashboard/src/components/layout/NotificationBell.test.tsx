@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, expect, test, vi } from 'vitest'
@@ -33,9 +33,8 @@ function mockRoutes() {
   return fetchMock
 }
 
-function renderBell(count: number | undefined = 1) {
-  const onChange = vi.fn()
-  render(
+function bellTree(count: number | undefined, onChange: () => void) {
+  return (
     <MemoryRouter initialEntries={['/org/1']}>
       <Routes>
         <Route path="/org/1" element={
@@ -44,9 +43,14 @@ function renderBell(count: number | undefined = 1) {
         <Route path="/org/1/invest/deposit" element={<div>deposit page</div>} />
         <Route path="/org/1/invest/notifications" element={<div>notifications page</div>} />
       </Routes>
-    </MemoryRouter>,
+    </MemoryRouter>
   )
-  return onChange
+}
+
+function renderBell(count: number | undefined = 1) {
+  const onChange = vi.fn()
+  const view = render(bellTree(count, onChange))
+  return { onChange, setCount: (c: number | undefined) => view.rerender(bellTree(c, onChange)) }
 }
 
 async function openPanel(name: string) {
@@ -74,7 +78,7 @@ test('with nothing unread the name carries no number', () => {
 
 test('a click marks the row read, tells the layout and follows its link', async () => {
   const fetchMock = mockRoutes()
-  const onChange = renderBell()
+  const { onChange } = renderBell()
   const panel = await openPanel('Notifications, 1 unread')
   await userEvent.click(await within(panel).findByRole('button', { name: /Your deposit of 250.00 USD was confirmed/ }))
   expect(await screen.findByText('deposit page')).toBeInTheDocument()
@@ -84,15 +88,81 @@ test('a click marks the row read, tells the layout and follows its link', async 
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
 })
 
-test('Mark all read empties the unread state; See all goes to the page', async () => {
+test('Mark all read calls read-all; the badge itself only clears once the authoritative count does', async () => {
   const fetchMock = mockRoutes()
-  const onChange = renderBell()
+  const { onChange, setCount } = renderBell()
   const panel = await openPanel('Notifications, 1 unread')
   await within(panel).findByText('Your deposit of 250.00 USD was confirmed')
   await userEvent.click(within(panel).getByRole('button', { name: 'Mark all read' }))
   await waitFor(() => expect(onChange).toHaveBeenCalled())
   expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith('/notifications/read-all'))).toBe(true)
+  // onChange tells the layout to refresh the authoritative count; once that
+  // answer comes back as 0, the parent passes a new `count` prop down.
+  setCount(0)
   expect(within(panel).getByRole('button', { name: 'Mark all read' })).toBeDisabled()
   await userEvent.click(within(panel).getByRole('link', { name: 'See all notifications' }))
   expect(await screen.findByText('notifications page')).toBeInTheDocument()
+})
+
+test('the authoritative count decides Mark all read, not the fetched latest eight', async () => {
+  // count says 3 unread, but every one of the fetched rows is already read
+  // (e.g. read on another device) -- the button must still work.
+  const bothRead = { ...unread, read_at: '2026-10-01T10:00:00Z' }
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input)
+    if (url.endsWith('/notifications?limit=8')) {
+      return jsonResponse({ notifications: [bothRead, read], has_more: false, next_before: null })
+    }
+    if (url.endsWith('/notifications/read-all') && init?.method === 'POST') return jsonResponse({ updated: 1 })
+    return jsonResponse({})
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  renderBell(3)
+  const panel = await openPanel('Notifications, 3 unread')
+  await within(panel).findByText('Your deposit of 250.00 USD was confirmed')
+  const markAllRead = within(panel).getByRole('button', { name: 'Mark all read' })
+  expect(markAllRead).toBeEnabled()
+  await userEvent.click(markAllRead)
+  expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith('/notifications/read-all'))).toBe(true)
+})
+
+test('opening with the keyboard moves focus into the panel', async () => {
+  mockRoutes()
+  renderBell()
+  const trigger = screen.getByRole('button', { name: 'Notifications, 1 unread' })
+  act(() => trigger.focus())
+  await userEvent.keyboard('{Enter}')
+  const panel = await screen.findByRole('dialog', { name: 'Latest notifications' })
+  expect(panel).toHaveFocus()
+})
+
+test('Tab closes the panel rather than letting focus escape into the page behind it', async () => {
+  mockRoutes()
+  renderBell()
+  await openPanel('Notifications, 1 unread')
+  await userEvent.keyboard('{Tab}')
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+})
+
+test('Escape closes the panel and returns focus to the bell', async () => {
+  mockRoutes()
+  renderBell()
+  const trigger = screen.getByRole('button', { name: 'Notifications, 1 unread' })
+  await openPanel('Notifications, 1 unread')
+  await userEvent.keyboard('{Escape}')
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  expect(trigger).toHaveFocus()
+})
+
+test('clicking outside the panel closes it', async () => {
+  mockRoutes()
+  render(
+    <>
+      {bellTree(1, vi.fn())}
+      <button>Elsewhere</button>
+    </>,
+  )
+  await openPanel('Notifications, 1 unread')
+  await userEvent.click(screen.getByRole('button', { name: 'Elsewhere' }))
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
 })

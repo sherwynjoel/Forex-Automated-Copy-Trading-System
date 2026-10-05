@@ -80,13 +80,36 @@ test('a click marks the row read and follows its link', async () => {
     String(u).endsWith('/notifications/31/read') && (i as RequestInit | undefined)?.method === 'POST')).toBe(true)
 })
 
-test('Mark all read clears every unread badge', async () => {
-  mockRoutes()
+test('Mark all read clears every unread badge; the button stays enabled (read-all is idempotent)', async () => {
+  const fetchMock = mockRoutes()
   renderPage()
   await screen.findByText('Your deposit of 250.00 USD was confirmed')
   await userEvent.click(screen.getByRole('button', { name: 'Mark all read' }))
   await waitFor(() => expect(screen.queryByText('Unread')).not.toBeInTheDocument())
-  expect(screen.getByRole('button', { name: 'Mark all read' })).toBeDisabled()
+  // Rows are still on screen, so the button stays usable -- it is never
+  // derived from whether any row still looks unread.
+  expect(screen.getByRole('button', { name: 'Mark all read' })).toBeEnabled()
+  expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/notifications/read-all'))).toHaveLength(1)
+})
+
+test('with every visible row already read, Mark all read stays enabled and still posts', async () => {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input)
+    if (url.endsWith('/notifications?limit=50')) {
+      return jsonResponse({ notifications: [second, older], has_more: false, next_before: null })
+    }
+    if (url.endsWith('/notifications/read-all') && init?.method === 'POST') return jsonResponse({ updated: 1 })
+    return jsonResponse({})
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  renderPage()
+  await screen.findByText('New reply on ticket #7: Deposits')
+  expect(screen.queryByText('Unread')).not.toBeInTheDocument()
+  const button = screen.getByRole('button', { name: 'Mark all read' })
+  expect(button).toBeEnabled()
+  await userEvent.click(button)
+  expect(fetchMock.mock.calls.some(([u, i]) =>
+    String(u).endsWith('/notifications/read-all') && (i as RequestInit | undefined)?.method === 'POST')).toBe(true)
 })
 
 test('a late answer for the previous org never lands', async () => {

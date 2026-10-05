@@ -86,7 +86,7 @@ export default function Notifications() {
         title="Notifications"
         subtitle="Every decision on your requests, every ticket reply and every bonus, newest first. Your email switches live under Settings."
         actions={
-          <Button variant="secondary" size="sm" disabled={!rows.some((n) => n.read_at == null)}
+          <Button variant="secondary" size="sm" disabled={rows.length === 0}
                   onClick={() => { void readAll() }}>
             Mark all read
           </Button>

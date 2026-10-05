@@ -17,9 +17,13 @@ const PANEL_WIDTH = 320
  * badge, and a glass popover with the latest eight (on an opaque inset),
  * "Mark all read" and a link to the full page. A row click marks it read
  * and follows its in-app link. The popover is portalled and fixed to the
- * trigger, as Menu's is, so no clipping ancestor cuts it off; Escape and an
- * outside click close it. The trigger is 44 px square at every width (a
- * touch target in the tablet top bar as much as on the phone).
+ * trigger, as Menu's is, so no clipping ancestor cuts it off. Opening it
+ * moves focus straight into the dialog; Tab closes it and returns focus to
+ * the trigger rather than let focus wander into the page behind the portal
+ * (Menu.tsx's choice, for the same reason); Escape and an outside click
+ * also close it, Escape returning focus to the trigger. The trigger is
+ * 44 px square at every width (a touch target in the tablet top bar as
+ * much as on the phone).
  */
 export default function NotificationBell({ orgId, pageHref, count, onChange }: {
   orgId: number
@@ -39,10 +43,17 @@ export default function NotificationBell({ orgId, pageHref, count, onChange }: {
   // Bumped per open: a slow list for an earlier opening (or org) never lands.
   const seq = useRef(0)
 
-  useEffect(() => { setOpen(false); setItems(null) }, [orgId])
+  // An org switch invalidates any list fetch still in flight for the old
+  // org, even if no `toggle()` runs before it lands (which would otherwise
+  // bump `seq` itself).
+  useEffect(() => { seq.current += 1; setOpen(false); setItems(null) }, [orgId])
 
   useEffect(() => {
     if (!open) return
+    // Focus the dialog itself (not a specific row -- the list may still be
+    // loading) so screen-reader and keyboard users land inside it at once,
+    // the way any dialog should.
+    panelRef.current?.focus({ preventScroll: true })
     const onDoc = (e: MouseEvent) => {
       if (!panelRef.current?.contains(e.target as Node) && !triggerRef.current?.contains(e.target as Node)) {
         setOpen(false)
@@ -50,6 +61,13 @@ export default function NotificationBell({ orgId, pageHref, count, onChange }: {
     }
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') { setOpen(false); triggerRef.current?.focus() }
+      // Tab never tabs on into the page behind the popover (it is portalled
+      // to the end of <body>, past everything else): close it and send
+      // focus back to the trigger first, the same choice Menu.tsx makes.
+      else if (e.key === 'Tab' && panelRef.current?.contains(document.activeElement)) {
+        triggerRef.current?.focus()
+        setOpen(false)
+      }
     }
     document.addEventListener('mousedown', onDoc)
     document.addEventListener('keydown', onKey)
@@ -115,13 +133,13 @@ export default function NotificationBell({ orgId, pageHref, count, onChange }: {
         ) : null}
       </Button>
       {open && createPortal(
-        <div ref={panelRef} role="dialog" aria-label="Latest notifications"
+        <div ref={panelRef} role="dialog" aria-label="Latest notifications" tabIndex={-1}
              style={{ position: 'fixed', top: pos.top, right: pos.right, width: PANEL_WIDTH }}
-             className="glass z-40 rounded-inset border p-2 shadow-float space-y-2">
+             className="glass z-40 rounded-inset border p-2 shadow-float space-y-2 outline-none">
           <div className="flex items-center justify-between gap-2 px-1">
             <span className="desk-label">Notifications</span>
             <Button variant="ghost" size="sm" onClick={() => { void readAll() }}
-                    disabled={!items?.some((n) => n.read_at == null)}>
+                    disabled={!count}>
               Mark all read
             </Button>
           </div>
