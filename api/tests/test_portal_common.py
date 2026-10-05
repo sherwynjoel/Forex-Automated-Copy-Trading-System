@@ -449,16 +449,60 @@ class _FakeAlerter:
         return True
 
 
-def test_notify_investor_is_best_effort(db, org_user, monkeypatch):
+def _notes(db, user_id):
+    with psycopg.connect(db, autocommit=True) as conn:
+        return conn.execute(
+            "SELECT topic, title, body, link, read_at FROM notifications WHERE user_id = %s "
+            "ORDER BY id", (user_id,)).fetchall()
+
+
+def test_notify_writes_a_row_and_emails_unless_the_pref_is_off(db, org_user, monkeypatch):
     org_id, user_id = org_user
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
     fake = _FakeAlerter()
+    monkeypatch.setattr(ws_module.broadcaster, "alerter", fake, raising=False)
     with psycopg.connect(db, autocommit=True) as conn:
-        monkeypatch.setattr(ws_module.broadcaster, "alerter", fake, raising=False)
-        asyncio.run(pc.notify_investor(conn, request, user_id, "Subject", "Body"))
-        asyncio.run(pc.notify_investor(conn, request, 999999, "Nobody", "Body"))
-        monkeypatch.setattr(ws_module.broadcaster, "alerter", _FakeAlerter(fail=True), raising=False)
-        asyncio.run(pc.notify_investor(conn, request, user_id, "Fails quietly", "Body"))
+        asyncio.run(pc.notify(conn, request, org_id, user_id, "money", "Subject", "Body",
+                              "/org/1/invest"))
+        conn.execute("INSERT INTO notification_prefs (org_id, user_id, money) "
+                     "VALUES (%s, %s, false)", (org_id, user_id))
+        asyncio.run(pc.notify(conn, request, org_id, user_id, "money", "Muted", "Body"))
+        asyncio.run(pc.notify(conn, request, org_id, user_id, "bonus", "Still on", "x" * 600))
+        asyncio.run(pc.notify(conn, request, org_id, 999999, "money", "Nobody", "Body"))
+        monkeypatch.setattr(ws_module.broadcaster, "alerter", _FakeAlerter(fail=True),
+                            raising=False)
+        asyncio.run(pc.notify(conn, request, org_id, user_id, "identity", "Fails quietly", "Body"))
         monkeypatch.setattr(ws_module.broadcaster, "alerter", None, raising=False)
-        asyncio.run(pc.notify_investor(conn, request, user_id, "No alerter", "Body"))
-    assert fake.sent == [("inv@example.com", "Subject", "Body")]
+        asyncio.run(pc.notify(conn, request, org_id, user_id, "support", "No alerter", "Body"))
+        with pytest.raises(ValueError):
+            pc.email_wanted(conn, org_id, user_id, "chat")
+    assert [(to, subject) for to, subject, _ in fake.sent] == [
+        ("inv@example.com", "Subject"), ("inv@example.com", "Still on")]
+    assert fake.sent[1][2] == "x" * 499 + "…"
+    rows = _notes(db, user_id)
+    assert [r[:2] for r in rows] == [("money", "Subject"), ("money", "Muted"),
+                                     ("bonus", "Still on"), ("identity", "Fails quietly"),
+                                     ("support", "No alerter")]
+    assert rows[0][2:] == ("Body", "/org/1/invest", None)
+    assert len(rows[2][2]) == 500
+
+
+def test_notify_admins_reaches_every_admin_and_nobody_else(db, make_user, make_org, monkeypatch):
+    a1, a2 = make_user(email="a1@example.com"), make_user(email="a2@example.com")
+    viewer, inv = make_user(email="v@example.com"), make_user(email="i@example.com")
+    org_id = make_org(members=[(a1, "admin"), (a2, "admin"), (viewer, "viewer"),
+                               (inv, "investor")])
+    monkeypatch.setattr(ws_module.broadcaster, "alerter", None, raising=False)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    with psycopg.connect(db, autocommit=True) as conn:
+        asyncio.run(pc.notify_admins(conn, request, org_id, "support", "New ticket #1: Deposits",
+                                     "Body", "/org/1/requests?tab=support&ticket=1"))
+        rows = conn.execute("SELECT user_id, topic FROM notifications ORDER BY user_id").fetchall()
+    assert rows == sorted([(a1["id"], "support"), (a2["id"], "support")])
+
+
+def test_clip_and_investor_link():
+    assert pc.clip("abc", 3) == "abc"
+    assert pc.clip("abcd", 3) == "ab…"
+    assert pc.investor_link(7, "deposit") == "/org/7/invest/deposit"
+    assert pc.TOPICS == ("money", "identity", "support", "bonus")

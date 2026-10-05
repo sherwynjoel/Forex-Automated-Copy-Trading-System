@@ -429,11 +429,12 @@ def create_portal_admin_router() -> APIRouter:
             summary=f"Deposit #{deposit_id} {new_status} by {ctx.user_email}")
         credited_line = (f"Credited: {out['credited_amount']:.2f} USD\n"
                          if out["credited_amount"] is not None else "")
-        await pc.notify_investor(
-            conn, http_request, investor_id,
+        await pc.notify(
+            conn, http_request, ctx.org_id, investor_id, "money",
             f"Your deposit of {out['amount']:.2f} USD was {new_status}",
             f"Status: {new_status}\nAmount: {out['amount']:.2f} USD via {out['method_label']}\n"
-            f"{credited_line}Note: {note or '—'}\n\nOpen the portal for details.")
+            f"{credited_line}Note: {note or '—'}\n\nOpen the portal for details.",
+            pc.investor_link(ctx.org_id, "deposit"))
         return out
 
     # ------------------------------------------------------------ withdrawals
@@ -487,11 +488,12 @@ def create_portal_admin_router() -> APIRouter:
             conn, org_id=ctx.org_id, action="investor_withdrawal_decided",
             actor_email=ctx.user_email, user_id=user_id,
             withdrawal_id=wd_id, status=new_status, note=note, amount=out["amount"])
-        await pc.notify_investor(
-            conn, http_request, user_id,
+        await pc.notify(
+            conn, http_request, ctx.org_id, user_id, "money",
             f"Your withdrawal of {amount:.2f} USD was {new_status}",
             f"Status: {new_status}\nAmount: {amount:.2f} USD\nTo: {summary}\n"
-            f"Note: {note or '—'}\n\nOpen the portal for details.")
+            f"Note: {note or '—'}\n\nOpen the portal for details.",
+            pc.investor_link(ctx.org_id, "withdraw"))
         return out
 
     @router.post("/withdrawals/{wd_id}/paid", response_model=Dict[str, Any])
@@ -535,11 +537,12 @@ def create_portal_admin_router() -> APIRouter:
             conn, org_id=ctx.org_id, action="investor_withdrawal_paid",
             actor_email=ctx.user_email, user_id=user_id,
             withdrawal_id=wd_id, txid=txid, amount=out["amount"])
-        await pc.notify_investor(
-            conn, http_request, user_id,
+        await pc.notify(
+            conn, http_request, ctx.org_id, user_id, "money",
             f"Your withdrawal of {amount:.2f} USD was paid",
             f"Amount: {amount:.2f} USD\nTo: {summary}\nTransaction: {txid}\n\n"
-            "Open the portal for details.")
+            "Open the portal for details.",
+            pc.investor_link(ctx.org_id, "withdraw"))
         return out
 
     # ---------------------------------------------------- payout destinations
@@ -592,11 +595,12 @@ def create_portal_admin_router() -> APIRouter:
             conn, org_id=ctx.org_id, action="investor_destination_decided",
             actor_email=ctx.user_email, user_id=user_id,
             destination_id=dest_id, status=new_status, note=note, destination=summary)
-        await pc.notify_investor(
-            conn, http_request, user_id,
+        await pc.notify(
+            conn, http_request, ctx.org_id, user_id, "money",
             f"Your payout account {summary} was {new_status}",
             f"Status: {new_status}\nPayout account: {summary}\nNote: {note or '—'}\n\n"
-            "Open the portal for details.")
+            "Open the portal for details.",
+            pc.investor_link(ctx.org_id, "payout-accounts"))
         return out
 
     # -------------------------------------------------------------- transfers
@@ -699,11 +703,12 @@ def create_portal_admin_router() -> APIRouter:
             account_id=source_account if source_account is not None else target_account,
             transfer_id=tr_id, status=new_status, note=note, amount=out["amount"],
             source=from_label, target=to_label)
-        await pc.notify_investor(
-            conn, http_request, user_id,
+        await pc.notify(
+            conn, http_request, ctx.org_id, user_id, "money",
             f"Your transfer of {amount:.2f} USD was {new_status}",
             f"Status: {new_status}\nAmount: {amount:.2f} USD\nFrom: {from_label}\n"
-            f"To: {to_label}\nNote: {note or '—'}\n\nOpen the portal for details.")
+            f"To: {to_label}\nNote: {note or '—'}\n\nOpen the portal for details.",
+            pc.investor_link(ctx.org_id, "transfer"))
         return out
 
     # ---------------------------------------------------------------- investors
@@ -866,11 +871,12 @@ def create_portal_admin_router() -> APIRouter:
             actor_email=ctx.user_email, user_id=user_id, severity="warning",
             entry_id=out["id"], wallet=wallet, amount=out["amount"], note=note,
             summary=f"Ledger adjusted: {amount:+.2f} USD on {label} of {email} by {ctx.user_email}")
-        await pc.notify_investor(
-            conn, http_request, user_id,
+        await pc.notify(
+            conn, http_request, ctx.org_id, user_id, "money",
             f"Your {label} was adjusted by {amount:+.2f} USD",
             f"Wallet: {label}\nAmount: {amount:+.2f} USD\nNote: {note}\n\n"
-            "Open the portal for details.")
+            "Open the portal for details.",
+            pc.investor_link(ctx.org_id, "transactions"))
         return out
 
     # ---------------------------------------------------------------- requests

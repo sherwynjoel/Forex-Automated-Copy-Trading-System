@@ -60,12 +60,48 @@ async def audit_control(conn: psycopg.Connection, *, org_id: int, action: str,
         logger.exception("failed to write portal audit event %s", action)
 
 
-async def notify_investor(conn: psycopg.Connection, request: Request, user_id: int,
-                          subject: str, text: str) -> None:
-    """Best-effort email to the investor's own address. The alerter lives on
-    the event broadcaster (main.py wires it at startup); with none
-    configured this is a no-op, and a failing send never fails the
-    request that triggered it."""
+TOPICS = ("money", "identity", "support", "bonus")
+TITLE_MAX = 120
+BODY_MAX = 500
+
+
+def clip(text: str, limit: int) -> str:
+    """At most `limit` characters; an ellipsis marks a cut."""
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def investor_link(org_id: int, page: str) -> str:
+    """The in-app path of an investor page, e.g. investor_link(7, "deposit")."""
+    return f"/org/{org_id}/invest/{page}"
+
+
+def email_wanted(conn: psycopg.Connection, org_id: int, user_id: int, topic: str) -> bool:
+    """The user's email switch for `topic` in this org; no prefs row means
+    every switch is on. `topic` names a column, so it is checked first."""
+    if topic not in TOPICS:
+        raise ValueError(f"unknown notification topic {topic!r}")
+    row = conn.execute(f"SELECT {topic} FROM notification_prefs WHERE org_id = %s AND user_id = %s",
+                       (org_id, user_id)).fetchone()
+    return row is None or bool(row[0])
+
+
+async def notify(conn: psycopg.Connection, request: Request, org_id: int, user_id: int,
+                 topic: str, title: str, body: str, link: Optional[str] = None) -> None:
+    """One in-app notification for `user_id` in `org_id`, then the same words
+    by email (subject = title, text = body) unless their switch for `topic`
+    is off. Title and body are clipped to the column limits for both. Best
+    effort, like the audit: a failed insert is logged, and a failing or
+    missing alerter never fails the request that triggered it. Callers run
+    it AFTER their transaction, never while holding the ledger lock."""
+    title, body = clip(title, TITLE_MAX), clip(body, BODY_MAX)
+    try:
+        conn.execute(
+            "INSERT INTO notifications (org_id, user_id, topic, title, body, link) "
+            "VALUES (%s, %s, %s, %s, %s, %s)", (org_id, user_id, topic, title, body, link))
+    except Exception:
+        logger.exception("failed to write notification for user %s", user_id)
+    if not email_wanted(conn, org_id, user_id, topic):
+        return
     alerter = getattr(broadcaster, "alerter", None)
     if alerter is None:
         alerter = getattr(request.app.state, "alerter", None)
@@ -75,9 +111,18 @@ async def notify_investor(conn: psycopg.Connection, request: Request, user_id: i
     if not row:
         return
     try:
-        await alerter.send_to(row[0], subject, text)
+        await alerter.send_to(row[0], title, body)
     except Exception:
-        logger.exception("investor email failed for user %s", user_id)
+        logger.exception("notification email failed for user %s", user_id)
+
+
+async def notify_admins(conn: psycopg.Connection, request: Request, org_id: int, topic: str,
+                        title: str, body: str, link: Optional[str] = None) -> None:
+    """notify() every admin member of the org (the support desk)."""
+    for (admin_id,) in conn.execute(
+            "SELECT user_id FROM org_memberships WHERE org_id = %s AND role = 'admin' "
+            "ORDER BY user_id", (org_id,)).fetchall():
+        await notify(conn, request, org_id, admin_id, topic, title, body, link)
 
 
 # ------------------------------------------------------------ accounts + equity
