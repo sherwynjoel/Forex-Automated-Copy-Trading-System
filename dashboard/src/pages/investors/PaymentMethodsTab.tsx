@@ -94,10 +94,10 @@ export default function PaymentMethodsTab({ orgId, control, methods, settings, b
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState<PaymentMethod | null>(null)
 
-  // Withdrawal settings: the same dirty guard the old wallet card had. Once
+  // Portal settings: the same dirty guard the old wallet card had. Once
   // the admin touches the form, the 10 s poll leaves it alone until a save
   // clears the flag; read through a ref so the effect never sees a stale value.
-  const [rules, setRules] = useState({ withdrawal_min: '0', withdrawal_fee_pct: '0' })
+  const [rules, setRules] = useState({ withdrawal_min: '0', withdrawal_fee_pct: '0', max_live_accounts: '5' })
   const [rulesDirty, setRulesDirty] = useState(false)
   const rulesDirtyRef = useRef(false)
   rulesDirtyRef.current = rulesDirty
@@ -106,6 +106,7 @@ export default function PaymentMethodsTab({ orgId, control, methods, settings, b
       setRules({
         withdrawal_min: String(settings.withdrawal_min),
         withdrawal_fee_pct: String(settings.withdrawal_fee_pct),
+        max_live_accounts: String(settings.max_live_accounts),
       })
     }
   }, [settings])
@@ -119,13 +120,18 @@ export default function PaymentMethodsTab({ orgId, control, methods, settings, b
     e.preventDefault()
     run(async () => {
       const saved = await orgApi<PortalSettings>(orgId, 'portal-settings', {
-        method: 'PUT', body: JSON.stringify(rules) })
+        // Digits go as a number; anything else goes as typed so the api's
+        // "max_live_accounts must be a whole number from 1 to 50" shows.
+        method: 'PUT', body: JSON.stringify({ ...rules, max_live_accounts:
+          /^\d+$/.test(rules.max_live_accounts.trim()) ? Number(rules.max_live_accounts.trim())
+            : rules.max_live_accounts }) })
       setRules({
         withdrawal_min: String(saved.withdrawal_min),
         withdrawal_fee_pct: String(saved.withdrawal_fee_pct),
+        max_live_accounts: String(saved.max_live_accounts),
       })
       setRulesDirty(false)
-    }, 'Withdrawal settings saved')
+    }, 'Portal settings saved')
   }
 
   const openAdd = () => { setForm(EMPTY_FORM); setFormError(null); setEditing({ mode: 'add' }) }
@@ -257,11 +263,12 @@ export default function PaymentMethodsTab({ orgId, control, methods, settings, b
         </div>
       </Card>
 
-      <Card title="Withdrawal settings">
+      <Card title="Portal settings">
         <form onSubmit={saveRules} className="space-y-4">
           <p className="text-sm text-ink-soft">
-            Applied to every withdrawal request: the smallest amount an investor may ask
-            for, and the fee the workspace keeps. Both default to 0.
+            Applied to every withdrawal request: the smallest amount an investor may ask for
+            and the fee the workspace keeps (both default to 0). The cap counts each
+            investor's live accounts plus an open account request (default 5).
           </p>
           <div className="flex flex-wrap items-end gap-3">
             <label className="block w-40">
@@ -276,8 +283,14 @@ export default function PaymentMethodsTab({ orgId, control, methods, settings, b
                      value={rules.withdrawal_fee_pct}
                      onChange={(e) => editRules({ withdrawal_fee_pct: e.target.value })} />
             </label>
+            <label className="block w-40">
+              <span className="desk-label block mb-1">Max live accounts per investor</span>
+              <Input aria-label="Max live accounts per investor" num inputMode="numeric" disabled={!control}
+                     value={rules.max_live_accounts}
+                     onChange={(e) => editRules({ max_live_accounts: e.target.value })} />
+            </label>
             {control && (
-              <Button type="submit" disabled={busy || !rulesDirty}>Save withdrawal settings</Button>
+              <Button type="submit" disabled={busy || !rulesDirty}>Save portal settings</Button>
             )}
           </div>
         </form>
