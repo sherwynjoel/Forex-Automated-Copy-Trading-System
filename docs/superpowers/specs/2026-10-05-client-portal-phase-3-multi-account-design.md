@@ -1,7 +1,7 @@
 # Client portal, phase 3: several live accounts per investor
 
 **Date:** 2026-10-05
-**Status:** approved design; plan to follow
+**Status:** implemented on branch client-portal-phase-3 (plan docs/superpowers/plans/2026-10-05-client-portal-phase-3.md); awaiting deploy
 **Builds on:** phase 1 (`2026-09-29-client-portal-phase-1-money-design.md`) and phase 2
 (`2026-10-01-client-portal-phase-2-identity-design.md`), both on main.
 **Reference:** `docs/reference/aiprime-portal-survey.md` (Your Trading Accounts, Live tab).
@@ -127,7 +127,7 @@ the admin Investors list does), not one call per account.
   limit instead of the form.
 - **Admin Investors:** the account column shows the count and the first account's name
   ("2 accounts"); the investor drawer lists the accounts with Unlink each, and Link
-  adds one (picker of unlinked MT5 accounts). Portal settings gains "Max live accounts
+  adds one (picker of unlinked non-master accounts, any platform). Portal settings gains "Max live accounts
   per investor".
 - **Requests desk, Account requests tab:** unchanged except that the cap error is shown
   as returned.

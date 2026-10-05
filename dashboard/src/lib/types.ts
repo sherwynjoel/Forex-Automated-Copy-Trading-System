@@ -668,17 +668,10 @@ export interface InvestorSummary {
   accounts: AccountSummary[]
   /** used = owned accounts + open account requests. */
   account_limit: { max: number; used: number }
-  // Transitional (phase 3 Task 15 removes them): link_state, account, account_available.
-  link_state: 'linked' | 'unlinked'
-  account: {
-    account_id: number; nickname: string | null; platform: string
-    status: string; last_error: string | null; connected: boolean
-  } | null
-  equity_source: 'live' | 'last known' | 'unknown'
+  equity_source: EquitySource
   equity: number | null
   net_funded: number
   profit: number | null
-  account_available: number | null
   open_positions: number
   kyc_status: KycStatus
 }
@@ -690,11 +683,6 @@ export interface InvestorRow {
   display_name: string
   joined_at: string
   accounts: InvestorAccount[]
-  // Transitional (phase 3 Task 15 removes them): account_id, nickname, equity, equity_source.
-  account_id: number | null
-  nickname: string | null
-  equity: number | null
-  equity_source: string
   balances: Record<WalletKind, number>
   on_hold: number
   available: number

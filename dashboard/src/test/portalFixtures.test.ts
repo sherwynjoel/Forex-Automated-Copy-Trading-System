@@ -9,7 +9,6 @@ test('the summary carries the documented figures and every wallet', () => {
   expect(s.wallets.main).toEqual({ balance: 5120.5, on_hold: 100, available: 5020.5 })
   expect(Object.keys(s.wallets)).toEqual(['main', 'credit', 'pamm', 'social'])
   expect(s.currency).toBe('USD')
-  expect(summaryFixture({ link_state: 'unlinked', account: null }).account).toBeNull()
 })
 
 test('every row builder merges overrides over a complete row', () => {

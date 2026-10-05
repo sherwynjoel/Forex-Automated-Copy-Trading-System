@@ -98,7 +98,7 @@
 - Consumes: `db/migrate.py` `apply_migrations` (conftest runs it); conftest `db`, `make_user`, `make_org`.
 - Produces: index `accounts_one_per_investor` gone; plain partial index `accounts_by_investor (org_id, investor_user_id) WHERE investor_user_id IS NOT NULL`; column `portal_settings.max_live_accounts INTEGER NOT NULL DEFAULT 5 CHECK (BETWEEN 1 AND 50)` (last column).
 
-- [ ] **Step 1: Write the failing migration test**
+- [x] **Step 1: Write the failing migration test**
 
 Create `api/tests/test_migration_024.py`:
 
@@ -166,12 +166,12 @@ def test_max_live_accounts_defaults_to_5_and_stays_between_1_and_50(db, make_use
                          (good, org_id))
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `"$PY" -m pytest tests/test_migration_024.py -q -p no:cacheprovider`
 Expected: FAIL — `024_multi_account.sql` is not in `schema_migrations`.
 
-- [ ] **Step 3: Write the migration**
+- [x] **Step 3: Write the migration**
 
 Create `db/migrations/024_multi_account.sql`:
 
@@ -193,7 +193,7 @@ ALTER TABLE portal_settings ADD COLUMN max_live_accounts INTEGER NOT NULL DEFAUL
     CHECK (max_live_accounts BETWEEN 1 AND 50);
 ```
 
-- [ ] **Step 4: Retire the tests 024 makes wrong**
+- [x] **Step 4: Retire the tests 024 makes wrong**
 
 In `api/tests/test_migration_019.py`, delete the whole function `test_one_account_per_investor_per_org` (the index it asserts is dropped by 024; `test_migration_024.py` now covers the link). Append to that module's docstring, before the closing `"""`: ` The one-account-per-investor index it created is dropped by 024_multi_account.sql; see test_migration_024.py.`
 
@@ -204,12 +204,12 @@ In `api/tests/test_migration_022.py`, replace the `portal_settings` entry of `CO
                         "updated_at", "max_live_accounts"],
 ```
 
-- [ ] **Step 5: Run the migration tests to verify they pass**
+- [x] **Step 5: Run the migration tests to verify they pass**
 
 Run: `"$PY" -m pytest tests/test_migration_019.py tests/test_migration_022.py tests/test_migration_024.py -q -p no:cacheprovider`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add db/migrations/024_multi_account.sql api/tests/test_migration_024.py api/tests/test_migration_019.py api/tests/test_migration_022.py
@@ -239,7 +239,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
   - `portal_settings(...)` now returns `{"withdrawal_min": Decimal, "withdrawal_fee_pct": Decimal, "max_live_accounts": int}`.
   - `linked_account` stays until Task 7 (its last caller goes there).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `api/tests/test_portal_common.py`, extend the imports:
 
@@ -352,12 +352,12 @@ In `test_portal_settings_creates_the_default_row_once`, replace the two dict ass
                       "max_live_accounts": 5}
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `"$PY" -m pytest tests/test_portal_common.py -q -p no:cacheprovider`
 Expected: FAIL — `AttributeError: module 'api.portal_common' has no attribute 'linked_accounts'`, and the settings dicts lack `max_live_accounts`.
 
-- [ ] **Step 3: Add the helpers**
+- [x] **Step 3: Add the helpers**
 
 In `api/src/api/portal_common.py`, directly after the existing `linked_account` function, add:
 
@@ -447,7 +447,7 @@ def link_account(conn: psycopg.Connection, org_id: int, user_id: int, account_id
                             detail="Account not found in this workspace, or already linked")
 ```
 
-- [ ] **Step 4: The cap in `portal_settings`**
+- [x] **Step 4: The cap in `portal_settings`**
 
 Replace `portal_settings` with:
 
@@ -464,12 +464,12 @@ def portal_settings(conn: psycopg.Connection, org_id: int) -> dict:
             "max_live_accounts": int(row[2])}
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 Run: `"$PY" -m pytest tests/test_portal_common.py tests/test_portal_methods.py tests/test_portal_withdrawals.py -q -p no:cacheprovider`
 Expected: PASS (the admin settings route still serialises only the two withdrawal keys until Task 5).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add api/src/api/portal_common.py api/tests/test_portal_common.py
@@ -490,7 +490,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 - Consumes: `pc.linked_accounts`, `pc.owns_account`, `pc.pick_account` (Task 2); `pc.equity_for` (unchanged; the transfers lock-order test spies on it); `portal_helpers.add_method`, `credit`, `csrf`, `link`, `member`.
 - Produces: `GET investor/positions|analytics|history/{kind}` take an optional `account_id: Optional[int]` query; `POST investor/transfers` checks the named account; `POST investor/deposits` checks `target_account_id` (required with several accounts: 400 `target_account_id is required`). Test module `test_portal_multi_account.py` with `READS`, `W`, `A`, `_q`, `_live`, `_copier` and fixture `two`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `api/tests/test_portal_multi_account.py`:
 
@@ -656,12 +656,12 @@ def test_an_account_deposit_names_an_owned_account_once_there_are_several(two, d
 
 (The unused imports — `seed_mt5`, `add_package`, `kyc_profile`, `open_account_request` — are used by Tasks 6-7; pytest does not lint them.)
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `"$PY" -m pytest tests/test_portal_multi_account.py -q -p no:cacheprovider`
 Expected: FAIL — the read routes ignore `account_id` (200 for a foreign id), the transfer to 1002 may answer 404 (only one linked account is seen, by row order), the deposit without `target_account_id` answers 201.
 
-- [ ] **Step 3: Deposit notices name an owned account**
+- [x] **Step 3: Deposit notices name an owned account**
 
 In `file_deposit` (`api/src/api/routes/portal_investor.py`), replace the block
 
@@ -691,7 +691,7 @@ with
                                                 body.target_account_id, field="target_account_id")
 ```
 
-- [ ] **Step 4: Transfers name an owned account**
+- [x] **Step 4: Transfers name an owned account**
 
 In `request_transfer`, replace the block
 
@@ -721,7 +721,7 @@ with
 
 (`transfer_pair` already refuses an account end without an id with 400 `that transfer is not allowed`, so `named` is never None here.)
 
-- [ ] **Step 5: The read routes take `?account_id=`**
+- [x] **Step 5: The read routes take `?account_id=`**
 
 Delete the nested `_require_linked` helper (the `def _require_linked(...)` block just under `# ---- summary`). Replace the three read-throughs with:
 
@@ -770,12 +770,12 @@ Delete the nested `_require_linked` helper (the `def _require_linked(...)` block
 
 Change the comment above them, `# Moved from the old investor router unchanged in behaviour.`, to `# One account per call: ?account_id=, optional while the investor owns one.`
 
-- [ ] **Step 6: Run the tests to verify they pass**
+- [x] **Step 6: Run the tests to verify they pass**
 
 Run: `"$PY" -m pytest tests/test_portal_multi_account.py tests/test_portal_transfers.py tests/test_portal_deposits.py tests/test_portal_summary.py -q -p no:cacheprovider`
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add api/src/api/routes/portal_investor.py api/tests/test_portal_multi_account.py
@@ -797,7 +797,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 - Consumes: `pc.owns_account` (Task 2); fixture `two`, `ADMIN` (Task 3).
 - Produces: a confirmed `target = account` deposit creates the approved main -> account transfer to `deposits.target_account_id` when the investor still owns it, else credits main only, with the unchanged note suffix `(no account linked; credited to wallet)`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `api/tests/test_portal_multi_account.py`:
 
@@ -834,12 +834,12 @@ def test_confirming_funds_the_named_account_while_it_is_still_owned(two, db, log
     assert rows == [(1002, Decimal("100.00"), "approved")]
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `"$PY" -m pytest tests/test_portal_multi_account.py -k confirming -q -p no:cacheprovider`
 Expected: FAIL — the decision funds whatever single account `linked_account` returns now (1002 for both notices), so the second also creates a transfer and has no note.
 
-- [ ] **Step 3: Fund the named account**
+- [x] **Step 3: Fund the named account**
 
 In `decide_deposit` (`api/src/api/routes/portal_admin.py`), replace
 
@@ -889,12 +889,12 @@ with
                     note = f"{note} {suffix}" if note else suffix
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `"$PY" -m pytest tests/test_portal_multi_account.py tests/test_portal_deposits.py -q -p no:cacheprovider`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add api/src/api/routes/portal_admin.py api/tests/test_portal_multi_account.py
@@ -919,7 +919,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 - Consumes: `pc.portal_settings` (with `max_live_accounts`), `pc.accounts_used`, `pc.account_limit_text`, `pc.link_account` (Task 2).
 - Produces: `GET/PUT portal-settings` body and answer `{withdrawal_min, withdrawal_fee_pct, max_live_accounts}`; on PUT `max_live_accounts` is optional (omitted keeps the current value), else a whole number 1-50 or 400 `max_live_accounts must be a whole number from 1 to 50`; audit `portal_settings_changed` carries it in `previous` and in the new values. `POST investor/account-requests` refuses 409 `account_limit_text(max)` when `accounts_used >= max`, checked after the KYC gate and the one-open-request rule; the old 409 `you already have a trading account` is gone. Fulfil links through `pc.link_account` (adds; cap checked; the request being fulfilled is not counted). `test_portal_account_requests.py` gains `_set_cap(db, org_id, cap)` and `_cancel_open(db, user_id)`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `api/tests/test_portal_multi_account.py`:
 
@@ -1024,12 +1024,12 @@ def test_fulfil_links_a_second_account_up_to_the_cap(desk, db):
 
 Change that module docstring's first line from `"""Live account requests: a verified investor with no trading account asks` to `"""Live account requests: a verified investor under the workspace's cap asks`.
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `"$PY" -m pytest tests/test_portal_multi_account.py tests/test_portal_methods.py tests/test_portal_account_requests.py -q -p no:cacheprovider`
 Expected: FAIL — `portal-settings` has no `max_live_accounts`; the second request answers 409 `you already have a trading account`; fulfil answers 409 `the investor already has a linked account`.
 
-- [ ] **Step 3: The settings route**
+- [x] **Step 3: The settings route**
 
 In `api/src/api/routes/portal_admin.py`, replace `class SettingsBody` with:
 
@@ -1079,7 +1079,7 @@ Replace `_settings_json` and `put_settings` with:
         return out
 ```
 
-- [ ] **Step 4: Account requests and fulfil**
+- [x] **Step 4: Account requests and fulfil**
 
 In `api/src/api/routes/portal_identity.py`, delete the whole `_link_account` function (it moved to `pc.link_account` in Task 2).
 
@@ -1108,12 +1108,12 @@ In `request_account`, replace everything from the docstring through the `"a requ
 
 In `fulfil_request`, replace `_link_account(conn, ctx.org_id, user_id, body.account_id)` with `pc.link_account(conn, ctx.org_id, user_id, body.account_id, mt5_only=True)`.
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 Run: `"$PY" -m pytest tests/test_portal_multi_account.py tests/test_portal_methods.py tests/test_portal_account_requests.py tests/test_portal_withdrawals.py tests/test_portal_summary.py -q -p no:cacheprovider`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add api/src/api/routes/portal_admin.py api/src/api/routes/portal_identity.py api/tests/test_portal_multi_account.py api/tests/test_portal_methods.py api/tests/test_portal_account_requests.py
@@ -1137,7 +1137,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 - Consumes: `pc.link_account` (Task 2); `_require_investor`, `_org_state`, `_equity_from` (existing in `portal_admin.py`); `seed_mt5`.
 - Produces: `POST investors/{user_id}/accounts` body `LinkBody {account_id: int}` -> 201 `{user_id, account_id}`, audit `investor_account_linked` (info, events `account_id` set); `DELETE investors/{user_id}/accounts/{account_id}` -> 204, 404 `Account not found` unless that investor owns it, audit `investor_account_unlinked`; both 404 `Investor not found` for a non-investor. `PUT investors/{user_id}/account` no longer exists. `GET investors` rows: `account_id`, `nickname`, `equity`, `equity_source` replaced by `accounts: [{account_id, nickname, equity, equity_source}]` (account id order), still one `/state` call for the whole list.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `api/tests/test_portal_multi_account.py`:
 
@@ -1312,12 +1312,12 @@ def test_the_master_account_cannot_be_linked_to_an_investor(org_client, make_use
     assert links == {100: None, 1001: investor["id"]}
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `"$PY" -m pytest tests/test_portal_multi_account.py tests/test_portal_summary.py tests/test_investor_access.py -q -p no:cacheprovider`
 Expected: FAIL — `POST .../investors/{id}/accounts` answers 405, the investors rows have no `accounts` key.
 
-- [ ] **Step 3: The investors list**
+- [x] **Step 3: The investors list**
 
 In `api/src/api/routes/portal_admin.py`, replace `list_investors` with:
 
@@ -1362,7 +1362,7 @@ In `api/src/api/routes/portal_admin.py`, replace `list_investors` with:
         return out
 ```
 
-- [ ] **Step 4: Link and unlink one account**
+- [x] **Step 4: Link and unlink one account**
 
 Replace `class LinkBody` with:
 
@@ -1409,12 +1409,12 @@ Replace the whole `@router.put("/investors/{user_id}/account", ...)` route (`lin
         return Response(status_code=204)
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 Run: `"$PY" -m pytest tests/test_portal_multi_account.py tests/test_portal_summary.py tests/test_investor_access.py tests/test_portal_account_requests.py -q -p no:cacheprovider`
 Expected: PASS. (`tests/test_rbac_matrix.py` still lists the removed PUT and fails until Task 8.)
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add api/src/api/routes/portal_admin.py api/tests/test_portal_multi_account.py api/tests/test_portal_summary.py api/tests/test_investor_access.py
@@ -1439,7 +1439,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 - Consumes: `pc.linked_accounts`, `pc.accounts_used`, `pc.portal_settings` (Task 2); `pc.org_state`, `pc.equity_from`, `pc.net_funded`, `pc.open_account_transfers_out`, `pc.floor_cents`, `_account_card` (existing).
 - Produces: `GET investor/summary` without `link_state`, `account`, `account_available`; with `accounts: AccountSummary[]` (account id order; each `{account_id, nickname, platform, status, last_error, connected, mt5_login, mt5_server, equity_source, equity, net_funded, profit, account_available, open_positions}`), totals `equity` (null when any account's is unknown or there is none), `equity_source` (worst: unknown > last known > live; `unknown` with no account), `net_funded`, `profit` (`equity - net_funded` when equity is known), `open_positions`, and `account_limit: {max, used}`. `EQUITY_RANK = {"live": 0, "last known": 1, "unknown": 2}`. `pc.linked_account` no longer exists.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `api/tests/test_portal_multi_account.py`:
 
@@ -1571,12 +1571,12 @@ with
         assert pc.linked_accounts(conn, org_id, 999999) == []
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `"$PY" -m pytest tests/test_portal_multi_account.py tests/test_portal_summary.py -q -p no:cacheprovider`
 Expected: FAIL — `KeyError: 'accounts'`.
 
-- [ ] **Step 3: The summary**
+- [x] **Step 3: The summary**
 
 In `api/src/api/routes/portal_investor.py`, after `ENTRIES_MAX_LIMIT = 200` add:
 
@@ -1685,19 +1685,19 @@ Replace `investor_summary` with:
         }
 ```
 
-- [ ] **Step 4: Remove `linked_account`**
+- [x] **Step 4: Remove `linked_account`**
 
 Delete `linked_account` from `api/src/api/portal_common.py`, and in the module docstring change `the linked-account and equity resolvers` to `the account ownership and equity resolvers`. Then prove nothing calls it:
 
 Run: `grep -rnw linked_account api/src api/tests`
 Expected: no output.
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 Run: `"$PY" -m pytest tests/test_portal_multi_account.py tests/test_portal_summary.py tests/test_portal_common.py tests/test_portal_transfers.py tests/test_portal_deposits.py tests/test_portal_account_requests.py tests/test_investor_access.py -q -p no:cacheprovider`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add api/src/api/routes/portal_investor.py api/src/api/portal_common.py api/tests/test_portal_multi_account.py api/tests/test_portal_summary.py api/tests/test_portal_common.py
@@ -1718,7 +1718,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 - Consumes: the routes of Task 6.
 - Produces: rows for `POST investors/{investor}/accounts` and `DELETE investors/{investor}/accounts/100`; the removed PUT row is gone.
 
-- [ ] **Step 1: Replace the PUT row**
+- [x] **Step 1: Replace the PUT row**
 
 In `MATRIX`, replace
 
@@ -1743,17 +1743,17 @@ In `test_destructive_rows_allowed`, directly after `login_as(client, users["admi
     assert r.status_code == 404 and r.json()["detail"] == "Account not found"   # not theirs
 ```
 
-- [ ] **Step 2: Run the matrix**
+- [x] **Step 2: Run the matrix**
 
 Run: `"$PY" -m pytest tests/test_rbac_matrix.py -q -p no:cacheprovider`
 Expected: PASS.
 
-- [ ] **Step 3: Run the whole API suite**
+- [x] **Step 3: Run the whole API suite**
 
 Run: `"$PY" -m pytest tests -q -p no:cacheprovider`
 Expected: PASS except the known 7 `test_events_ws.py` errors and the one EA-download CRLF failure.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add api/tests/test_rbac_matrix.py
@@ -1776,7 +1776,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 - Consumes: the API shapes of Tasks 5-7.
 - Produces: types `EquitySource`, `AccountSummary`, `InvestorAccount`; `InvestorSummary.accounts: AccountSummary[]`, `InvestorSummary.account_limit: { max: number; used: number }`; `InvestorRow.accounts: InvestorAccount[]`; `PortalSettings.max_live_accounts: number`. The old `InvestorSummary.link_state | account | account_available` and `InvestorRow.account_id | nickname | equity | equity_source` STAY until Task 15 (transitional, so every task in between compiles); no page reads them after Task 14. `accountName(a: { account_id: number; nickname: string | null; mt5_login?: number | null }): string` -> `"MT5 <login>"`, else the nickname, else `"Account <id>"`. `pickAccount<T extends { account_id: number }>(accounts: T[], wanted: string | null): T | null`. Fixture `accountSummaryFixture(overrides)`; `summaryFixture` adds `accounts: [accountSummaryFixture()]`, `account_limit: { max: 5, used: 1 }`; `investorRowFixture` adds `accounts: [{ account_id: 555, nickname: 'Growth', equity: 1240.25, equity_source: 'live' }]`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `dashboard/src/lib/investor.test.ts`, add `accountName` and `pickAccount` to the existing `import { … } from './investor'`, and append inside the `describe('investor helpers', …)` block:
 
@@ -1809,12 +1809,12 @@ test('the summary carries one account and the cap; the investor row its accounts
 })
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
+- [x] **Step 2: Run them to verify they fail**
 
 Run (from `dashboard/`): `npx vitest run src/lib/investor.test.ts src/test/portalFixtures.test.ts`
 Expected: FAIL — `accountName is not a function`, `accountSummaryFixture is not a function`.
 
-- [ ] **Step 3: Types**
+- [x] **Step 3: Types**
 
 In `dashboard/src/lib/types.ts`, directly above `/** GET investor/summary. …`, add:
 
@@ -1860,7 +1860,7 @@ Replace `export interface PortalSettings { withdrawal_min: number; withdrawal_fe
 export interface PortalSettings { withdrawal_min: number; withdrawal_fee_pct: number; max_live_accounts: number }
 ```
 
-- [ ] **Step 4: The helpers**
+- [x] **Step 4: The helpers**
 
 In `dashboard/src/lib/investor.ts`, after `moneyOrDash`, add:
 
@@ -1879,7 +1879,7 @@ export function pickAccount<T extends { account_id: number }>(accounts: T[], wan
 }
 ```
 
-- [ ] **Step 5: Fixtures**
+- [x] **Step 5: Fixtures**
 
 In `dashboard/src/test/portalFixtures.ts`, add `AccountSummary` to the type import, and above `summaryFixture` add:
 
@@ -1907,12 +1907,12 @@ In `investorRowFixture`, directly after `joined_at: '2026-09-01T09:00:00Z',`, ad
     accounts: [{ account_id: 555, nickname: 'Growth', equity: 1240.25, equity_source: 'live' }],
 ```
 
-- [ ] **Step 6: Run the tests and the type check**
+- [x] **Step 6: Run the tests and the type check**
 
 Run: `npx vitest run src/lib/investor.test.ts src/test/portalFixtures.test.ts && npx tsc --noEmit -p tsconfig.app.json`
 Expected: PASS, no type errors.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add dashboard/src/lib/types.ts dashboard/src/lib/investor.ts dashboard/src/lib/investor.test.ts dashboard/src/test/portalFixtures.ts dashboard/src/test/portalFixtures.test.ts
@@ -1934,7 +1934,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 - Consumes: `InvestorSummary.accounts`, `account_limit`, `equity`, `equity_source`; `accountName` (Task 9); `accountSummaryFixture`.
 - Produces: Card `Live accounts`: one row per account — a link named `accountName(a)` to `${base}/account?account=<id>`, `connected` / `terminal offline`, equity, signed profit — a `Total equity` row with `summary.equity` and its source, and the header action link `Open live account` (to `${base}/open-account`) while `account_limit.used < account_limit.max`. No accounts: the existing "Your account is being set up" NextStep. `VerificationCard` gets `linked={summary.accounts.length > 0}`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `dashboard/src/pages/investor/InvestorDashboard.test.tsx`, import `accountSummaryFixture` with the other fixtures, and replace the tail of `linked` and all of `unlinked`:
 
@@ -2001,12 +2001,12 @@ test('several accounts each get a row in the tray with the total; at the cap Ope
 })
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
+- [x] **Step 2: Run them to verify they fail**
 
 Run: `npx vitest run src/pages/investor/InvestorDashboard.test.tsx`
 Expected: FAIL — no `Live accounts` heading; `Inv` is not a link.
 
-- [ ] **Step 3: The tray**
+- [x] **Step 3: The tray**
 
 In `dashboard/src/pages/investor/InvestorDashboard.tsx`, import `accountName` with the other `../../lib/investor` names. Replace
 
@@ -2057,12 +2057,12 @@ and replace everything from `{summary.link_state === 'linked' && summary.account
 
 The `) : ( <NextStep title="Your account is being set up"> … </NextStep> )}` branch after it stays as it is.
 
-- [ ] **Step 4: Run the tests and the type check**
+- [x] **Step 4: Run the tests and the type check**
 
 Run: `npx vitest run src/pages/investor/InvestorDashboard.test.tsx && npx tsc --noEmit -p tsconfig.app.json`
 Expected: PASS, no type errors, no `act(` warning.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add dashboard/src/pages/investor/InvestorDashboard.tsx dashboard/src/pages/investor/InvestorDashboard.test.tsx
@@ -2085,7 +2085,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 - Consumes: `accountName`, `pickAccount` (Task 9); `GET investor/positions|analytics|history/deals` with `account_id` (Task 3); `AccountSummary.mt5_login|mt5_server`.
 - Produces: `AccountSwitcher({ accounts: AccountSummary[]; value: number | null; onChange: (accountId: number) => void })` — renders nothing with fewer than two accounts, else a `Select` labelled `Trading account` whose options are `accountName(a)` with value `account_id`. Account and History pages keep the pick in `?account=<id>` (`setSearchParams({ account }, { replace: true })`) and send `account_id=<id>` to the API whenever an account is picked. The Account page's login card (`Your MT5 login`) shows the picked account's `mt5_login` / `mt5_server` and no longer fetches `investor/account-requests`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `dashboard/src/pages/investor/InvestorAccount.test.tsx`:
 
@@ -2236,12 +2236,12 @@ test('the history follows the picked account', async () => {
 })
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
+- [x] **Step 2: Run them to verify they fail**
 
 Run: `npx vitest run src/pages/investor/InvestorAccount.test.tsx src/pages/investor/InvestorHistory.test.tsx`
 Expected: FAIL — no `Trading account` picker; positions are fetched without `account_id`; the login card waits for an account request.
 
-- [ ] **Step 3: The switcher**
+- [x] **Step 3: The switcher**
 
 Create `dashboard/src/pages/investor/AccountSwitcher.tsx`:
 
@@ -2273,7 +2273,7 @@ export default function AccountSwitcher({ accounts, value, onChange }: {
 }
 ```
 
-- [ ] **Step 4: The Account page**
+- [x] **Step 4: The Account page**
 
 In `dashboard/src/pages/investor/InvestorAccount.tsx`:
 
@@ -2381,7 +2381,7 @@ Replace the `{summary?.account && ( <Card title="Trading account"> … </Card> )
 
 The positions and analytics cards stay as they are.
 
-- [ ] **Step 5: The History page**
+- [x] **Step 5: The History page**
 
 In `dashboard/src/pages/investor/InvestorHistory.tsx`: add `import { useSearchParams } from 'react-router-dom'`, import `ACCOUNT_CURRENCY, pickAccount` from `../../lib/investor`, `import AccountSwitcher from './AccountSwitcher'`, and change the type import to `import type { AccountSummary, Deal, InvestorSummary } from '../../lib/types'`.
 
@@ -2421,12 +2421,12 @@ In the JSX, directly after the error `Banner`, add:
                        onChange={(id) => setParams({ account: String(id) }, { replace: true })} />
 ```
 
-- [ ] **Step 6: Run the tests and the type check**
+- [x] **Step 6: Run the tests and the type check**
 
 Run: `npx vitest run src/pages/investor/InvestorAccount.test.tsx src/pages/investor/InvestorHistory.test.tsx && npx tsc --noEmit -p tsconfig.app.json`
 Expected: PASS, no type errors, no `act(` warning.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add dashboard/src/pages/investor/AccountSwitcher.tsx dashboard/src/pages/investor/InvestorAccount.tsx dashboard/src/pages/investor/InvestorAccount.test.tsx dashboard/src/pages/investor/InvestorHistory.tsx dashboard/src/pages/investor/InvestorHistory.test.tsx
@@ -2448,7 +2448,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 - Consumes: `InvestorSummary.accounts`; `accountName` (Task 9); `POST investor/transfers`, `POST investor/deposits` with the account id (Task 3).
 - Produces: `transferOptions(s)` adds one `account:<id>` option per account, labelled `Trading account` when there is one and `Trading account <accountName>` when there are several, with that account's `account_available`; transfer rows name the account the same way. Deposit: with several accounts and `Deposit to` = `Trading account`, a `Select` labelled `Which trading account` (options `accountName`) picks `target_account_id`; with one account it stays implicit (that account's id, as today).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `dashboard/src/pages/investor/InvestorTransfer.test.tsx`, import `accountSummaryFixture` with the other fixtures and replace `linked` / `unlinked`:
 
@@ -2541,12 +2541,12 @@ test('with several accounts the notice names the one picked', async () => {
 })
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
+- [x] **Step 2: Run them to verify they fail**
 
 Run: `npx vitest run src/pages/investor/InvestorTransfer.test.tsx src/pages/investor/InvestorDeposit.test.tsx`
 Expected: FAIL — no account option (the page still reads `link_state`), no `Which trading account` select.
 
-- [ ] **Step 3: Transfer**
+- [x] **Step 3: Transfer**
 
 In `dashboard/src/pages/investor/InvestorTransfer.tsx`, import `accountName` with the other `../../lib/investor` names and add `AccountSummary` to the type import. Replace `transferOptions` and `refLabel` with:
 
@@ -2579,7 +2579,7 @@ function refLabel(r: MoneyRef, accounts: AccountSummary[]): string {
 
 In the transfers list, replace `{`${refLabel(t.source)} → ${refLabel(t.target)}`}` with `{`${refLabel(t.source, summary?.accounts ?? [])} → ${refLabel(t.target, summary?.accounts ?? [])}`}`. Update the comment above `PAIRS` to say `"account" is any of the investor's trading accounts`.
 
-- [ ] **Step 4: Deposit**
+- [x] **Step 4: Deposit**
 
 In `dashboard/src/pages/investor/InvestorDeposit.tsx`: import `ACCOUNT_CURRENCY, BADGE_TONE, accountName, statusLabel, statusTone` from `../../lib/investor`, add `import Select from '../../components/Select'`.
 
@@ -2614,12 +2614,12 @@ Directly after the `Deposit to` `</fieldset>`, add:
               )}
 ```
 
-- [ ] **Step 5: Run the tests and the type check**
+- [x] **Step 5: Run the tests and the type check**
 
 Run: `npx vitest run src/pages/investor/InvestorTransfer.test.tsx src/pages/investor/InvestorDeposit.test.tsx && npx tsc --noEmit -p tsconfig.app.json`
 Expected: PASS, no type errors.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add dashboard/src/pages/investor/InvestorTransfer.tsx dashboard/src/pages/investor/InvestorTransfer.test.tsx dashboard/src/pages/investor/InvestorDeposit.tsx dashboard/src/pages/investor/InvestorDeposit.test.tsx
@@ -2641,7 +2641,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 - Consumes: `InvestorSummary.kyc_status`, `InvestorSummary.account_limit` (Task 9); `POST investor/account-requests` 409 `you have reached the limit of N live accounts` (Task 5, shown inline by `PinConfirmDialog` as returned).
 - Produces: the page reads `investor/summary` instead of `investor/profile`. Order: not verified -> "Verify your identity first"; else the latest request's card when it is `requested` or `fulfilled` (as today); then, unless that request is still `requested`: at the cap (`used >= max`) a NextStep titled `You have reached your account limit` with `This workspace allows <max> live accounts per investor. Ask your admin if you need another.`, otherwise the packages and the form (so a fulfilled request no longer blocks asking for another account).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `dashboard/src/pages/investor/InvestorOpenAccount.test.tsx`, change the fixture import to `import { accountRequestFixture, packageFixture, summaryFixture } from '../../test/portalFixtures'`, change `mockRoutes`' signature to `function mockRoutes(opts: { kyc?: KycStatus; requests?: AccountRequest[]; limit?: { max: number; used: number } } = {})`, and replace its `/investor/profile` route with:
 
@@ -2673,12 +2673,12 @@ test('at the cap the page explains the limit instead of the packages', async () 
 })
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
+- [x] **Step 2: Run them to verify they fail**
 
 Run: `npx vitest run src/pages/investor/InvestorOpenAccount.test.tsx`
 Expected: FAIL — the page still asks `investor/profile` (the mock answers `{}`, so everyone looks unverified).
 
-- [ ] **Step 3: The page**
+- [x] **Step 3: The page**
 
 In `dashboard/src/pages/investor/InvestorOpenAccount.tsx`:
 
@@ -2831,12 +2831,12 @@ Replace the JSX from `) : current ? (` to the `)}` that closes the `{!loaded ? (
 
 (Everything inside is today's markup, moved; the only new pieces are the `current &&` wrapper and the `atCap` branch.)
 
-- [ ] **Step 4: Run the tests and the type check**
+- [x] **Step 4: Run the tests and the type check**
 
 Run: `npx vitest run src/pages/investor/InvestorOpenAccount.test.tsx && npx tsc --noEmit -p tsconfig.app.json`
 Expected: PASS, no type errors.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add dashboard/src/pages/investor/InvestorOpenAccount.tsx dashboard/src/pages/investor/InvestorOpenAccount.test.tsx
@@ -2860,7 +2860,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 - Consumes: `InvestorRow.accounts`, `PortalSettings.max_live_accounts` (Task 9); `accountName`, `moneyOrDash`; `POST investors/{id}/accounts`, `DELETE investors/{id}/accounts/{account_id}`, `PUT portal-settings` with `max_live_accounts` (Tasks 5-6).
 - Produces: the `Accounts` column (`not linked` / the first account's name / `<name> · <n> accounts`); `Equity` = the sum of the accounts' equities, `—` while any is unknown or there is none; row menu item `Manage accounts` opens `AccountsDrawer` (dialog `<display_name>'s accounts`: one row per account with a `Unlink <name>` button, a `Select` labelled `Account to link` over non-master accounts nobody owns yet, any platform, a `Link` button; the drawer makes its own link/unlink requests and shows a refusal in its own error state, never the page banner); notices `Account linked` / `Account unlinked`. The settings card becomes `Portal settings` with a third field `Max live accounts per investor`, button `Save portal settings`, notice `Portal settings saved`. The row `Select` labelled `Account for <email>` is gone.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `dashboard/src/pages/Investors.test.tsx`:
 
@@ -2967,12 +2967,12 @@ In the two poll tests (`the withdrawal settings follow the server while the form
 
 In `a viewer sees the figures but no actions`, replace `'Save withdrawal settings'` with `'Save portal settings'`.
 
-- [ ] **Step 2: Run them to verify they fail**
+- [x] **Step 2: Run them to verify they fail**
 
 Run: `npx vitest run src/pages/Investors.test.tsx`
 Expected: FAIL — no `Manage accounts` menu item, no `Accounts` column, no `Save portal settings` button.
 
-- [ ] **Step 3: The drawer**
+- [x] **Step 3: The drawer**
 
 Create `dashboard/src/pages/investors/AccountsDrawer.tsx`:
 
@@ -3081,7 +3081,7 @@ export default function AccountsDrawer({ investor, linkable, orgId, run, onClose
 }
 ```
 
-- [ ] **Step 4: The Investors page**
+- [x] **Step 4: The Investors page**
 
 In `dashboard/src/pages/Investors.tsx`:
 
@@ -3132,7 +3132,7 @@ function totalEquity(r: InvestorRow): number | null {
                       onClose={() => setAccountsFor(null)} />
 ```
 
-- [ ] **Step 5: The cap field**
+- [x] **Step 5: The cap field**
 
 In `dashboard/src/pages/investors/PaymentMethodsTab.tsx`:
 
@@ -3162,12 +3162,12 @@ In `dashboard/src/pages/investors/PaymentMethodsTab.tsx`:
 
   and the submit button text `Save withdrawal settings` becomes `Save portal settings`. Update the `// Withdrawal settings: …` comment's first words to `// Portal settings: …`.
 
-- [ ] **Step 6: Run the tests and the type check**
+- [x] **Step 6: Run the tests and the type check**
 
 Run: `npx vitest run src/pages/Investors.test.tsx && npx tsc --noEmit -p tsconfig.app.json`
 Expected: PASS, no type errors (`noUnusedLocals` catches a leftover `Select` or `orgApi` import).
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add dashboard/src/pages/investors/AccountsDrawer.tsx dashboard/src/pages/Investors.tsx dashboard/src/pages/investors/PaymentMethodsTab.tsx dashboard/src/pages/Investors.test.tsx
@@ -3191,7 +3191,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 - Consumes: everything above.
 - Produces: `InvestorSummary` without `link_state`, `account`, `account_available` (and `equity_source: EquitySource`); `InvestorRow` without `account_id`, `nickname`, `equity`, `equity_source`; a green branch and the deploy notes.
 
-- [ ] **Step 1: Remove the transitional fields**
+- [x] **Step 1: Remove the transitional fields**
 
 In `dashboard/src/lib/types.ts`, delete from `InvestorSummary` the lines `link_state: 'linked' | 'unlinked'`, the four-line `account: { … } | null`, `account_available: number | null` and the `// Transitional …` comment, and change its `equity_source: 'live' | 'last known' | 'unknown'` to `equity_source: EquitySource`. Delete from `InvestorRow` the lines `account_id: number | null`, `nickname: string | null`, `equity: number | null`, `equity_source: string` and its `// Transitional …` comment.
 
@@ -3202,7 +3202,7 @@ In `dashboard/src/test/portalFixtures.test.ts`, delete the line `expect(summaryF
 Run: `grep -rnE "link_state|summary\??\.account\b|summary\??\.account_available" dashboard/src`
 Expected: no output (the type check in Step 2 proves the `InvestorRow` half).
 
-- [ ] **Step 2: Full dashboard gate**
+- [x] **Step 2: Full dashboard gate**
 
 From `dashboard/`:
 
@@ -3212,19 +3212,19 @@ Expected: palette prover passes, no type errors, every test passes, and `npx vit
 Run: `npm run build`
 Expected: build succeeds.
 
-- [ ] **Step 3: Full API suite**
+- [x] **Step 3: Full API suite**
 
 From `api/` with the env of the Global Constraints:
 
 Run: `"$PY" -m pytest tests -q -p no:cacheprovider`
 Expected: everything passes except the 7 known `test_events_ws.py` errors and the 1 EA-download CRLF failure.
 
-- [ ] **Step 4: `copier/` untouched**
+- [x] **Step 4: `copier/` untouched**
 
 Run: `git diff --stat main..HEAD -- copier/`
 Expected: prints nothing.
 
-- [ ] **Step 5: README runbook**
+- [x] **Step 5: README runbook**
 
 In `README.md`, directly after the paragraph that starts "Migration 023 (client portal phase 2", add:
 
@@ -3242,7 +3242,7 @@ Deposit. Deploy the api and the dashboard together: the old dashboard reads
 `account` from the investor summary, which no longer exists.
 ```
 
-- [ ] **Step 6: Spec status and §7 wording**
+- [x] **Step 6: Spec status and §7 wording**
 
 In the spec, replace `**Status:** approved design; plan to follow` with
 `**Status:** implemented on branch client-portal-phase-3 (plan docs/superpowers/plans/2026-10-05-client-portal-phase-3.md); awaiting deploy`.
@@ -3252,7 +3252,7 @@ accounts` with `picker of unlinked non-master accounts, any platform` — sectio
 5 already says "any platform as today"; this was the one line left saying
 MT5-only for admin linking.
 
-- [ ] **Step 7: Tick this plan's checkboxes, then commit**
+- [x] **Step 7: Tick this plan's checkboxes, then commit**
 
 ```bash
 git add dashboard/src/lib/types.ts dashboard/src/test/portalFixtures.ts dashboard/src/test/portalFixtures.test.ts README.md docs/superpowers/specs/2026-10-05-client-portal-phase-3-multi-account-design.md docs/superpowers/plans/2026-10-05-client-portal-phase-3.md

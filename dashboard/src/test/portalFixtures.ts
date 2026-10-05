@@ -43,15 +43,10 @@ export function summaryFixture(overrides: Partial<InvestorSummary> = {}): Invest
     withdrawal_rules: { min: 50, fee_pct: 1 },
     accounts: [accountSummaryFixture()],
     account_limit: { max: 5, used: 1 },
-    link_state: 'linked',
-    account: {
-      account_id: 555, nickname: 'Growth', platform: 'ctrader', status: 'ok', last_error: null, connected: true,
-    },
     equity_source: 'live',
     equity: 1240.25,
     net_funded: 1000,
     profit: 240.25,
-    account_available: 1240.25,
     open_positions: 2,
     kyc_status: 'approved',
     ...overrides,
@@ -125,7 +120,6 @@ export function investorRowFixture(overrides: Partial<InvestorRow> = {}): Invest
   return {
     user_id: 1, email: 'investor@example.com', display_name: 'Sherwyn Joel', joined_at: '2026-09-01T09:00:00Z',
     accounts: [{ account_id: 555, nickname: 'Growth', equity: 1240.25, equity_source: 'live' }],
-    account_id: 555, nickname: 'Growth', equity: 1240.25, equity_source: 'live',
     balances: { main: 5120.5, credit: 0, pamm: 250, social: 0 }, on_hold: 100, available: 5020.5,
     pending: { deposits: 1, withdrawals: 0, transfers: 0, payout_destinations: 0 },
     kyc_status: 'approved',
