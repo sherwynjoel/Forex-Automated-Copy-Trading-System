@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest'
 import {
-  ACCOUNT_CURRENCY, BADGE_TONE, WALLETS, approvedLabel, entryLabel, moneyOrDash, shortAddress,
-  statusLabel, statusTone, walletLabel,
+  ACCOUNT_CURRENCY, BADGE_TONE, WALLETS, accountName, approvedLabel, entryLabel, moneyOrDash, pickAccount,
+  shortAddress, statusLabel, statusTone, walletLabel,
 } from './investor'
 import type { WalletEntry } from './types'
 
@@ -38,6 +38,20 @@ describe('investor helpers', () => {
     expect(shortAddress('TQn9Y2khEsLJW1ChVWFMSMeRDow5KcbLSE9f')).toBe('T…9f')
     expect(shortAddress('TDest')).toBe('TDest')
     expect(shortAddress('  TDest  ')).toBe('TDest')
+  })
+
+  test('accountName prefers the MT5 login, then the nickname, then the id', () => {
+    expect(accountName({ account_id: 9, nickname: 'Growth', mt5_login: 5001 })).toBe('MT5 5001')
+    expect(accountName({ account_id: 9, nickname: 'Growth', mt5_login: null })).toBe('Growth')
+    expect(accountName({ account_id: 9, nickname: null })).toBe('Account 9')
+  })
+
+  test('pickAccount takes the named account when it is there, else the first', () => {
+    const list = [{ account_id: 1 }, { account_id: 2 }]
+    expect(pickAccount(list, '2')).toEqual({ account_id: 2 })
+    expect(pickAccount(list, '7')).toEqual({ account_id: 1 })
+    expect(pickAccount(list, null)).toEqual({ account_id: 1 })
+    expect(pickAccount([], '1')).toBeNull()
   })
 })
 

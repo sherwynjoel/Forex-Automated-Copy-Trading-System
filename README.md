@@ -462,6 +462,20 @@ for the MPIN, on the desk and in the portal alike. The two MT5 passwords of an
 open account request are sealed with `FERNET_KEY`: rotating that key makes them
 unreadable, and the admin then rejects the request and asks for a new one.
 
+Migration 024 (client portal phase 3: several live accounts per investor)
+drops the one-account-per-investor index and adds
+`portal_settings.max_live_accounts` (default 5); it rewrites no row, so the
+same sequence applies and `migrate` prints `applied: ['024_multi_account.sql']`.
+Admins now link and unlink accounts one at a time under **Investors → Actions →
+Manage accounts** (the row's account select is gone; any non-master account
+nobody owns can be linked, MT5 or cTrader; fulfilling a request still links
+MT5 only) and set the cap under **Investors → Payment methods → Portal settings**.
+Unlinking is refused with a 409 while the account still has an open
+(requested or approved) transfer on either end; finish or reject it first.
+An investor with several accounts picks one on Account, History, Transfer and
+Deposit. Deploy the api and the dashboard together: the old dashboard reads
+`account` from the investor summary, which no longer exists.
+
 Then hard-reload any open dashboard tab (the old bundle is stale). Without a
 new migration the short form is `sudo docker compose build api && sudo docker
 compose up -d api`. The first deploy of the client portal also creates the

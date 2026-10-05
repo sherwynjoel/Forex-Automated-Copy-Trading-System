@@ -96,32 +96,6 @@ def _open_request(conn: psycopg.Connection, org_id: int, req_id: int):
     return row
 
 
-def _link_account(conn: psycopg.Connection, org_id: int, user_id: int, account_id: int) -> None:
-    """Phase 1's link rule (routes/portal_admin.link_account), run inside the
-    caller's transaction: never the master, never an account linked to
-    someone else, and one account per investor."""
-    linked = pc.linked_account(conn, org_id, user_id)
-    if linked == account_id:
-        return
-    if linked is not None:
-        raise HTTPException(status_code=409, detail="the investor already has a linked account")
-    role_row = conn.execute(
-        "SELECT role, platform FROM accounts WHERE ctid_trader_account_id = %s AND org_id = %s",
-        (account_id, org_id)).fetchone()
-    if role_row and role_row[0] == "master":
-        raise HTTPException(status_code=400,
-                            detail="The master account cannot be linked to an investor")
-    if role_row and role_row[1] != "mt5":
-        raise HTTPException(status_code=400, detail="Only an MT5 account can be linked here")
-    updated = conn.execute(
-        "UPDATE accounts SET investor_user_id = %s "
-        "WHERE ctid_trader_account_id = %s AND org_id = %s AND investor_user_id IS NULL "
-        "RETURNING ctid_trader_account_id", (user_id, account_id, org_id)).fetchone()
-    if not updated:
-        raise HTTPException(status_code=404,
-                            detail="Account not found in this workspace, or already linked")
-
-
 def _profile_row(conn: psycopg.Connection, org_id: int, user_id: int):
     return conn.execute(
         f"SELECT {pid.PROFILE_COLS} FROM kyc_profiles WHERE org_id = %s AND user_id = %s",
@@ -408,20 +382,22 @@ def create_portal_identity_router() -> APIRouter:
                               ctx: OrgContext = Depends(require_investor),
                               conn: psycopg.Connection = Depends(get_conn),
                               cfg: ApiConfig = Depends(ApiConfig.from_env)):
-        """A live MT5 account from one package. KYC must be approved, the
-        investor has no linked account (phase 1 links one per investor) and
-        no other open request. The two passwords are sealed with FERNET_KEY
-        and live only until an admin decides."""
+        """A live MT5 account from one package. KYC must be approved, no
+        other request may be open, and the investor's accounts plus open
+        requests must stay under the workspace's max_live_accounts. The two
+        passwords are sealed with FERNET_KEY and live only until an admin
+        decides."""
         failure = require_mpin(conn, ctx.user_id, body.mpin)
         if failure is not None:
             return failure
         if pid.kyc_status(conn, ctx.org_id, ctx.user_id) != "approved":
             raise HTTPException(status_code=409, detail="verify your identity first")
-        if pc.linked_account(conn, ctx.org_id, ctx.user_id) is not None:
-            raise HTTPException(status_code=409, detail="you already have a trading account")
         if conn.execute("SELECT 1 FROM account_requests WHERE org_id = %s AND user_id = %s "
                         "AND status = 'requested'", (ctx.org_id, ctx.user_id)).fetchone():
             raise HTTPException(status_code=409, detail="a request is already open")
+        limit = pc.portal_settings(conn, ctx.org_id)["max_live_accounts"]
+        if pc.accounts_used(conn, ctx.org_id, ctx.user_id) >= limit:
+            raise HTTPException(status_code=409, detail=pc.account_limit_text(limit))
         package_id = body.package_id
         if isinstance(package_id, bool) or not isinstance(package_id, int):
             raise HTTPException(status_code=404, detail="Package not found")
@@ -561,7 +537,7 @@ def create_portal_identity_router() -> APIRouter:
                                 detail="that MT5 login is already given to another request")
         with conn.transaction():
             if body.account_id is not None:
-                _link_account(conn, ctx.org_id, user_id, body.account_id)
+                pc.link_account(conn, ctx.org_id, user_id, body.account_id, mt5_only=True)
             row = conn.execute(
                 "UPDATE account_requests SET status = 'fulfilled', mt5_login = %s, "
                 "mt5_server = %s, account_id = %s, decided_by = %s, decided_at = now(), "

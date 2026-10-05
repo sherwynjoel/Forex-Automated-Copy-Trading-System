@@ -1,6 +1,6 @@
 import type {
-  AccountPackage, AccountRequest, InvestorRow, InvestorSummary, KycProfile, PayoutDestination, PaymentMethod,
-  PortalDeposit, PortalTransfer, PortalWithdrawal, SignIn, WalletEntry,
+  AccountPackage, AccountRequest, AccountSummary, InvestorRow, InvestorSummary, KycProfile, PayoutDestination,
+  PaymentMethod, PortalDeposit, PortalTransfer, PortalWithdrawal, SignIn, WalletEntry,
 } from '../lib/types'
 
 /**
@@ -11,6 +11,15 @@ import type {
  */
 
 const WHEN = '2026-09-29T10:05:06Z'
+
+export function accountSummaryFixture(overrides: Partial<AccountSummary> = {}): AccountSummary {
+  return {
+    account_id: 555, nickname: 'Growth', platform: 'mt5', status: 'ok', last_error: null, connected: true,
+    mt5_login: 5001, mt5_server: 'Broker-Live', equity_source: 'live', equity: 1240.25, net_funded: 1000,
+    profit: 240.25, account_available: 1240.25, open_positions: 2,
+    ...overrides,
+  }
+}
 
 export function summaryFixture(overrides: Partial<InvestorSummary> = {}): InvestorSummary {
   return {
@@ -32,15 +41,12 @@ export function summaryFixture(overrides: Partial<InvestorSummary> = {}): Invest
     pending: { deposits: 1, withdrawals: 0, transfers: 0, payout_destinations: 0 },
     deposits_open: true,
     withdrawal_rules: { min: 50, fee_pct: 1 },
-    link_state: 'linked',
-    account: {
-      account_id: 555, nickname: 'Growth', platform: 'ctrader', status: 'ok', last_error: null, connected: true,
-    },
+    accounts: [accountSummaryFixture()],
+    account_limit: { max: 5, used: 1 },
     equity_source: 'live',
     equity: 1240.25,
     net_funded: 1000,
     profit: 240.25,
-    account_available: 1240.25,
     open_positions: 2,
     kyc_status: 'approved',
     ...overrides,
@@ -113,7 +119,7 @@ export function methodFixture(overrides: Partial<PaymentMethod> = {}): PaymentMe
 export function investorRowFixture(overrides: Partial<InvestorRow> = {}): InvestorRow {
   return {
     user_id: 1, email: 'investor@example.com', display_name: 'Sherwyn Joel', joined_at: '2026-09-01T09:00:00Z',
-    account_id: 555, nickname: 'Growth', equity: 1240.25, equity_source: 'live',
+    accounts: [{ account_id: 555, nickname: 'Growth', equity: 1240.25, equity_source: 'live' }],
     balances: { main: 5120.5, credit: 0, pamm: 250, social: 0 }, on_hold: 100, available: 5020.5,
     pending: { deposits: 1, withdrawals: 0, transfers: 0, payout_destinations: 0 },
     kyc_status: 'approved',

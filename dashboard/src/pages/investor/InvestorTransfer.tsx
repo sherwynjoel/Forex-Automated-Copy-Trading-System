@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { orgApi } from '../../lib/api'
 import { useOrg } from '../../lib/org'
 import { errorText, formatWhen, money } from '../../lib/format'
-import { ACCOUNT_CURRENCY, BADGE_TONE, statusLabel, statusTone, walletLabel } from '../../lib/investor'
+import { ACCOUNT_CURRENCY, accountName, BADGE_TONE, statusLabel, statusTone, walletLabel } from '../../lib/investor'
 import Badge from '../../components/Badge'
 import Banner from '../../components/Banner'
 import Button from '../../components/Button'
@@ -14,12 +14,12 @@ import Money from '../../components/Money'
 import PageHeader from '../../components/PageHeader'
 import PinConfirmDialog from '../../components/PinConfirmDialog'
 import Select from '../../components/Select'
-import type { InvestorSummary, MoneyRef, PortalTransfer, WalletKind } from '../../lib/types'
+import type { AccountSummary, InvestorSummary, MoneyRef, PortalTransfer, WalletKind } from '../../lib/types'
 
 const AMOUNT_RE = /^\d+(\.\d{1,2})?$/
 const TWO_DECIMALS = 'Enter an amount with at most two decimals, digits only (for example 250.00).'
-// The pairs phase 1 allows (spec section 7); "account" is the linked
-// trading account, the credit wallet never moves.
+// The pairs phase 1 allows (spec section 7); "account" is any of the
+// investor's trading accounts, the credit wallet never moves.
 const PAIRS: ReadonlyArray<readonly [string, string]> = [
   ['main', 'account'], ['account', 'main'], ['pamm', 'main'], ['social', 'main'],
 ]
@@ -43,23 +43,29 @@ export function pairAllowed(from: string, to: string): boolean {
   return PAIRS.some(([x, y]) => x === a && y === b)
 }
 
+/** "Trading account", or "Trading account MT5 5001" once there are several to tell apart. */
+function accountLabel(accounts: AccountSummary[], accountId: number | null | undefined): string {
+  const a = accounts.length > 1 ? accounts.find((x) => x.account_id === accountId) : undefined
+  return a ? `Trading account ${accountName(a)}` : 'Trading account'
+}
+
 export function transferOptions(s: InvestorSummary): TransferOption[] {
   const wallets: WalletKind[] = ['main', 'pamm', 'social']
   const opts: TransferOption[] = wallets.map((w) => ({
     value: `wallet:${w}`, label: walletLabel(w), ref: { kind: 'wallet', wallet: w },
     available: s.wallets[w].available,
   }))
-  if (s.link_state === 'linked' && s.account) {
+  for (const a of s.accounts) {
     opts.push({
-      value: `account:${s.account.account_id}`, label: 'Trading account',
-      ref: { kind: 'account', account_id: s.account.account_id }, available: s.account_available,
+      value: `account:${a.account_id}`, label: accountLabel(s.accounts, a.account_id),
+      ref: { kind: 'account', account_id: a.account_id }, available: a.account_available,
     })
   }
   return opts
 }
 
-function refLabel(r: MoneyRef): string {
-  return r.kind === 'wallet' && r.wallet ? walletLabel(r.wallet) : 'Trading account'
+function refLabel(r: MoneyRef, accounts: AccountSummary[]): string {
+  return r.kind === 'wallet' && r.wallet ? walletLabel(r.wallet) : accountLabel(accounts, r.account_id)
 }
 
 export default function InvestorTransfer() {
@@ -238,7 +244,7 @@ export default function InvestorTransfer() {
             <li key={t.id} className="px-4 py-3 text-sm space-y-1">
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
                 <span className="num text-ink-soft">{formatWhen(t.created_at)}</span>
-                <span className="text-ink">{`${refLabel(t.source)} → ${refLabel(t.target)}`}</span>
+                <span className="text-ink">{`${refLabel(t.source, summary?.accounts ?? [])} → ${refLabel(t.target, summary?.accounts ?? [])}`}</span>
                 <span className="font-semibold text-ink"><Money value={t.amount} unit={t.currency} /></span>
                 <Badge tone={BADGE_TONE[statusTone(t.status, 'transfer')]}>{statusLabel(t.status, 'transfer')}</Badge>
                 {t.status === 'requested' && (

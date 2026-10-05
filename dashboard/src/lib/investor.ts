@@ -73,6 +73,19 @@ export function moneyOrDash(n: number | null | undefined, unit?: string): string
   return n == null ? '—' : money(n, unit)
 }
 
+/** How an account is named to people: its MT5 login when the request that
+ *  opened it says so, else the admin's nickname, else its id. */
+export function accountName(a: { account_id: number; nickname: string | null; mt5_login?: number | null }): string {
+  if (a.mt5_login != null) return `MT5 ${a.mt5_login}`
+  return a.nickname ?? `Account ${a.account_id}`
+}
+
+/** The account a page shows: the one `?account=` names when it is in the
+ *  list, else the first; null with no accounts. */
+export function pickAccount<T extends { account_id: number }>(accounts: T[], wanted: string | null): T | null {
+  return accounts.find((a) => String(a.account_id) === wanted) ?? accounts[0] ?? null
+}
+
 /**
  * "T…9f": the first character and the last two, for a one-line summary
  * such as the Withdraw review title. The full address is always shown next

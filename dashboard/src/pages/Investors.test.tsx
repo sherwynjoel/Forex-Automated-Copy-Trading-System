@@ -25,8 +25,8 @@ function jsonResponse(payload: unknown, status = 200) {
 
 const investor = investorRowFixture({
   user_id: 5, email: 'inv@example.com', display_name: 'Ada Investor',
-  joined_at: '2026-09-01T00:00:00Z', account_id: 1001, nickname: 'Inv',
-  equity: 6000, equity_source: 'live',
+  joined_at: '2026-09-01T00:00:00Z',
+  accounts: [{ account_id: 1001, nickname: 'Inv', equity: 6000, equity_source: 'live' }],
   balances: { main: 5120.5, credit: 0, pamm: 0, social: 0 }, on_hold: 100, available: 5020.5,
   pending: { deposits: 2, withdrawals: 1, transfers: 0, payout_destinations: 0 },
 })
@@ -81,18 +81,31 @@ function mockRoutes(options: {
    *  order, instead of the default logic -- lets a test control exactly
    *  when and with what each of several concurrent ledger loads answers. */
   walletEntries?: Array<Promise<Response>>
+  /** Overrides what `GET .../investors` returns; defaults to `[investor]`. */
+  investors?: unknown[]
+  /** Makes the link POST answer this instead of 201. */
+  refuseLink?: { status: number; body: unknown }
 } = {}) {
   let walletEntriesCall = 0
-  const queue = options.settings ? [...options.settings] : [{ withdrawal_min: 0, withdrawal_fee_pct: 0 }]
+  const queue = options.settings
+    ? [...options.settings]
+    : [{ withdrawal_min: 0, withdrawal_fee_pct: 0, max_live_accounts: 5 }]
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
     const method = init?.method || 'GET'
     const path = url.split('?')[0]
-    if (path.endsWith('/investors')) return jsonResponse([investor])
+    if (path.endsWith('/investors')) return jsonResponse(options.investors ?? [investor])
+    if (path.endsWith('/investors/5/accounts') && method === 'POST') {
+      if (options.refuseLink) return jsonResponse(options.refuseLink.body, options.refuseLink.status)
+      return jsonResponse({ user_id: 5, ...JSON.parse(init!.body as string) }, 201)
+    }
+    if (/\/investors\/5\/accounts\/\d+$/.test(path) && method === 'DELETE') return new Response(null, { status: 204 })
     if (path.endsWith('/accounts')) {
       return jsonResponse([{ ctid_trader_account_id: 1001, trader_login: 1001, is_live: false,
-        role: 'slave', enabled: true, multiplier: 1, status: 'ok', connection_status: 'active' },
+        role: 'slave', enabled: true, multiplier: 1, status: 'ok', connection_status: 'active', platform: 'mt5' },
         { ctid_trader_account_id: 1002, trader_login: 1002, is_live: false, role: 'slave',
+          enabled: true, multiplier: 1, status: 'ok', connection_status: 'active', platform: 'mt5' },
+        { ctid_trader_account_id: 1003, trader_login: 1003, is_live: false, role: 'slave',
           enabled: true, multiplier: 1, status: 'ok', connection_status: 'active' }])
     }
     if (path.endsWith('/payment-methods') && method === 'GET') return jsonResponse(options.methods ?? [usdt])
@@ -124,7 +137,6 @@ function mockRoutes(options: {
       if (options.refuseAdjustment) return jsonResponse(options.refuseAdjustment.body, options.refuseAdjustment.status)
       return jsonResponse({ ...older, id: 901 }, 201)
     }
-    if (path.endsWith('/investors/5/account')) return jsonResponse({ user_id: 5, account_id: null })
     if (path.endsWith('/account-packages')) return jsonResponse([])
     return jsonResponse({})
   })
@@ -173,13 +185,49 @@ test('shows the heading and a loading state, then the investors with their walle
   expect(screen.queryByRole('link', { name: /transfer/ })).not.toBeInTheDocument()
 })
 
-test('links an account from the row select', async () => {
+test("Manage accounts lists the investor's accounts, links one more and unlinks one", async () => {
   const fetchMock = mockRoutes()
   render(<MemoryRouter><Investors /></MemoryRouter>)
   await screen.findByText('Ada Investor')
-  await userEvent.selectOptions(screen.getByLabelText('Account for inv@example.com'), '1002')
-  await waitFor(() => expect(bodyOf(fetchMock, '/investors/5/account', 'PUT')).toEqual({ account_id: 1002 }))
+  expect(screen.queryByLabelText('Account for inv@example.com')).not.toBeInTheDocument()
+  await chooseFromMenu('Ada Investor', 'Manage accounts')
+  const drawer = await screen.findByRole('dialog', { name: "Ada Investor's accounts" })
+  expect(within(drawer).getByText('Inv')).toBeInTheDocument()
+  const picker = within(drawer).getByLabelText('Account to link')
+  // Any platform, never one already linked: 1001 is Ada's.
+  expect(within(picker).getAllByRole('option').map((o) => (o as HTMLOptionElement).value)).toEqual(['1002', '1003'])
+  // 1003 has no `platform` field (a cTrader account) and must not be
+  // mislabelled "MT5" the way the fulfil picker labels its own options.
+  expect(within(picker).getAllByRole('option').map((o) => o.textContent)).toEqual(['1002 (MT5)', '1003 (CTRADER)'])
+  await userEvent.click(within(drawer).getByRole('button', { name: 'Link' }))
+  await waitFor(() => expect(bodyOf(fetchMock, '/investors/5/accounts', 'POST')).toEqual({ account_id: 1002 }))
   expect(await screen.findByText('Account linked')).toBeInTheDocument()
+  await userEvent.click(within(drawer).getByRole('button', { name: 'Unlink Inv' }))
+  await waitFor(() => expect(fetchMock.mock.calls.some(([u, init]) =>
+    String(u).endsWith('/investors/5/accounts/1001') && (init as RequestInit)?.method === 'DELETE')).toBe(true))
+  expect(await screen.findByText('Account unlinked')).toBeInTheDocument()
+})
+
+test("the server's refusal to link is shown inside the accounts drawer, not the page banner", async () => {
+  mockRoutes({ refuseLink: { status: 409, body: { detail: 'you have reached the limit of 5 live accounts' } } })
+  render(<MemoryRouter><Investors /></MemoryRouter>)
+  await screen.findByText('Ada Investor')
+  await chooseFromMenu('Ada Investor', 'Manage accounts')
+  const drawer = await screen.findByRole('dialog', { name: "Ada Investor's accounts" })
+  await userEvent.click(within(drawer).getByRole('button', { name: 'Link' }))
+  expect(await within(drawer).findByRole('alert')).toHaveTextContent('you have reached the limit of 5 live accounts')
+  expect(screen.queryByText('Account linked')).not.toBeInTheDocument()
+  expect(screen.getByRole('dialog', { name: "Ada Investor's accounts" })).toBeInTheDocument()
+})
+
+test('the accounts column names the first account and counts the rest; equity is their total', async () => {
+  mockRoutes({ investors: [{ ...investor, accounts: [
+    { account_id: 1001, nickname: 'Inv', equity: 6000, equity_source: 'live' },
+    { account_id: 1002, nickname: null, equity: 50, equity_source: 'last known' }] }] })
+  render(<MemoryRouter><Investors /></MemoryRouter>)
+  expect(await screen.findByText('Inv · 2 accounts')).toBeInTheDocument()
+  expect(screen.getByRole('columnheader', { name: 'Accounts' })).toBeInTheDocument()
+  expect(screen.getByText('6,050.00')).toBeInTheDocument()
 })
 
 test('View ledger opens the drawer, loads more and filters by wallet', async () => {
@@ -462,34 +510,37 @@ test('a method with a pending deposit refuses the delete, and the refusal is sho
   expect(screen.getByText('USDT on TRC20')).toBeInTheDocument()
 })
 
-test('saves the withdrawal settings', async () => {
+test('saves the portal settings', async () => {
   const fetchMock = mockRoutes()
   render(<MemoryRouter><Investors /></MemoryRouter>)
   await screen.findByText('Ada Investor')
   await userEvent.click(screen.getByRole('tab', { name: 'Payment methods' }))
-  const save = screen.getByRole('button', { name: 'Save withdrawal settings' })
+  const save = screen.getByRole('button', { name: 'Save portal settings' })
   expect(save).toBeDisabled()
   await userEvent.clear(screen.getByLabelText('Minimum withdrawal'))
   await userEvent.type(screen.getByLabelText('Minimum withdrawal'), '25')
   await userEvent.clear(screen.getByLabelText('Withdrawal fee %'))
   await userEvent.type(screen.getByLabelText('Withdrawal fee %'), '1.5')
+  await userEvent.clear(screen.getByLabelText('Max live accounts per investor'))
+  await userEvent.type(screen.getByLabelText('Max live accounts per investor'), '3')
   expect(save).toBeEnabled()
   await userEvent.click(save)
   await waitFor(() => expect(bodyOf(fetchMock, '/portal-settings', 'PUT'))
-    .toEqual({ withdrawal_min: '25', withdrawal_fee_pct: '1.5' }))
-  expect(await screen.findByText('Withdrawal settings saved')).toBeInTheDocument()
+    .toEqual({ withdrawal_min: '25', withdrawal_fee_pct: '1.5', max_live_accounts: 3 }))
+  expect(await screen.findByText('Portal settings saved')).toBeInTheDocument()
 })
 
 test('the withdrawal settings follow the server while the form is untouched', async () => {
   vi.useFakeTimers({ shouldAdvanceTime: true })
   mockRoutes({ settings: [
-    { withdrawal_min: 0, withdrawal_fee_pct: 0 },
-    { withdrawal_min: 50, withdrawal_fee_pct: 1 },
+    { withdrawal_min: 0, withdrawal_fee_pct: 0, max_live_accounts: 5 },
+    { withdrawal_min: 50, withdrawal_fee_pct: 1, max_live_accounts: 5 },
   ] })
   render(<MemoryRouter><Investors /></MemoryRouter>)
   await screen.findByText('Ada Investor')
   fireEvent.click(screen.getByRole('tab', { name: 'Payment methods' }))
   expect(screen.getByLabelText('Minimum withdrawal')).toHaveValue('0')
+  expect(screen.getByLabelText('Max live accounts per investor')).toHaveValue('5')
   await act(async () => { await vi.advanceTimersByTimeAsync(10000) })
   await waitFor(() => expect(screen.getByLabelText('Minimum withdrawal')).toHaveValue('50'))
   expect(screen.getByLabelText('Withdrawal fee %')).toHaveValue('1')
@@ -498,8 +549,8 @@ test('the withdrawal settings follow the server while the form is untouched', as
 test('a touched settings form survives a poll tick with different server values', async () => {
   vi.useFakeTimers({ shouldAdvanceTime: true })
   mockRoutes({ settings: [
-    { withdrawal_min: 0, withdrawal_fee_pct: 0 },
-    { withdrawal_min: 50, withdrawal_fee_pct: 1 },
+    { withdrawal_min: 0, withdrawal_fee_pct: 0, max_live_accounts: 5 },
+    { withdrawal_min: 50, withdrawal_fee_pct: 1, max_live_accounts: 5 },
   ] })
   render(<MemoryRouter><Investors /></MemoryRouter>)
   await screen.findByText('Ada Investor')
@@ -539,5 +590,5 @@ test('a viewer sees the figures but no actions', async () => {
   expect(screen.getByText('Inv')).toBeInTheDocument()
   await userEvent.click(screen.getByRole('tab', { name: 'Payment methods' }))
   expect(screen.queryByRole('button', { name: 'Add method' })).not.toBeInTheDocument()
-  expect(screen.queryByRole('button', { name: 'Save withdrawal settings' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Save portal settings' })).not.toBeInTheDocument()
 })

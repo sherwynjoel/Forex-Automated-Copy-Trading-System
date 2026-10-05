@@ -4,7 +4,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import InvestorOpenAccount from './InvestorOpenAccount'
 import { mockUseOrg } from '../../test/orgMock'
-import { accountRequestFixture, packageFixture } from '../../test/portalFixtures'
+import { accountRequestFixture, packageFixture, summaryFixture } from '../../test/portalFixtures'
 import type { AccountRequest, KycStatus } from '../../lib/types'
 
 const { useOrgMock } = vi.hoisted(() => ({ useOrgMock: vi.fn() }))
@@ -16,12 +16,15 @@ function jsonResponse(payload: unknown, status = 200) {
   return new Response(JSON.stringify(payload), { status, headers: { 'Content-Type': 'application/json' } })
 }
 
-function mockRoutes(opts: { kyc?: KycStatus; requests?: AccountRequest[] } = {}) {
+function mockRoutes(opts: { kyc?: KycStatus; requests?: AccountRequest[]; limit?: { max: number; used: number } } = {}) {
   let requests = [...(opts.requests ?? [])]
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
     const method = init?.method ?? 'GET'
-    if (url.endsWith('/investor/profile')) return jsonResponse({ status: opts.kyc ?? 'approved' })
+    if (url.endsWith('/investor/summary')) {
+      return jsonResponse(summaryFixture({ kyc_status: opts.kyc ?? 'approved',
+                                           account_limit: opts.limit ?? { max: 5, used: 0 } }))
+    }
     if (url.endsWith('/investor/account-packages')) {
       return jsonResponse([packageFixture(), packageFixture({ id: 2, name: 'Pro', min_deposit: 1000, leverage_options: [100] })])
     }
@@ -118,13 +121,14 @@ test('an open request can be cancelled, and the packages come back', async () =>
   expect(posts(fetchMock).map(([u]) => String(u))).toEqual(['/api/orgs/1/investor/account-requests/7/cancel'])
 })
 
-test('a fulfilled request shows the login and server', async () => {
+test('a fulfilled request shows the login and server, and another account can be requested under the cap', async () => {
   mockRoutes({ requests: [accountRequestFixture({ status: 'fulfilled', mt5_login: 5001, mt5_server: 'Broker-Live' })] })
   renderPage()
   expect(await screen.findByText('5001')).toBeInTheDocument()
   expect(screen.getByText('Broker-Live')).toBeInTheDocument()
   expect(screen.getByText('Ready')).toBeInTheDocument()
   expect(screen.queryByRole('button', { name: 'Cancel request' })).not.toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Choose Standard' })).toBeInTheDocument()
 })
 
 test('a rejected request shows the note and offers the packages again', async () => {
@@ -132,4 +136,15 @@ test('a rejected request shows the note and offers the packages again', async ()
   renderPage()
   expect(await screen.findByText('Your last request was rejected: Broker paused new accounts')).toBeInTheDocument()
   expect(screen.getByRole('button', { name: 'Choose Pro' })).toBeInTheDocument()
+})
+
+test('at the cap the page explains the limit instead of the packages', async () => {
+  mockRoutes({ limit: { max: 2, used: 2 },
+               requests: [accountRequestFixture({ status: 'fulfilled', mt5_login: 5001, mt5_server: 'Broker-Live' })] })
+  renderPage()
+  expect(await screen.findByRole('heading', { name: 'You have reached your account limit' })).toBeInTheDocument()
+  expect(screen.getByText('This workspace allows 2 live accounts per investor. Ask your admin if you need another.'))
+    .toBeInTheDocument()
+  expect(screen.getByText('5001')).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Choose Standard' })).not.toBeInTheDocument()
 })

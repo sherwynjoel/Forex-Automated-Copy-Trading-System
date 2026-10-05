@@ -110,10 +110,10 @@ def test_summary_before_an_account_is_linked(org_client, make_user, login_as, db
                                "payout_destinations": 0}
     assert body["deposits_open"] is False
     assert body["withdrawal_rules"] == {"min": 0.0, "fee_pct": 0.0}
-    assert body["link_state"] == "unlinked" and body["account"] is None
+    assert body["accounts"] == [] and body["account_limit"] == {"max": 5, "used": 0}
     assert body["equity_source"] == "unknown" and body["equity"] is None
     assert body["net_funded"] == 0.0 and body["profit"] is None
-    assert body["account_available"] is None and body["open_positions"] == 0
+    assert body["open_positions"] == 0
 
 
 def test_summary_figures_from_the_ledger_and_live_equity(org_client, make_user, login_as, db):
@@ -161,10 +161,11 @@ def test_summary_figures_from_the_ledger_and_live_equity(org_client, make_user, 
     assert body["cash_flow"] == [{"date": today, "deposits": 5120.5, "withdrawals": 100.0}]
     assert body["pending"] == {"deposits": 0, "withdrawals": 1, "transfers": 2,
                                "payout_destinations": 1}
-    assert body["link_state"] == "linked" and body["account"]["account_id"] == 1001
+    (account,) = body["accounts"]
+    assert account["account_id"] == 1001
     assert body["equity"] == 2120.5 and body["equity_source"] == "live"
     assert body["net_funded"] == 2000.0 and body["profit"] == 120.5
-    assert body["account_available"] == 2100.0, "equity minus the open account->wallet transfer"
+    assert account["account_available"] == 2100.0, "equity minus the open account->wallet transfer"
     assert body["open_positions"] == 1
 
 
@@ -185,9 +186,10 @@ def test_summary_falls_back_to_last_known_equity_when_the_copier_is_down(
     _state(client, down=True)
     login_as(client, investor)
     body = client.get(f"/api/orgs/{org_id}/investor/summary").json()
+    (account,) = body["accounts"]
     assert body["equity"] == 4990.25 and body["equity_source"] == "last known"
-    assert body["account"]["platform"] == "mt5" and body["account"]["connected"] is False
-    assert body["account_available"] == 4990.25 and body["profit"] == 4990.25
+    assert account["platform"] == "mt5" and account["connected"] is False
+    assert account["account_available"] == 4990.25 and body["profit"] == 4990.25
 
 
 def test_deposits_open_and_withdrawal_rules_reflect_admin_settings(
@@ -287,44 +289,15 @@ def test_the_investor_list_has_figures_and_asks_the_copier_once(org_client, make
     assert [r["email"] for r in rows] == ["inv1@example.com", "inv2@example.com"]
     ann, bob = rows
     assert ann["display_name"] == "Ann" and ann["joined_at"] is not None
-    assert ann["account_id"] == 1001 and ann["nickname"] is None
-    assert ann["equity"] == 100.0 and ann["equity_source"] == "live"
+    assert ann["accounts"] == [{"account_id": 1001, "nickname": None, "equity": 100.0,
+                                "equity_source": "live"}]
     assert ann["balances"] == {"main": 500.0, "credit": 25.0, "pamm": 0.0, "social": 0.0}
     assert ann["on_hold"] == 100.0 and ann["available"] == 400.0
     assert ann["pending"] == {"deposits": 0, "withdrawals": 0, "transfers": 1,
                               "payout_destinations": 0}
-    assert bob["account_id"] is None and bob["equity"] is None
-    assert bob["equity_source"] == "unknown"
+    assert bob["accounts"] == []
     assert bob["balances"] == {"main": 0.0, "credit": 0.0, "pamm": 0.0, "social": 0.0}
     assert bob["pending"]["payout_destinations"] == 1
-
-
-def test_admin_links_and_unlinks_an_account(org_client, make_user, db):
-    client, org_id, seed = org_client
-    seed(100, role="master")
-    seed(1001, role="slave")
-    investor = make_user(email="inv@example.com")
-    _member(db, org_id, investor, "investor")
-    _state(client, {1001: {"balance": 100.0, "equity": 100.0, "open_pnl": 0.0, "positions": []}})
-    r = client.put(f"/api/orgs/{org_id}/investors/{investor['id']}/account",
-                   json={"account_id": 1001}, headers=csrf(client))
-    assert r.status_code == 200 and r.json() == {"user_id": investor["id"], "account_id": 1001}
-    assert client.get(f"/api/orgs/{org_id}/investors").json()[0]["account_id"] == 1001
-    r = client.put(f"/api/orgs/{org_id}/investors/{investor['id']}/account",
-                   json={"account_id": 100}, headers=csrf(client))
-    assert r.status_code == 400 and "master" in r.json()["detail"]
-    assert client.get(f"/api/orgs/{org_id}/investors").json()[0]["account_id"] == 1001
-    r = client.put(f"/api/orgs/{org_id}/investors/{investor['id']}/account",
-                   json={"account_id": None}, headers=csrf(client))
-    assert r.status_code == 200 and r.json()["account_id"] is None
-    assert client.get(f"/api/orgs/{org_id}/investors").json()[0]["account_id"] is None
-    viewer = make_user(email="v@example.com")
-    _member(db, org_id, viewer, "viewer")
-    r = client.put(f"/api/orgs/{org_id}/investors/{viewer['id']}/account",
-                   json={"account_id": 1001}, headers=csrf(client))
-    assert r.status_code == 404 and r.json()["detail"] == "Investor not found"
-    actions = [p["action"] for _, p in _events(db, org_id)]
-    assert actions == ["investor_account_linked", "investor_account_linked"]
 
 
 def test_admin_reads_an_investors_ledger(org_client, make_user, login_as, db):

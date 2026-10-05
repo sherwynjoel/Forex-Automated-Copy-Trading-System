@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { orgApi } from '../../lib/api'
 import { useOrg } from '../../lib/org'
 import { errorText, formatWhen, money } from '../../lib/format'
-import { ACCOUNT_CURRENCY, entryLabel, walletLabel } from '../../lib/investor'
+import { ACCOUNT_CURRENCY, accountName, entryLabel, walletLabel } from '../../lib/investor'
 import { kycBadge, kycLabel } from '../../lib/identity'
 import { useHiddenBalances } from '../../lib/hideBalances'
 import Badge from '../../components/Badge'
@@ -252,35 +252,39 @@ export default function InvestorDashboard() {
             </div>
           </Card>
 
-          <VerificationCard status={summary.kyc_status} linked={summary.link_state === 'linked'} base={base} />
+          <VerificationCard status={summary.kyc_status} linked={summary.accounts.length > 0} base={base} />
 
           <WalletTiles summary={summary} unit={unit} />
 
-          {summary.link_state === 'linked' && summary.account ? (
-            <Card title="Trading account"
-                  actions={<Button variant="ghost" size="sm" to={`${base}/account`}>View account</Button>}>
-              <dl className="inset p-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4 text-sm">
-                <div><dt className="desk-label">Account</dt>
-                  <dd className="text-ink">{summary.account.nickname ?? summary.account.account_id}</dd></div>
-                <div><dt className="desk-label">Platform</dt>
-                  <dd className="text-ink uppercase">{summary.account.platform}</dd></div>
-                <div><dt className="desk-label">Connection</dt>
-                  <dd className={summary.account.connected ? 'text-profit' : 'text-warn-deep'}>
-                    {summary.account.connected ? 'connected' : 'terminal offline'}
-                  </dd></div>
-                <div><dt className="desk-label">Open positions</dt>
-                  <dd className="num text-ink">{summary.open_positions}</dd></div>
-                <div><dt className="desk-label">Equity</dt>
-                  <dd className="text-ink"><Money value={summary.equity} unit={unit} />
-                    <span className="text-xs text-ink-soft"> {summary.equity_source}</span></dd></div>
-                <div><dt className="desk-label">Net funded</dt>
-                  <dd className="text-ink"><Money value={summary.net_funded} unit={unit} /></dd></div>
-                <div><dt className="desk-label">Profit</dt>
-                  <dd className={summary.profit != null && summary.profit < 0 ? 'text-loss' : 'text-profit'}>
-                    <Money value={summary.profit} unit={unit} /></dd></div>
-                <div><dt className="desk-label">Available to move</dt>
-                  <dd className="text-ink"><Money value={summary.account_available} unit={unit} /></dd></div>
-              </dl>
+          {summary.accounts.length > 0 ? (
+            <Card title="Live accounts"
+                  actions={summary.account_limit.used < summary.account_limit.max
+                    ? <Button variant="ghost" size="sm" to={`${base}/open-account`}>Open live account</Button>
+                    : undefined}>
+              <ul className="inset divide-y divide-line text-sm">
+                {summary.accounts.map((a) => (
+                  <li key={a.account_id} className="px-4 py-2.5 flex flex-wrap items-center gap-x-4 gap-y-1">
+                    <span className="flex-1 min-w-0">
+                      <Button variant="ghost" size="sm" to={`${base}/account?account=${a.account_id}`}>
+                        {accountName(a)}
+                      </Button>
+                    </span>
+                    <span className={a.connected ? 'text-profit' : 'text-warn-deep'}>
+                      {a.connected ? 'connected' : 'terminal offline'}
+                    </span>
+                    <Money value={a.equity} unit={unit} />
+                    <Money value={a.profit} unit={unit} signed
+                           className={a.profit != null && a.profit < 0 ? 'text-loss' : 'text-profit'} />
+                  </li>
+                ))}
+                <li className="px-4 py-2.5 flex flex-wrap items-center justify-between gap-3">
+                  <span className="desk-label">Total equity</span>
+                  <span className="text-ink font-semibold">
+                    <Money value={summary.equity} unit={unit} />
+                    <span className="text-xs text-ink-soft"> {summary.equity_source}</span>
+                  </span>
+                </li>
+              </ul>
             </Card>
           ) : (
             <NextStep title="Your account is being set up">

@@ -5,15 +5,15 @@ import { useOrg } from '../lib/org'
 import { can } from '../lib/roles'
 import { useLiveRefresh } from '../hooks/useLiveRefresh'
 import { errorText, money, signed } from '../lib/format'
-import { moneyOrDash, walletLabel } from '../lib/investor'
+import { accountName, moneyOrDash, walletLabel } from '../lib/investor'
 import Badge from '../components/Badge'
 import Banner from '../components/Banner'
 import Card from '../components/Card'
 import Loading from '../components/Loading'
 import Menu from '../components/Menu'
 import PageHeader from '../components/PageHeader'
-import Select from '../components/Select'
 import Tabs from '../components/Tabs'
+import AccountsDrawer from './investors/AccountsDrawer'
 import AdjustDialog from './investors/AdjustDialog'
 import LedgerDrawer from './investors/LedgerDrawer'
 import PackagesTab from './investors/PackagesTab'
@@ -50,6 +50,19 @@ function OpenRequests({ orgId, pending }: { orgId: number; pending: InvestorRow[
   )
 }
 
+/** "not linked", "Growth", or "Growth · 2 accounts". */
+function accountsText(r: InvestorRow): string {
+  const [first] = r.accounts
+  if (!first) return 'not linked'
+  return r.accounts.length === 1 ? accountName(first) : `${accountName(first)} · ${r.accounts.length} accounts`
+}
+
+/** The accounts' equity together; null while any is unknown, or there is none. */
+function totalEquity(r: InvestorRow): number | null {
+  if (r.accounts.length === 0 || r.accounts.some((a) => a.equity == null)) return null
+  return r.accounts.reduce((sum, a) => sum + (a.equity ?? 0), 0)
+}
+
 export default function Investors() {
   const { orgId, role } = useOrg()
   const [rows, setRows] = useState<InvestorRow[]>([])
@@ -59,6 +72,7 @@ export default function Investors() {
   const [tab, setTab] = useState<Tab>('investors')
   const [ledgerFor, setLedgerFor] = useState<InvestorRow | null>(null)
   const [adjustFor, setAdjustFor] = useState<InvestorRow | null>(null)
+  const [accountsFor, setAccountsFor] = useState<number | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -103,13 +117,11 @@ export default function Investors() {
     }
   }
 
-  const linkAccount = (userId: number, accountId: number | null) => run(async () => {
-    await orgApi(orgId, `investors/${userId}/account`, {
-      method: 'PUT', body: JSON.stringify({ account_id: accountId }) })
-  }, accountId == null ? 'Account unlinked' : 'Account linked')
-
-  const linkedIds = new Set(rows.map((r) => r.account_id).filter((id) => id != null))
-  const unlinked = accounts.filter((a) => !linkedIds.has(a.ctid_trader_account_id) && a.role !== 'master')
+  // What may be linked: any platform, never the master, nobody's yet (the
+  // api refuses the rest anyway).
+  const linkedIds = new Set(rows.flatMap((r) => r.accounts.map((a) => a.account_id)))
+  const linkable = accounts.filter((a) =>
+    a.role !== 'master' && !linkedIds.has(a.ctid_trader_account_id))
 
   return (
     <div className="space-y-6 max-w-5xl">
@@ -149,7 +161,7 @@ export default function Investors() {
                       <th className="desk-label px-5 py-2 font-semibold">Verification</th>
                       <th className="desk-label px-5 py-2 font-semibold text-right">My wallet</th>
                       <th className="desk-label px-5 py-2 font-semibold text-right">Equity</th>
-                      <th className="desk-label px-5 py-2 font-semibold">Linked account</th>
+                      <th className="desk-label px-5 py-2 font-semibold">Accounts</th>
                       <th className="desk-label px-5 py-2 font-semibold">Open requests</th>
                       <th></th>
                     </tr>
@@ -177,31 +189,15 @@ export default function Investors() {
                             </div>
                           </div>
                         </td>
-                        <td data-label="Equity" className="num px-5 py-2.5 text-right">{moneyOrDash(r.equity)}</td>
-                        <td data-label="Linked account" className="px-5 py-2.5">
-                          {control ? (
-                            <Select aria-label={`Account for ${r.email}`}
-                                    value={r.account_id ?? ''}
-                                    disabled={busy}
-                                    onChange={(e) => linkAccount(r.user_id, e.target.value ? Number(e.target.value) : null)}>
-                              <option value="">not linked</option>
-                              {r.account_id != null && (
-                                <option value={r.account_id}>{r.nickname ?? r.account_id}</option>
-                              )}
-                              {unlinked.map((a) => (
-                                <option key={a.ctid_trader_account_id} value={a.ctid_trader_account_id}>
-                                  {a.nickname ?? a.trader_login} ({a.platform ?? 'ctrader'})
-                                </option>
-                              ))}
-                            </Select>
-                          ) : (r.nickname ?? r.account_id ?? 'not linked')}
-                        </td>
+                        <td data-label="Equity" className="num px-5 py-2.5 text-right">{moneyOrDash(totalEquity(r))}</td>
+                        <td data-label="Accounts" className="px-5 py-2.5">{accountsText(r)}</td>
                         <td data-label="Open requests" className="px-5 py-2.5">
                           <OpenRequests orgId={orgId} pending={r.pending} />
                         </td>
                         <td className="px-5 py-2.5 text-right">
                           {control && (
                             <Menu label={`Actions for ${r.email}`} items={[
+                              { key: 'accounts', label: 'Manage accounts', onSelect: () => setAccountsFor(r.user_id) },
                               { key: 'ledger', label: 'View ledger', onSelect: () => setLedgerFor(r) },
                               { key: 'adjust', label: 'Adjust balance', disabled: busy, onSelect: () => setAdjustFor(r) },
                             ]} />
@@ -221,6 +217,11 @@ export default function Investors() {
           )}
         </div>
       )}
+
+      <AccountsDrawer key={accountsFor ?? 'none-accounts'}
+                      investor={rows.find((r) => r.user_id === accountsFor) ?? null}
+                      linkable={linkable} orgId={orgId} run={run}
+                      onClose={() => setAccountsFor(null)} />
 
       {/* Keyed on the investor so each opening starts with a clean filter. */}
       <LedgerDrawer key={ledgerFor?.user_id ?? 'none'} orgId={orgId} investor={ledgerFor}

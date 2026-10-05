@@ -78,6 +78,8 @@ MATRIX = [
     ("GET",    "investor/transfers",             None,                          "investor_only"),
     ("GET",    "investor/wallet-entries",        None,                          "investor_only"),
     ("GET",    "investor/positions",             None,                          "investor_only"),
+    ("GET",    "investor/analytics",             None,                          "investor_only"),
+    ("GET",    "investor/history/deals?from=0&to=1", None,                      "investor_only"),
     ("POST",   "investor/deposits",              {"method_id": 1, "amount": "10",
                                                   "reference": "matrix-filed",
                                                   "target": "wallet"},          "investor_only"),
@@ -93,7 +95,8 @@ MATRIX = [
     # ---- investor portal, admin side
     ("GET",    "investors",                      None,                          "admin"),
     ("GET",    "investors/{investor}/wallet-entries", None,                     "admin"),
-    ("PUT",    "investors/{investor}/account",   {"account_id": None},           "admin"),
+    ("POST",   "investors/{investor}/accounts",  {"account_id": 100},            "admin"),
+    ("DELETE", "investors/{investor}/accounts/100", None,                        "admin"),
     ("POST",   "investors/{investor}/adjustments", {"wallet": "main", "amount": "1",
                                                     "note": "matrix", "mpin": MPIN}, "admin"),
     ("GET",    "payment-methods",                None,                          "admin"),
@@ -243,6 +246,9 @@ def test_destructive_rows_allowed(matrix_org, login_as):
     targets it (transfers.target_account_id is ON DELETE SET NULL)."""
     client, org_id, users, _ = matrix_org
     login_as(client, users["admin"])
+    r = _call(client, "DELETE", org_id,
+              f"investors/{users['investor']['id']}/accounts/100", None)
+    assert r.status_code == 404 and r.json()["detail"] == "Account not found"   # not theirs
     r = _call(client, "DELETE", org_id, "payment-methods/1", None)
     assert r.status_code == 409
     r = _call(client, "DELETE", org_id, "accounts/100/connection", None)
