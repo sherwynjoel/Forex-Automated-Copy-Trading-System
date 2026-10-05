@@ -158,8 +158,11 @@ def can_transition(table: str, current: str, new: str) -> bool:
 
 # ------------------------------------------------------------ transfers
 
+# Bonus credit moves only to a trading account: never to My wallet, never
+# withdrawn (withdrawals only ever debit main).
 TRANSFER_PAIRS: frozenset[tuple[str, str]] = frozenset({
     ("main", "account"), ("account", "main"), ("pamm", "main"), ("social", "main"),
+    ("credit", "account"),
 })
 _NOT_ALLOWED = "that transfer is not allowed"
 
@@ -179,7 +182,7 @@ def _end(ref: dict) -> str:
 
 def transfer_pair(source: dict, target: dict) -> tuple[str, str]:
     """("main", "account") and friends; raises LedgerError for every pair
-    outside TRANSFER_PAIRS (credit never moves in phase 1)."""
+    outside TRANSFER_PAIRS (credit moves only to a trading account)."""
     pair = (_end(source), _end(target))
     if pair not in TRANSFER_PAIRS:
         raise LedgerError(_NOT_ALLOWED)

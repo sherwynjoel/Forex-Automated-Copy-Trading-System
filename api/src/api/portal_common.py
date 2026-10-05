@@ -25,7 +25,8 @@ from pydantic import BaseModel
 
 from .config import ApiConfig
 from .portal_ledger import *  # noqa: F401,F403  -- re-exported for the routers
-from .portal_ledger import WALLETS, available, balance, clean_text, deposit_bonus, holds, money
+from .portal_ledger import (WALLETS, available, balance, clean_text, deposit_bonus,
+                            floor_cents, holds, money)
 from .routes.mt5 import MT5_OFFLINE_AFTER_S
 from .routes.settings_control import _proxy_to_copier
 from .ws import broadcaster
@@ -333,6 +334,29 @@ def net_funded(conn: psycopg.Connection, org_id: int, user_id: int, account_id: 
         "FROM transfers WHERE org_id = %s AND user_id = %s AND status = 'done'",
         (account_id, account_id, org_id, user_id)).fetchone()
     return Decimal(total)
+
+
+def credit_funded(conn: psycopg.Connection, org_id: int, user_id: int,
+                  account_id: int) -> Decimal:
+    """Bonus credit this investor moved into this account: done transfers
+    from the Credit wallet. The desk funds them as broker credit; that
+    principal never moves back out to a wallet (profit made on it may)."""
+    (total,) = conn.execute(
+        "SELECT COALESCE(SUM(amount), 0) FROM transfers WHERE org_id = %s AND user_id = %s "
+        "AND status = 'done' AND source_kind = 'wallet' AND source_wallet = 'credit' "
+        "AND target_kind = 'account' AND target_account_id = %s",
+        (org_id, user_id, account_id)).fetchone()
+    return Decimal(total)
+
+
+def account_movable(conn: psycopg.Connection, org_id: int, user_id: int, account_id: int,
+                    equity: Decimal) -> Decimal:
+    """What may still move from the account to a wallet: equity less open
+    account->wallet transfers less the bonus credit funded into it, floored
+    to the cent and never below zero."""
+    movable = floor_cents(equity - open_account_transfers_out(conn, org_id, user_id, account_id)
+                          - credit_funded(conn, org_id, user_id, account_id))
+    return max(movable, Decimal("0.00"))
 
 
 # ------------------------------------------------------------ locking

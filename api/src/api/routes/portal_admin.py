@@ -666,12 +666,12 @@ def create_portal_admin_router() -> APIRouter:
             raise HTTPException(status_code=400, detail=str(exc))
         current = conn.execute(
             "SELECT status, user_id, source_kind, source_wallet, source_account_id, "
-            "target_kind, target_wallet, target_account_id, amount FROM transfers "
-            "WHERE id = %s AND org_id = %s", (tr_id, ctx.org_id)).fetchone()
+            "target_kind, target_wallet, target_account_id, amount, equity_at_request "
+            "FROM transfers WHERE id = %s AND org_id = %s", (tr_id, ctx.org_id)).fetchone()
         if not current:
             raise HTTPException(status_code=404, detail="Transfer not found")
         (status_now, user_id, source_kind, source_wallet, source_account, target_kind,
-         target_wallet, target_account, amount) = current
+         target_wallet, target_account, amount, equity_at_request) = current
         if not pc.can_transition("transfers", status_now, new_status):
             raise HTTPException(status_code=409, detail=f"transfer is already {status_now}")
         amount = Decimal(amount)
@@ -683,6 +683,20 @@ def create_portal_admin_router() -> APIRouter:
         # (user_id), never the admin deciding it.
         with conn.transaction():
             pc.lock_investor_ledger(conn, ctx.org_id, user_id)
+            # Bonus credit may have been funded into the account after this
+            # request was checked (the desk funds the broker credit, then
+            # marks the credit transfer done). Re-check against the equity
+            # seen at request time, never the live equity: by `done` the
+            # desk has already taken the money out at the broker.
+            if (new_status in ("approved", "done") and source_kind == "account"
+                    and source_account is not None and equity_at_request is not None):
+                cap = max(pc.floor_cents(Decimal(equity_at_request) - pc.credit_funded(
+                    conn, ctx.org_id, user_id, source_account)), Decimal("0.00"))
+                if amount > cap:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"bonus credit cannot leave the account (at most {cap:.2f} "
+                               "may move out); reject this transfer instead")
             if new_status == "done":
                 # Done straight from requested also records the decision;
                 # done after approved keeps the earlier decision.

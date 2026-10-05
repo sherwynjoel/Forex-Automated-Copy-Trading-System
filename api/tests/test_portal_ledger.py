@@ -156,8 +156,10 @@ class TestTransferPairs:
          ("pamm", "main")),
         ({"kind": "wallet", "wallet": "social"}, {"kind": "wallet", "wallet": "main"},
          ("social", "main")),
+        ({"kind": "wallet", "wallet": "credit"}, {"kind": "account", "account_id": 1001},
+         ("credit", "account")),
     ])
-    def test_the_four_allowed_pairs(self, source, target, pair):
+    def test_the_allowed_pairs(self, source, target, pair):
         assert transfer_pair(source, target) == pair
         assert pair in TRANSFER_PAIRS
 
@@ -170,6 +172,8 @@ class TestTransferPairs:
         ({"kind": "wallet"}, {"kind": "wallet", "wallet": "main"}),
         ({"kind": "account"}, {"kind": "wallet", "wallet": "main"}),
         ({"kind": "cash", "wallet": "main"}, {"kind": "wallet", "wallet": "main"}),
+        ({"kind": "wallet", "wallet": "credit"}, {"kind": "wallet", "wallet": "pamm"}),
+        ({"kind": "account", "account_id": 1001}, {"kind": "wallet", "wallet": "credit"}),
     ])
     def test_everything_else_is_refused_with_one_message(self, source, target):
         with pytest.raises(LedgerError, match="that transfer is not allowed"):

@@ -574,9 +574,9 @@ def create_portal_investor_router() -> APIRouter:
             pc.lock_investor_ledger(conn, ctx.org_id, ctx.user_id)
             if source_kind == "account":
                 if equity is not None:
-                    account_available = pc.floor_cents(
-                        equity - pc.open_account_transfers_out(
-                            conn, ctx.org_id, ctx.user_id, account_id))
+                    # Bonus credit funded into the account never leaves it.
+                    account_available = pc.account_movable(
+                        conn, ctx.org_id, ctx.user_id, account_id, equity)
                     if amount > account_available:
                         raise HTTPException(
                             status_code=400,
@@ -702,8 +702,8 @@ def create_portal_investor_router() -> APIRouter:
             funded = pc.net_funded(conn, ctx.org_id, ctx.user_id, account_id)
             available: Optional[Decimal] = None
             if account_equity is not None:
-                available = pc.floor_cents(account_equity - pc.open_account_transfers_out(
-                    conn, ctx.org_id, ctx.user_id, account_id))
+                available = pc.account_movable(conn, ctx.org_id, ctx.user_id, account_id,
+                                               account_equity)
             count = len([p for p in positions if isinstance(p, dict)])
             login, server = logins.get(account_id, (None, None))
             accounts.append({
