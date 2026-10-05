@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi, afterEach, beforeEach } from 'vitest'
@@ -124,4 +124,46 @@ test('the history follows the picked account', async () => {
   expect(historyCalls().at(-1)).toMatch(/&account_id=1002$/)
   await userEvent.selectOptions(screen.getByLabelText('Trading account'), '1001')
   await waitFor(() => expect(historyCalls().at(-1)).toMatch(/&account_id=1001$/))
+})
+
+test("a stale deals response for the account you switched away from doesn't overwrite the picked one", async () => {
+  // Deferred per account: each account's `investor/history/deals` call is
+  // resolved by hand, in whichever order the test chooses, instead of
+  // whichever order orgApi happens to call fetch in.
+  const resolvers: Record<string, (r: Response) => void> = {}
+  function dealsFor(accountId: number, symbol: string) {
+    return new Promise<Response>((resolve) => { resolvers[String(accountId)] = resolve })
+      .then(() => jsonResponse({ deals: [{ ...deal, deal_id: accountId, symbol }], has_more: false }))
+  }
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input)
+    if (url.endsWith('/investor/summary')) {
+      return jsonResponse(summaryFixture({ accounts: [
+        accountSummaryFixture({ account_id: 1001, mt5_login: 5001 }),
+        accountSummaryFixture({ account_id: 1002, mt5_login: 6002 })] }))
+    }
+    if (url.includes('account_id=1001')) return dealsFor(1001, 'XAUUSD')
+    if (url.includes('account_id=1002')) return dealsFor(1002, 'EURUSD')
+    return jsonResponse({})
+  }))
+  render(<MemoryRouter initialEntries={['/org/1/invest/history?account=1001']}><InvestorHistory /></MemoryRouter>)
+  // Wait for account 1001's deals call to have gone out, then switch to
+  // 1002 before it resolves -- 1001's response is now stale.
+  await waitFor(() => expect(historyCalls().some((u) => u.includes('account_id=1001'))).toBe(true))
+  await userEvent.selectOptions(await screen.findByLabelText('Trading account'), '1002')
+  await waitFor(() => expect(historyCalls().some((u) => u.includes('account_id=1002'))).toBe(true))
+  // The picked account's (1002's) response lands first...
+  resolvers['1002'](new Response())
+  expect(await screen.findByText('EURUSD')).toBeInTheDocument()
+  // ...then the stale 1001 response lands after. It must not overwrite 1002's
+  // row. act()'s flush (a macrotask boundary) gives any `setDeals` triggered
+  // by that stale response every chance to land before the assertion below,
+  // so a still-missing guard is caught here rather than hidden by a
+  // too-early check.
+  await act(async () => {
+    resolvers['1001'](new Response())
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  })
+  expect(screen.getByText('EURUSD')).toBeInTheDocument()
+  expect(screen.queryByText('XAUUSD')).not.toBeInTheDocument()
 })
