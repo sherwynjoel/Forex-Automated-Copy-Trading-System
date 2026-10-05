@@ -95,3 +95,170 @@ def test_a_file_in_a_ticket_message_is_not_free_any_more(org_client, make_user, 
             "VALUES (%s, %s, %s, false, 'Hi', %s::bigint[])",
             (ticket_id, org_id, investor["id"], [image]))
         assert not file_belongs(conn, org_id, investor["id"], image, "ticket_attachment")
+
+
+# ------------------------------------------------------------ investor side
+
+
+@pytest.fixture
+def portal(org_client, make_user, login_as, db):
+    """org_client's org with subjects Deposits (enabled) and Old (disabled)
+    and an investor member logged in."""
+    client, org_id, _seed = org_client
+    deposits = _subject(client, org_id, "Deposits").json()
+    old = _subject(client, org_id, "Old", enabled=False).json()
+    investor = make_user(email="inv@example.com", display_name="Inv One")
+    member(db, org_id, investor["id"], "investor")
+    client.cookies.clear()
+    login_as(client, investor)
+    return client, org_id, investor, {"deposits": deposits["id"], "old": old["id"]}
+
+
+def _open(client, org_id, subject_id, body="My deposit is missing", file_ids=None):
+    return client.post(f"/api/orgs/{org_id}/investor/tickets",
+                       json={"subject_id": subject_id, "body": body, "file_ids": file_ids or []},
+                       headers=csrf(client))
+
+
+def _reply(client, org_id, ticket_id, body="Any news?", file_ids=None, desk=False):
+    base = "tickets" if desk else "investor/tickets"
+    payload = {"body": body} if desk else {"body": body, "file_ids": file_ids or []}
+    return client.post(f"/api/orgs/{org_id}/{base}/{ticket_id}/messages", json=payload,
+                       headers=csrf(client))
+
+
+def test_an_investor_opens_a_ticket_with_images(portal, db):
+    client, org_id, investor, subjects = portal
+    images = [seed_file(db, org_id, investor["id"], purpose="ticket_attachment") for _ in range(2)]
+    r = _open(client, org_id, subjects["deposits"], file_ids=images)
+    assert r.status_code == 201, r.text
+    t = r.json()
+    assert (t["status"], t["subject_label"], t["user_id"]) == ("new", "Deposits", investor["id"])
+    assert t["last_from_desk"] is False and t["closed_at"] is None
+    assert t["waiting_on_desk"] is True
+    (m,) = t["messages"]
+    assert (m["body"], m["file_ids"], m["from_desk"], m["author_name"]) == (
+        "My deposit is missing", images, False, "Inv One")
+    severity, payload, actor = _events(db, org_id, "ticket_opened")[-1]
+    assert (severity, actor) == ("info", "inv@example.com")
+    assert payload == {"action": "ticket_opened", "user_id": investor["id"], "ticket_id": t["id"],
+                       "subject": "Deposits", "images": 2,
+                       "summary": f"Ticket #{t['id']} opened by inv@example.com: Deposits"}
+    with psycopg.connect(db, autocommit=True) as conn:
+        notes = conn.execute("SELECT user_id, topic, title, link FROM notifications "
+                             "ORDER BY id").fetchall()
+    assert notes == [(_user_id(db, "admin@example.com"), "support",
+                      f"New ticket #{t['id']}: Deposits",
+                      f"/org/{org_id}/requests?tab=support&ticket={t['id']}")]
+
+
+def test_a_ticket_is_refused_for_a_bad_subject_body_or_images(portal, db, make_user):
+    client, org_id, investor, subjects = portal
+    other = make_user(email="other@example.com")
+    member(db, org_id, other["id"], "investor")
+    mine = seed_file(db, org_id, investor["id"], purpose="ticket_attachment")
+    theirs = seed_file(db, org_id, other["id"], purpose="ticket_attachment")
+    receipt = seed_file(db, org_id, investor["id"], purpose="deposit_receipt")
+    four = [seed_file(db, org_id, investor["id"], purpose="ticket_attachment") for _ in range(4)]
+    dep = subjects["deposits"]
+    cases = [
+        ({"subject_id": subjects["old"], "body": "x"}, 404, "Subject not found"),
+        ({"subject_id": 999, "body": "x"}, 404, "Subject not found"),
+        ({"subject_id": None, "body": "x"}, 400, "subject_id is required"),
+        ({"subject_id": dep, "body": "  "}, 400, "body is required"),
+        ({"subject_id": dep, "body": "x" * 4001}, 400, "body must be at most 4000 characters"),
+        ({"subject_id": dep, "body": "x", "file_ids": four}, 400, "at most 3 images per message"),
+        ({"subject_id": dep, "body": "x", "file_ids": [mine, mine]}, 400,
+         "each image may be attached once"),
+        ({"subject_id": dep, "body": "x", "file_ids": [theirs]}, 400, "image not found"),
+        ({"subject_id": dep, "body": "x", "file_ids": [receipt]}, 400, "image not found"),
+        ({"subject_id": dep, "body": "x", "file_ids": "1"}, 400, "file_ids must be a list of file ids"),
+    ]
+    for body, status, detail in cases:
+        r = client.post(f"/api/orgs/{org_id}/investor/tickets", json=body, headers=csrf(client))
+        assert (r.status_code, r.json()["detail"]) == (status, detail), body
+    assert _open(client, org_id, dep, file_ids=[mine]).status_code == 201
+    r = _open(client, org_id, dep, file_ids=[mine])
+    assert r.status_code == 400 and r.json()["detail"] == "image not found"   # already attached
+
+
+def test_the_list_filters_by_status_and_searches_subject_and_messages(portal, db):
+    client, org_id, _investor, subjects = portal
+    a = _open(client, org_id, subjects["deposits"], body="USDT never arrived").json()
+    b = _open(client, org_id, subjects["deposits"], body="Bank wire 50% fee?").json()
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute("UPDATE tickets SET status = 'closed', closed_at = now() WHERE id = %s",
+                     (b["id"],))
+    url = f"/api/orgs/{org_id}/investor/tickets"
+    assert [t["id"] for t in client.get(url).json()] == [b["id"], a["id"]]
+    assert [t["id"] for t in client.get(url + "?status=new").json()] == [a["id"]]
+    assert [t["id"] for t in client.get(url + "?status=closed").json()] == [b["id"]]
+    assert [t["id"] for t in client.get(url + "?q=usdt").json()] == [a["id"]]
+    assert [t["id"] for t in client.get(url + "?q=50%25").json()] == [b["id"]]   # % is literal
+    assert [t["id"] for t in client.get(url + "?q=deposits").json()] == [b["id"], a["id"]]
+    r = client.get(url + "?status=pending")
+    assert r.status_code == 400 and r.json()["detail"] == "status must be new, open or closed"
+
+
+def test_reply_close_and_reopen(portal, db):
+    client, org_id, investor, subjects = portal
+    t = _open(client, org_id, subjects["deposits"]).json()
+    r = _reply(client, org_id, t["id"], "Any news?")
+    assert r.status_code == 201 and r.json()["status"] == "new" and len(r.json()["messages"]) == 2
+    close = f"/api/orgs/{org_id}/investor/tickets/{t['id']}/close"
+    r = client.post(close, headers=csrf(client))
+    assert r.status_code == 200
+    assert (r.json()["status"], r.json()["closed_by"]) == ("closed", investor["id"])
+    r = client.post(close, headers=csrf(client))
+    assert r.status_code == 409 and r.json()["detail"] == "ticket is already closed"
+    body = _reply(client, org_id, t["id"], "Still missing").json()
+    assert (body["status"], body["closed_at"], body["closed_by"]) == ("open", None, None)
+    thread = client.get(f"/api/orgs/{org_id}/investor/tickets/{t['id']}").json()
+    assert [m["body"] for m in thread["messages"]] == [
+        "My deposit is missing", "Any news?", "Still missing"]
+    assert [e[1]["from_desk"] for e in _events(db, org_id, "ticket_replied")] == [False, False]
+    (closed,) = _events(db, org_id, "ticket_closed")
+    assert closed[1]["from_desk"] is False and "missing" not in str(closed[1])
+
+
+def test_another_investors_ticket_is_a_404(portal, db, make_user, login_as):
+    client, org_id, _investor, subjects = portal
+    t = _open(client, org_id, subjects["deposits"]).json()
+    other = make_user(email="other@example.com")
+    member(db, org_id, other["id"], "investor")
+    client.cookies.clear()
+    login_as(client, other)
+    base = f"/api/orgs/{org_id}/investor/tickets"
+    for r in (client.get(f"{base}/{t['id']}"), _reply(client, org_id, t["id"]),
+              client.post(f"{base}/{t['id']}/close", headers=csrf(client))):
+        assert r.status_code == 404 and r.json()["detail"] == "Ticket not found"
+    assert client.get(base).json() == []
+
+
+def test_ten_tickets_an_hour(portal):
+    client, org_id, _investor, subjects = portal
+    for _ in range(10):
+        assert _open(client, org_id, subjects["deposits"]).status_code == 201
+    r = _open(client, org_id, subjects["deposits"])
+    assert r.status_code == 429 and r.json()["detail"] == "too many requests; try again later"
+
+
+async def _no_notify(*_args, **_kwargs):
+    """Skips the admin emails the reply rate-limit test would otherwise send."""
+    return None
+
+
+def test_sixty_replies_an_hour(portal, monkeypatch):
+    """Each reply emails every admin, so replies are limited too: 60 per
+    investor per hour, counted apart from new tickets."""
+    from api import portal_common
+    monkeypatch.setattr(portal_common, "notify_admins", _no_notify)
+    client, org_id, _investor, subjects = portal
+    t = _open(client, org_id, subjects["deposits"]).json()
+    for _ in range(60):
+        assert _reply(client, org_id, t["id"]).status_code == 201
+    r = _reply(client, org_id, t["id"])
+    assert r.status_code == 429 and r.json()["detail"] == "too many requests; try again later"
+    thread = client.get(f"/api/orgs/{org_id}/investor/tickets/{t['id']}").json()
+    assert len(thread["messages"]) == 61
+    assert _open(client, org_id, subjects["deposits"]).status_code == 201, "tickets count apart"
