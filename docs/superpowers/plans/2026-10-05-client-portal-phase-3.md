@@ -232,7 +232,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 - Produces (all in `api/src/api/portal_common.py`):
   - `linked_accounts(conn, org_id: int, user_id: int) -> list[int]` — ordered by account id.
   - `owns_account(conn, org_id: int, user_id: int, account_id: Optional[int]) -> bool`.
-  - `pick_account(conn, org_id: int, user_id: int, account_id: Optional[int]) -> int` — raises `HTTPException` 404 `Account not found` / 409 `no account linked yet` / 400 `account_id is required`.
+  - `pick_account(conn, org_id: int, user_id: int, account_id: Optional[int], *, field: str = "account_id") -> int` — raises `HTTPException` 404 `Account not found` / 409 `no account linked yet` / 400 `f"{field} is required"` (deposits pass `field="target_account_id"`).
   - `accounts_used(conn, org_id: int, user_id: int) -> int` — owned accounts + `requested` account requests.
   - `account_limit_text(limit: int) -> str` — `"you have reached the limit of {limit} live accounts"`.
   - `link_account(conn, org_id: int, user_id: int, account_id: int, *, mt5_only: bool = False) -> None` — runs inside the caller's transaction; refusals 400 `The master account cannot be linked to an investor`, 400 `Only an MT5 account can be linked here` (only with `mt5_only=True`; fulfil passes it, the admin link does not -- today's admin link accepts cTrader accounts and keeps doing so), 409 `account_limit_text(max)`, 404 `Account not found in this workspace, or already linked`; already this investor's = no-op.
@@ -380,10 +380,12 @@ def owns_account(conn: psycopg.Connection, org_id: int, user_id: int,
 
 
 def pick_account(conn: psycopg.Connection, org_id: int, user_id: int,
-                 account_id: Optional[int]) -> int:
+                 account_id: Optional[int], *, field: str = "account_id") -> int:
     """The account a read route works on: the named one (404 unless the
     investor owns it -- no hint whether it exists), else the only one; 409
-    while there is none and 400 when there are several to choose from."""
+    while there is none and 400 when there are several to choose from.
+    `field` names the body/query field in the 400 message (deposits pass
+    "target_account_id" so their refusal names the field they sent)."""
     if account_id is not None:
         if not owns_account(conn, org_id, user_id, account_id):
             raise HTTPException(status_code=404, detail="Account not found")
@@ -392,7 +394,7 @@ def pick_account(conn: psycopg.Connection, org_id: int, user_id: int,
     if not owned:
         raise HTTPException(status_code=409, detail="no account linked yet")
     if len(owned) > 1:
-        raise HTTPException(status_code=400, detail="account_id is required")
+        raise HTTPException(status_code=400, detail=f"{field} is required")
     return owned[0]
 
 
@@ -652,12 +654,12 @@ def test_an_account_deposit_names_an_owned_account_once_there_are_several(two, d
     assert r.status_code == 201 and r.json()["target_account_id"] == 1002
 ```
 
-(The unused imports — `seed_mt5`, `add_package`, `kyc_profile`, `open_account_request` — are used by Tasks 5-7; pytest does not lint them.)
+(The unused imports — `seed_mt5`, `add_package`, `kyc_profile`, `open_account_request` — are used by Tasks 6-7; pytest does not lint them.)
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `"$PY" -m pytest tests/test_portal_multi_account.py -q -p no:cacheprovider`
-Expected: FAIL — the read routes ignore `account_id` (200 for a foreign id), the transfer to 1002 answers 404 (only one linked account is seen), the deposit without `target_account_id` answers 201.
+Expected: FAIL — the read routes ignore `account_id` (200 for a foreign id), the transfer to 1002 may answer 404 (only one linked account is seen, by row order), the deposit without `target_account_id` answers 201.
 
 - [ ] **Step 3: Deposit notices name an owned account**
 
@@ -679,19 +681,14 @@ with
 ```python
         target_account_id: Optional[int] = None
         if target == "account":
-            owned = pc.linked_accounts(conn, ctx.org_id, ctx.user_id)
-            if not owned:
+            # The 409 is checked before pick_account so owning none wins
+            # over a foreign id too (today's order; pick_account alone
+            # would 404 a foreign id first, which the read routes want but
+            # deposits do not).
+            if not pc.linked_accounts(conn, ctx.org_id, ctx.user_id):
                 raise HTTPException(status_code=409, detail="no account linked yet")
-            if body.target_account_id is None:
-                # One account may stay implicit (the phase 1 dashboard never
-                # named it); with several the investor must say which.
-                if len(owned) > 1:
-                    raise HTTPException(status_code=400, detail="target_account_id is required")
-                target_account_id = owned[0]
-            elif body.target_account_id in owned:
-                target_account_id = body.target_account_id
-            else:
-                raise HTTPException(status_code=404, detail="Account not found")
+            target_account_id = pc.pick_account(conn, ctx.org_id, ctx.user_id,
+                                                body.target_account_id, field="target_account_id")
 ```
 
 - [ ] **Step 4: Transfers name an owned account**
@@ -1159,7 +1156,6 @@ def _events(db, org_id, actions):
 
 def test_admin_links_and_unlinks_one_account_at_a_time(org_client, make_user, db):
     client, org_id, seed = org_client
-    seed(1001, role="slave")
     first, second, third = (seed_mt5(db, org_id, f"key-{i}") for i in range(3))
     investor = make_user(email="inv@example.com")
     member(db, org_id, investor["id"], "investor")
@@ -1255,7 +1251,24 @@ with
 
 Delete `test_admin_links_and_unlinks_an_account` from `test_portal_summary.py` (the multi-account test above replaces it).
 
-In `api/tests/test_investor_access.py`, replace the module docstring sentence `These five never touched those tables -- PUT .../investors/{id}/account only ever wrote org_memberships and accounts -- so they still pass unmodified against the current schema;` with `These five never touched those tables -- linking only ever wrote org_memberships and accounts (since phase 3 through POST .../investors/{id}/accounts);`, add `from conftest import seed_mt5` to the imports, and replace the two linking tests with:
+In `api/tests/test_investor_access.py`, replace the module docstring sentence
+
+```
+These five never touched those tables -- PUT .../investors/{id}/account
+only ever wrote org_memberships and accounts -- so they still pass
+unmodified against the current schema; only the private _csrf/_member
+helpers are rewired onto the shared portal_helpers.
+```
+
+with
+
+```
+These five never touched those tables -- linking only ever wrote
+org_memberships and accounts; the two linking tests were rewritten onto
+POST .../investors/{id}/accounts in phase 3.
+```
+
+, add `from conftest import seed_mt5` to the imports, and replace the two linking tests with:
 
 ```python
 def test_linking_refuses_an_account_from_another_workspace_or_a_non_investor(
@@ -1283,11 +1296,11 @@ def test_the_master_account_cannot_be_linked_to_an_investor(org_client, make_use
     a withdrawal against it. The refusal leaves the existing link alone."""
     client, org_id, seed = org_client
     seed(100, role="master")
-    mine = seed_mt5(db, org_id, "key-mine")
+    seed(1001, role="slave")
     investor = make_user(email="inv@example.com")
     member(db, org_id, investor["id"], "investor")
     assert client.post(f"/api/orgs/{org_id}/investors/{investor['id']}/accounts",
-                       json={"account_id": mine}, headers=csrf(client)).status_code == 201
+                       json={"account_id": 1001}, headers=csrf(client)).status_code == 201
 
     r = client.post(f"/api/orgs/{org_id}/investors/{investor['id']}/accounts",
                     json={"account_id": 100}, headers=csrf(client))
@@ -1296,7 +1309,7 @@ def test_the_master_account_cannot_be_linked_to_an_investor(org_client, make_use
         links = dict(conn.execute(
             "SELECT ctid_trader_account_id, investor_user_id FROM accounts WHERE org_id = %s",
             (org_id,)).fetchall())
-    assert links == {100: None, mine: investor["id"]}
+    assert links == {100: None, 1001: investor["id"]}
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -2845,7 +2858,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 
 **Interfaces:**
 - Consumes: `InvestorRow.accounts`, `PortalSettings.max_live_accounts` (Task 9); `accountName`, `moneyOrDash`; `POST investors/{id}/accounts`, `DELETE investors/{id}/accounts/{account_id}`, `PUT portal-settings` with `max_live_accounts` (Tasks 5-6).
-- Produces: the `Accounts` column (`not linked` / the first account's name / `<name> · <n> accounts`); `Equity` = the sum of the accounts' equities, `—` while any is unknown or there is none; row menu item `Manage accounts` opens `AccountsDrawer` (dialog `<display_name>'s accounts`: one row per account with a `Unlink <name>` button, a `Select` labelled `Account to link` over MT5 non-master accounts nobody owns, a `Link` button, and the page's error inside the drawer); notices `Account linked` / `Account unlinked`. The settings card becomes `Portal settings` with a third field `Max live accounts per investor`, button `Save portal settings`, notice `Portal settings saved`. The row `Select` labelled `Account for <email>` is gone.
+- Produces: the `Accounts` column (`not linked` / the first account's name / `<name> · <n> accounts`); `Equity` = the sum of the accounts' equities, `—` while any is unknown or there is none; row menu item `Manage accounts` opens `AccountsDrawer` (dialog `<display_name>'s accounts`: one row per account with a `Unlink <name>` button, a `Select` labelled `Account to link` over non-master accounts nobody owns yet, any platform, a `Link` button; the drawer makes its own link/unlink requests and shows a refusal in its own error state, never the page banner); notices `Account linked` / `Account unlinked`. The settings card becomes `Portal settings` with a third field `Max live accounts per investor`, button `Save portal settings`, notice `Portal settings saved`. The row `Select` labelled `Account for <email>` is gone.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2858,6 +2871,8 @@ In `mockRoutes`, add to the options type:
 ```ts
   /** Overrides what `GET .../investors` returns; defaults to `[investor]`. */
   investors?: unknown[]
+  /** Makes the link POST answer this instead of 201. */
+  refuseLink?: { status: number; body: unknown }
 ```
 
 change the default settings queue to `[{ withdrawal_min: 0, withdrawal_fee_pct: 0, max_live_accounts: 5 }]`, and replace the first two routes with:
@@ -2865,6 +2880,7 @@ change the default settings queue to `[{ withdrawal_min: 0, withdrawal_fee_pct: 
 ```ts
     if (path.endsWith('/investors')) return jsonResponse(options.investors ?? [investor])
     if (path.endsWith('/investors/5/accounts') && method === 'POST') {
+      if (options.refuseLink) return jsonResponse(options.refuseLink.body, options.refuseLink.status)
       return jsonResponse({ user_id: 5, ...JSON.parse(init!.body as string) }, 201)
     }
     if (/\/investors\/5\/accounts\/\d+$/.test(path) && method === 'DELETE') return new Response(null, { status: 204 })
@@ -2894,6 +2910,9 @@ test("Manage accounts lists the investor's accounts, links one more and unlinks 
   const picker = within(drawer).getByLabelText('Account to link')
   // Any platform, never one already linked: 1001 is Ada's.
   expect(within(picker).getAllByRole('option').map((o) => (o as HTMLOptionElement).value)).toEqual(['1002', '1003'])
+  // 1003 has no `platform` field (a cTrader account) and must not be
+  // mislabelled "MT5" the way the fulfil picker labels its own options.
+  expect(within(picker).getAllByRole('option').map((o) => o.textContent)).toEqual(['1002 (MT5)', '1003 (CTRADER)'])
   await userEvent.click(within(drawer).getByRole('button', { name: 'Link' }))
   await waitFor(() => expect(bodyOf(fetchMock, '/investors/5/accounts', 'POST')).toEqual({ account_id: 1002 }))
   expect(await screen.findByText('Account linked')).toBeInTheDocument()
@@ -2901,6 +2920,18 @@ test("Manage accounts lists the investor's accounts, links one more and unlinks 
   await waitFor(() => expect(fetchMock.mock.calls.some(([u, init]) =>
     String(u).endsWith('/investors/5/accounts/1001') && (init as RequestInit)?.method === 'DELETE')).toBe(true))
   expect(await screen.findByText('Account unlinked')).toBeInTheDocument()
+})
+
+test("the server's refusal to link is shown inside the accounts drawer, not the page banner", async () => {
+  mockRoutes({ refuseLink: { status: 409, body: { detail: 'you have reached the limit of 5 live accounts' } } })
+  render(<MemoryRouter><Investors /></MemoryRouter>)
+  await screen.findByText('Ada Investor')
+  await chooseFromMenu('Ada Investor', 'Manage accounts')
+  const drawer = await screen.findByRole('dialog', { name: "Ada Investor's accounts" })
+  await userEvent.click(within(drawer).getByRole('button', { name: 'Link' }))
+  expect(await within(drawer).findByRole('alert')).toHaveTextContent('you have reached the limit of 5 live accounts')
+  expect(screen.queryByText('Account linked')).not.toBeInTheDocument()
+  expect(screen.getByRole('dialog', { name: "Ada Investor's accounts" })).toBeInTheDocument()
 })
 
 test('the accounts column names the first account and counts the rest; equity is their total', async () => {
@@ -2947,30 +2978,64 @@ Create `dashboard/src/pages/investors/AccountsDrawer.tsx`:
 
 ```tsx
 import { useState } from 'react'
+import { orgApi } from '../../lib/api'
+import { errorText } from '../../lib/format'
 import { accountName, moneyOrDash } from '../../lib/investor'
 import Banner from '../../components/Banner'
 import Button from '../../components/Button'
 import Drawer from '../../components/Drawer'
 import Select from '../../components/Select'
 import type { Account, InvestorRow } from '../../lib/types'
+import type { Runner } from './PaymentMethodsTab'
 
 /**
- * One investor's live accounts: Unlink each, or Link one more from the MT5
- * accounts nobody owns yet. The parent runs the calls through its runner
- * (notices, the error shown here too) and passes the refreshed row back in.
+ * One investor's live accounts: Unlink each, or Link one more from the
+ * accounts nobody owns yet (any platform; only fulfil insists on MT5). The
+ * link/unlink requests run here, not through `run()`, so a refusal shows
+ * inside this drawer and never reaches the page banner; `run()` is called
+ * only once a request has already succeeded, to refresh the list and show
+ * the notice.
  */
-export default function AccountsDrawer({ investor, linkable, busy, error, onLink, onUnlink, onClose }: {
+export default function AccountsDrawer({ investor, linkable, orgId, run, onClose }: {
   investor: InvestorRow | null
   linkable: Account[]
-  busy: boolean
-  error: string | null
-  onLink: (accountId: number) => void
-  onUnlink: (accountId: number) => void
+  orgId: number
+  run: Runner
   onClose: () => void
 }) {
   const [pick, setPick] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const chosen = linkable.some((a) => String(a.ctid_trader_account_id) === pick)
     ? pick : (linkable[0] ? String(linkable[0].ctid_trader_account_id) : '')
+
+  const link = async () => {
+    if (!investor || !chosen) return
+    setError(null); setBusy(true)
+    try {
+      await orgApi(orgId, `investors/${investor.user_id}/accounts`, {
+        method: 'POST', body: JSON.stringify({ account_id: Number(chosen) }) })
+      await run(async () => {}, 'Account linked')
+    } catch (err) {
+      setError(errorText(err, 'Could not link the account'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const unlink = async (accountId: number) => {
+    if (!investor) return
+    setError(null); setBusy(true)
+    try {
+      await orgApi(orgId, `investors/${investor.user_id}/accounts/${accountId}`, { method: 'DELETE' })
+      await run(async () => {}, 'Account unlinked')
+    } catch (err) {
+      setError(errorText(err, 'Could not unlink the account'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <Drawer open={investor != null} busy={busy} onClose={onClose}
             title={investor ? `${investor.display_name}'s accounts` : ''}>
@@ -2986,14 +3051,14 @@ export default function AccountsDrawer({ investor, linkable, busy, error, onLink
                 <span className="text-ink flex-1 min-w-0">{accountName(a)}</span>
                 <span className="num">{moneyOrDash(a.equity)}</span>
                 <Button variant="ghost" tone="loss" size="sm" aria-label={`Unlink ${accountName(a)}`}
-                        disabled={busy} onClick={() => onUnlink(a.account_id)}>
+                        disabled={busy} onClick={() => void unlink(a.account_id)}>
                   Unlink
                 </Button>
               </li>
             ))}
           </ul>
           {linkable.length === 0 ? (
-            <p className="text-xs text-ink-soft">Every MT5 account is already linked; add one under Accounts first.</p>
+            <p className="text-xs text-ink-soft">Every account is already linked; add one under Accounts first.</p>
           ) : (
             <div className="flex flex-wrap items-end gap-3">
               <label className="block">
@@ -3001,12 +3066,12 @@ export default function AccountsDrawer({ investor, linkable, busy, error, onLink
                 <Select aria-label="Account to link" value={chosen} onChange={(e) => setPick(e.target.value)}>
                   {linkable.map((a) => (
                     <option key={a.ctid_trader_account_id} value={a.ctid_trader_account_id}>
-                      {`${a.nickname ?? a.trader_login} (MT5 ${a.mt5?.login ?? a.ctid_trader_account_id})`}
+                      {`${a.nickname ?? a.trader_login} (${(a.platform ?? 'ctrader').toUpperCase()})`}
                     </option>
                   ))}
                 </Select>
               </label>
-              <Button disabled={busy || !chosen} onClick={() => onLink(Number(chosen))}>Link</Button>
+              <Button disabled={busy || !chosen} onClick={() => void link()}>Link</Button>
             </div>
           )}
         </div>
@@ -3020,7 +3085,7 @@ export default function AccountsDrawer({ investor, linkable, busy, error, onLink
 
 In `dashboard/src/pages/Investors.tsx`:
 
-- Imports: drop `import Select from '../components/Select'`; change `import { moneyOrDash, walletLabel } from '../lib/investor'` to `import { accountName, moneyOrDash, walletLabel } from '../lib/investor'`; add `import AccountsDrawer from './investors/AccountsDrawer'`.
+- Imports: drop `import Select from '../components/Select'` and `import { orgApi } from '../lib/api'` (the drawer now makes its own requests); change `import { moneyOrDash, walletLabel } from '../lib/investor'` to `import { accountName, moneyOrDash, walletLabel } from '../lib/investor'`; add `import AccountsDrawer from './investors/AccountsDrawer'`.
 - Below `OpenRequests`, add:
 
 ```tsx
@@ -3039,18 +3104,9 @@ function totalEquity(r: InvestorRow): number | null {
 ```
 
 - After `const [adjustFor, setAdjustFor] = …` add `const [accountsFor, setAccountsFor] = useState<number | null>(null)`.
-- Replace `linkAccount`, `linkedIds` and `unlinked` with:
+- Delete the old `linkAccount` function (the PUT-based single link; `AccountsDrawer` now makes its own link/unlink requests). Replace `linkedIds` and `unlinked` with:
 
 ```tsx
-  const linkAccount = (userId: number, accountId: number) => run(async () => {
-    await orgApi(orgId, `investors/${userId}/accounts`, {
-      method: 'POST', body: JSON.stringify({ account_id: accountId }) })
-  }, 'Account linked')
-
-  const unlinkAccount = (userId: number, accountId: number) => run(async () => {
-    await orgApi(orgId, `investors/${userId}/accounts/${accountId}`, { method: 'DELETE' })
-  }, 'Account unlinked')
-
   // What may be linked: any platform, never the master, nobody's yet (the
   // api refuses the rest anyway).
   const linkedIds = new Set(rows.flatMap((r) => r.accounts.map((a) => a.account_id)))
@@ -3070,10 +3126,9 @@ function totalEquity(r: InvestorRow): number | null {
 - Directly before `{/* Keyed on the investor so each opening starts with a clean filter. */}`, add:
 
 ```tsx
-      <AccountsDrawer investor={rows.find((r) => r.user_id === accountsFor) ?? null} linkable={linkable}
-                      busy={busy} error={error}
-                      onLink={(id) => { if (accountsFor != null) void linkAccount(accountsFor, id) }}
-                      onUnlink={(id) => { if (accountsFor != null) void unlinkAccount(accountsFor, id) }}
+      <AccountsDrawer key={accountsFor ?? 'none'}
+                      investor={rows.find((r) => r.user_id === accountsFor) ?? null}
+                      linkable={linkable} orgId={orgId} run={run}
                       onClose={() => setAccountsFor(null)} />
 ```
 
@@ -3110,7 +3165,7 @@ In `dashboard/src/pages/investors/PaymentMethodsTab.tsx`:
 - [ ] **Step 6: Run the tests and the type check**
 
 Run: `npx vitest run src/pages/Investors.test.tsx && npx tsc --noEmit -p tsconfig.app.json`
-Expected: PASS, no type errors (`noUnusedLocals` catches a leftover `Select` import).
+Expected: PASS, no type errors (`noUnusedLocals` catches a leftover `Select` or `orgApi` import).
 
 - [ ] **Step 7: Commit**
 
@@ -3179,17 +3234,23 @@ drops the one-account-per-investor index and adds
 `portal_settings.max_live_accounts` (default 5); it rewrites no row, so the
 same sequence applies and `migrate` prints `applied: ['024_multi_account.sql']`.
 Admins now link and unlink accounts one at a time under **Investors → Actions →
-Manage accounts** (the row's account select is gone; only MT5 accounts can be
-linked) and set the cap under **Investors → Payment methods → Portal settings**.
+Manage accounts** (the row's account select is gone; any non-master account
+nobody owns can be linked, MT5 or cTrader; fulfilling a request still links
+MT5 only) and set the cap under **Investors → Payment methods → Portal settings**.
 An investor with several accounts picks one on Account, History, Transfer and
 Deposit. Deploy the api and the dashboard together: the old dashboard reads
 `account` from the investor summary, which no longer exists.
 ```
 
-- [ ] **Step 6: Spec status**
+- [ ] **Step 6: Spec status and §7 wording**
 
 In the spec, replace `**Status:** approved design; plan to follow` with
 `**Status:** implemented on branch client-portal-phase-3 (plan docs/superpowers/plans/2026-10-05-client-portal-phase-3.md); awaiting deploy`.
+
+Also in section 7 (the admin Investors bullet), replace `picker of unlinked MT5
+accounts` with `picker of unlinked non-master accounts, any platform` — section
+5 already says "any platform as today"; this was the one line left saying
+MT5-only for admin linking.
 
 - [ ] **Step 7: Tick this plan's checkboxes, then commit**
 
@@ -3229,7 +3290,7 @@ Where the spec was silent or ambiguous:
 
 Where the spec is wrong against the code:
 
-- Spec 5 lists "MT5 only" among the *existing* admin link rules; the removed `PUT investors/{id}/account` never checked the platform (only fulfil did). Owner-side ruling (2026-10-05): keep today's behaviour -- `POST investors/{id}/accounts` accepts any platform; only fulfil passes `mt5_only=True`.
+- Spec 7's admin Investors bullet says the Link picker offers "unlinked MT5 accounts"; the removed `PUT investors/{id}/account` never checked the platform (only fulfil did), and neither does the new `POST investors/{id}/accounts`. Owner-side ruling (2026-10-05): keep today's behaviour -- it accepts any platform; only fulfil passes `mt5_only=True`. Fixed in Task 15 Step 6.
 - Spec 7 says the Account page loads "history"; it has positions and analytics only — history is the History page (above).
 - Spec 7 speaks of "the investor drawer"; none existed (above).
 - Not in the spec but required by the code: `test_migration_019.py` asserts the unique index 024 drops, `test_migration_022.py` pins `portal_settings`' exact column list, and `test_portal_methods.py` pins the exact settings JSON; all three are updated in Tasks 1 and 5.

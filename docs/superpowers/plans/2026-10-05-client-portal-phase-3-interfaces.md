@@ -59,9 +59,10 @@ No new table, so the conftest TRUNCATE list is unchanged.
 ```python
 def linked_accounts(conn, org_id: int, user_id: int) -> list[int]          # ordered by account id
 def owns_account(conn, org_id: int, user_id: int, account_id: Optional[int]) -> bool
-def pick_account(conn, org_id: int, user_id: int, account_id: Optional[int]) -> int
+def pick_account(conn, org_id: int, user_id: int, account_id: Optional[int], *, field: str = "account_id") -> int
     # given: 404 "Account not found" unless owned; omitted: the only one,
-    # 409 "no account linked yet" with none, 400 "account_id is required" with several
+    # 409 "no account linked yet" with none, 400 f"{field} is required" with several
+    # (deposits pass field="target_account_id")
 def accounts_used(conn, org_id: int, user_id: int) -> int                  # owned + 'requested' account_requests
 def account_limit_text(limit: int) -> str   # "you have reached the limit of {limit} live accounts"
 def link_account(conn, org_id: int, user_id: int, account_id: int, *, mt5_only: bool = False) -> None
@@ -150,5 +151,5 @@ equity 1240.25); `summaryFixture` gains `accounts: [accountSummaryFixture()]`,
 | `pages/investor/InvestorDeposit.tsx` | 12 | `Select` aria-label `Which trading account` (several accounts, target account only) |
 | `pages/investor/InvestorOpenAccount.tsx` | 13 | reads `investor/summary`; NextStep `You have reached your account limit` / `This workspace allows <max> live accounts per investor. Ask your admin if you need another.` |
 | `pages/Investors.tsx` | 14 | column `Accounts` (`not linked` / name / `<name> · <n> accounts`); equity total; menu item `Manage accounts`; notices `Account linked`, `Account unlinked` |
-| `pages/investors/AccountsDrawer.tsx` (default export) | 14 | props `{ investor: InvestorRow | null; linkable: Account[]; busy: boolean; error: string | null; onLink(id); onUnlink(id); onClose() }`; dialog `<display_name>'s accounts`; buttons `Unlink <name>`, `Link`; `Select` aria-label `Account to link` |
+| `pages/investors/AccountsDrawer.tsx` (default export) | 14 | props `{ investor: InvestorRow | null; linkable: Account[]; orgId: number; run: Runner; onClose() }`; owns its own busy/error state and calls `orgApi` directly, so a link/unlink refusal shows inside the drawer, never the page banner; dialog `<display_name>'s accounts`; buttons `Unlink <name>`, `Link`; `Select` aria-label `Account to link` |
 | `pages/investors/PaymentMethodsTab.tsx` | 14 | Card `Portal settings`; input aria-label `Max live accounts per investor`; button `Save portal settings`; notice `Portal settings saved` |
