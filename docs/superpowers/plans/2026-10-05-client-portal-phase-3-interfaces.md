@@ -64,10 +64,10 @@ def pick_account(conn, org_id: int, user_id: int, account_id: Optional[int]) -> 
     # 409 "no account linked yet" with none, 400 "account_id is required" with several
 def accounts_used(conn, org_id: int, user_id: int) -> int                  # owned + 'requested' account_requests
 def account_limit_text(limit: int) -> str   # "you have reached the limit of {limit} live accounts"
-def link_account(conn, org_id: int, user_id: int, account_id: int) -> None
+def link_account(conn, org_id: int, user_id: int, account_id: int, *, mt5_only: bool = False) -> None
     # inside the caller's transaction; already this investor's: no-op;
     # 400 "The master account cannot be linked to an investor"
-    # 400 "Only an MT5 account can be linked here"
+    # 400 "Only an MT5 account can be linked here" (mt5_only=True: fulfil only)
     # 409 account_limit_text(max) when the investor already owns max accounts
     # 404 "Account not found in this workspace, or already linked"
 def portal_settings(conn, org_id: int) -> dict

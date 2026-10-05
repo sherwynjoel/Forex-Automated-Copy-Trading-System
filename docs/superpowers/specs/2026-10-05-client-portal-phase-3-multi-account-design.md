@@ -74,7 +74,7 @@ account is linked at decision time; with several it must be the named one.)
 
 **Admin link / unlink.**
 - `POST /investors/{user_id}/accounts {account_id}` adds one link under the existing
-  rules (investor member, not the master, MT5 only, account not linked to anyone) plus
+  rules (investor member, not the master, any platform as today, account not linked to anyone) plus
   the cap. Audit `investor_account_linked`.
 - `DELETE /investors/{user_id}/accounts/{account_id}` removes one link; 404 if that
   investor does not own it. Audit `investor_account_unlinked`. Pending transfers on that

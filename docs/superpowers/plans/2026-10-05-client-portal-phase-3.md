@@ -235,7 +235,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
   - `pick_account(conn, org_id: int, user_id: int, account_id: Optional[int]) -> int` — raises `HTTPException` 404 `Account not found` / 409 `no account linked yet` / 400 `account_id is required`.
   - `accounts_used(conn, org_id: int, user_id: int) -> int` — owned accounts + `requested` account requests.
   - `account_limit_text(limit: int) -> str` — `"you have reached the limit of {limit} live accounts"`.
-  - `link_account(conn, org_id: int, user_id: int, account_id: int) -> None` — runs inside the caller's transaction; refusals 400 `The master account cannot be linked to an investor`, 400 `Only an MT5 account can be linked here`, 409 `account_limit_text(max)`, 404 `Account not found in this workspace, or already linked`; already this investor's = no-op.
+  - `link_account(conn, org_id: int, user_id: int, account_id: int, *, mt5_only: bool = False) -> None` — runs inside the caller's transaction; refusals 400 `The master account cannot be linked to an investor`, 400 `Only an MT5 account can be linked here` (only with `mt5_only=True`; fulfil passes it, the admin link does not -- today's admin link accepts cTrader accounts and keeps doing so), 409 `account_limit_text(max)`, 404 `Account not found in this workspace, or already linked`; already this investor's = no-op.
   - `portal_settings(...)` now returns `{"withdrawal_min": Decimal, "withdrawal_fee_pct": Decimal, "max_live_accounts": int}`.
   - `linked_account` stays until Task 7 (its last caller goes there).
 
@@ -323,7 +323,7 @@ def test_link_account_keeps_the_link_rules_and_the_cap(org_client, make_user, db
         def refused(account_id):
             with pytest.raises(HTTPException) as exc:
                 with conn.transaction():
-                    pc.link_account(conn, org_id, uid, account_id)
+                    pc.link_account(conn, org_id, uid, account_id, mt5_only=True)
             return exc.value.status_code, exc.value.detail
 
         assert refused(100) == (400, "The master account cannot be linked to an investor")
@@ -412,10 +412,12 @@ def account_limit_text(limit: int) -> str:
     return f"you have reached the limit of {limit} live accounts"
 
 
-def link_account(conn: psycopg.Connection, org_id: int, user_id: int, account_id: int) -> None:
+def link_account(conn: psycopg.Connection, org_id: int, user_id: int, account_id: int,
+                 *, mt5_only: bool = False) -> None:
     """Link one more account to an investor, inside the caller's
     transaction (moved from routes/portal_identity._link_account; the admin
-    link route and fulfil both use it): never the master, MT5 only, never an
+    link route and fulfil both use it): never the master, MT5 only when
+    mt5_only (fulfil of an MT5 account request), never an
     account linked to someone else, and at most max_live_accounts per
     investor. Linking an account the investor already owns is a no-op."""
     if owns_account(conn, org_id, user_id, account_id):
@@ -426,7 +428,7 @@ def link_account(conn: psycopg.Connection, org_id: int, user_id: int, account_id
     if role_row and role_row[0] == "master":
         raise HTTPException(status_code=400,
                             detail="The master account cannot be linked to an investor")
-    if role_row and role_row[1] != "mt5":
+    if mt5_only and role_row and role_row[1] != "mt5":
         raise HTTPException(status_code=400, detail="Only an MT5 account can be linked here")
     limit = portal_settings(conn, org_id)["max_live_accounts"]
     # ponytail: count then update, no lock -- two admins linking to the same
@@ -1107,7 +1109,7 @@ In `request_account`, replace everything from the docstring through the `"a requ
 
 (the lines from `package_id = body.package_id` on stay as they are).
 
-In `fulfil_request`, replace `_link_account(conn, ctx.org_id, user_id, body.account_id)` with `pc.link_account(conn, ctx.org_id, user_id, body.account_id)`.
+In `fulfil_request`, replace `_link_account(conn, ctx.org_id, user_id, body.account_id)` with `pc.link_account(conn, ctx.org_id, user_id, body.account_id, mt5_only=True)`.
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
@@ -1164,8 +1166,6 @@ def test_admin_links_and_unlinks_one_account_at_a_time(org_client, make_user, db
     uid = investor["id"]
     _copier(client, down=True)
     base = f"/api/orgs/{org_id}/investors/{uid}/accounts"
-    r = client.post(base, json={"account_id": 1001}, headers=csrf(client))
-    assert r.status_code == 400 and r.json()["detail"] == "Only an MT5 account can be linked here"
     for aid in (first, second):
         r = client.post(base, json={"account_id": aid}, headers=csrf(client))
         assert r.status_code == 201 and r.json() == {"user_id": uid, "account_id": aid}
@@ -1366,7 +1366,8 @@ Replace the whole `@router.put("/investors/{user_id}/account", ...)` route (`lin
                                     ctx: OrgContext = Depends(require_org_role("admin")),
                                     conn: psycopg.Connection = Depends(get_conn)) -> Dict[str, Any]:
         """Add one account to an investor under pc.link_account's rules: not
-        the master, MT5 only, nobody else's, and under max_live_accounts."""
+        the master, nobody else's, and under max_live_accounts (any platform,
+        as before; only fulfil insists on MT5)."""
         _require_investor(conn, ctx.org_id, user_id)
         with conn.transaction():
             pc.link_account(conn, ctx.org_id, user_id, body.account_id)
@@ -2891,8 +2892,8 @@ test("Manage accounts lists the investor's accounts, links one more and unlinks 
   const drawer = await screen.findByRole('dialog', { name: "Ada Investor's accounts" })
   expect(within(drawer).getByText('Inv')).toBeInTheDocument()
   const picker = within(drawer).getByLabelText('Account to link')
-  // MT5 only, never one already linked: 1001 is Ada's, 1003 is cTrader.
-  expect(within(picker).getAllByRole('option').map((o) => (o as HTMLOptionElement).value)).toEqual(['1002'])
+  // Any platform, never one already linked: 1001 is Ada's.
+  expect(within(picker).getAllByRole('option').map((o) => (o as HTMLOptionElement).value)).toEqual(['1002', '1003'])
   await userEvent.click(within(drawer).getByRole('button', { name: 'Link' }))
   await waitFor(() => expect(bodyOf(fetchMock, '/investors/5/accounts', 'POST')).toEqual({ account_id: 1002 }))
   expect(await screen.findByText('Account linked')).toBeInTheDocument()
@@ -3050,11 +3051,11 @@ function totalEquity(r: InvestorRow): number | null {
     await orgApi(orgId, `investors/${userId}/accounts/${accountId}`, { method: 'DELETE' })
   }, 'Account unlinked')
 
-  // What may be linked: MT5 accounts, never the master, nobody's yet (the
+  // What may be linked: any platform, never the master, nobody's yet (the
   // api refuses the rest anyway).
   const linkedIds = new Set(rows.flatMap((r) => r.accounts.map((a) => a.account_id)))
   const linkable = accounts.filter((a) =>
-    a.platform === 'mt5' && a.role !== 'master' && !linkedIds.has(a.ctid_trader_account_id))
+    a.role !== 'master' && !linkedIds.has(a.ctid_trader_account_id))
 ```
 
 - Header: replace `<th className="desk-label px-5 py-2 font-semibold">Linked account</th>` with `<th className="desk-label px-5 py-2 font-semibold">Accounts</th>`.
@@ -3228,7 +3229,7 @@ Where the spec was silent or ambiguous:
 
 Where the spec is wrong against the code:
 
-- Spec 5 lists "MT5 only" among the *existing* admin link rules; the removed `PUT investors/{id}/account` never checked the platform (only fulfil did). `POST investors/{id}/accounts` now enforces it, so an admin can no longer link a cTrader follower to an investor.
+- Spec 5 lists "MT5 only" among the *existing* admin link rules; the removed `PUT investors/{id}/account` never checked the platform (only fulfil did). Owner-side ruling (2026-10-05): keep today's behaviour -- `POST investors/{id}/accounts` accepts any platform; only fulfil passes `mt5_only=True`.
 - Spec 7 says the Account page loads "history"; it has positions and analytics only — history is the History page (above).
 - Spec 7 speaks of "the investor drawer"; none existed (above).
 - Not in the spec but required by the code: `test_migration_019.py` asserts the unique index 024 drops, `test_migration_022.py` pins `portal_settings`' exact column list, and `test_portal_methods.py` pins the exact settings JSON; all three are updated in Tasks 1 and 5.
