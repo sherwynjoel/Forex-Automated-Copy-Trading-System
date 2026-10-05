@@ -240,6 +240,11 @@ def create_app(http_transport: Optional[httpx.BaseTransport] = None) -> FastAPI:
     app.include_router(create_portal_admin_router())
     app.include_router(create_portal_identity_router())
 
+    # Client portal phase 4: notifications, email prefs and appearance
+    # (any member), support tickets, bonuses.
+    from .routes.portal_notifications import create_portal_notifications_router
+    app.include_router(create_portal_notifications_router())
+
     # Include events router
     events_router = create_events_router()
     app.include_router(events_router)
