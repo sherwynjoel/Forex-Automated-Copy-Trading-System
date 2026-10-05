@@ -424,7 +424,16 @@ def rule_bonus(conn: psycopg.Connection, org_id: int, source: str,
                base: Optional[Decimal] = None) -> Decimal:
     """What the org's rule pays for this event NOW (rules are never applied
     backwards): 0 while the rule is off; the deposit rule takes `base`, the
-    confirmed amount."""
+    confirmed amount.
+
+    There is no rule for a hand-posted bonus and no base-less deposit
+    bonus, so both raise ValueError -- even while the matching rule is
+    off -- rather than silently answering 0 for a caller that passed the
+    wrong source or forgot `base`."""
+    if source == "manual":
+        raise ValueError("rule_bonus does not pay the 'manual' source; use pay_bonus directly")
+    if source == "deposit" and base is None:
+        raise ValueError("rule_bonus requires base for source 'deposit'")
     rules = bonus_rules(conn, org_id)
     if not rules[f"{source}_enabled"]:
         return Decimal("0")
@@ -451,9 +460,18 @@ def pay_bonus(conn: psycopg.Connection, org_id: int, user_id: int, source: str, 
         (org_id, user_id, source, source_id, amount, note, created_by)).fetchone()
     if row is None:
         return None
-    settle(conn, org_id=org_id, user_id=user_id, wallet="credit", amount=amount, kind="bonus",
-           ref_table="bonuses", ref_id=int(row[0]), note=note, created_by=created_by)
-    return int(row[0])
+    bonus_id = int(row[0])
+    wrote = settle(conn, org_id=org_id, user_id=user_id, wallet="credit", amount=amount,
+                   kind="bonus", ref_table="bonuses", ref_id=bonus_id, note=note,
+                   created_by=created_by)
+    if not wrote:
+        # The bonuses row is new (just inserted above), so its ref_id can
+        # never already be settled -- settle() reporting nothing written
+        # means the writer and the row it is meant to back have drifted
+        # apart. Keep that explicit rather than leaving an orphan bonuses
+        # row with no matching credit entry.
+        raise RuntimeError(f"bonus {bonus_id} was recorded but settle() wrote no ledger entry")
+    return bonus_id
 
 
 async def announce_bonus(conn: psycopg.Connection, request: Request, *, org_id: int,
@@ -491,18 +509,27 @@ async def award_rule_bonus(conn: psycopg.Connection, request: Request, org_id: i
     Best effort, like notify: it runs after the join, role change or KYC
     approval has committed, so a failure here is logged and returns None
     rather than answering 500 for a change that already landed. A missed
-    bonus is visible in the log and can be granted by hand."""
+    bonus is visible in the log and can be granted by hand.
+
+    The announce_bonus call is inside this same try (ruling P8): once the
+    paying transaction above has committed, a failure in the audit/notify
+    step is just as much a best-effort failure as one in the payment
+    itself -- it must never turn into a 500 for a join, role change or KYC
+    approval that already landed. The bonus stays paid either way; only
+    the return value (None) tells the caller the announcement is missing
+    from the log."""
     try:
         with conn.transaction():
             lock_investor_ledger(conn, org_id, user_id)
             amount = rule_bonus(conn, org_id, source)
             bonus_id = pay_bonus(conn, org_id, user_id, source, amount)
+        if bonus_id is not None:
+            await announce_bonus(conn, request, org_id=org_id, user_id=user_id,
+                                 bonus_id=bonus_id, source=source, amount=amount,
+                                 actor_email=actor_email)
     except Exception:
         logger.exception("%s bonus failed for user %s in org %s", source, user_id, org_id)
         return None
-    if bonus_id is not None:
-        await announce_bonus(conn, request, org_id=org_id, user_id=user_id, bonus_id=bonus_id,
-                             source=source, amount=amount, actor_email=actor_email)
     return bonus_id
 
 

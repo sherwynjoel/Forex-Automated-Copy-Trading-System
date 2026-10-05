@@ -4,6 +4,8 @@ writer, audit and email plumbing, the settings row and the serialisers.
 Real Postgres; the copier's /state is faked through the app's mock
 transport only where equity_for needs it."""
 import asyncio
+import logging
+import threading
 from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
@@ -544,3 +546,114 @@ def test_rule_bonus_follows_the_rules(org_user, db):
         assert pc.rule_bonus(conn, org_id, "kyc") == 0
         assert pc.rule_bonus(conn, org_id, "deposit", Decimal("100")) == Decimal("10.00")
         assert pc.rule_bonus(conn, org_id, "deposit", Decimal("1000")) == Decimal("30.00")
+
+
+def test_rule_bonus_refuses_manual_and_a_base_less_deposit_even_while_off(org_user, db):
+    """Controller ruling (Task 8 review): there is no rule for 'manual' and
+    no base-less deposit bonus, so both raise ValueError -- even while the
+    deposit rule is off -- rather than quietly answering 0 for a caller
+    that passed the wrong source or forgot `base`."""
+    org_id, _user_id = org_user
+    with psycopg.connect(db, autocommit=True) as conn:
+        with pytest.raises(ValueError, match="manual"):
+            pc.rule_bonus(conn, org_id, "manual")
+        with pytest.raises(ValueError, match="base"):
+            pc.rule_bonus(conn, org_id, "deposit")                 # rule is off; still raises
+        assert pc.rule_bonus(conn, org_id, "deposit", Decimal("0")) == Decimal("0")
+
+
+def test_pay_bonus_raises_when_settle_writes_no_entry(org_user, db, monkeypatch):
+    """Controller ruling: if settle() ever reports no ledger entry was
+    written for a bonus that was just inserted, pay_bonus raises rather
+    than silently leaving a bonuses row with no matching credit entry --
+    and the transaction (including the bonuses INSERT) rolls back."""
+    org_id, user_id = org_user
+    monkeypatch.setattr(pc, "settle", lambda *a, **k: False)
+    with psycopg.connect(db, autocommit=True) as conn:
+        with pytest.raises(RuntimeError, match="settle"):
+            with conn.transaction():
+                pc.lock_investor_ledger(conn, org_id, user_id)
+                pc.pay_bonus(conn, org_id, user_id, "signup", Decimal("50"))
+        rows = conn.execute("SELECT 1 FROM bonuses WHERE org_id = %s AND user_id = %s",
+                            (org_id, user_id)).fetchall()
+    assert rows == []
+
+
+def test_award_rule_bonus_logs_an_announce_failure_after_the_bonus_committed(
+        org_user, db, monkeypatch, caplog):
+    """Ruling P8: announce_bonus runs inside award_rule_bonus's best-effort
+    try, so a failure there (audit/notify, AFTER the paying transaction has
+    committed) is logged and swallowed -- the bonus stays paid, and the
+    caller (join, role change, KYC approval) never sees a 500. Only the
+    return value (None here, same as a failed payment) tells the caller
+    the announcement never happened."""
+    org_id, user_id = org_user
+    with psycopg.connect(db, autocommit=True) as conn:
+        pc.bonus_rules(conn, org_id)
+        conn.execute("UPDATE bonus_rules SET signup_enabled = true, signup_amount = 25 "
+                     "WHERE org_id = %s", (org_id,))
+
+    async def boom(*_args, **_kwargs):
+        raise RuntimeError("notify down")
+
+    monkeypatch.setattr(pc, "announce_bonus", boom)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    with psycopg.connect(db, autocommit=True) as conn:
+        with caplog.at_level(logging.ERROR):
+            result = asyncio.run(pc.award_rule_bonus(
+                conn, request, org_id, user_id, "signup", actor_email="admin@example.com"))
+        rows = conn.execute(
+            "SELECT amount FROM wallet_entries WHERE org_id = %s AND user_id = %s "
+            "AND wallet = 'credit'", (org_id, user_id)).fetchall()
+    assert result is None
+    assert rows == [(Decimal("25.00"),)]                 # the bonus is NOT rolled back
+    assert "signup bonus failed" in caplog.text
+
+
+def test_pay_bonus_concurrent_confirm_of_the_same_deposit_pays_once(org_user, db):
+    """Two REAL connections in two REAL threads, each taking
+    lock_investor_ledger first (as every ledger-writing transaction must)
+    and then pay_bonus for the SAME deposit's source_id, lined up with a
+    Barrier so both reach the lock at essentially the same instant. The
+    advisory lock -- not the barrier -- is what actually serialises them:
+    whichever thread loses the race blocks on pg_advisory_xact_lock until
+    the winner's transaction ends, then its INSERT ... ON CONFLICT DO
+    NOTHING finds the row already there and pays nothing. Exactly one
+    bonuses row and one credit ledger entry must survive."""
+    org_id, user_id = org_user
+    barrier = threading.Barrier(2)
+    results: list = []
+    errors: list = []
+    lock = threading.Lock()
+
+    def worker():
+        try:
+            with psycopg.connect(db, autocommit=True) as conn:
+                barrier.wait(timeout=10)
+                with conn.transaction():
+                    pc.lock_investor_ledger(conn, org_id, user_id)
+                    bonus_id = pc.pay_bonus(conn, org_id, user_id, "deposit", Decimal("10"),
+                                            source_id=99, note="deposit #99")
+                with lock:
+                    results.append(bonus_id)
+        except Exception as exc:  # pragma: no cover - surfaced via the assertion below
+            with lock:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=15)
+
+    assert not errors, errors
+    assert sorted(r is None for r in results) == [False, True]  # exactly one paid, one None
+    with psycopg.connect(db, autocommit=True) as conn:
+        bonus_rows = conn.execute(
+            "SELECT id FROM bonuses WHERE org_id = %s AND user_id = %s AND source_id = %s",
+            (org_id, user_id, 99)).fetchall()
+        assert len(bonus_rows) == 1
+        entry_rows = conn.execute(
+            "SELECT id FROM wallet_entries WHERE ref_table = 'bonuses' AND ref_id = %s",
+            (bonus_rows[0][0],)).fetchall()
+        assert len(entry_rows) == 1

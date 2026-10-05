@@ -4,13 +4,14 @@ import secrets
 from typing import Optional
 
 import psycopg
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from ..auth import require_user
 from ..db import get_conn
 from ..rbac import OrgContext, ROLE_RANK, require_org_role
 from ..ws import broadcaster
+from .. import portal_common as pc
 
 INVITE_TTL_DAYS = 7
 
@@ -71,6 +72,7 @@ def create_orgs_router() -> APIRouter:
     @router.post("/join")
     async def join_org(
         body: JoinRequest,
+        http_request: Request,
         user_id: int = Depends(require_user),
         conn: psycopg.Connection = Depends(get_conn),
     ):
@@ -94,6 +96,13 @@ def create_orgs_router() -> APIRouter:
             ).fetchone()
             if not inserted:
                 raise HTTPException(status_code=409, detail="Already a member")
+        if role == "investor":
+            # The welcome bonus, if the org's rule is on: its own transaction
+            # (the ledger lock must be the first statement of whatever writes
+            # wallet_entries, and this one began with the invite).
+            (email,) = conn.execute("SELECT email FROM users WHERE id = %s", (user_id,)).fetchone()
+            await pc.award_rule_bonus(conn, http_request, org_id, user_id, "signup",
+                                      actor_email=email)
         return {"org_id": org_id, "role": role}
 
     @router.get("/{org_id}")
@@ -155,6 +164,7 @@ def create_orgs_router() -> APIRouter:
     async def patch_member(
         member_user_id: int,
         body: PatchMemberRequest,
+        http_request: Request,
         ctx: OrgContext = Depends(require_org_role("admin")),
         conn: psycopg.Connection = Depends(get_conn),
     ):
@@ -188,6 +198,9 @@ def create_orgs_router() -> APIRouter:
             )
             if body.role != "investor":
                 _cancel_open_account_requests(conn, ctx.org_id, member_user_id)
+        if body.role == "investor" and row[0] != "investor":
+            await pc.award_rule_bonus(conn, http_request, ctx.org_id, member_user_id, "signup",
+                                      actor_email=ctx.user_email)
         return {"user_id": member_user_id, "role": body.role}
 
     @router.delete("/{org_id}/members/{member_user_id}", status_code=204)

@@ -251,6 +251,9 @@ def create_portal_identity_router() -> APIRouter:
             f"Your identity verification was {new_status}",
             f"Status: {new_status}\nNote: {note or '—'}\n\nOpen the portal for details.",
             pc.investor_link(ctx.org_id, "profile"))
+        if new_status == "approved":
+            await pc.award_rule_bonus(conn, http_request, ctx.org_id, user_id, "kyc",
+                                      actor_email=ctx.user_email)
         return pid.profile_json(row)
 
     # ------------------------------------------------------------ account packages

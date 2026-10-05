@@ -81,3 +81,153 @@ def test_bad_rules_are_refused(org_client, over, detail):
     client, org_id, _seed = org_client
     r = _rules(client, org_id, **over)
     assert r.status_code == 400 and r.json()["detail"] == detail
+
+
+# ------------------------------------------------------------ triggers
+
+
+def _invite(client, org_id, role="investor"):
+    r = client.post(f"/api/orgs/{org_id}/invites", json={"role": role}, headers=csrf(client))
+    return r.json()["token"]
+
+
+def _join(client, login_as, user, token):
+    client.cookies.clear()
+    login_as(client, user)
+    return client.post("/api/orgs/join", json={"token": token}, headers=csrf(client))
+
+
+def test_the_signup_bonus_pays_once_on_join_and_on_a_role_change(org_client, make_user,
+                                                                 login_as, db):
+    client, org_id, _seed = org_client
+    assert _rules(client, org_id, signup_enabled=True, signup_amount="50").status_code == 200
+    token = _invite(client, org_id)
+    joiner = make_user(email="joiner@example.com")
+    assert _join(client, login_as, joiner, token).status_code == 200
+    assert _credit_entries(db, joiner["id"]) == [("signup", 50.0)]
+    client.cookies.clear()
+    login_as(client, ADMIN)
+    url = f"/api/orgs/{org_id}/members/{joiner['id']}"
+    assert client.patch(url, json={"role": "viewer"}, headers=csrf(client)).status_code == 200
+    assert client.patch(url, json={"role": "investor"}, headers=csrf(client)).status_code == 200
+    assert _credit_entries(db, joiner["id"]) == [("signup", 50.0)]      # once per investor
+    promoted = make_user(email="viewer@example.com")
+    member(db, org_id, promoted["id"], "viewer")
+    r = client.patch(f"/api/orgs/{org_id}/members/{promoted['id']}", json={"role": "investor"},
+                     headers=csrf(client))
+    assert r.status_code == 200
+    assert _credit_entries(db, promoted["id"]) == [("signup", 50.0)]
+    with psycopg.connect(db, autocommit=True) as conn:
+        notes = conn.execute("SELECT topic, title, link FROM notifications WHERE user_id = %s",
+                             (joiner["id"],)).fetchall()
+    assert notes == [("bonus", "You received a 50.00 USD welcome bonus",
+                      f"/org/{org_id}/invest/bonus")]
+    severity, payload, actor = _events(db, org_id, "investor_bonus_paid")[0]
+    assert (severity, actor, payload["source"], payload["amount"]) == (
+        "info", "joiner@example.com", "signup", 50.0)
+
+
+def test_no_bonus_while_off_none_back_paid_and_none_for_desk_roles(org_client, make_user,
+                                                                   login_as, db):
+    client, org_id, _seed = org_client
+    token = _invite(client, org_id)
+    early = make_user(email="early@example.com")
+    assert _join(client, login_as, early, token).status_code == 200
+    client.cookies.clear()
+    login_as(client, ADMIN)
+    _rules(client, org_id, signup_enabled=True, signup_amount="50")
+    viewer_token = _invite(client, org_id, role="viewer")
+    viewer = make_user(email="viewer@example.com")
+    assert _join(client, login_as, viewer, viewer_token).status_code == 200
+    assert _credit_entries(db, early["id"]) == [] and _credit_entries(db, viewer["id"]) == []
+
+
+def test_the_kyc_bonus_pays_once_on_approval(org_client, make_user, db):
+    client, org_id, _seed = org_client
+    _rules(client, org_id, kyc_enabled=True, kyc_amount="25")
+    investor = _investor(make_user, db, org_id)
+    rejected = _investor(make_user, db, org_id, email="rej@example.com")
+    kyc_profile(db, org_id, investor["id"], status="submitted")
+    kyc_profile(db, org_id, rejected["id"], status="submitted")
+
+    def decide(user_id, status, note=None):
+        return client.post(f"/api/orgs/{org_id}/kyc/{user_id}/decision",
+                           json={"status": status, "note": note}, headers=csrf(client))
+
+    assert decide(investor["id"], "approved").status_code == 200
+    assert _credit_entries(db, investor["id"]) == [("kyc", 25.0)]
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute("UPDATE kyc_profiles SET status = 'submitted' WHERE user_id = %s",
+                     (investor["id"],))
+    assert decide(investor["id"], "approved").status_code == 200
+    assert _credit_entries(db, investor["id"]) == [("kyc", 25.0)]       # a re-approval pays nothing
+    assert decide(rejected["id"], "rejected", "blurry").status_code == 200
+    assert _credit_entries(db, rejected["id"]) == []
+
+
+def test_a_failing_rule_bonus_never_fails_the_join_or_the_approval(org_client, make_user,
+                                                                   login_as, db, monkeypatch):
+    """award_rule_bonus runs after the primary change committed: a failure is
+    logged and the request still answers as if no rule were on."""
+    from api import portal_common
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("ledger down")
+
+    client, org_id, _seed = org_client
+    _rules(client, org_id, signup_enabled=True, signup_amount="50", kyc_enabled=True,
+           kyc_amount="25")
+    token = _invite(client, org_id)
+    monkeypatch.setattr(portal_common, "pay_bonus", boom)
+    joiner = make_user(email="joiner@example.com")
+    r = _join(client, login_as, joiner, token)
+    assert r.status_code == 200 and r.json()["role"] == "investor"
+    with psycopg.connect(db, autocommit=True) as conn:
+        assert conn.execute("SELECT role FROM org_memberships WHERE org_id = %s AND user_id = %s",
+                            (org_id, joiner["id"])).fetchone() == ("investor",)
+    client.cookies.clear()
+    login_as(client, ADMIN)
+    kyc_profile(db, org_id, joiner["id"], status="submitted")
+    r = client.post(f"/api/orgs/{org_id}/kyc/{joiner['id']}/decision",
+                    json={"status": "approved", "note": None}, headers=csrf(client))
+    assert r.status_code == 200 and r.json()["status"] == "approved"
+    assert _credit_entries(db, joiner["id"]) == []
+    assert _events(db, org_id, "investor_bonus_paid") == []
+
+
+def _pending_deposit(db, org_id, user_id, amount, reference):
+    with psycopg.connect(db, autocommit=True) as conn:
+        return conn.execute(
+            "INSERT INTO deposits (org_id, user_id, method_kind, method_label, amount, reference) "
+            "VALUES (%s, %s, 'crypto', 'USDT on TRC20', %s, %s) RETURNING id",
+            (org_id, user_id, Decimal(amount), reference)).fetchone()[0]
+
+
+def test_the_deposit_bonus_rounds_caps_and_pays_once(org_client, make_user, db):
+    client, org_id, _seed = org_client
+    uid = _investor(make_user, db, org_id)["id"]
+    _rules(client, org_id, deposit_enabled=True, deposit_pct="12.5", deposit_cap="100")
+    small = _pending_deposit(db, org_id, uid, "33.33", "d-1")
+    mid = _pending_deposit(db, org_id, uid, "500", "d-mid")
+    big = _pending_deposit(db, org_id, uid, "5000", "d-2")
+    tiny = _pending_deposit(db, org_id, uid, "0.03", "d-3")
+
+    def confirm(dep_id, **extra):
+        return client.post(f"/api/orgs/{org_id}/deposits/{dep_id}/decision",
+                           json={"status": "confirmed", **extra}, headers=csrf(client))
+
+    assert confirm(small).status_code == 200
+    assert confirm(small).status_code == 409          # a double confirm pays nothing more
+    # Below the cap, so the base shows: 12.5 % of the credited 400 is 50.00,
+    # where the 500 notice amount would have paid 62.50.
+    assert confirm(mid, credited_amount="400").status_code == 200
+    assert confirm(big, credited_amount="4000").status_code == 200   # capped at 100
+    assert confirm(tiny).status_code == 200            # 0.00375 rounds to 0: nothing paid
+    assert _credit_entries(db, uid) == [("deposit", 4.17), ("deposit", 50.0),
+                                        ("deposit", 100.0)]
+    with psycopg.connect(db, autocommit=True) as conn:
+        rows = conn.execute("SELECT source_id, amount, note FROM bonuses WHERE user_id = %s "
+                            "ORDER BY id", (uid,)).fetchall()
+    assert rows == [(small, Decimal("4.17"), f"deposit #{small}"),
+                    (mid, Decimal("50.00"), f"deposit #{mid}"),
+                    (big, Decimal("100.00"), f"deposit #{big}")]

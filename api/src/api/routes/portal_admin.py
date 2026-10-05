@@ -383,6 +383,8 @@ def create_portal_admin_router() -> APIRouter:
                                     f"the notice amount ({Decimal(amount):.2f})")
         linked: Optional[int] = None
         transfer_id: Optional[int] = None
+        bonus = Decimal("0")
+        bonus_id: Optional[int] = None
         with conn.transaction():
             # First statement in the transaction, uniformly, whether this
             # decision settles money or not: keeps every ledger-writing
@@ -421,6 +423,13 @@ def create_portal_admin_router() -> APIRouter:
                         "now(), %s) RETURNING id",
                         (ctx.org_id, investor_id, linked, credited, ctx.user_id,
                          f"funded from deposit #{deposit_id}")).fetchone()
+                # The deposit rule, on the confirmed (credited) amount: inside
+                # this transaction, so the deposit and its bonus land together;
+                # bonuses_once_per_deposit makes a replay pay nothing.
+                bonus = pc.rule_bonus(conn, ctx.org_id, "deposit", credited)
+                bonus_id = pc.pay_bonus(conn, ctx.org_id, investor_id, "deposit", bonus,
+                                        source_id=deposit_id, note=f"deposit #{deposit_id}",
+                                        created_by=ctx.user_id)
         out = pc.deposit_json(row)
         await pc.audit_control(
             conn, org_id=ctx.org_id, action="investor_deposit_decided",
@@ -436,6 +445,10 @@ def create_portal_admin_router() -> APIRouter:
             f"Status: {new_status}\nAmount: {out['amount']:.2f} USD via {out['method_label']}\n"
             f"{credited_line}Note: {note or '—'}\n\nOpen the portal for details.",
             pc.investor_link(ctx.org_id, "deposit"))
+        if bonus_id is not None:
+            await pc.announce_bonus(conn, http_request, org_id=ctx.org_id, user_id=investor_id,
+                                    bonus_id=bonus_id, source="deposit", amount=bonus,
+                                    actor_email=ctx.user_email, note=f"deposit #{deposit_id}")
         return out
 
     # ------------------------------------------------------------ withdrawals
