@@ -1,7 +1,8 @@
 import { expect, test } from 'vitest'
 import {
-  accountSummaryFixture, depositFixture, destinationFixture, entryFixture, investorRowFixture, methodFixture,
-  summaryFixture, transferFixture, withdrawalFixture,
+  accountSummaryFixture, bonusFixture, bonusRulesFixture, depositFixture, destinationFixture, entryFixture,
+  investorRowFixture, methodFixture, notificationFixture, subjectFixture, summaryFixture, threadFixture,
+  ticketFixture, transferFixture, withdrawalFixture,
 } from './portalFixtures'
 
 test('the summary carries the documented figures and every wallet', () => {
@@ -28,4 +29,15 @@ test('the summary carries one account and the cap; the investor row its accounts
   expect(accountSummaryFixture({ mt5_login: null }).mt5_login).toBeNull()
   expect(investorRowFixture().accounts).toEqual([
     { account_id: 555, nickname: 'Growth', equity: 1240.25, equity_source: 'live' }])
+})
+
+test('the phase 4 builders give complete rows and take overrides', () => {
+  expect(notificationFixture({ id: 9 })).toMatchObject({ id: 9, topic: 'money', read_at: null })
+  expect(ticketFixture().last_from_desk).toBe(false)
+  expect(ticketFixture().waiting_on_desk).toBe(true)
+  expect(threadFixture().messages).toHaveLength(1)
+  expect(threadFixture({ status: 'closed' }).status).toBe('closed')
+  expect(subjectFixture({ enabled: false }).enabled).toBe(false)
+  expect(bonusFixture().source).toBe('deposit')
+  expect(bonusRulesFixture().deposit_cap).toBe(100)
 })

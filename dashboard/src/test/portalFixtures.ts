@@ -1,6 +1,7 @@
 import type {
-  AccountPackage, AccountRequest, AccountSummary, InvestorRow, InvestorSummary, KycProfile, PayoutDestination,
-  PaymentMethod, PortalDeposit, PortalTransfer, PortalWithdrawal, SignIn, WalletEntry,
+  AccountPackage, AccountRequest, AccountSummary, Bonus, BonusRules, InvestorRow, InvestorSummary, KycProfile,
+  PayoutDestination, PaymentMethod, PortalDeposit, PortalNotification, PortalTransfer, PortalWithdrawal, SignIn,
+  Ticket, TicketMessage, TicketSubject, TicketThread, WalletEntry,
 } from '../lib/types'
 
 /**
@@ -162,6 +163,62 @@ export function signInFixture(overrides: Partial<SignIn> = {}): SignIn {
     id: 1, ip: '203.0.113.7',
     user_agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0 Safari/537.36',
     outcome: 'mpin_ok', created_at: WHEN,
+    ...overrides,
+  }
+}
+
+// ------------------------------------------------------------ phase 4: engagement
+
+export function notificationFixture(overrides: Partial<PortalNotification> = {}): PortalNotification {
+  return {
+    id: 31, topic: 'money', title: 'Your deposit of 250.00 USD was confirmed',
+    body: 'Status: confirmed\nAmount: 250.00 USD via USDT on TRC20', link: '/org/1/invest/deposit',
+    read_at: null, created_at: WHEN,
+    ...overrides,
+  }
+}
+
+export function ticketFixture(overrides: Partial<Ticket> = {}): Ticket {
+  return {
+    id: 7, user_id: 1, subject_id: 2, subject_label: 'Deposits', status: 'new',
+    created_at: WHEN, updated_at: WHEN, last_message_at: WHEN, closed_at: null, closed_by: null,
+    last_from_desk: false, waiting_on_desk: true,
+    ...overrides,
+  }
+}
+
+export function ticketMessageFixture(overrides: Partial<TicketMessage> = {}): TicketMessage {
+  return {
+    id: 70, author_id: 1, author_name: 'Sherwyn Joel', from_desk: false,
+    body: 'My deposit has not arrived.', file_ids: [], created_at: WHEN,
+    ...overrides,
+  }
+}
+
+export function threadFixture(overrides: Partial<TicketThread> = {}): TicketThread {
+  return {
+    ...ticketFixture(), email: 'inv@example.com', display_name: 'Sherwyn Joel',
+    messages: [ticketMessageFixture()],
+    ...overrides,
+  }
+}
+
+export function subjectFixture(overrides: Partial<TicketSubject> = {}): TicketSubject {
+  return { id: 2, label: 'Deposits', enabled: true, sort: 0, created_at: WHEN, ...overrides }
+}
+
+export function bonusFixture(overrides: Partial<Bonus> = {}): Bonus {
+  return {
+    id: 4, source: 'deposit', source_id: 12, amount: 25, note: 'deposit #12', created_at: WHEN,
+    currency: 'USD',
+    ...overrides,
+  }
+}
+
+export function bonusRulesFixture(overrides: Partial<BonusRules> = {}): BonusRules {
+  return {
+    signup_enabled: false, signup_amount: 0, kyc_enabled: false, kyc_amount: 0,
+    deposit_enabled: true, deposit_pct: 10, deposit_cap: 100, updated_at: WHEN,
     ...overrides,
   }
 }

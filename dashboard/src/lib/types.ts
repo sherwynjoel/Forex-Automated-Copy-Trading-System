@@ -694,7 +694,7 @@ export interface PortalSettings { withdrawal_min: number; withdrawal_fee_pct: nu
 
 export interface RequestsSummary {
   deposits: number; withdrawals: number; transfers: number; payout_destinations: number
-  kyc: number; account_requests: number; total: number
+  kyc: number; account_requests: number; tickets: number; total: number
 }
 
 /** What POST investor/files answers. */
@@ -748,4 +748,46 @@ export interface RevealedPasswords { main_password: string; investor_password: s
 export interface SignIn {
   id: number; ip: string; user_agent: string | null
   outcome: 'password_ok' | 'mpin_ok' | 'failed'; created_at: string
+}
+
+// ------------------------------------------------------------ phase 4: engagement
+
+export type NotificationTopic = 'money' | 'identity' | 'support' | 'bonus'
+export interface PortalNotification {
+  id: number; topic: NotificationTopic; title: string; body: string
+  /** An in-app path, or null. */
+  link: string | null
+  read_at: string | null; created_at: string
+}
+export interface NotificationsPage { notifications: PortalNotification[]; has_more: boolean; next_before: number | null }
+export type NotificationPrefs = Record<NotificationTopic, boolean>
+export type ThemePref = 'light' | 'dim' | 'dark' | 'system'
+/** updated_at is null until the user first saves a theme. */
+export interface UserSettings { theme: ThemePref; updated_at: string | null }
+export type TicketStatus = 'new' | 'open' | 'closed'
+export interface TicketSubject { id: number; label: string; enabled: boolean; sort: number; created_at: string }
+export interface Ticket {
+  id: number; user_id: number; subject_id: number | null; subject_label: string; status: TicketStatus
+  created_at: string; updated_at: string; last_message_at: string
+  closed_at: string | null; closed_by: number | null
+  /** Who spoke last: true while the ticket waits on the investor. */
+  last_from_desk: boolean
+  /** The server's one "waiting on the desk" rule (not closed, investor spoke last). */
+  waiting_on_desk: boolean
+  /** On the desk queue and on every thread. */
+  email?: string; display_name?: string | null
+}
+export interface TicketMessage {
+  id: number; author_id: number | null; author_name: string | null; from_desk: boolean
+  body: string; file_ids: number[]; created_at: string
+}
+export interface TicketThread extends Ticket { messages: TicketMessage[] }
+export type BonusSource = 'signup' | 'kyc' | 'deposit' | 'manual'
+export interface Bonus {
+  id: number; source: BonusSource; source_id: number | null; amount: number
+  note: string | null; created_at: string; currency: string
+}
+export interface BonusRules {
+  signup_enabled: boolean; signup_amount: number; kyc_enabled: boolean; kyc_amount: number
+  deposit_enabled: boolean; deposit_pct: number; deposit_cap: number | null; updated_at: string | null
 }
