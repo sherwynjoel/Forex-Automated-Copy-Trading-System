@@ -90,40 +90,49 @@ async def notify(conn: psycopg.Connection, request: Request, org_id: int, user_i
                  topic: str, title: str, body: str, link: Optional[str] = None) -> None:
     """One in-app notification for `user_id` in `org_id`, then the same words
     by email (subject = title, text = body) unless their switch for `topic`
-    is off. Title and body are clipped to the column limits for both. Best
-    effort, like the audit: a failed insert is logged, and a failing or
-    missing alerter never fails the request that triggered it. Callers run
-    it AFTER their transaction, never while holding the ledger lock."""
-    title, body = clip(title, TITLE_MAX), clip(body, BODY_MAX)
+    is off. Title and body are clipped to the column limits for both.
+
+    Best effort: the WHOLE body -- checking the switch, the INSERT, finding
+    the alerter and the user's address, and the send -- is one try/except,
+    so a failure anywhere is logged and never fails the request that
+    triggered it. Callers run it AFTER their transaction, never while
+    holding the ledger lock."""
     try:
+        title, body = clip(title, TITLE_MAX), clip(body, BODY_MAX)
         conn.execute(
             "INSERT INTO notifications (org_id, user_id, topic, title, body, link) "
             "VALUES (%s, %s, %s, %s, %s, %s)", (org_id, user_id, topic, title, body, link))
-    except Exception:
-        logger.exception("failed to write notification for user %s", user_id)
-    if not email_wanted(conn, org_id, user_id, topic):
-        return
-    alerter = getattr(broadcaster, "alerter", None)
-    if alerter is None:
-        alerter = getattr(request.app.state, "alerter", None)
-    if alerter is None:
-        return
-    row = conn.execute("SELECT email FROM users WHERE id = %s", (user_id,)).fetchone()
-    if not row:
-        return
-    try:
+        if not email_wanted(conn, org_id, user_id, topic):
+            return
+        alerter = getattr(broadcaster, "alerter", None)
+        if alerter is None:
+            alerter = getattr(request.app.state, "alerter", None)
+        if alerter is None:
+            return
+        row = conn.execute("SELECT email FROM users WHERE id = %s", (user_id,)).fetchone()
+        if not row:
+            return
         await alerter.send_to(row[0], title, body)
     except Exception:
-        logger.exception("notification email failed for user %s", user_id)
+        logger.exception("notify failed for user %s in org %s (topic %s)", user_id, org_id, topic)
 
 
 async def notify_admins(conn: psycopg.Connection, request: Request, org_id: int, topic: str,
                         title: str, body: str, link: Optional[str] = None) -> None:
-    """notify() every admin member of the org (the support desk)."""
-    for (admin_id,) in conn.execute(
-            "SELECT user_id FROM org_memberships WHERE org_id = %s AND role = 'admin' "
-            "ORDER BY user_id", (org_id,)).fetchall():
-        await notify(conn, request, org_id, admin_id, topic, title, body, link)
+    """notify() every admin member of the org (the support desk). Best
+    effort, like notify(): the whole body is one try/except, so a failure
+    (listing the admins, or notifying one of them) is logged and never
+    fails the request that triggered it.
+
+    ponytail: the admins are emailed sequentially, inside this request --
+    move this to a background task if an org ever has many admins."""
+    try:
+        for (admin_id,) in conn.execute(
+                "SELECT user_id FROM org_memberships WHERE org_id = %s AND role = 'admin' "
+                "ORDER BY user_id", (org_id,)).fetchall():
+            await notify(conn, request, org_id, admin_id, topic, title, body, link)
+    except Exception:
+        logger.exception("failed to notify admins for org %s", org_id)
 
 
 # ------------------------------------------------------------ accounts + equity
@@ -525,32 +534,49 @@ async def announce_bonus(conn: psycopg.Connection, request: Request, *, org_id: 
                          actor_email: str, note: Optional[str] = None) -> None:
     """Audit one paid bonus and tell the investor (topic bonus). A hand-posted
     bonus is a warning, so it reaches the alerters like a ledger adjustment;
-    a rule's bonus is info. Run after the paying transaction."""
-    name = BONUS_NAMES[source]
-    row = conn.execute("SELECT email FROM users WHERE id = %s", (user_id,)).fetchone()
-    who = row[0] if row else f"user {user_id}"
-    await audit_control(
-        conn, org_id=org_id, action="investor_bonus_paid", actor_email=actor_email,
-        user_id=user_id, severity="warning" if source == "manual" else "info",
-        bonus_id=bonus_id, source=source, amount=money(amount), note=note,
-        summary=f"Bonus {amount:+.2f} USD ({name}) for {who} by {actor_email}")
-    noted = f"\nNote: {note}" if note else ""
-    if amount > 0:
-        title = f"You received a {amount:.2f} USD {name}"
-        body = (f"{amount:.2f} USD was paid into your Credit wallet.{noted}\n"
-                "Bonus credit can be moved to one of your trading accounts from Transfer.")
-    else:
-        title = f"A bonus of {-amount:.2f} USD was taken back"
-        body = f"{-amount:.2f} USD was taken from your Credit wallet.{noted}"
-    await notify(conn, request, org_id, user_id, "bonus", title, body,
-                 investor_link(org_id, "bonus"))
+    a rule's bonus is info. Run after the paying transaction.
+
+    Best effort, like notify: the whole body -- the email lookup, the audit
+    row and the notification -- is one try/except. By the time this runs
+    the bonus is already committed, so a failure here is logged as "paid
+    but not announced", never as a failed payment, and never turns into a
+    500 for a request that already landed."""
+    try:
+        name = BONUS_NAMES[source]
+        row = conn.execute("SELECT email FROM users WHERE id = %s", (user_id,)).fetchone()
+        who = row[0] if row else f"user {user_id}"
+        await audit_control(
+            conn, org_id=org_id, action="investor_bonus_paid", actor_email=actor_email,
+            user_id=user_id, severity="warning" if source == "manual" else "info",
+            bonus_id=bonus_id, source=source, amount=money(amount), note=note,
+            summary=f"Bonus {amount:+.2f} USD ({name}) for {who} by {actor_email}")
+        noted = f"\nNote: {note}" if note else ""
+        if amount > 0:
+            title = f"You received a {amount:.2f} USD {name}"
+            body = (f"{amount:.2f} USD was paid into your Credit wallet.{noted}\n"
+                    "Bonus credit can be moved to one of your trading accounts from Transfer.")
+        else:
+            title = f"A bonus of {-amount:.2f} USD was taken back"
+            body = f"{-amount:.2f} USD was taken from your Credit wallet.{noted}"
+        await notify(conn, request, org_id, user_id, "bonus", title, body,
+                     investor_link(org_id, "bonus"))
+    except Exception:
+        logger.exception("bonus %s paid but not announced", bonus_id)
 
 
 async def award_rule_bonus(conn: psycopg.Connection, request: Request, org_id: int,
-                           user_id: int, source: str, *, actor_email: str) -> Optional[int]:
+                           user_id: int, source: str, *,
+                           actor_email: Optional[str] = None) -> Optional[int]:
     """The signup or kyc rule's bonus, in its own transaction (ledger lock
     first), then audit + notify. Paid at most once per investor; nothing
     while the rule is off. Returns the bonuses id when paid.
+
+    `actor_email` is the admin who caused the triggering change (a role
+    change, a KYC approval); omitted (None) by the one caller where the
+    actor IS the investor themselves (a self-service join) and no
+    OrgContext carries their email -- it is then resolved from `user_id`
+    inside this same best-effort try, so a lookup failure cannot 500 a
+    join that already committed.
 
     Best effort, like notify: it runs after the join, role change or KYC
     approval has committed, so a failure here is logged and returns None
@@ -563,18 +589,29 @@ async def award_rule_bonus(conn: psycopg.Connection, request: Request, org_id: i
     itself -- it must never turn into a 500 for a join, role change or KYC
     approval that already landed. The bonus stays paid either way; only
     the return value (None) tells the caller the announcement is missing
-    from the log."""
+    from the log. The log message says so explicitly ("paid but not
+    announced") rather than the generic "bonus failed", which would be
+    wrong once the money has already moved."""
+    bonus_id: Optional[int] = None
     try:
         with conn.transaction():
             lock_investor_ledger(conn, org_id, user_id)
             amount = rule_bonus(conn, org_id, source)
             bonus_id = pay_bonus(conn, org_id, user_id, source, amount)
         if bonus_id is not None:
+            email = actor_email
+            if email is None:
+                row = conn.execute("SELECT email FROM users WHERE id = %s",
+                                   (user_id,)).fetchone()
+                email = row[0] if row else f"user {user_id}"
             await announce_bonus(conn, request, org_id=org_id, user_id=user_id,
                                  bonus_id=bonus_id, source=source, amount=amount,
-                                 actor_email=actor_email)
+                                 actor_email=email)
     except Exception:
-        logger.exception("%s bonus failed for user %s in org %s", source, user_id, org_id)
+        if bonus_id is not None:
+            logger.exception("bonus %s paid but not announced", bonus_id)
+        else:
+            logger.exception("%s bonus failed for user %s in org %s", source, user_id, org_id)
         return None
     return bonus_id
 

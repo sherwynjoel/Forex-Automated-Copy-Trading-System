@@ -99,10 +99,12 @@ def create_orgs_router() -> APIRouter:
         if role == "investor":
             # The welcome bonus, if the org's rule is on: its own transaction
             # (the ledger lock must be the first statement of whatever writes
-            # wallet_entries, and this one began with the invite).
-            (email,) = conn.execute("SELECT email FROM users WHERE id = %s", (user_id,)).fetchone()
-            await pc.award_rule_bonus(conn, http_request, org_id, user_id, "signup",
-                                      actor_email=email)
+            # wallet_entries, and this one began with the invite). No
+            # OrgContext here to carry an actor email (unlike every other
+            # award_rule_bonus caller) -- award_rule_bonus resolves the
+            # joiner's own email itself, inside its best-effort try, so a
+            # lookup failure here cannot 500 a join that already committed.
+            await pc.award_rule_bonus(conn, http_request, org_id, user_id, "signup")
         return {"org_id": org_id, "role": role}
 
     @router.get("/{org_id}")

@@ -503,6 +503,71 @@ def test_notify_admins_reaches_every_admin_and_nobody_else(db, make_user, make_o
     assert rows == sorted([(a1["id"], "support"), (a2["id"], "support")])
 
 
+def test_notify_is_best_effort_across_its_whole_body(db, org_user, monkeypatch):
+    """Fix-wave item 2: notify()'s whole body -- the email-switch check, the
+    INSERT, finding the alerter and the user's address, and the send -- is
+    one try/except. A failure checking the switch (here) must not propagate
+    and must not undo the notification row the INSERT already wrote."""
+    org_id, user_id = org_user
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("prefs lookup down")
+
+    monkeypatch.setattr(pc, "email_wanted", boom)
+    with psycopg.connect(db, autocommit=True) as conn:
+        asyncio.run(pc.notify(conn, request, org_id, user_id, "money", "Subject", "Body"))
+        rows = _notes(db, user_id)
+    assert [r[:2] for r in rows] == [("money", "Subject")]
+
+
+def test_announce_bonus_is_best_effort_across_its_whole_body(org_user, db, monkeypatch, caplog):
+    """Fix-wave item 2 ("same for announce_bonus"): a failure anywhere in
+    its body (here, the notify step) is logged and swallowed -- the audit
+    row it already wrote (before notify runs) stays, and the caller never
+    sees an exception. The message matches item 3's convention."""
+    org_id, user_id = org_user
+    with psycopg.connect(db, autocommit=True) as conn:
+        with conn.transaction():
+            pc.lock_investor_ledger(conn, org_id, user_id)
+            bonus_id = pc.pay_bonus(conn, org_id, user_id, "manual", Decimal("20"), note="promo")
+
+    async def boom(*_args, **_kwargs):
+        raise RuntimeError("notify down")
+
+    monkeypatch.setattr(pc, "notify", boom)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    with psycopg.connect(db, autocommit=True) as conn:
+        with caplog.at_level(logging.ERROR):
+            asyncio.run(pc.announce_bonus(
+                conn, request, org_id=org_id, user_id=user_id, bonus_id=bonus_id,
+                source="manual", amount=Decimal("20"), actor_email="admin@example.com",
+                note="promo"))
+        audited = conn.execute(
+            "SELECT 1 FROM events WHERE org_id = %s AND payload->>'action' = 'investor_bonus_paid'",
+            (org_id,)).fetchall()
+    assert audited                                        # the audit row still landed
+    assert f"bonus {bonus_id} paid but not announced" in caplog.text
+
+
+def test_notify_admins_is_best_effort_across_its_whole_body(db, make_user, make_org,
+                                                             monkeypatch, caplog):
+    """Fix-wave item 2: a failure listing the org's admins is logged and
+    swallowed rather than failing whatever triggered the notification."""
+    admin = make_user(email="a1@example.com")
+    org_id = make_org(members=[(admin, "admin")])
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("memberships down")
+
+    with psycopg.connect(db, autocommit=True) as conn:
+        monkeypatch.setattr(conn, "execute", boom)
+        with caplog.at_level(logging.ERROR):
+            asyncio.run(pc.notify_admins(conn, request, org_id, "support", "New ticket", "Body"))
+    assert "failed to notify admins" in caplog.text
+
+
 def test_clip_and_investor_link():
     assert pc.clip("abc", 3) == "abc"
     assert pc.clip("abcd", 3) == "ab…"
@@ -586,7 +651,12 @@ def test_award_rule_bonus_logs_an_announce_failure_after_the_bonus_committed(
     committed) is logged and swallowed -- the bonus stays paid, and the
     caller (join, role change, KYC approval) never sees a 500. Only the
     return value (None here, same as a failed payment) tells the caller
-    the announcement never happened."""
+    the announcement never happened.
+
+    Fix-wave item 3: the log message must say "bonus <id> paid but not
+    announced", never the generic "bonus failed" -- that would wrongly
+    suggest the money never moved, when it is sitting in wallet_entries
+    right above this assertion."""
     org_id, user_id = org_user
     with psycopg.connect(db, autocommit=True) as conn:
         pc.bonus_rules(conn, org_id)
@@ -605,9 +675,48 @@ def test_award_rule_bonus_logs_an_announce_failure_after_the_bonus_committed(
         rows = conn.execute(
             "SELECT amount FROM wallet_entries WHERE org_id = %s AND user_id = %s "
             "AND wallet = 'credit'", (org_id, user_id)).fetchall()
+        (bonus_id,) = conn.execute(
+            "SELECT id FROM bonuses WHERE org_id = %s AND user_id = %s AND source = 'signup'",
+            (org_id, user_id)).fetchone()
     assert result is None
     assert rows == [(Decimal("25.00"),)]                 # the bonus is NOT rolled back
-    assert "signup bonus failed" in caplog.text
+    assert f"bonus {bonus_id} paid but not announced" in caplog.text
+    assert "signup bonus failed" not in caplog.text
+
+
+def test_award_rule_bonus_resolves_its_own_actor_email_and_survives_a_lookup_failure(
+        org_user, db, monkeypatch, caplog):
+    """Fix-wave item 4: orgs.py's join route no longer pre-fetches the
+    joiner's email before calling award_rule_bonus (that SELECT used to run
+    OUTSIDE any try, after the join had already committed). Passing no
+    actor_email (the self-service join path) makes award_rule_bonus resolve
+    it from user_id itself, inside this same best-effort try -- a failure
+    there still pays the bonus and is logged, never a 500 for a join that
+    already landed."""
+    org_id, user_id = org_user
+    with psycopg.connect(db, autocommit=True) as conn:
+        pc.bonus_rules(conn, org_id)
+        conn.execute("UPDATE bonus_rules SET signup_enabled = true, signup_amount = 30 "
+                     "WHERE org_id = %s", (org_id,))
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    with psycopg.connect(db, autocommit=True) as conn:
+        real_execute = conn.execute
+
+        def flaky(query, *args, **kwargs):
+            if isinstance(query, str) and "SELECT email FROM users" in query:
+                raise RuntimeError("users table down")
+            return real_execute(query, *args, **kwargs)
+
+        monkeypatch.setattr(conn, "execute", flaky)
+        with caplog.at_level(logging.ERROR):
+            result = asyncio.run(pc.award_rule_bonus(conn, request, org_id, user_id, "signup"))
+    with psycopg.connect(db, autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT amount FROM wallet_entries WHERE org_id = %s AND user_id = %s "
+            "AND wallet = 'credit'", (org_id, user_id)).fetchall()
+    assert result is None
+    assert rows == [(Decimal("30.00"),)]                 # paid despite the lookup failure
+    assert "paid but not announced" in caplog.text
 
 
 def test_pay_bonus_concurrent_confirm_of_the_same_deposit_pays_once(org_user, db):
