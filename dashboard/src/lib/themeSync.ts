@@ -26,9 +26,13 @@ export async function saveThemePref(pref: ThemePref): Promise<void> {
   } catch { /* see above */ }
 }
 
-/** After sign-in: paint the account's theme -- or, for an account that never
- *  saved one, seed it from this browser's explicit choice instead of
- *  resetting a choice the user already made here. */
+/** After sign-in: paint the account's theme. An account that never saved
+ *  one (`updated_at` null) is left alone -- this browser keeps whatever it
+ *  is already showing, and nothing is written back. A browser can be
+ *  shared: writing this browser's local look to a server that has never
+ *  saved one would hand a PREVIOUS user's choice to whichever account
+ *  signs in next. The account only gets a theme once its own user picks
+ *  one in Settings. */
 export async function syncThemeFromServer(choose: (pref: ThemePref) => void): Promise<void> {
   let s: Partial<UserSettings> | undefined
   try {
@@ -37,10 +41,6 @@ export async function syncThemeFromServer(choose: (pref: ThemePref) => void): Pr
     return
   }
   if (!s || !isThemePref(s.theme)) return
-  const local = localPref()
-  if (s.updated_at == null && local != null) {
-    await saveThemePref(local)
-    return
-  }
+  if (s.updated_at == null) return
   choose(s.theme)
 }

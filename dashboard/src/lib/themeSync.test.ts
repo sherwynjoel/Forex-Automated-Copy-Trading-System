@@ -28,14 +28,24 @@ test("the account's saved theme is applied", async () => {
   expect(choose).toHaveBeenCalledWith('dim')
 })
 
-test('an account that never saved one is seeded from this browser, not reset', async () => {
+test('the server never having saved a theme makes no PUT and leaves the local look alone', async () => {
+  const fetchMock = stubSettings({ theme: 'system', updated_at: null })
+  const choose = vi.fn()
+  await syncThemeFromServer(choose)
+  expect(choose).not.toHaveBeenCalled()
+  expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === 'PUT')).toBe(false)
+  expect(localStorage.getItem('mf.theme')).toBeNull()
+})
+
+test("a shared browser's previous user never gets written onto the next account", async () => {
   localStorage.setItem('mf.theme', 'dark')
   const fetchMock = stubSettings({ theme: 'system', updated_at: null })
   const choose = vi.fn()
   await syncThemeFromServer(choose)
   expect(choose).not.toHaveBeenCalled()
-  const put = fetchMock.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === 'PUT')
-  expect(JSON.parse((put![1] as RequestInit).body as string)).toEqual({ theme: 'dim' })
+  expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === 'PUT')).toBe(false)
+  // the local look (this browser's, possibly the PREVIOUS user's choice) is untouched
+  expect(localStorage.getItem('mf.theme')).toBe('dark')
 })
 
 test('an answer that is not a settings body changes nothing', async () => {

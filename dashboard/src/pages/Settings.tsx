@@ -30,6 +30,9 @@ export default function Settings() {
   const [notice, setNotice] = useState<string | null>(null)
   // Bumped per org: a late answer for the previous org never lands.
   const seq = useRef(0)
+  // Bumped per theme pick: a stale PUT answer (success or failure) from an
+  // earlier pick never overwrites what a later pick already showed.
+  const themeSeq = useRef(0)
 
   useEffect(() => {
     const mine = ++seq.current
@@ -51,14 +54,15 @@ export default function Settings() {
   }, [orgId])
 
   const pickTheme = async (pref: ThemePref) => {
+    const mine = ++themeSeq.current
     setThemePref(pref)
     choose(pref)
     setError(null); setNotice(null)
     try {
       await api<UserSettings>('/api/me/settings', { method: 'PUT', body: JSON.stringify({ theme: pref }) })
-      setNotice('Appearance saved')
+      if (mine === themeSeq.current) setNotice('Appearance saved')
     } catch (err) {
-      setError(errorText(err, 'Could not save the appearance'))
+      if (mine === themeSeq.current) setError(errorText(err, 'Could not save the appearance'))
     }
   }
 
