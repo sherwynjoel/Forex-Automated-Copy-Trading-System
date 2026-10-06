@@ -15,6 +15,7 @@ import PageHeader from '../components/PageHeader'
 import Tabs from '../components/Tabs'
 import AccountsDrawer from './investors/AccountsDrawer'
 import AdjustDialog from './investors/AdjustDialog'
+import GrantBonusDialog from './investors/GrantBonusDialog'
 import LedgerDrawer from './investors/LedgerDrawer'
 import PackagesTab from './investors/PackagesTab'
 import PaymentMethodsTab, { type Runner } from './investors/PaymentMethodsTab'
@@ -72,6 +73,7 @@ export default function Investors() {
   const [tab, setTab] = useState<Tab>('investors')
   const [ledgerFor, setLedgerFor] = useState<InvestorRow | null>(null)
   const [adjustFor, setAdjustFor] = useState<InvestorRow | null>(null)
+  const [bonusFor, setBonusFor] = useState<InvestorRow | null>(null)
   const [accountsFor, setAccountsFor] = useState<number | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -200,6 +202,7 @@ export default function Investors() {
                               { key: 'accounts', label: 'Manage accounts', onSelect: () => setAccountsFor(r.user_id) },
                               { key: 'ledger', label: 'View ledger', onSelect: () => setLedgerFor(r) },
                               { key: 'adjust', label: 'Adjust balance', disabled: busy, onSelect: () => setAdjustFor(r) },
+                              { key: 'bonus', label: 'Grant bonus', disabled: busy, onSelect: () => setBonusFor(r) },
                             ]} />
                           )}
                         </td>
@@ -233,6 +236,16 @@ export default function Investors() {
                       setNotice(`Adjustment of ${signed(entry.amount)} posted to ${walletLabel(entry.wallet)}`)
                       await refresh()
                     }} />
+      <GrantBonusDialog orgId={orgId} investor={bonusFor} onCancel={() => setBonusFor(null)}
+                        onGranted={async (b) => {
+                          const name = bonusFor?.display_name ?? 'the investor'
+                          setBonusFor(null)
+                          setError(null)
+                          setNotice(b.amount > 0
+                            ? `Bonus of ${money(b.amount)} paid to ${name}'s Credit wallet`
+                            : `Bonus of ${money(-b.amount)} taken back from ${name}'s Credit wallet`)
+                          await refresh()
+                        }} />
     </div>
   )
 }

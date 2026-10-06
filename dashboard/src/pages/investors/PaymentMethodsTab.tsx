@@ -10,6 +10,7 @@ import ConfirmDialog from '../../components/ConfirmDialog'
 import Drawer from '../../components/Drawer'
 import Input from '../../components/Input'
 import Select from '../../components/Select'
+import BonusRulesCard from './BonusRulesCard'
 import TicketSubjectsCard from './TicketSubjectsCard'
 import type { PaymentMethod, PortalSettings } from '../../lib/types'
 
@@ -296,6 +297,8 @@ export default function PaymentMethodsTab({ orgId, control, methods, settings, b
           </div>
         </form>
       </Card>
+
+      <BonusRulesCard orgId={orgId} control={control} />
 
       <TicketSubjectsCard orgId={orgId} control={control} />
 

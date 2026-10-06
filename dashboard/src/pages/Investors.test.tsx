@@ -138,6 +138,14 @@ function mockRoutes(options: {
       return jsonResponse({ ...older, id: 901 }, 201)
     }
     if (path.endsWith('/ticket-subjects')) return jsonResponse([])
+    if (path.endsWith('/bonus-rules')) {
+      return jsonResponse({ signup_enabled: false, signup_amount: 0, kyc_enabled: false, kyc_amount: 0,
+        deposit_enabled: false, deposit_pct: 0, deposit_cap: null, updated_at: null })
+    }
+    if (path.endsWith('/investors/5/bonuses') && method === 'POST') {
+      return jsonResponse({ id: 9, source: 'manual', source_id: null, amount: 25, note: 'Promo',
+        created_at: '2026-10-05T10:00:00Z', currency: 'USD' }, 201)
+    }
     if (path.endsWith('/account-packages')) return jsonResponse([])
     return jsonResponse({})
   })
@@ -580,6 +588,31 @@ test('the investors table shows each investor\'s verification, and the packages 
   expect(await screen.findByRole('heading', { name: 'Account packages' })).toBeInTheDocument()
   expect(await screen.findByText('No packages yet. Investors cannot request an account until you add one.'))
     .toBeInTheDocument()
+})
+
+test('Grant bonus pays into the Credit wallet with the admin MPIN', async () => {
+  const fetchMock = mockRoutes()
+  render(<MemoryRouter><Investors /></MemoryRouter>)
+  await screen.findByText('Ada Investor')
+  await chooseFromMenu('Ada Investor', 'Grant bonus')
+  const dialog = await screen.findByRole('dialog', { name: 'Grant Ada Investor a bonus' })
+  await userEvent.type(within(dialog).getByLabelText('Bonus amount'), '25')
+  await userEvent.type(within(dialog).getByLabelText('Bonus note'), 'Promo')
+  await userEvent.click(within(dialog).getByLabelText('Your MPIN digit 1 of 6'))
+  await userEvent.keyboard('123456')
+  await userEvent.click(within(dialog).getByRole('button', { name: 'Pay bonus' }))
+  expect(await screen.findByText("Bonus of 25.00 paid to Ada Investor's Credit wallet")).toBeInTheDocument()
+  expect(bodyOf(fetchMock, '/investors/5/bonuses', 'POST')).toEqual({ amount: '25', note: 'Promo', mpin: '123456' })
+})
+
+test('the Portal settings tab carries the bonus rules and the ticket subjects', async () => {
+  mockRoutes()
+  render(<MemoryRouter><Investors /></MemoryRouter>)
+  await screen.findByText('Ada Investor')
+  await userEvent.click(screen.getByRole('tab', { name: 'Portal settings' }))
+  expect(await screen.findByRole('heading', { name: 'Bonus rules' })).toBeInTheDocument()
+  expect(screen.getByRole('heading', { name: 'Ticket subjects' })).toBeInTheDocument()
+  expect(screen.getByRole('heading', { name: 'Withdrawal and account rules' })).toBeInTheDocument()
 })
 
 test('a viewer sees the figures but no actions', async () => {
