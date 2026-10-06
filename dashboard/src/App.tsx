@@ -54,6 +54,7 @@ const InvestorSecurity = pick(investor, 'InvestorSecurity')
 const InvestorProfile = pick(investor, 'InvestorProfile')
 const InvestorOpenAccount = pick(investor, 'InvestorOpenAccount')
 const InvestorSupport = pick(investor, 'InvestorSupport')
+const InvestorBonus = pick(investor, 'InvestorBonus')
 const Notifications = pick(admin, 'Notifications')
 const InvestorNotifications = pick(investor, 'Notifications')
 const Settings = pick(admin, 'Settings')
@@ -133,6 +134,7 @@ export default function App() {
               <Route path="invest/profile" element={<InvestorProfile />} />
               <Route path="invest/open-account" element={<InvestorOpenAccount />} />
               <Route path="invest/support" element={<InvestorSupport />} />
+              <Route path="invest/bonus" element={<InvestorBonus />} />
               <Route path="invest/notifications" element={<InvestorNotifications />} />
               <Route path="invest/settings" element={<InvestorSettings />} />
               <Route path="*" element={<NotFound />} />

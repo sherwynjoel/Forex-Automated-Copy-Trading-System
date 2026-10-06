@@ -18,10 +18,10 @@ import type { AccountSummary, InvestorSummary, MoneyRef, PortalTransfer, WalletK
 
 const AMOUNT_RE = /^\d+(\.\d{1,2})?$/
 const TWO_DECIMALS = 'Enter an amount with at most two decimals, digits only (for example 250.00).'
-// The pairs phase 1 allows (spec section 7); "account" is any of the
-// investor's trading accounts, the credit wallet never moves.
+// The allowed pairs (portal_ledger.TRANSFER_PAIRS): "account" is any of the
+// investor's trading accounts; bonus credit moves only to a trading account.
 const PAIRS: ReadonlyArray<readonly [string, string]> = [
-  ['main', 'account'], ['account', 'main'], ['pamm', 'main'], ['social', 'main'],
+  ['main', 'account'], ['account', 'main'], ['pamm', 'main'], ['social', 'main'], ['credit', 'account'],
 ]
 
 export interface TransferOption {
@@ -50,7 +50,7 @@ function accountLabel(accounts: AccountSummary[], accountId: number | null | und
 }
 
 export function transferOptions(s: InvestorSummary): TransferOption[] {
-  const wallets: WalletKind[] = ['main', 'pamm', 'social']
+  const wallets: WalletKind[] = ['main', 'credit', 'pamm', 'social']
   const opts: TransferOption[] = wallets.map((w) => ({
     value: `wallet:${w}`, label: walletLabel(w), ref: { kind: 'wallet', wallet: w },
     available: s.wallets[w].available,
@@ -154,7 +154,7 @@ export default function InvestorTransfer() {
     <div className="space-y-6 max-w-5xl">
       <PageHeader
         title="Transfer"
-        subtitle="Move money between your wallets and your trading account. Wallet-to-wallet moves complete at once; moves to or from the trading account are done by an admin."
+        subtitle="Move money between your wallets and your trading accounts. Bonus credit moves only to a trading account. Wallet-to-wallet moves complete at once; moves to or from a trading account are done by an admin."
       />
       {error && <Banner kind="error" onDismiss={() => setError(null)}>{error}</Banner>}
       {notice && <Banner kind="notice" onDismiss={() => setNotice(null)}>{notice}</Banner>}
@@ -184,7 +184,7 @@ export default function InvestorTransfer() {
                 </Select>
                 {targets.length === 0 && (
                   <span className="block mt-1 text-xs text-warn-deep">
-                    Link a trading account to move wallet money into it; PAMM and Social wallets can still move to My wallet.
+                    {fromOpt.ref.wallet === 'credit' ? 'Bonus credit moves only to a trading account; you have none linked yet.' : 'Link a trading account to move wallet money into it; PAMM and Social wallets can still move to My wallet.'}
                   </span>
                 )}
               </label>
