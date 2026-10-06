@@ -139,7 +139,7 @@ export default function Investors() {
         onChange={(k) => setTab(k as Tab)}
         items={[
           { key: 'investors', label: 'Investors' },
-          { key: 'methods', label: 'Payment methods' },
+          { key: 'methods', label: 'Portal settings' },
           { key: 'packages', label: 'Account packages' },
         ]}
       />

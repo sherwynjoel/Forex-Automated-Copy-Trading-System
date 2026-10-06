@@ -19,6 +19,7 @@ import {
 } from './requests/RequestTabs'
 import AccountRequestsTab from './requests/AccountRequestsTab'
 import VerificationTab from './requests/VerificationTab'
+import SupportTab from './requests/SupportTab'
 import RequestDetailsDrawer, { type Details } from './requests/RequestDetailsDrawer'
 import type {
   PayoutDestination, PortalDeposit, PortalTransfer, PortalWithdrawal, RequestsSummary,
@@ -48,12 +49,39 @@ function isTab(v: string | null): v is DeskTab {
 
 export default function Requests() {
   const { orgId, role } = useOrg()
-  const [searchParams] = useSearchParams()
+  const [searchParams, setSearchParams] = useSearchParams()
   // The Investors page's chips deep-link here with ?tab=<kind>.
   const [tab, setTab] = useState<DeskTab>(() => {
     const t = searchParams.get('tab')
     return isTab(t) ? t : 'deposits'
   })
+  const urlTab = searchParams.get('tab')
+  const initialTicket = Number(searchParams.get('ticket')) || null
+  // The page is keyed by pathname only, so a link followed while it is open
+  // (a support notification from the bell) changes just the query string:
+  // follow its tab. `initialTicket` is a dependency so a link back to the
+  // tab already named in the URL still lands.
+  useEffect(() => { if (isTab(urlTab)) setTab(urlTab) }, [urlTab, initialTicket])
+  // ?tab mirrors the chosen tab, so the next link to ?tab=support is always
+  // a change; a tab change also drops ?ticket.
+  const chooseTab = (k: DeskTab) => {
+    setTab(k)
+    setSearchParams((p) => {
+      const next = new URLSearchParams(p)
+      next.set('tab', k)
+      next.delete('ticket')
+      return next
+    }, { replace: true })
+  }
+  // Closing the ticket drawer drops ?ticket, so returning to the tab does
+  // not reopen it and the same notification opens it again.
+  const dropTicket = useCallback(() => {
+    setSearchParams((p) => {
+      const next = new URLSearchParams(p)
+      next.delete('ticket')
+      return next
+    }, { replace: true })
+  }, [setSearchParams])
   const [show, setShow] = useState<'open' | 'all'>('open')
   const [summary, setSummary] = useState<RequestsSummary | null>(null)
   const [deposits, setDeposits] = useState<PortalDeposit[]>([])
@@ -220,7 +248,7 @@ export default function Requests() {
     <div className="space-y-6 max-w-5xl">
       <PageHeader
         title="Requests"
-        subtitle="Every request waiting on you: deposit notices to confirm, withdrawals to approve and pay, transfers to fund, payout accounts to vet, identities to verify and trading accounts to open. The app records; you move the funds."
+        subtitle="Every request waiting on you: deposit notices to confirm, withdrawals to approve and pay, transfers to fund, payout accounts to vet, identities to verify, trading accounts to open and support tickets to answer. The app records; you move the funds."
         actions={
           <Select aria-label="Show" value={show} onChange={(e) => setShow(e.target.value as 'open' | 'all')}>
             <option value="open">Open</option>
@@ -235,7 +263,7 @@ export default function Requests() {
         idBase="requests"
         label="Request types"
         value={tab}
-        onChange={(k) => setTab(k as DeskTab)}
+        onChange={(k) => chooseTab(k as DeskTab)}
         items={tabItems(summary)}
       />
 
@@ -282,6 +310,11 @@ export default function Requests() {
               {tab === 'account_requests' && (
                 <AccountRequestsTab key={orgId} orgId={orgId} control={control} show={show}
                                     onDone={tabDone} />
+              )}
+              {tab === 'support' && (
+                <SupportTab key={orgId} orgId={orgId} control={control} show={show}
+                            onDone={tabDone} initialTicket={initialTicket}
+                            onDrawerClosed={dropTicket} />
               )}
             </div>
           </Card>

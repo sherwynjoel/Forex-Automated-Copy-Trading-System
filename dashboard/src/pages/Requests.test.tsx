@@ -1,12 +1,12 @@
 import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, useNavigate } from 'react-router-dom'
 import { expect, test, vi, afterEach, beforeEach } from 'vitest'
 import Requests from './Requests'
 import * as apiModule from '../lib/api'
 import { mockUseOrg } from '../test/orgMock'
 import {
-  depositFixture, destinationFixture, transferFixture, withdrawalFixture,
+  depositFixture, destinationFixture, threadFixture, ticketFixture, transferFixture, withdrawalFixture,
 } from '../test/portalFixtures'
 
 const { useOrgMock } = vi.hoisted(() => ({ useOrgMock: vi.fn() }))
@@ -593,4 +593,64 @@ test('the desk has Verification and Account requests tabs, and ?tab= opens them'
   expect(screen.getByRole('tab', { name: 'Account requests (0)' })).toHaveAttribute('aria-selected', 'true')
   await userEvent.click(screen.getByRole('tab', { name: 'Verification (0)' }))
   expect(await screen.findByText('No open verifications')).toBeInTheDocument()
+})
+
+test('the Support tab carries the waiting count and opens a linked ticket', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input)
+    if (url.endsWith('/requests/summary')) {
+      return jsonResponse({ deposits: 0, withdrawals: 0, transfers: 0, payout_destinations: 0,
+                            kyc: 0, account_requests: 0, tickets: 2, total: 2 })
+    }
+    if (url.endsWith('/tickets/7')) return jsonResponse(threadFixture({ id: 7 }))
+    if (url.endsWith('/tickets')) {
+      return jsonResponse([ticketFixture({ id: 7, email: 'inv@example.com', display_name: 'Ada' })])
+    }
+    return jsonResponse([])
+  }))
+  render(<MemoryRouter initialEntries={['/org/1/requests?tab=support&ticket=7']}><Requests /></MemoryRouter>)
+  expect(await screen.findByRole('tab', { name: 'Support (2)' })).toHaveAttribute('aria-selected', 'true')
+  expect(await screen.findByRole('dialog', { name: 'Ticket #7: Deposits' })).toBeInTheDocument()
+})
+
+/** Stands in for the bell: navigates while Requests stays mounted. */
+function GoTo({ to }: { to: string }) {
+  const navigate = useNavigate()
+  return <button type="button" onClick={() => navigate(to)}>Follow link</button>
+}
+
+test('a support link followed while the page is open switches tab and opens the ticket every time', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input)
+    if (url.endsWith('/requests/summary')) {
+      return jsonResponse({ deposits: 0, withdrawals: 0, transfers: 0, payout_destinations: 0,
+                            kyc: 0, account_requests: 0, tickets: 1, total: 1 })
+    }
+    if (url.endsWith('/tickets/7')) return jsonResponse(threadFixture({ id: 7 }))
+    if (url.endsWith('/tickets')) {
+      return jsonResponse([ticketFixture({ id: 7, email: 'inv@example.com', display_name: 'Ada' })])
+    }
+    return jsonResponse([])
+  }))
+  render(
+    <MemoryRouter initialEntries={['/org/1/requests']}>
+      <GoTo to="/org/1/requests?tab=support&ticket=7" />
+      <Requests />
+    </MemoryRouter>,
+  )
+  expect(await screen.findByRole('tab', { name: /^Deposits/ })).toHaveAttribute('aria-selected', 'true')
+  await userEvent.click(screen.getByRole('button', { name: 'Follow link' }))
+  expect(await screen.findByRole('tab', { name: 'Support (1)' })).toHaveAttribute('aria-selected', 'true')
+  const drawer = await screen.findByRole('dialog', { name: 'Ticket #7: Deposits' })
+  await userEvent.click(within(drawer).getByRole('button', { name: 'Close' }))
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  // Closing dropped ?ticket, so the same link is a change again and reopens it.
+  await userEvent.click(screen.getByRole('button', { name: 'Follow link' }))
+  expect(await screen.findByRole('dialog', { name: 'Ticket #7: Deposits' })).toBeInTheDocument()
+  // Picking another tab moves ?tab with it, so the link switches back.
+  await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Close' }))
+  await userEvent.click(screen.getByRole('tab', { name: /^Deposits/ }))
+  await userEvent.click(screen.getByRole('button', { name: 'Follow link' }))
+  expect(await screen.findByRole('tab', { name: 'Support (1)' })).toHaveAttribute('aria-selected', 'true')
+  expect(await screen.findByRole('dialog', { name: 'Ticket #7: Deposits' })).toBeInTheDocument()
 })
