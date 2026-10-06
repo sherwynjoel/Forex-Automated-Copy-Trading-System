@@ -17,7 +17,7 @@ test('admin groups are Desk, Fleet and Org, and the current page carries aria-cu
   expect(screen.getByRole('link', { name: 'Requests' })).toHaveAttribute('href', '/org/7/requests')
 })
 
-test('a viewer sees no Trade, Automation, Investors or Requests; an investor sees fourteen portal links in Money and Account groups', () => {
+test('a viewer sees no Trade, Automation, Investors or Requests; an investor sees fifteen portal links in Money and Account groups', () => {
   const { unmount } = render(
     <MemoryRouter initialEntries={['/org/7']}>
       <NavRail groups={adminNav(7, 'viewer')} />
@@ -32,7 +32,7 @@ test('a viewer sees no Trade, Automation, Investors or Requests; an investor see
       <NavRail groups={investorNav(7)} />
     </MemoryRouter>
   )
-  expect(screen.getAllByRole('link')).toHaveLength(14)
+  expect(screen.getAllByRole('link')).toHaveLength(15)
   expect(screen.getByText('Money')).toBeInTheDocument()
   expect(screen.getByText('Account')).toBeInTheDocument()
   expect(screen.queryByText('Desk')).toBeNull()
