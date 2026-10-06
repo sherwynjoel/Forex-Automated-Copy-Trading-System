@@ -3,6 +3,7 @@ import { Navigate, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { api } from '../lib/api'
 import { useOrg } from '../lib/org'
 import { useTheme } from '../hooks/useTheme'
+import { saveThemePref, syncThemeFromServer } from '../lib/themeSync'
 import { useRequestsBadge } from '../hooks/useRequestsBadge'
 import { useUnreadCount } from '../hooks/useUnreadCount'
 import type { Account } from '../lib/types'
@@ -29,7 +30,10 @@ import { platformCaption } from '../lib/platform'
  * their portal; admins see the open-request count on the Requests link.
  */
 export default function Layout() {
-  const { theme, toggle: toggleTheme } = useTheme()
+  const { theme, toggle: toggleTheme, choose: chooseTheme } = useTheme()
+  // The account's theme follows the user between browsers; localStorage
+  // stays the first-paint cache. Once per shell mount.
+  useEffect(() => { void syncThemeFromServer(chooseTheme) }, [chooseTheme])
   const location = useLocation()
   const navigate = useNavigate()
   const { orgId, role, me } = useOrg()
@@ -116,12 +120,18 @@ export default function Layout() {
       </div>
       <NavRail groups={groups} onNavigate={() => setMenuOpen(false)} />
       <div className="border-t p-3">
-        <Button variant="ghost" tone="neutral" size="sm" block onClick={toggleTheme}
+        <Button variant="ghost" tone="neutral" size="sm" block onClick={() => { void saveThemePref(toggleTheme()) }}
                 aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dim theme'}
                 className="justify-start">
           <span aria-hidden="true">{theme === 'dark' ? '☀' : '☾'}</span>{' '}
           {theme === 'dark' ? 'Light mode' : 'Dim mode'}
         </Button>
+        {!investor && (
+          <Button variant="ghost" tone="neutral" size="sm" block to={`/org/${orgId}/settings`}
+                  className="justify-start">
+            Settings
+          </Button>
+        )}
         <Button variant="ghost" tone="neutral" size="sm" block onClick={handleLogout} className="justify-start">
           Log out
         </Button>

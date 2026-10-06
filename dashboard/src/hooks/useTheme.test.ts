@@ -1,6 +1,6 @@
 import { renderHook, act } from '@testing-library/react'
 import { expect, test, afterEach, vi } from 'vitest'
-import { useTheme } from './useTheme'
+import { paletteFor, useTheme } from './useTheme'
 
 afterEach(() => {
   localStorage.clear()
@@ -107,4 +107,30 @@ test('toggling keeps the browser-chrome theme-color meta in step', () => {
     result.current.toggle()
   })
   expect(meta.getAttribute('content')).toBe('#f4fafb')
+})
+
+test('choose paints a preference: dim and dark are the night palette, system follows the OS', () => {
+  stubMatchMedia(false)
+  const { result } = renderHook(() => useTheme())
+  act(() => { result.current.choose('dim') })
+  expect(document.documentElement.dataset.theme).toBe('dark')
+  expect(localStorage.getItem('mf.theme')).toBe('dark')
+  act(() => { result.current.choose('system') })
+  expect(document.documentElement.dataset.theme).toBe('light')
+  expect(localStorage.getItem('mf.theme')).toBeNull()
+  act(() => { result.current.choose('dark') })
+  expect(result.current.theme).toBe('dark')
+  expect(paletteFor('light')).toBe('light')
+  expect(paletteFor('dark')).toBe('dark')
+})
+
+test('a choice in one hook reaches every other hook in the tab; toggle says what it chose', () => {
+  const a = renderHook(() => useTheme())
+  const b = renderHook(() => useTheme())
+  act(() => { a.result.current.choose('dim') })
+  expect(b.result.current.theme).toBe('dark')
+  let pref = ''
+  act(() => { pref = b.result.current.toggle() })
+  expect(pref).toBe('light')
+  expect(a.result.current.theme).toBe('light')
 })

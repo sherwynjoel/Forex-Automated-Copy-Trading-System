@@ -1060,6 +1060,18 @@ test('a failed dry-run switch says, in sentence case, that dry-run is still off'
   expect(await screen.findByText(/^Dry-run is still off — the change failed: /)).toHaveAttribute('role', 'alert')
 })
 
+test('the theme toggle saves the choice to the account; the desk rail links to Settings', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
+  const fetchMock = mockRoutes()
+  renderShell('/org/1')
+  const [toggle] = await screen.findAllByRole('button', { name: /switch to dim theme/i })
+  await userEvent.click(toggle)
+  await waitFor(() => expect(fetchMock.mock.calls.some(([u, i]) => String(u) === '/api/me/settings'
+    && (i as RequestInit | undefined)?.method === 'PUT'
+    && JSON.parse((i as RequestInit).body as string).theme === 'dim')).toBe(true))
+  expect(screen.getAllByRole('link', { name: 'Settings' })[0]).toHaveAttribute('href', '/org/1/settings')
+})
+
 test('the bell carries the unread count and links to the desk or portal page', async () => {
   useOrgMock.mockReturnValue(makeOrgValue('admin'))
   mockRoutes({ unread: { count: 4 } })
