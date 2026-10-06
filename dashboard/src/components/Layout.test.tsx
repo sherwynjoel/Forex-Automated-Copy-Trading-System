@@ -78,6 +78,7 @@ function mockRoutes(overrides: Record<string, unknown> = {}) {
       new Response(JSON.stringify(payload), {
         status: 200, headers: { 'Content-Type': 'application/json' },
       })
+    if (url.includes('/notifications/unread-count')) return respond(overrides['unread'] ?? { count: 0 })
     if (url.includes('/requests/summary')) {
       return respond(overrides['requests']
         ?? { deposits: 0, withdrawals: 0, transfers: 0, payout_destinations: 0, total: 0 })
@@ -1057,4 +1058,81 @@ test('a failed dry-run switch says, in sentence case, that dry-run is still off'
   await userEvent.click(await screen.findByTestId('dry-run-toggle'))
 
   expect(await screen.findByText(/^Dry-run is still off — the change failed: /)).toHaveAttribute('role', 'alert')
+})
+
+test('the theme toggle saves the choice to the account; the desk rail links to Settings', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
+  const fetchMock = mockRoutes()
+  renderShell('/org/1')
+  const [toggle] = await screen.findAllByRole('button', { name: /switch to dim theme/i })
+  await userEvent.click(toggle)
+  await waitFor(() => expect(fetchMock.mock.calls.some(([u, i]) => String(u) === '/api/me/settings'
+    && (i as RequestInit | undefined)?.method === 'PUT'
+    && JSON.parse((i as RequestInit).body as string).theme === 'dim')).toBe(true))
+  expect(screen.getAllByRole('link', { name: 'Settings' })[0]).toHaveAttribute('href', '/org/1/settings')
+})
+
+test('a manual theme toggle before the account GET answers wins; the late answer is dropped', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
+  let releaseSettingsGet: ((r: Response) => void) | null = null
+  const respond = (payload: unknown) => new Response(JSON.stringify(payload), {
+    status: 200, headers: { 'Content-Type': 'application/json' } })
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input)
+    const method = init?.method ?? 'GET'
+    // The toggle's own PUT (saveThemePref) hits this same path with a
+    // different method -- it must resolve on its own, not share the mount
+    // GET's held promise.
+    if (url === '/api/me/settings' && method === 'GET') {
+      return new Promise<Response>((resolve) => { releaseSettingsGet = resolve })
+    }
+    if (url === '/api/me/settings' && method === 'PUT') {
+      return respond({ ...JSON.parse((init!.body as string)), updated_at: '2026-10-05T10:05:00Z' })
+    }
+    if (url.includes('/notifications/unread-count')) return respond({ count: 0 })
+    if (url.includes('/requests/summary')) {
+      return respond({ deposits: 0, withdrawals: 0, transfers: 0, payout_destinations: 0, total: 0 })
+    }
+    if (url.includes('/events')) return respond([])
+    if (url.includes('/webhook')) return respond({ configured: true, enabled: true })
+    if (url.includes('/settings')) return respond(settings)
+    if (url.includes('/state')) return respond(apiState)
+    if (url.includes('/accounts')) return respond(accounts)
+    return respond({})
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  renderLayout()
+
+  const [toggle] = await screen.findAllByRole('button', { name: /switch to dim theme/i })
+  await userEvent.click(toggle)
+  expect(document.documentElement.dataset.theme).toBe('dark')
+
+  // The mount GET, held open until now, answers late with 'light' -- the
+  // user's own just-made choice must still stand. The chain from fetch to
+  // syncThemeFromServer's `choose` call crosses several microtask ticks
+  // (finish() awaits response.json() too), so give it room to settle.
+  await act(async () => {
+    releaseSettingsGet!(respond({ theme: 'light', updated_at: '2026-10-05T10:00:00Z' }))
+    await new Promise((r) => setTimeout(r, 20))
+  })
+  expect(document.documentElement.dataset.theme).toBe('dark')
+})
+
+test('the bell carries the unread count and links to the desk or portal page', async () => {
+  useOrgMock.mockReturnValue(makeOrgValue('admin'))
+  mockRoutes({ unread: { count: 4 } })
+  const view = renderShell('/org/1')
+  const [deskBell] = await screen.findAllByRole('button', { name: 'Notifications, 4 unread' })
+  await userEvent.click(deskBell)
+  expect(await screen.findByRole('link', { name: 'See all notifications' }))
+    .toHaveAttribute('href', '/org/1/notifications')
+  view.unmount()
+
+  useOrgMock.mockReturnValue(makeOrgValue('investor'))
+  mockRoutes()
+  renderShell('/org/1/invest')
+  const [portalBell] = await screen.findAllByRole('button', { name: 'Notifications' })
+  await userEvent.click(portalBell)
+  expect(await screen.findByRole('link', { name: 'See all notifications' }))
+    .toHaveAttribute('href', '/org/1/invest/notifications')
 })

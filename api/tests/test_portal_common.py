@@ -4,6 +4,8 @@ writer, audit and email plumbing, the settings row and the serialisers.
 Real Postgres; the copier's /state is faked through the app's mock
 transport only where equity_for needs it."""
 import asyncio
+import logging
+import threading
 from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
@@ -449,16 +451,318 @@ class _FakeAlerter:
         return True
 
 
-def test_notify_investor_is_best_effort(db, org_user, monkeypatch):
+def _notes(db, user_id):
+    with psycopg.connect(db, autocommit=True) as conn:
+        return conn.execute(
+            "SELECT topic, title, body, link, read_at FROM notifications WHERE user_id = %s "
+            "ORDER BY id", (user_id,)).fetchall()
+
+
+def test_notify_writes_a_row_and_emails_unless_the_pref_is_off(db, org_user, monkeypatch):
     org_id, user_id = org_user
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
     fake = _FakeAlerter()
+    monkeypatch.setattr(ws_module.broadcaster, "alerter", fake, raising=False)
     with psycopg.connect(db, autocommit=True) as conn:
-        monkeypatch.setattr(ws_module.broadcaster, "alerter", fake, raising=False)
-        asyncio.run(pc.notify_investor(conn, request, user_id, "Subject", "Body"))
-        asyncio.run(pc.notify_investor(conn, request, 999999, "Nobody", "Body"))
-        monkeypatch.setattr(ws_module.broadcaster, "alerter", _FakeAlerter(fail=True), raising=False)
-        asyncio.run(pc.notify_investor(conn, request, user_id, "Fails quietly", "Body"))
+        asyncio.run(pc.notify(conn, request, org_id, user_id, "money", "Subject", "Body",
+                              "/org/1/invest"))
+        conn.execute("INSERT INTO notification_prefs (org_id, user_id, money) "
+                     "VALUES (%s, %s, false)", (org_id, user_id))
+        asyncio.run(pc.notify(conn, request, org_id, user_id, "money", "Muted", "Body"))
+        asyncio.run(pc.notify(conn, request, org_id, user_id, "bonus", "Still on", "x" * 600))
+        asyncio.run(pc.notify(conn, request, org_id, 999999, "money", "Nobody", "Body"))
+        monkeypatch.setattr(ws_module.broadcaster, "alerter", _FakeAlerter(fail=True),
+                            raising=False)
+        asyncio.run(pc.notify(conn, request, org_id, user_id, "identity", "Fails quietly", "Body"))
         monkeypatch.setattr(ws_module.broadcaster, "alerter", None, raising=False)
-        asyncio.run(pc.notify_investor(conn, request, user_id, "No alerter", "Body"))
-    assert fake.sent == [("inv@example.com", "Subject", "Body")]
+        asyncio.run(pc.notify(conn, request, org_id, user_id, "support", "No alerter", "Body"))
+        with pytest.raises(ValueError):
+            pc.email_wanted(conn, org_id, user_id, "chat")
+    assert [(to, subject) for to, subject, _ in fake.sent] == [
+        ("inv@example.com", "Subject"), ("inv@example.com", "Still on")]
+    assert fake.sent[1][2] == "x" * 499 + "…"
+    rows = _notes(db, user_id)
+    assert [r[:2] for r in rows] == [("money", "Subject"), ("money", "Muted"),
+                                     ("bonus", "Still on"), ("identity", "Fails quietly"),
+                                     ("support", "No alerter")]
+    assert rows[0][2:] == ("Body", "/org/1/invest", None)
+    assert len(rows[2][2]) == 500
+
+
+def test_notify_admins_reaches_every_admin_and_nobody_else(db, make_user, make_org, monkeypatch):
+    a1, a2 = make_user(email="a1@example.com"), make_user(email="a2@example.com")
+    viewer, inv = make_user(email="v@example.com"), make_user(email="i@example.com")
+    org_id = make_org(members=[(a1, "admin"), (a2, "admin"), (viewer, "viewer"),
+                               (inv, "investor")])
+    monkeypatch.setattr(ws_module.broadcaster, "alerter", None, raising=False)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    with psycopg.connect(db, autocommit=True) as conn:
+        asyncio.run(pc.notify_admins(conn, request, org_id, "support", "New ticket #1: Deposits",
+                                     "Body", "/org/1/requests?tab=support&ticket=1"))
+        rows = conn.execute("SELECT user_id, topic FROM notifications ORDER BY user_id").fetchall()
+    assert rows == sorted([(a1["id"], "support"), (a2["id"], "support")])
+
+
+def test_notify_is_best_effort_across_its_whole_body(db, org_user, monkeypatch):
+    """Fix-wave item 2: notify()'s whole body -- the email-switch check, the
+    INSERT, finding the alerter and the user's address, and the send -- is
+    one try/except. A failure checking the switch (here) must not propagate
+    and must not undo the notification row the INSERT already wrote."""
+    org_id, user_id = org_user
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("prefs lookup down")
+
+    monkeypatch.setattr(pc, "email_wanted", boom)
+    with psycopg.connect(db, autocommit=True) as conn:
+        asyncio.run(pc.notify(conn, request, org_id, user_id, "money", "Subject", "Body"))
+        rows = _notes(db, user_id)
+    assert [r[:2] for r in rows] == [("money", "Subject")]
+
+
+def test_announce_bonus_is_best_effort_across_its_whole_body(org_user, db, monkeypatch, caplog):
+    """Fix-wave item 2 ("same for announce_bonus"): a failure anywhere in
+    its body (here, the notify step) is logged and swallowed -- the audit
+    row it already wrote (before notify runs) stays, and the caller never
+    sees an exception. The message matches item 3's convention."""
+    org_id, user_id = org_user
+    with psycopg.connect(db, autocommit=True) as conn:
+        with conn.transaction():
+            pc.lock_investor_ledger(conn, org_id, user_id)
+            bonus_id = pc.pay_bonus(conn, org_id, user_id, "manual", Decimal("20"), note="promo")
+
+    async def boom(*_args, **_kwargs):
+        raise RuntimeError("notify down")
+
+    monkeypatch.setattr(pc, "notify", boom)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    with psycopg.connect(db, autocommit=True) as conn:
+        with caplog.at_level(logging.ERROR):
+            asyncio.run(pc.announce_bonus(
+                conn, request, org_id=org_id, user_id=user_id, bonus_id=bonus_id,
+                source="manual", amount=Decimal("20"), actor_email="admin@example.com",
+                note="promo"))
+        audited = conn.execute(
+            "SELECT 1 FROM events WHERE org_id = %s AND payload->>'action' = 'investor_bonus_paid'",
+            (org_id,)).fetchall()
+    assert audited                                        # the audit row still landed
+    assert f"bonus {bonus_id} paid but not announced" in caplog.text
+
+
+def test_notify_admins_is_best_effort_across_its_whole_body(db, make_user, make_org,
+                                                             monkeypatch, caplog):
+    """Fix-wave item 2: a failure listing the org's admins is logged and
+    swallowed rather than failing whatever triggered the notification."""
+    admin = make_user(email="a1@example.com")
+    org_id = make_org(members=[(admin, "admin")])
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("memberships down")
+
+    with psycopg.connect(db, autocommit=True) as conn:
+        monkeypatch.setattr(conn, "execute", boom)
+        with caplog.at_level(logging.ERROR):
+            asyncio.run(pc.notify_admins(conn, request, org_id, "support", "New ticket", "Body"))
+    assert "failed to notify admins" in caplog.text
+
+
+def test_clip_and_investor_link():
+    assert pc.clip("abc", 3) == "abc"
+    assert pc.clip("abcd", 3) == "ab…"
+    assert pc.investor_link(7, "deposit") == "/org/7/invest/deposit"
+    assert pc.TOPICS == ("money", "identity", "support", "bonus")
+
+
+def test_pay_bonus_pays_once_into_credit(org_user, db):
+    org_id, user_id = org_user
+    with psycopg.connect(db, autocommit=True) as conn:
+        with pytest.raises(RuntimeError):
+            pc.pay_bonus(conn, org_id, user_id, "signup", Decimal("5"))
+        with conn.transaction():
+            pc.lock_investor_ledger(conn, org_id, user_id)
+            first = pc.pay_bonus(conn, org_id, user_id, "signup", Decimal("50"))
+            again = pc.pay_bonus(conn, org_id, user_id, "signup", Decimal("50"))
+            nothing = pc.pay_bonus(conn, org_id, user_id, "kyc", Decimal("0"))
+            dep = pc.pay_bonus(conn, org_id, user_id, "deposit", Decimal("10"), source_id=7,
+                               note="deposit #7")
+            dep_again = pc.pay_bonus(conn, org_id, user_id, "deposit", Decimal("10"), source_id=7)
+        assert isinstance(first, int) and isinstance(dep, int)
+        assert again is None and nothing is None and dep_again is None
+        rows = conn.execute(
+            "SELECT wallet, amount, kind, ref_table, ref_id, note FROM wallet_entries "
+            "WHERE user_id = %s ORDER BY id", (user_id,)).fetchall()
+        assert rows == [("credit", Decimal("50.00"), "bonus", "bonuses", first, None),
+                        ("credit", Decimal("10.00"), "bonus", "bonuses", dep, "deposit #7")]
+        assert pc.wallet_figures(conn, org_id, user_id)["credit"]["available"] == Decimal("60.00")
+
+
+def test_rule_bonus_follows_the_rules(org_user, db):
+    org_id, _user_id = org_user
+    with psycopg.connect(db, autocommit=True) as conn:
+        assert pc.rule_bonus(conn, org_id, "signup") == 0          # creates the row, all off
+        assert pc.bonus_rules(conn, org_id)["deposit_cap"] is None
+        conn.execute(
+            "UPDATE bonus_rules SET signup_enabled = true, signup_amount = 25, "
+            "deposit_enabled = true, deposit_pct = 10, deposit_cap = 30 WHERE org_id = %s",
+            (org_id,))
+        assert pc.rule_bonus(conn, org_id, "signup") == Decimal("25.00")
+        assert pc.rule_bonus(conn, org_id, "kyc") == 0
+        assert pc.rule_bonus(conn, org_id, "deposit", Decimal("100")) == Decimal("10.00")
+        assert pc.rule_bonus(conn, org_id, "deposit", Decimal("1000")) == Decimal("30.00")
+
+
+def test_rule_bonus_refuses_manual_and_a_base_less_deposit_even_while_off(org_user, db):
+    """Controller ruling (Task 8 review): there is no rule for 'manual' and
+    no base-less deposit bonus, so both raise ValueError -- even while the
+    deposit rule is off -- rather than quietly answering 0 for a caller
+    that passed the wrong source or forgot `base`."""
+    org_id, _user_id = org_user
+    with psycopg.connect(db, autocommit=True) as conn:
+        with pytest.raises(ValueError, match="manual"):
+            pc.rule_bonus(conn, org_id, "manual")
+        with pytest.raises(ValueError, match="base"):
+            pc.rule_bonus(conn, org_id, "deposit")                 # rule is off; still raises
+        assert pc.rule_bonus(conn, org_id, "deposit", Decimal("0")) == Decimal("0")
+
+
+def test_pay_bonus_raises_when_settle_writes_no_entry(org_user, db, monkeypatch):
+    """Controller ruling: if settle() ever reports no ledger entry was
+    written for a bonus that was just inserted, pay_bonus raises rather
+    than silently leaving a bonuses row with no matching credit entry --
+    and the transaction (including the bonuses INSERT) rolls back."""
+    org_id, user_id = org_user
+    monkeypatch.setattr(pc, "settle", lambda *a, **k: False)
+    with psycopg.connect(db, autocommit=True) as conn:
+        with pytest.raises(RuntimeError, match="settle"):
+            with conn.transaction():
+                pc.lock_investor_ledger(conn, org_id, user_id)
+                pc.pay_bonus(conn, org_id, user_id, "signup", Decimal("50"))
+        rows = conn.execute("SELECT 1 FROM bonuses WHERE org_id = %s AND user_id = %s",
+                            (org_id, user_id)).fetchall()
+    assert rows == []
+
+
+def test_award_rule_bonus_logs_an_announce_failure_after_the_bonus_committed(
+        org_user, db, monkeypatch, caplog):
+    """Ruling P8: announce_bonus runs inside award_rule_bonus's best-effort
+    try, so a failure there (audit/notify, AFTER the paying transaction has
+    committed) is logged and swallowed -- the bonus stays paid, and the
+    caller (join, role change, KYC approval) never sees a 500. Only the
+    return value (None here, same as a failed payment) tells the caller
+    the announcement never happened.
+
+    Fix-wave item 3: the log message must say "bonus <id> paid but not
+    announced", never the generic "bonus failed" -- that would wrongly
+    suggest the money never moved, when it is sitting in wallet_entries
+    right above this assertion."""
+    org_id, user_id = org_user
+    with psycopg.connect(db, autocommit=True) as conn:
+        pc.bonus_rules(conn, org_id)
+        conn.execute("UPDATE bonus_rules SET signup_enabled = true, signup_amount = 25 "
+                     "WHERE org_id = %s", (org_id,))
+
+    async def boom(*_args, **_kwargs):
+        raise RuntimeError("notify down")
+
+    monkeypatch.setattr(pc, "announce_bonus", boom)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    with psycopg.connect(db, autocommit=True) as conn:
+        with caplog.at_level(logging.ERROR):
+            result = asyncio.run(pc.award_rule_bonus(
+                conn, request, org_id, user_id, "signup", actor_email="admin@example.com"))
+        rows = conn.execute(
+            "SELECT amount FROM wallet_entries WHERE org_id = %s AND user_id = %s "
+            "AND wallet = 'credit'", (org_id, user_id)).fetchall()
+        (bonus_id,) = conn.execute(
+            "SELECT id FROM bonuses WHERE org_id = %s AND user_id = %s AND source = 'signup'",
+            (org_id, user_id)).fetchone()
+    assert result is None
+    assert rows == [(Decimal("25.00"),)]                 # the bonus is NOT rolled back
+    assert f"bonus {bonus_id} paid but not announced" in caplog.text
+    assert "signup bonus failed" not in caplog.text
+
+
+def test_award_rule_bonus_resolves_its_own_actor_email_and_survives_a_lookup_failure(
+        org_user, db, monkeypatch, caplog):
+    """Fix-wave item 4: orgs.py's join route no longer pre-fetches the
+    joiner's email before calling award_rule_bonus (that SELECT used to run
+    OUTSIDE any try, after the join had already committed). Passing no
+    actor_email (the self-service join path) makes award_rule_bonus resolve
+    it from user_id itself, inside this same best-effort try -- a failure
+    there still pays the bonus and is logged, never a 500 for a join that
+    already landed."""
+    org_id, user_id = org_user
+    with psycopg.connect(db, autocommit=True) as conn:
+        pc.bonus_rules(conn, org_id)
+        conn.execute("UPDATE bonus_rules SET signup_enabled = true, signup_amount = 30 "
+                     "WHERE org_id = %s", (org_id,))
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    with psycopg.connect(db, autocommit=True) as conn:
+        real_execute = conn.execute
+
+        def flaky(query, *args, **kwargs):
+            if isinstance(query, str) and "SELECT email FROM users" in query:
+                raise RuntimeError("users table down")
+            return real_execute(query, *args, **kwargs)
+
+        monkeypatch.setattr(conn, "execute", flaky)
+        with caplog.at_level(logging.ERROR):
+            result = asyncio.run(pc.award_rule_bonus(conn, request, org_id, user_id, "signup"))
+    with psycopg.connect(db, autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT amount FROM wallet_entries WHERE org_id = %s AND user_id = %s "
+            "AND wallet = 'credit'", (org_id, user_id)).fetchall()
+    assert result is None
+    assert rows == [(Decimal("30.00"),)]                 # paid despite the lookup failure
+    assert "paid but not announced" in caplog.text
+
+
+def test_pay_bonus_concurrent_confirm_of_the_same_deposit_pays_once(org_user, db):
+    """Two REAL connections in two REAL threads, each taking
+    lock_investor_ledger first (as every ledger-writing transaction must)
+    and then pay_bonus for the SAME deposit's source_id, lined up with a
+    Barrier so both reach the lock at essentially the same instant. The
+    advisory lock -- not the barrier -- is what actually serialises them:
+    whichever thread loses the race blocks on pg_advisory_xact_lock until
+    the winner's transaction ends, then its INSERT ... ON CONFLICT DO
+    NOTHING finds the row already there and pays nothing. Exactly one
+    bonuses row and one credit ledger entry must survive."""
+    org_id, user_id = org_user
+    barrier = threading.Barrier(2)
+    results: list = []
+    errors: list = []
+    lock = threading.Lock()
+
+    def worker():
+        try:
+            with psycopg.connect(db, autocommit=True) as conn:
+                barrier.wait(timeout=10)
+                with conn.transaction():
+                    pc.lock_investor_ledger(conn, org_id, user_id)
+                    bonus_id = pc.pay_bonus(conn, org_id, user_id, "deposit", Decimal("10"),
+                                            source_id=99, note="deposit #99")
+                with lock:
+                    results.append(bonus_id)
+        except Exception as exc:  # pragma: no cover - surfaced via the assertion below
+            with lock:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=15)
+
+    assert not errors, errors
+    assert sorted(r is None for r in results) == [False, True]  # exactly one paid, one None
+    with psycopg.connect(db, autocommit=True) as conn:
+        bonus_rows = conn.execute(
+            "SELECT id FROM bonuses WHERE org_id = %s AND user_id = %s AND source_id = %s",
+            (org_id, user_id, 99)).fetchall()
+        assert len(bonus_rows) == 1
+        entry_rows = conn.execute(
+            "SELECT id FROM wallet_entries WHERE ref_table = 'bonuses' AND ref_id = %s",
+            (bonus_rows[0][0],)).fetchall()
+        assert len(entry_rows) == 1

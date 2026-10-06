@@ -8,7 +8,22 @@ import Select from '../../components/Select'
 import type { InvestorRow, WalletEntry, WalletKind } from '../../lib/types'
 
 /** A signed amount with at most two decimals: "-25.00", "100", "+12.5". */
-const SIGNED_AMOUNT = /^[-+]?\d+(\.\d{1,2})?$/
+export const SIGNED_AMOUNT = /^[-+]?\d+(\.\d{1,2})?$/
+
+/**
+ * The checks every signed-amount MPIN dialog (Adjust, Grant bonus) runs
+ * before it posts. Throws the message PinConfirmDialog shows in its error
+ * line; answers the trimmed amount.
+ */
+export function checkSignedAmount(amount: string, note: string): string {
+  const raw = amount.trim()
+  if (!SIGNED_AMOUNT.test(raw)) {
+    throw new Error('Enter a signed amount with at most two decimals, for example -25.00 or 100')
+  }
+  if (Number(raw) === 0) throw new Error('amount must not be zero')
+  if (note.trim() === '') throw new Error('A note is required')
+  return raw
+}
 
 /**
  * Posts a signed ledger entry to one of the investor's wallets, confirmed
@@ -32,12 +47,7 @@ export default function AdjustDialog({ orgId, investor, onCancel, onPosted }: {
 
   const confirm = async (mpin: string) => {
     if (!investor) return
-    const raw = amount.trim()
-    if (!SIGNED_AMOUNT.test(raw)) {
-      throw new Error('Enter a signed amount with at most two decimals, for example -25.00 or 100')
-    }
-    if (Number(raw) === 0) throw new Error('amount must not be zero')
-    if (note.trim() === '') throw new Error('A note is required')
+    const raw = checkSignedAmount(amount, note)
     setBusy(true)
     try {
       // Straight through api() with redirectOn401 off: a wrong MPIN answers

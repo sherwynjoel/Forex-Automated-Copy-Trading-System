@@ -79,13 +79,18 @@ async function enterPin(dialog: HTMLElement, pin: string) {
 beforeEach(() => { useOrgMock.mockReturnValue(mockUseOrg('investor')) })
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
-test('transferOptions lists the three movable wallets plus the linked account; pairAllowed follows the phase 1 rules', () => {
-  expect(transferOptions(linked).map((o) => o.value)).toEqual(['wallet:main', 'wallet:pamm', 'wallet:social', 'account:1001'])
-  expect(transferOptions(unlinked).map((o) => o.value)).toEqual(['wallet:main', 'wallet:pamm', 'wallet:social'])
+test('transferOptions lists the four wallets plus each account; pairAllowed follows the rules', () => {
+  expect(transferOptions(linked).map((o) => o.value)).toEqual(
+    ['wallet:main', 'wallet:credit', 'wallet:pamm', 'wallet:social', 'account:1001'])
+  expect(transferOptions(unlinked).map((o) => o.value)).toEqual(
+    ['wallet:main', 'wallet:credit', 'wallet:pamm', 'wallet:social'])
   expect(pairAllowed('wallet:main', 'account:1001')).toBe(true)
   expect(pairAllowed('account:1001', 'wallet:main')).toBe(true)
   expect(pairAllowed('wallet:pamm', 'wallet:main')).toBe(true)
   expect(pairAllowed('wallet:social', 'wallet:main')).toBe(true)
+  expect(pairAllowed('wallet:credit', 'account:1001')).toBe(true)
+  expect(pairAllowed('wallet:credit', 'wallet:main')).toBe(false)
+  expect(pairAllowed('account:1001', 'wallet:credit')).toBe(false)
   expect(pairAllowed('wallet:main', 'wallet:pamm')).toBe(false)
   expect(pairAllowed('wallet:pamm', 'account:1001')).toBe(false)
   expect(pairAllowed('wallet:main', 'wallet:main')).toBe(false)
@@ -225,5 +230,27 @@ test('several accounts each become a choice with their own available figure, nam
   expect(JSON.parse((posts(fetchMock)[0][1] as RequestInit).body as string)).toEqual({
     source: { kind: 'account', account_id: 1002 }, target: { kind: 'wallet', wallet: 'main' },
     amount: '100', mpin: '123456',
+  })
+})
+
+test('bonus credit can only go to a trading account', async () => {
+  const withCredit: InvestorSummary = {
+    ...linked, wallets: { ...linked.wallets, credit: { balance: 40, on_hold: 0, available: 40 } },
+  }
+  const fetchMock = mockRoutes({ summary: withCredit })
+  render(<MemoryRouter><InvestorTransfer /></MemoryRouter>)
+  await userEvent.selectOptions(await screen.findByLabelText('From'), 'wallet:credit')
+  const to = screen.getByLabelText('To')
+  expect(within(to).getAllByRole('option').map((o) => (o as HTMLOptionElement).value)).toEqual(['account:1001'])
+  expect(screen.getByText('40.00 USD')).toBeInTheDocument()
+  await userEvent.type(screen.getByLabelText('Amount in USD'), '40')
+  await userEvent.click(screen.getByRole('button', { name: 'Request transfer' }))
+  const dialog = await screen.findByRole('dialog', { name: 'Move 40.00 USD from Credit wallet to Trading account?' })
+  await enterPin(dialog, '123456')
+  await userEvent.click(within(dialog).getByRole('button', { name: 'Confirm transfer' }))
+  await waitFor(() => expect(posts(fetchMock)).toHaveLength(1))
+  expect(JSON.parse((posts(fetchMock)[0][1] as RequestInit).body as string)).toEqual({
+    source: { kind: 'wallet', wallet: 'credit' }, target: { kind: 'account', account_id: 1001 },
+    amount: '40', mpin: '123456',
   })
 })

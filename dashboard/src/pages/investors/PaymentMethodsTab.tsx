@@ -10,6 +10,8 @@ import ConfirmDialog from '../../components/ConfirmDialog'
 import Drawer from '../../components/Drawer'
 import Input from '../../components/Input'
 import Select from '../../components/Select'
+import BonusRulesCard from './BonusRulesCard'
+import TicketSubjectsCard from './TicketSubjectsCard'
 import type { PaymentMethod, PortalSettings } from '../../lib/types'
 
 /** The action envelope the Investors page owns (busy flag, error and
@@ -94,7 +96,7 @@ export default function PaymentMethodsTab({ orgId, control, methods, settings, b
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState<PaymentMethod | null>(null)
 
-  // Portal settings: the same dirty guard the old wallet card had. Once
+  // Withdrawal and account rules: the same dirty guard the old wallet card had. Once
   // the admin touches the form, the 10 s poll leaves it alone until a save
   // clears the flag; read through a ref so the effect never sees a stale value.
   const [rules, setRules] = useState({ withdrawal_min: '0', withdrawal_fee_pct: '0', max_live_accounts: '5' })
@@ -263,7 +265,7 @@ export default function PaymentMethodsTab({ orgId, control, methods, settings, b
         </div>
       </Card>
 
-      <Card title="Portal settings">
+      <Card title="Withdrawal and account rules">
         <form onSubmit={saveRules} className="space-y-4">
           <p className="text-sm text-ink-soft">
             Applied to every withdrawal request: the smallest amount an investor may ask for
@@ -295,6 +297,10 @@ export default function PaymentMethodsTab({ orgId, control, methods, settings, b
           </div>
         </form>
       </Card>
+
+      <BonusRulesCard orgId={orgId} control={control} />
+
+      <TicketSubjectsCard orgId={orgId} control={control} />
 
       <Drawer open={editing != null} busy={saving}
               title={editing?.mode === 'edit' ? `Edit ${editing.method.label}` : 'Add payment method'}

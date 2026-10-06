@@ -69,6 +69,7 @@ export function investorNav(orgId: number): NavGroup[] {
         { path: `${p}/transfer`, label: 'Transfer' },
         { path: `${p}/transactions`, label: 'Transactions' },
         { path: `${p}/payout-accounts`, label: 'Payout accounts' },
+        { path: `${p}/bonus`, label: 'Bonus' },
       ],
     },
     {
@@ -79,6 +80,9 @@ export function investorNav(orgId: number): NavGroup[] {
         { path: `${p}/open-account`, label: 'Open account' },
         { path: `${p}/security`, label: 'Security' },
         { path: `${p}/history`, label: 'History' },
+        { path: `${p}/support`, label: 'Support' },
+        { path: `${p}/notifications`, label: 'Notifications' },
+        { path: `${p}/settings`, label: 'Settings' },
       ],
     },
   ]

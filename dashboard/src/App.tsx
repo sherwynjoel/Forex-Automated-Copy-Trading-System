@@ -53,6 +53,12 @@ const InvestorAccount = pick(investor, 'InvestorAccount')
 const InvestorSecurity = pick(investor, 'InvestorSecurity')
 const InvestorProfile = pick(investor, 'InvestorProfile')
 const InvestorOpenAccount = pick(investor, 'InvestorOpenAccount')
+const InvestorSupport = pick(investor, 'InvestorSupport')
+const InvestorBonus = pick(investor, 'InvestorBonus')
+const Notifications = pick(admin, 'Notifications')
+const InvestorNotifications = pick(investor, 'Notifications')
+const Settings = pick(admin, 'Settings')
+const InvestorSettings = pick(investor, 'Settings')
 
 /** `/` → the last-used org, else the first org, else /welcome; signed-out
  *  visitors get the public front page instead of the login screen. */
@@ -113,6 +119,8 @@ export default function App() {
               <Route path="members" element={<Members />} />
               <Route path="investors" element={<Investors />} />
               <Route path="requests" element={<Requests />} />
+              <Route path="notifications" element={<Notifications />} />
+              <Route path="settings" element={<Settings />} />
               <Route path="invest" element={<InvestorDashboard />} />
               <Route path="invest/deposit" element={<InvestorDeposit />} />
               <Route path="invest/withdraw" element={<InvestorWithdraw />} />
@@ -125,6 +133,10 @@ export default function App() {
               <Route path="invest/security" element={<InvestorSecurity />} />
               <Route path="invest/profile" element={<InvestorProfile />} />
               <Route path="invest/open-account" element={<InvestorOpenAccount />} />
+              <Route path="invest/support" element={<InvestorSupport />} />
+              <Route path="invest/bonus" element={<InvestorBonus />} />
+              <Route path="invest/notifications" element={<InvestorNotifications />} />
+              <Route path="invest/settings" element={<InvestorSettings />} />
               <Route path="*" element={<NotFound />} />
             </Route>
             <Route path="/" element={<RootRedirect />} />

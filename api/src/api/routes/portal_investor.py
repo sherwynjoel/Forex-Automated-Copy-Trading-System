@@ -573,16 +573,46 @@ def create_portal_investor_router() -> APIRouter:
         with conn.transaction():
             pc.lock_investor_ledger(conn, ctx.org_id, ctx.user_id)
             if source_kind == "account":
+                # Mutual exclusion per account (ruling, Task 11 fix round 1,
+                # Finding 1): while a credit->account transfer into this
+                # account is still open, an outflow is refused outright.
+                # Without this, two outflows requested while the credit
+                # transfer is in flight can each look within
+                # equity_at_request - credit_funded (still 0 before the
+                # credit lands done) and together move more bonus
+                # principal out than the account ever held clear of it.
+                if pc.credit_transfer_open(conn, ctx.org_id, ctx.user_id, account_id):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="a bonus credit transfer into this account is still open; "
+                               "wait for it to finish")
                 if equity is not None:
-                    account_available = pc.floor_cents(
-                        equity - pc.open_account_transfers_out(
-                            conn, ctx.org_id, ctx.user_id, account_id))
+                    # Bonus credit funded into the account never leaves it.
+                    account_available = pc.account_movable(
+                        conn, ctx.org_id, ctx.user_id, account_id, equity)
                     if amount > account_available:
                         raise HTTPException(
                             status_code=400,
                             detail="amount exceeds the account's available equity "
                                    f"({account_available:.2f})")
+                elif pc.credit_funded(conn, ctx.org_id, ctx.user_id, account_id) > 0:
+                    # Finding 2: equity unknown leaves nothing to subtract
+                    # the funded credit from, and the decide-time re-check
+                    # never runs either (equity_at_request stays NULL) --
+                    # refuse rather than let the whole balance move blind.
+                    raise HTTPException(
+                        status_code=409,
+                        detail="this account holds bonus credit; try again when its "
+                               "balance is live")
             else:
+                if source_kind == "credit" and target_kind == "account":
+                    # The same mutual exclusion, the other way round.
+                    if pc.open_account_transfers_out(
+                            conn, ctx.org_id, ctx.user_id, account_id) > 0:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="this account has a transfer out still open; "
+                                   "wait for it to finish")
                 available = pc.wallet_figures(conn, ctx.org_id, ctx.user_id)[source_kind]["available"]
                 if amount > available:
                     raise HTTPException(
@@ -702,8 +732,8 @@ def create_portal_investor_router() -> APIRouter:
             funded = pc.net_funded(conn, ctx.org_id, ctx.user_id, account_id)
             available: Optional[Decimal] = None
             if account_equity is not None:
-                available = pc.floor_cents(account_equity - pc.open_account_transfers_out(
-                    conn, ctx.org_id, ctx.user_id, account_id))
+                available = pc.account_movable(conn, ctx.org_id, ctx.user_id, account_id,
+                                               account_equity)
             count = len([p for p in positions if isinstance(p, dict)])
             login, server = logins.get(account_id, (None, None))
             accounts.append({

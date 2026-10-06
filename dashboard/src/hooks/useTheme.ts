@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useState } from 'react'
+import type { ThemePref } from '../lib/types'
 
 export type Theme = 'light' | 'dark'
 
 const STORAGE_KEY = 'mf.theme'
 // Keep in sync with --color-paper in index.css for both themes.
 const PAPER = { light: '#f4fafb', dark: '#0e1a1f' } as const
+/** Same-tab broadcast between useTheme instances (the rail, the Settings page). */
+const CHANGE_EVENT = 'mf-theme-change'
 
 function systemTheme(): Theme {
   try {
@@ -33,17 +36,29 @@ function initialTheme(): Theme {
   return systemTheme()
 }
 
-/** Day/dark theme with a persisted toggle. The document attribute is the
- * single source of truth; index.html applies it before first paint. */
-export function useTheme(): { theme: Theme; toggle: () => void } {
+/** The palette a preference paints. Dim and dark are the one night palette
+ *  (ponytail: there is no separate, darker palette yet); system follows the OS. */
+export function paletteFor(pref: ThemePref): Theme {
+  if (pref === 'system') return systemTheme()
+  return pref === 'light' ? 'light' : 'dark'
+}
+
+/** Day/night theme. The document attribute is the single source of truth;
+ *  index.html paints localStorage's palette before first paint, so storage
+ *  stays the first-paint cache: a palette for an explicit choice, absent
+ *  while following the OS. `choose` applies a preference (the account's,
+ *  from Settings or the server); `toggle` flips light <-> dim and returns the
+ *  preference it chose so the caller can save it to the account. */
+export function useTheme(): { theme: Theme; toggle: () => ThemePref; choose: (pref: ThemePref) => void } {
   const [theme, setTheme] = useState<Theme>(() => {
     const t = initialTheme()
     apply(t)
     return t
   })
 
-  // Stay in step with the outside world: another tab toggling (storage
-  // event), or the OS flipping while the user never chose explicitly.
+  // Stay in step with the outside world: another tab (storage event),
+  // another hook in this tab (CHANGE_EVENT), or the OS flipping while the
+  // user follows it.
   useEffect(() => {
     const follow = (next: Theme) => {
       apply(next)
@@ -52,6 +67,10 @@ export function useTheme(): { theme: Theme; toggle: () => void } {
     const onStorage = (e: StorageEvent) => {
       if (e.key !== STORAGE_KEY) return
       if (e.newValue === 'dark' || e.newValue === 'light') follow(e.newValue)
+    }
+    const onChoose = (e: Event) => {
+      const next = (e as CustomEvent<Theme>).detail
+      if (next === 'dark' || next === 'light') setTheme(next)
     }
     const onOsChange = (e: { matches: boolean }) => {
       let stored: string | null = null
@@ -62,6 +81,7 @@ export function useTheme(): { theme: Theme; toggle: () => void } {
       follow(e.matches ? 'dark' : 'light')
     }
     window.addEventListener('storage', onStorage)
+    window.addEventListener(CHANGE_EVENT, onChoose)
     let mq: MediaQueryList | null = null
     try {
       if (typeof matchMedia === 'function') {
@@ -71,20 +91,27 @@ export function useTheme(): { theme: Theme; toggle: () => void } {
     } catch { /* no matchMedia */ }
     return () => {
       window.removeEventListener('storage', onStorage)
+      window.removeEventListener(CHANGE_EVENT, onChoose)
       mq?.removeEventListener?.('change', onOsChange)
     }
   }, [])
 
-  const toggle = useCallback(() => {
-    setTheme((current) => {
-      const next: Theme = current === 'dark' ? 'light' : 'dark'
-      apply(next)
-      try {
-        localStorage.setItem(STORAGE_KEY, next)
-      } catch { /* private mode */ }
-      return next
-    })
+  const choose = useCallback((pref: ThemePref) => {
+    const next = paletteFor(pref)
+    apply(next)
+    try {
+      if (pref === 'system') localStorage.removeItem(STORAGE_KEY)
+      else localStorage.setItem(STORAGE_KEY, next)
+    } catch { /* private mode */ }
+    setTheme(next)
+    window.dispatchEvent(new CustomEvent(CHANGE_EVENT, { detail: next }))
   }, [])
 
-  return { theme, toggle }
+  const toggle = useCallback((): ThemePref => {
+    const pref: ThemePref = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dim'
+    choose(pref)
+    return pref
+  }, [choose])
+
+  return { theme, toggle, choose }
 }

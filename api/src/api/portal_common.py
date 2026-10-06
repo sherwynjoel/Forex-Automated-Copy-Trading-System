@@ -25,7 +25,8 @@ from pydantic import BaseModel
 
 from .config import ApiConfig
 from .portal_ledger import *  # noqa: F401,F403  -- re-exported for the routers
-from .portal_ledger import WALLETS, available, balance, clean_text, holds, money
+from .portal_ledger import (WALLETS, available, balance, clean_text, deposit_bonus,
+                            floor_cents, holds, money)
 from .routes.mt5 import MT5_OFFLINE_AFTER_S
 from .routes.settings_control import _proxy_to_copier
 from .ws import broadcaster
@@ -60,24 +61,78 @@ async def audit_control(conn: psycopg.Connection, *, org_id: int, action: str,
         logger.exception("failed to write portal audit event %s", action)
 
 
-async def notify_investor(conn: psycopg.Connection, request: Request, user_id: int,
-                          subject: str, text: str) -> None:
-    """Best-effort email to the investor's own address. The alerter lives on
-    the event broadcaster (main.py wires it at startup); with none
-    configured this is a no-op, and a failing send never fails the
-    request that triggered it."""
-    alerter = getattr(broadcaster, "alerter", None)
-    if alerter is None:
-        alerter = getattr(request.app.state, "alerter", None)
-    if alerter is None:
-        return
-    row = conn.execute("SELECT email FROM users WHERE id = %s", (user_id,)).fetchone()
-    if not row:
-        return
+TOPICS = ("money", "identity", "support", "bonus")
+TITLE_MAX = 120
+BODY_MAX = 500
+
+
+def clip(text: str, limit: int) -> str:
+    """At most `limit` characters; an ellipsis marks a cut."""
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def investor_link(org_id: int, page: str) -> str:
+    """The in-app path of an investor page, e.g. investor_link(7, "deposit")."""
+    return f"/org/{org_id}/invest/{page}"
+
+
+def email_wanted(conn: psycopg.Connection, org_id: int, user_id: int, topic: str) -> bool:
+    """The user's email switch for `topic` in this org; no prefs row means
+    every switch is on. `topic` names a column, so it is checked first."""
+    if topic not in TOPICS:
+        raise ValueError(f"unknown notification topic {topic!r}")
+    row = conn.execute(f"SELECT {topic} FROM notification_prefs WHERE org_id = %s AND user_id = %s",
+                       (org_id, user_id)).fetchone()
+    return row is None or bool(row[0])
+
+
+async def notify(conn: psycopg.Connection, request: Request, org_id: int, user_id: int,
+                 topic: str, title: str, body: str, link: Optional[str] = None) -> None:
+    """One in-app notification for `user_id` in `org_id`, then the same words
+    by email (subject = title, text = body) unless their switch for `topic`
+    is off. Title and body are clipped to the column limits for both.
+
+    Best effort: the WHOLE body -- checking the switch, the INSERT, finding
+    the alerter and the user's address, and the send -- is one try/except,
+    so a failure anywhere is logged and never fails the request that
+    triggered it. Callers run it AFTER their transaction, never while
+    holding the ledger lock."""
     try:
-        await alerter.send_to(row[0], subject, text)
+        title, body = clip(title, TITLE_MAX), clip(body, BODY_MAX)
+        conn.execute(
+            "INSERT INTO notifications (org_id, user_id, topic, title, body, link) "
+            "VALUES (%s, %s, %s, %s, %s, %s)", (org_id, user_id, topic, title, body, link))
+        if not email_wanted(conn, org_id, user_id, topic):
+            return
+        alerter = getattr(broadcaster, "alerter", None)
+        if alerter is None:
+            alerter = getattr(request.app.state, "alerter", None)
+        if alerter is None:
+            return
+        row = conn.execute("SELECT email FROM users WHERE id = %s", (user_id,)).fetchone()
+        if not row:
+            return
+        await alerter.send_to(row[0], title, body)
     except Exception:
-        logger.exception("investor email failed for user %s", user_id)
+        logger.exception("notify failed for user %s in org %s (topic %s)", user_id, org_id, topic)
+
+
+async def notify_admins(conn: psycopg.Connection, request: Request, org_id: int, topic: str,
+                        title: str, body: str, link: Optional[str] = None) -> None:
+    """notify() every admin member of the org (the support desk). Best
+    effort, like notify(): the whole body is one try/except, so a failure
+    (listing the admins, or notifying one of them) is logged and never
+    fails the request that triggered it.
+
+    ponytail: the admins are emailed sequentially, inside this request --
+    move this to a background task if an org ever has many admins."""
+    try:
+        for (admin_id,) in conn.execute(
+                "SELECT user_id FROM org_memberships WHERE org_id = %s AND role = 'admin' "
+                "ORDER BY user_id", (org_id,)).fetchall():
+            await notify(conn, request, org_id, admin_id, topic, title, body, link)
+    except Exception:
+        logger.exception("failed to notify admins for org %s", org_id)
 
 
 # ------------------------------------------------------------ accounts + equity
@@ -290,6 +345,51 @@ def net_funded(conn: psycopg.Connection, org_id: int, user_id: int, account_id: 
     return Decimal(total)
 
 
+def credit_transfer_open(conn: psycopg.Connection, org_id: int, user_id: int,
+                         account_id: int) -> bool:
+    """True while a requested/approved credit->account transfer is still
+    moving money into this account. Mutual exclusion with an outflow out of
+    the same account (request_transfer, ruling on the Task 11 fix round,
+    Finding 1): while either direction is open the other is refused, so a
+    credit transfer can never land `done` in between two outflows that each
+    looked capped alone and together moved more bonus principal out than
+    the account ever held clear of it."""
+    return conn.execute(
+        "SELECT 1 FROM transfers WHERE org_id = %s AND user_id = %s AND status = ANY(%s) "
+        "AND source_kind = 'wallet' AND source_wallet = 'credit' "
+        "AND target_kind = 'account' AND target_account_id = %s LIMIT 1",
+        (org_id, user_id, list(OPEN_TRANSFER_STATUSES), account_id)).fetchone() is not None
+
+
+def credit_funded(conn: psycopg.Connection, org_id: int, user_id: int,
+                  account_id: int) -> Decimal:
+    """Bonus credit this investor moved into this account: done transfers
+    from the Credit wallet. The desk funds them as broker credit; that
+    principal never moves back out to a wallet (profit made on it may).
+
+    ponytail: keyed on (user_id, account_id) over `transfers` rows, so
+    deleting and re-adding the account (its transfers' account_id is ON
+    DELETE SET NULL) or relinking it to a different investor resets this
+    floor to 0 for whoever holds it next. Both are admin-only actions;
+    accepted rather than guarded against."""
+    (total,) = conn.execute(
+        "SELECT COALESCE(SUM(amount), 0) FROM transfers WHERE org_id = %s AND user_id = %s "
+        "AND status = 'done' AND source_kind = 'wallet' AND source_wallet = 'credit' "
+        "AND target_kind = 'account' AND target_account_id = %s",
+        (org_id, user_id, account_id)).fetchone()
+    return Decimal(total)
+
+
+def account_movable(conn: psycopg.Connection, org_id: int, user_id: int, account_id: int,
+                    equity: Decimal) -> Decimal:
+    """What may still move from the account to a wallet: equity less open
+    account->wallet transfers less the bonus credit funded into it, floored
+    to the cent and never below zero."""
+    movable = floor_cents(equity - open_account_transfers_out(conn, org_id, user_id, account_id)
+                          - credit_funded(conn, org_id, user_id, account_id))
+    return max(movable, Decimal("0.00"))
+
+
 # ------------------------------------------------------------ locking
 
 
@@ -349,6 +449,171 @@ def settle(conn: psycopg.Connection, *, org_id: int, user_id: int, wallet: str, 
         "RETURNING id",
         (org_id, user_id, wallet, amount, kind, ref_table, ref_id, note, created_by)).fetchone()
     return row is not None
+
+
+# ------------------------------------------------------------ bonuses
+
+
+BONUS_SOURCES = ("signup", "kyc", "deposit", "manual")
+BONUS_NAMES = {"signup": "welcome bonus", "kyc": "verification bonus",
+               "deposit": "deposit bonus", "manual": "bonus"}
+
+
+def bonus_rules(conn: psycopg.Connection, org_id: int) -> dict:
+    """The org's bonus rules; the row is created with every rule off on first
+    read. Flags as bools, amounts and pct as Decimals, deposit_cap Decimal or None."""
+    conn.execute("INSERT INTO bonus_rules (org_id) VALUES (%s) ON CONFLICT (org_id) DO NOTHING",
+                 (org_id,))
+    row = conn.execute(
+        "SELECT signup_enabled, signup_amount, kyc_enabled, kyc_amount, deposit_enabled, "
+        "deposit_pct, deposit_cap, updated_at FROM bonus_rules WHERE org_id = %s",
+        (org_id,)).fetchone()
+    return {"signup_enabled": bool(row[0]), "signup_amount": Decimal(row[1]),
+            "kyc_enabled": bool(row[2]), "kyc_amount": Decimal(row[3]),
+            "deposit_enabled": bool(row[4]), "deposit_pct": Decimal(row[5]),
+            "deposit_cap": Decimal(row[6]) if row[6] is not None else None,
+            "updated_at": row[7]}
+
+
+def rule_bonus(conn: psycopg.Connection, org_id: int, source: str,
+               base: Optional[Decimal] = None) -> Decimal:
+    """What the org's rule pays for this event NOW (rules are never applied
+    backwards): 0 while the rule is off; the deposit rule takes `base`, the
+    confirmed amount.
+
+    There is no rule for a hand-posted bonus and no base-less deposit
+    bonus, so both raise ValueError -- even while the matching rule is
+    off -- rather than silently answering 0 for a caller that passed the
+    wrong source or forgot `base`."""
+    if source == "manual":
+        raise ValueError("rule_bonus does not pay the 'manual' source; use pay_bonus directly")
+    if source == "deposit" and base is None:
+        raise ValueError("rule_bonus requires base for source 'deposit'")
+    rules = bonus_rules(conn, org_id)
+    if not rules[f"{source}_enabled"]:
+        return Decimal("0")
+    if source == "deposit":
+        return deposit_bonus(base, rules["deposit_pct"], rules["deposit_cap"])
+    return rules[f"{source}_amount"]
+
+
+def pay_bonus(conn: psycopg.Connection, org_id: int, user_id: int, source: str, amount: Decimal,
+              source_id: Optional[int] = None, note: Optional[str] = None,
+              created_by: Optional[int] = None) -> Optional[int]:
+    """Record one bonus and credit it, inside the caller's transaction (which
+    took lock_investor_ledger first). The bonuses unique indexes make each
+    rule pay at most once: a second signup or kyc bonus for the investor, or
+    a second one for the same deposit, inserts nothing and returns None. A
+    zero amount pays nothing. Returns the bonuses id when paid."""
+    if conn.info.transaction_status != psycopg.pq.TransactionStatus.INTRANS:
+        raise RuntimeError("pay_bonus must run inside the caller's transaction")
+    if amount == 0:
+        return None
+    row = conn.execute(
+        "INSERT INTO bonuses (org_id, user_id, source, source_id, amount, note, created_by) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING RETURNING id",
+        (org_id, user_id, source, source_id, amount, note, created_by)).fetchone()
+    if row is None:
+        return None
+    bonus_id = int(row[0])
+    wrote = settle(conn, org_id=org_id, user_id=user_id, wallet="credit", amount=amount,
+                   kind="bonus", ref_table="bonuses", ref_id=bonus_id, note=note,
+                   created_by=created_by)
+    if not wrote:
+        # The bonuses row is new (just inserted above), so its ref_id can
+        # never already be settled -- settle() reporting nothing written
+        # means the writer and the row it is meant to back have drifted
+        # apart. Keep that explicit rather than leaving an orphan bonuses
+        # row with no matching credit entry.
+        raise RuntimeError(f"bonus {bonus_id} was recorded but settle() wrote no ledger entry")
+    return bonus_id
+
+
+async def announce_bonus(conn: psycopg.Connection, request: Request, *, org_id: int,
+                         user_id: int, bonus_id: int, source: str, amount: Decimal,
+                         actor_email: str, note: Optional[str] = None) -> None:
+    """Audit one paid bonus and tell the investor (topic bonus). A hand-posted
+    bonus is a warning, so it reaches the alerters like a ledger adjustment;
+    a rule's bonus is info. Run after the paying transaction.
+
+    Best effort, like notify: the whole body -- the email lookup, the audit
+    row and the notification -- is one try/except. By the time this runs
+    the bonus is already committed, so a failure here is logged as "paid
+    but not announced", never as a failed payment, and never turns into a
+    500 for a request that already landed."""
+    try:
+        name = BONUS_NAMES[source]
+        row = conn.execute("SELECT email FROM users WHERE id = %s", (user_id,)).fetchone()
+        who = row[0] if row else f"user {user_id}"
+        await audit_control(
+            conn, org_id=org_id, action="investor_bonus_paid", actor_email=actor_email,
+            user_id=user_id, severity="warning" if source == "manual" else "info",
+            bonus_id=bonus_id, source=source, amount=money(amount), note=note,
+            summary=f"Bonus {amount:+.2f} USD ({name}) for {who} by {actor_email}")
+        noted = f"\nNote: {note}" if note else ""
+        if amount > 0:
+            title = f"You received a {amount:.2f} USD {name}"
+            body = (f"{amount:.2f} USD was paid into your Credit wallet.{noted}\n"
+                    "Bonus credit can be moved to one of your trading accounts from Transfer.")
+        else:
+            title = f"A bonus of {-amount:.2f} USD was taken back"
+            body = f"{-amount:.2f} USD was taken from your Credit wallet.{noted}"
+        await notify(conn, request, org_id, user_id, "bonus", title, body,
+                     investor_link(org_id, "bonus"))
+    except Exception:
+        logger.exception("bonus %s paid but not announced", bonus_id)
+
+
+async def award_rule_bonus(conn: psycopg.Connection, request: Request, org_id: int,
+                           user_id: int, source: str, *,
+                           actor_email: Optional[str] = None) -> Optional[int]:
+    """The signup or kyc rule's bonus, in its own transaction (ledger lock
+    first), then audit + notify. Paid at most once per investor; nothing
+    while the rule is off. Returns the bonuses id when paid.
+
+    `actor_email` is the admin who caused the triggering change (a role
+    change, a KYC approval); omitted (None) by the one caller where the
+    actor IS the investor themselves (a self-service join) and no
+    OrgContext carries their email -- it is then resolved from `user_id`
+    inside this same best-effort try, so a lookup failure cannot 500 a
+    join that already committed.
+
+    Best effort, like notify: it runs after the join, role change or KYC
+    approval has committed, so a failure here is logged and returns None
+    rather than answering 500 for a change that already landed. A missed
+    bonus is visible in the log and can be granted by hand.
+
+    The announce_bonus call is inside this same try (ruling P8): once the
+    paying transaction above has committed, a failure in the audit/notify
+    step is just as much a best-effort failure as one in the payment
+    itself -- it must never turn into a 500 for a join, role change or KYC
+    approval that already landed. The bonus stays paid either way; only
+    the return value (None) tells the caller the announcement is missing
+    from the log. The log message says so explicitly ("paid but not
+    announced") rather than the generic "bonus failed", which would be
+    wrong once the money has already moved."""
+    bonus_id: Optional[int] = None
+    try:
+        with conn.transaction():
+            lock_investor_ledger(conn, org_id, user_id)
+            amount = rule_bonus(conn, org_id, source)
+            bonus_id = pay_bonus(conn, org_id, user_id, source, amount)
+        if bonus_id is not None:
+            email = actor_email
+            if email is None:
+                row = conn.execute("SELECT email FROM users WHERE id = %s",
+                                   (user_id,)).fetchone()
+                email = row[0] if row else f"user {user_id}"
+            await announce_bonus(conn, request, org_id=org_id, user_id=user_id,
+                                 bonus_id=bonus_id, source=source, amount=amount,
+                                 actor_email=email)
+    except Exception:
+        if bonus_id is not None:
+            logger.exception("bonus %s paid but not announced", bonus_id)
+        else:
+            logger.exception("%s bonus failed for user %s in org %s", source, user_id, org_id)
+        return None
+    return bonus_id
 
 
 # ------------------------------------------------------------ settings

@@ -12,9 +12,9 @@ import type {
 export type RequestKind = 'deposits' | 'withdrawals' | 'transfers' | 'payout_destinations'
 export const REQUEST_KINDS: RequestKind[] = ['deposits', 'withdrawals', 'transfers', 'payout_destinations']
 
-/** The desk's tabs: the four money queues plus phase 2's two identity queues. */
-export type DeskTab = RequestKind | 'kyc' | 'account_requests'
-export const DESK_TABS: DeskTab[] = [...REQUEST_KINDS, 'kyc', 'account_requests']
+/** The desk's tabs: the four money queues, phase 2's two identity queues and phase 4's support tickets. */
+export type DeskTab = RequestKind | 'kyc' | 'account_requests' | 'support'
+export const DESK_TABS: DeskTab[] = [...REQUEST_KINDS, 'kyc', 'account_requests', 'support']
 
 /** Task 11's `statusLabel`/`statusTone` take their own singular `RequestKind`
  *  (`lib/investor.ts`) -- an "approved" transfer reads "Approved, in
@@ -62,6 +62,7 @@ export function tabItems(summary: RequestsSummary | null): TabItem[] {
     { key: 'payout_destinations', label: `Payout accounts (${n('payout_destinations')})` },
     { key: 'kyc', label: `Verification (${n('kyc')})` },
     { key: 'account_requests', label: `Account requests (${n('account_requests')})` },
+    { key: 'support', label: `Support (${n('tickets')})` },
   ]
 }
 

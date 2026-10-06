@@ -12,7 +12,9 @@ fixture TRUNCATEs with RESTART IDENTITY, and every parametrised case gets its
 own fixture): payment method 1, the investor's approved payout destination 1
 and pending destination 2, deposit 1, withdrawal 1, transfer 1, the
 investor's submitted KYC profile (files 1-4), account package 1 and the
-investor's open account request 1. They are
+investor's open account request 1. Phase 4 adds ticket subjects 1 and 2, the
+investor's ticket 1, and one notification per role (`{note}` in a path is the
+CALLER's own notification). They are
 written so that the FIRST allowed role really performs the change and the
 later ones get a 409 or 400 from the row's state or the body — never a
 403/404 — so what the row proves is authorization, never business rules.
@@ -141,6 +143,38 @@ MATRIX = [
     ("POST",   "account-requests/1/fulfil",      {"mt5_login": 5001,
                                                   "mt5_server": "Broker-Live"}, "admin"),
     ("POST",   "account-requests/1/reject",      {"note": "matrix"},            "admin"),
+    # ---- phase 4, any member (each caller's OWN notification is {note})
+    ("GET",    "notifications",                  None,                          "investor"),
+    ("GET",    "notifications/unread-count",     None,                          "investor"),
+    ("POST",   "notifications/read-all",         None,                          "investor"),
+    ("POST",   "notifications/{note}/read",      None,                          "investor"),
+    ("GET",    "notification-prefs",             None,                          "investor"),
+    ("PUT",    "notification-prefs",             {"money": True, "identity": True,
+                                                  "support": True, "bonus": True}, "investor"),
+    # ---- phase 4, investor side
+    ("GET",    "investor/ticket-subjects",       None,                          "investor_only"),
+    ("GET",    "investor/tickets",               None,                          "investor_only"),
+    ("POST",   "investor/tickets",               {"subject_id": 1, "body": "matrix"}, "investor_only"),
+    ("GET",    "investor/tickets/1",             None,                          "investor_only"),
+    ("POST",   "investor/tickets/1/messages",    {"body": "matrix"},            "investor_only"),
+    ("POST",   "investor/tickets/1/close",       None,                          "investor_only"),
+    ("GET",    "investor/bonuses",               None,                          "investor_only"),
+    # ---- phase 4, admin side
+    ("GET",    "tickets",                        None,                          "admin"),
+    ("GET",    "tickets/1",                      None,                          "admin"),
+    ("POST",   "tickets/1/messages",             {"body": "matrix"},            "admin"),
+    ("POST",   "tickets/1/close",                None,                          "admin"),
+    ("GET",    "ticket-subjects",                None,                          "admin"),
+    ("POST",   "ticket-subjects",                {"label": "Matrix"},           "admin"),
+    ("PATCH",  "ticket-subjects/1",              {"sort": 1},                   "admin"),
+    ("DELETE", "ticket-subjects/2",              None,                          "admin"),
+    ("GET",    "bonus-rules",                    None,                          "admin"),
+    ("PUT",    "bonus-rules",                    {"signup_enabled": False, "signup_amount": "0",
+                                                  "kyc_enabled": False, "kyc_amount": "0",
+                                                  "deposit_enabled": False, "deposit_pct": "0",
+                                                  "deposit_cap": None},         "admin"),
+    ("POST",   "investors/{investor}/bonuses",   {"amount": "1", "note": "matrix",
+                                                  "mpin": MPIN},                "admin"),
 ]
 
 RANK = {"investor": -1, "viewer": 0, "admin": 1}
@@ -188,6 +222,19 @@ def matrix_org(app_client, make_user, make_org, db, login_as):
             "INSERT INTO transfers (org_id, user_id, source_kind, source_wallet, target_kind, "
             "target_account_id, amount) VALUES (%s, %s, 'wallet', 'main', 'account', 100, 10)",
             (org_id, investor_id))                                              # id 1
+        conn.execute("INSERT INTO ticket_subjects (org_id, label) VALUES (%s, 'Deposits'), "
+                     "(%s, 'Spare')", (org_id, org_id))                          # ids 1, 2
+        conn.execute("INSERT INTO tickets (org_id, user_id, subject_id, subject_label) "
+                     "VALUES (%s, %s, 1, 'Deposits')", (org_id, investor_id))    # id 1
+        conn.execute("INSERT INTO ticket_messages (ticket_id, org_id, author_id, from_desk, body) "
+                     "VALUES (1, %s, %s, false, 'Help')", (org_id, investor_id))
+        # A notification is only ever its owner's: each role gets its own,
+        # substituted for {note} per caller.
+        for role in ROLES:
+            (users[role]["note"],) = conn.execute(
+                "INSERT INTO notifications (org_id, user_id, topic, title, body) "
+                "VALUES (%s, %s, 'money', 'Matrix', 'Body') RETURNING id",
+                (org_id, users[role]["id"])).fetchone()
     return app_client, org_id, users, outsider
 
 
@@ -208,15 +255,19 @@ def test_role_thresholds(matrix_org, login_as, method, tail, body, min_role):
     client, org_id, users, outsider = matrix_org
     tail = tail.replace("{investor}", str(users["investor"]["id"]))
 
+    def own(role):
+        """The tail as `role` calls it: {note} is that role's notification."""
+        return tail.replace("{note}", str(users[role]["note"]))
+
     # Anonymous: always 401 (or 403 from CSRF middleware on mutations — both
     # prove denial before any org logic).
     client.cookies.clear()
-    r = _call(client, method, org_id, tail, body)
+    r = _call(client, method, org_id, own("investor"), body)
     assert r.status_code in (401, 403), f"anonymous got {r.status_code}"
 
     # Non-member: 404 — org existence never leaks.
     login_as(client, outsider)
-    r = _call(client, method, org_id, tail, body)
+    r = _call(client, method, org_id, own("investor"), body)
     assert r.status_code == 404, f"outsider got {r.status_code}"
 
     # DELETE rows are destructive — only probe DENIED roles for them, and
@@ -229,7 +280,7 @@ def test_role_thresholds(matrix_org, login_as, method, tail, body, min_role):
         if destructive and allowed:
             continue
         login_as(client, users[role])
-        r = _call(client, method, org_id, tail, body)
+        r = _call(client, method, org_id, own(role), body)
         if allowed:
             assert r.status_code not in (401, 403, 404), \
                 f"{role} should pass {method} {tail}, got {r.status_code}"
@@ -260,6 +311,8 @@ def test_destructive_rows_allowed(matrix_org, login_as):
     assert transfer["target"] == {"kind": "account", "account_id": None}
     r = _call(client, "DELETE", org_id, "account-packages/1", None)
     assert r.status_code == 409   # open account request 1 still uses it
+    r = _call(client, "DELETE", org_id, "ticket-subjects/2", None)
+    assert r.status_code == 204
     r = _call(client, "DELETE", org_id, "", None)
     assert r.status_code == 204
 
@@ -275,7 +328,8 @@ def test_a_half_session_is_refused_on_every_matrix_route(matrix_org):
     for method, tail, body, _min_role in MATRIX:
         if method == "DELETE":
             continue  # destructive rows are proven denied by the 401 below on GET/POST too
-        tail = tail.replace("{investor}", str(users["investor"]["id"]))
+        tail = (tail.replace("{investor}", str(users["investor"]["id"]))
+                    .replace("{note}", str(users["admin"]["note"])))
         r = _call(client, method, org_id, tail, body)
         assert r.status_code == 401, f"{method} {tail} -> {r.status_code}"
         assert r.json()["detail"] == "MPIN required", f"{method} {tail}"

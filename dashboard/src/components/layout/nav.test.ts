@@ -12,6 +12,7 @@ test('investorNav is three groups: the Dashboard alone, Money, and Account', () 
     ['Transfer', '/org/7/invest/transfer'],
     ['Transactions', '/org/7/invest/transactions'],
     ['Payout accounts', '/org/7/invest/payout-accounts'],
+    ['Bonus', '/org/7/invest/bonus'],
   ])
   expect(groups[2].items.map((i) => [i.label, i.path])).toEqual([
     ['Trading account', '/org/7/invest/account'],
@@ -19,8 +20,11 @@ test('investorNav is three groups: the Dashboard alone, Money, and Account', () 
     ['Open account', '/org/7/invest/open-account'],
     ['Security', '/org/7/invest/security'],
     ['History', '/org/7/invest/history'],
+    ['Support', '/org/7/invest/support'],
+    ['Notifications', '/org/7/invest/notifications'],
+    ['Settings', '/org/7/invest/settings'],
   ])
-  expect(groups.flatMap((g) => g.items)).toHaveLength(12)
+  expect(groups.flatMap((g) => g.items)).toHaveLength(16)
 })
 
 test('the investor tab bar is the four money-first pages, Dashboard exact-matched', () => {

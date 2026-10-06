@@ -3,7 +3,9 @@ import { Navigate, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { api } from '../lib/api'
 import { useOrg } from '../lib/org'
 import { useTheme } from '../hooks/useTheme'
+import { saveThemePref, syncThemeFromServer } from '../lib/themeSync'
 import { useRequestsBadge } from '../hooks/useRequestsBadge'
+import { useUnreadCount } from '../hooks/useUnreadCount'
 import type { Account } from '../lib/types'
 import Button from './Button'
 import Drawer from './Drawer'
@@ -15,6 +17,7 @@ import ChunkBoundary from './ChunkBoundary'
 import NavRail from './layout/NavRail'
 import BottomBar from './layout/BottomBar'
 import DeskStrip from './layout/DeskStrip'
+import NotificationBell from './layout/NotificationBell'
 import { consumePendingFocus, markNavigated } from '../lib/navigationFocus'
 import { adminNav, investorNav } from './layout/nav'
 import { platformCaption } from '../lib/platform'
@@ -27,7 +30,18 @@ import { platformCaption } from '../lib/platform'
  * their portal; admins see the open-request count on the Requests link.
  */
 export default function Layout() {
-  const { theme, toggle: toggleTheme } = useTheme()
+  const { theme, toggle: toggleTheme, choose: chooseTheme } = useTheme()
+  // The account's theme follows the user between browsers; localStorage
+  // stays the first-paint cache. Once per shell mount -- but the GET can
+  // take as long as a slow network does, and if the user flips the rail's
+  // toggle before it answers, that manual choice must win: a late server
+  // answer landing after it would otherwise flip the theme back under them.
+  const themeChangedLocally = useRef(false)
+  useEffect(() => {
+    void syncThemeFromServer((pref) => {
+      if (!themeChangedLocally.current) chooseTheme(pref)
+    })
+  }, [chooseTheme])
   const location = useLocation()
   const navigate = useNavigate()
   const { orgId, role, me } = useOrg()
@@ -50,6 +64,12 @@ export default function Layout() {
   // Open requests behind the Requests link; undefined for everyone below admin.
   const requestsBadge = useRequestsBadge(orgId, role)
   const groups = investor ? investorNav(orgId) : adminNav(orgId, role, requestsBadge)
+  // One poll feeds both bells (desktop rail and phone top bar).
+  const unread = useUnreadCount(orgId)
+  const bell = (
+    <NotificationBell orgId={orgId} count={unread.count} onChange={unread.refresh}
+                      pageHref={investor ? `/org/${orgId}/invest/notifications` : `/org/${orgId}/notifications`} />
+  )
   const portalRoot = `/org/${orgId}/invest`
   const strayed = investor
     && location.pathname !== portalRoot
@@ -88,10 +108,13 @@ export default function Layout() {
     markNavigated()
   }, [location.pathname])
 
-  const railChrome = (
+  const railChrome = (withBell: boolean) => (
     <>
       <div className="px-5 pt-5 pb-4 border-b">
-        <Logo size={26} />
+        <div className="flex items-center justify-between gap-2">
+          <Logo size={26} />
+          {withBell && bell}
+        </div>
         <Select
           aria-label="Organization"
           value={orgId}
@@ -105,12 +128,19 @@ export default function Layout() {
       </div>
       <NavRail groups={groups} onNavigate={() => setMenuOpen(false)} />
       <div className="border-t p-3">
-        <Button variant="ghost" tone="neutral" size="sm" block onClick={toggleTheme}
+        <Button variant="ghost" tone="neutral" size="sm" block
+                onClick={() => { themeChangedLocally.current = true; void saveThemePref(toggleTheme()) }}
                 aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dim theme'}
                 className="justify-start">
           <span aria-hidden="true">{theme === 'dark' ? '☀' : '☾'}</span>{' '}
           {theme === 'dark' ? 'Light mode' : 'Dim mode'}
         </Button>
+        {!investor && (
+          <Button variant="ghost" tone="neutral" size="sm" block to={`/org/${orgId}/settings`}
+                  className="justify-start">
+            Settings
+          </Button>
+        )}
         <Button variant="ghost" tone="neutral" size="sm" block onClick={handleLogout} className="justify-start">
           Log out
         </Button>
@@ -124,13 +154,13 @@ export default function Layout() {
 
       {/* Floating glass rail — desktop only */}
       <aside className="hidden lg:flex w-60 shrink-0 m-4 mr-0 flex-col rounded-card glass shadow-card border">
-        {railChrome}
+        {railChrome(true)}
       </aside>
 
       {/* Full menu — phone and tablet, opened from More or the top bar */}
       <div className="lg:hidden">
         <Drawer open={menuOpen} title="Menu" onClose={() => setMenuOpen(false)}>
-          {railChrome}
+          {railChrome(false)}
         </Drawer>
       </div>
 
@@ -143,6 +173,7 @@ export default function Layout() {
             </svg>
           </Button>
           <Logo size={22} textClass="text-base" />
+          <div className="ml-auto">{bell}</div>
         </div>
         {!investor && <DeskStrip onAccounts={handleAccounts} />}
         <main id="main" tabIndex={-1} className="flex-1 overflow-y-auto p-4 md:px-6 md:pt-6 pb-24 lg:pb-6 outline-none">

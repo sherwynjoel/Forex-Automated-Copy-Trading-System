@@ -9,8 +9,8 @@ import pytest
 from api.portal_ledger import (
     CENT, DEPOSIT_TRANSITIONS, DESTINATION_TRANSITIONS, INVESTOR_MOVES, TRANSFER_PAIRS,
     TRANSFER_TRANSITIONS, WALLETS, WITHDRAWAL_TRANSITIONS, LedgerError, available, balance,
-    can_transition, clean_text, fee_for, floor_cents, holds, money, parse_amount, round_cents,
-    transfer_pair)
+    can_transition, clean_text, deposit_bonus, fee_for, floor_cents, holds, money, parse_amount,
+    round_cents, transfer_pair)
 
 D = Decimal
 
@@ -156,8 +156,10 @@ class TestTransferPairs:
          ("pamm", "main")),
         ({"kind": "wallet", "wallet": "social"}, {"kind": "wallet", "wallet": "main"},
          ("social", "main")),
+        ({"kind": "wallet", "wallet": "credit"}, {"kind": "account", "account_id": 1001},
+         ("credit", "account")),
     ])
-    def test_the_four_allowed_pairs(self, source, target, pair):
+    def test_the_allowed_pairs(self, source, target, pair):
         assert transfer_pair(source, target) == pair
         assert pair in TRANSFER_PAIRS
 
@@ -170,6 +172,8 @@ class TestTransferPairs:
         ({"kind": "wallet"}, {"kind": "wallet", "wallet": "main"}),
         ({"kind": "account"}, {"kind": "wallet", "wallet": "main"}),
         ({"kind": "cash", "wallet": "main"}, {"kind": "wallet", "wallet": "main"}),
+        ({"kind": "wallet", "wallet": "credit"}, {"kind": "wallet", "wallet": "pamm"}),
+        ({"kind": "account", "account_id": 1001}, {"kind": "wallet", "wallet": "credit"}),
     ])
     def test_everything_else_is_refused_with_one_message(self, source, target):
         with pytest.raises(LedgerError, match="that transfer is not allowed"):
@@ -182,3 +186,12 @@ class TestMoney:
         assert money(D("0.005")) == 0.01
         assert money(D("-40")) == -40.0
         assert money(None) is None
+
+
+class TestDepositBonus:
+    def test_pct_rounds_half_up_to_the_cent_and_the_cap_wins(self):
+        assert deposit_bonus(D("1000"), D("10"), None) == D("100.00")
+        assert deposit_bonus(D("33.33"), D("12.5"), None) == D("4.17")   # 4.16625
+        assert deposit_bonus(D("1000"), D("10"), D("50")) == D("50")
+        assert deposit_bonus(D("0.03"), D("12.5"), None) == D("0.00")
+        assert deposit_bonus(D("200"), D("100"), None) == D("200.00")

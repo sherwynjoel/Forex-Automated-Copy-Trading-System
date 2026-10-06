@@ -246,10 +246,14 @@ def create_portal_identity_router() -> APIRouter:
         await pc.audit_control(
             conn, org_id=ctx.org_id, action="investor_kyc_decided",
             actor_email=ctx.user_email, user_id=user_id, status=new_status, note=note)
-        await pc.notify_investor(
-            conn, http_request, user_id,
+        await pc.notify(
+            conn, http_request, ctx.org_id, user_id, "identity",
             f"Your identity verification was {new_status}",
-            f"Status: {new_status}\nNote: {note or '—'}\n\nOpen the portal for details.")
+            f"Status: {new_status}\nNote: {note or '—'}\n\nOpen the portal for details.",
+            pc.investor_link(ctx.org_id, "profile"))
+        if new_status == "approved":
+            await pc.award_rule_bonus(conn, http_request, ctx.org_id, user_id, "kyc",
+                                      actor_email=ctx.user_email)
         return pid.profile_json(row)
 
     # ------------------------------------------------------------ account packages
@@ -557,11 +561,12 @@ def create_portal_identity_router() -> APIRouter:
             await pc.audit_control(
                 conn, org_id=ctx.org_id, action="investor_account_linked",
                 actor_email=ctx.user_email, user_id=user_id, account_id=body.account_id)
-        await pc.notify_investor(
-            conn, http_request, user_id, "Your trading account is ready",
+        await pc.notify(
+            conn, http_request, ctx.org_id, user_id, "identity", "Your trading account is ready",
             f"Login: {login}\nServer: {server}\nPackage: {package_name}\n"
             "Sign in to MetaTrader 5 with the passwords you chose when you requested it.\n\n"
-            "Open the portal for details.")
+            "Open the portal for details.",
+            pc.investor_link(ctx.org_id, "open-account"))
         return out
 
     @router.post("/account-requests/{req_id}/reject", response_model=Dict[str, Any])
@@ -584,9 +589,11 @@ def create_portal_identity_router() -> APIRouter:
             conn, org_id=ctx.org_id, action="investor_account_request_decided",
             actor_email=ctx.user_email, user_id=user_id, request_id=req_id, status="rejected",
             note=note)
-        await pc.notify_investor(
-            conn, http_request, user_id, "Your trading account request was rejected",
-            f"Package: {package_name}\nNote: {note}\n\nOpen the portal for details.")
+        await pc.notify(
+            conn, http_request, ctx.org_id, user_id, "identity",
+            "Your trading account request was rejected",
+            f"Package: {package_name}\nNote: {note}\n\nOpen the portal for details.",
+            pc.investor_link(ctx.org_id, "open-account"))
         return pid.request_json(row)
 
     return router

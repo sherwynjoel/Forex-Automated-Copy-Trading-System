@@ -8,7 +8,7 @@ import httpx
 import psycopg
 import pytest
 from conftest import default_mock_callback
-from portal_helpers import credit, csrf, link
+from portal_helpers import approved_destination, credit, csrf, link
 
 from api import ws as ws_module
 
@@ -144,6 +144,7 @@ def test_social_to_main_is_capped_by_the_social_wallet(org_client, make_user, lo
 @pytest.mark.parametrize("source, target", [
     (W("credit"), W("main")), (W("main"), W("pamm")), (W("main"), W("main")),
     (W("pamm"), W("social")), (A(1001), A(1001)), (W("main"), W("credit")),
+    (A(1001), W("credit")),
 ])
 def test_disallowed_pairs_are_refused(org_client, make_user, login_as, db, source, target):
     client, org_id, investor = _funded(org_client, make_user, login_as, db, link_to=1001,
@@ -565,3 +566,293 @@ def test_money_ref_label_names_a_removed_account():
     assert money_ref_label("account", None) == "trading account (removed)"
     assert money_ref_label("account", 1001) == "trading account 1001"
     assert money_ref_label("main", None) == "My wallet"
+
+
+# ------------------------------------------------------- credit -> account
+
+
+def test_credit_moves_only_to_a_trading_account(org_client, make_user, login_as, db):
+    client, org_id, investor = _funded(org_client, make_user, login_as, db, main="0",
+                                       link_to=1001, equity="100")
+    credit(db, org_id, investor["id"], Decimal("30"), wallet="credit")
+    r = _transfer(client, org_id, W("credit"), A(1001), "40")
+    assert r.status_code == 400 and r.json()["detail"] == "amount exceeds what is available (30.00)"
+    r = _transfer(client, org_id, W("credit"), A(1001), "30")
+    assert r.status_code == 201 and r.json()["status"] == "requested"
+    tr_id = r.json()["id"]
+    assert _figures(db, org_id, investor["id"], "credit") == {
+        "balance": 30.0, "on_hold": 30.0, "available": 0.0}
+    client.cookies.clear()
+    login_as(client, ADMIN)
+    assert _decide(client, org_id, tr_id, "done").status_code == 200
+    assert _entries(db, org_id, investor["id"])[-1] == ("credit", -30.0, "transfer", "transfers", tr_id)
+    assert _figures(db, org_id, investor["id"], "credit") == {
+        "balance": 0.0, "on_hold": 0.0, "available": 0.0}
+    # Credit is never withdrawn: a withdrawal only ever debits My wallet.
+    client.cookies.clear()
+    login_as(client, investor)
+    credit(db, org_id, investor["id"], Decimal("30"), wallet="credit")
+    dest = approved_destination(db, org_id, investor["id"])
+    r = client.post(f"/api/orgs/{org_id}/investor/withdrawals",
+                    json={"destination_id": dest, "amount": "10", "mpin": "123456"},
+                    headers=csrf(client))
+    assert r.status_code == 400 and r.json()["detail"] == "amount exceeds what is available (0.00)"
+
+
+def _credit_funded(db, org_id, user_id, account_id):
+    from api.portal_common import credit_funded
+    with psycopg.connect(db, autocommit=True) as conn:
+        return float(credit_funded(conn, org_id, user_id, account_id))
+
+
+def test_bonus_credit_moved_into_an_account_cannot_move_out(org_client, make_user, login_as, db):
+    client, org_id, investor = _funded(org_client, make_user, login_as, db, main="0",
+                                       link_to=1001, equity="1000")
+    credit(db, org_id, investor["id"], Decimal("100"), wallet="credit")
+    tr_id = _transfer(client, org_id, W("credit"), A(1001), "100").json()["id"]
+    assert _credit_funded(db, org_id, investor["id"], 1001) == 0.0, "requested is not funded"
+    client.cookies.clear()
+    login_as(client, ADMIN)
+    assert _decide(client, org_id, tr_id, "done").status_code == 200
+    assert _credit_funded(db, org_id, investor["id"], 1001) == 100.0
+    assert _credit_funded(db, org_id, investor["id"], 1002) == 0.0, "only that account"
+    client.cookies.clear()
+    login_as(client, investor)
+    (account,) = client.get(f"/api/orgs/{org_id}/investor/summary").json()["accounts"]
+    assert account["account_available"] == 900.0, "equity 1000 minus the 100 bonus credit"
+    r = _transfer(client, org_id, A(1001), W("main"), "950")
+    assert r.status_code == 400
+    assert r.json()["detail"] == "amount exceeds the account's available equity (900.00)"
+    assert _transfer(client, org_id, A(1001), W("main"), "900").status_code == 201
+    # Profit made on top of the credit may leave: equity 1300 less the 900
+    # already requested less the 100 credit leaves 300.
+    _state(client, {1001: {"balance": 1300.0, "equity": 1300.0, "open_pnl": 0.0,
+                           "positions": []}})
+    (account,) = client.get(f"/api/orgs/{org_id}/investor/summary").json()["accounts"]
+    assert account["account_available"] == 300.0
+    r = _transfer(client, org_id, A(1001), W("main"), "300.01")
+    assert r.status_code == 400
+    assert r.json()["detail"] == "amount exceeds the account's available equity (300.00)"
+    assert _transfer(client, org_id, A(1001), W("main"), "300").status_code == 201
+
+
+def test_account_available_never_goes_below_zero(org_client, make_user, login_as, db):
+    client, org_id, investor = _funded(org_client, make_user, login_as, db, main="0",
+                                       link_to=1001, equity="100")
+    credit(db, org_id, investor["id"], Decimal("100"), wallet="credit")
+    tr_id = _transfer(client, org_id, W("credit"), A(1001), "100").json()["id"]
+    client.cookies.clear()
+    login_as(client, ADMIN)
+    assert _decide(client, org_id, tr_id, "done").status_code == 200
+    client.cookies.clear()
+    login_as(client, investor)
+    # The account lost money: equity 60 is below the 100 credit funded.
+    _state(client, {1001: {"balance": 60.0, "equity": 60.0, "open_pnl": 0.0, "positions": []}})
+    (account,) = client.get(f"/api/orgs/{org_id}/investor/summary").json()["accounts"]
+    assert account["account_available"] == 0.0
+    r = _transfer(client, org_id, A(1001), W("main"), "0.01")
+    assert r.status_code == 400
+    assert r.json()["detail"] == "amount exceeds the account's available equity (0.00)"
+
+
+def test_credit_funded_after_the_request_blocks_the_decision(org_client, make_user, login_as, db):
+    """request_transfer's mutual exclusion (fix round 1, Finding 1) means
+    this race can no longer be BUILT through the API: an outflow is
+    refused while a credit->account transfer into the account is open, and
+    a credit transfer is refused while an outflow out of it is open. The
+    decide-time re-check stays as belt-and-braces (the ruling keeps it) --
+    simulate the race directly in the database (bypassing request_transfer,
+    the way test_a_transfer_whose_account_was_removed_cannot_be_done does
+    for a different edge case) to prove it still catches a stale
+    equity_at_request once credit lands done after the fact."""
+    client, org_id, investor = _funded(org_client, make_user, login_as, db, main="0",
+                                       link_to=1001, equity="1000")
+    credit(db, org_id, investor["id"], Decimal("100"), wallet="credit")
+    with psycopg.connect(db, autocommit=True) as conn:
+        (out_id,) = conn.execute(
+            "INSERT INTO transfers (org_id, user_id, source_kind, source_account_id, "
+            "target_kind, target_wallet, amount, status, equity_at_request, equity_verified) "
+            "VALUES (%s, %s, 'account', %s, 'wallet', 'main', 1000, 'requested', 1000, true) "
+            "RETURNING id", (org_id, investor["id"], 1001)).fetchone()
+        conn.execute(
+            "INSERT INTO transfers (org_id, user_id, source_kind, source_wallet, target_kind, "
+            "target_account_id, amount, status, done_at) "
+            "VALUES (%s, %s, 'wallet', 'credit', 'account', %s, 100, 'done', now())",
+            (org_id, investor["id"], 1001))
+    login_as(client, ADMIN)
+    r = _decide(client, org_id, out_id, "approved")
+    assert r.status_code == 409
+    assert r.json()["detail"] == ("bonus credit cannot leave the account (at most 900.00 "
+                                  "may move out); reject this transfer instead")
+    r = _decide(client, org_id, out_id, "done")
+    assert r.status_code == 409 and "900.00" in r.json()["detail"]
+    r = _decide(client, org_id, out_id, "rejected", "bonus credit stays")
+    assert r.status_code == 200 and r.json()["status"] == "rejected"
+    assert _entries(db, org_id, investor["id"])[-1][0] == "credit", "nothing reached main"
+
+
+def test_a_decision_within_the_cap_is_unaffected(org_client, make_user, login_as, db):
+    """The credit transfer must be decided (done) before the outflow can
+    even be requested now (mutual exclusion) -- reordered from the
+    original test, which requested both while the credit transfer was
+    still open; that ordering is covered by the mutual-exclusion tests
+    below instead."""
+    client, org_id, investor = _funded(org_client, make_user, login_as, db, main="0",
+                                       link_to=1001, equity="1000")
+    credit(db, org_id, investor["id"], Decimal("100"), wallet="credit")
+    credit_id = _transfer(client, org_id, W("credit"), A(1001), "100").json()["id"]
+    client.cookies.clear()
+    login_as(client, ADMIN)
+    assert _decide(client, org_id, credit_id, "done").status_code == 200
+    client.cookies.clear()
+    login_as(client, investor)
+    out_id = _transfer(client, org_id, A(1001), W("main"), "900").json()["id"]
+    client.cookies.clear()
+    login_as(client, ADMIN)
+    assert _decide(client, org_id, out_id, "approved").status_code == 200
+    r = _decide(client, org_id, out_id, "done")
+    assert r.status_code == 200 and r.json()["status"] == "done"
+    assert _entries(db, org_id, investor["id"])[-1] == ("main", 900.0, "transfer", "transfers",
+                                                        out_id)
+
+
+# --------------------------------------------- mutual exclusion (fix round 1)
+#
+# Controller ruling, Task 11 fix round 1, Finding 1: without this, two
+# outflows (900 + 100) requested while a 100 credit->account transfer is in
+# flight both pass the per-transfer cap (each alone looks within
+# equity_at_request - credit_funded, which is still 0 before the credit
+# lands done) -- so 100 of bonus principal reaches main once the credit
+# transfer and both outflows are marked done. Blocking either direction
+# while the other is open removes the split in both orderings.
+
+
+def test_an_outflow_is_refused_while_a_credit_transfer_into_the_account_is_open(
+        org_client, make_user, login_as, db):
+    client, org_id, investor = _funded(org_client, make_user, login_as, db, main="0",
+                                       link_to=1001, equity="1000")
+    credit(db, org_id, investor["id"], Decimal("100"), wallet="credit")
+    credit_id = _transfer(client, org_id, W("credit"), A(1001), "100").json()["id"]
+    blocked = "a bonus credit transfer into this account is still open; wait for it to finish"
+    r = _transfer(client, org_id, A(1001), W("main"), "900")
+    assert r.status_code == 409 and r.json()["detail"] == blocked
+    r = _transfer(client, org_id, A(1001), W("main"), "100")
+    assert r.status_code == 409 and r.json()["detail"] == blocked, (
+        "the split that used to slip through is blocked on both halves")
+    client.cookies.clear()
+    login_as(client, ADMIN)
+    assert _decide(client, org_id, credit_id, "approved").status_code == 200
+    client.cookies.clear()
+    login_as(client, investor)
+    r = _transfer(client, org_id, A(1001), W("main"), "900")
+    assert r.status_code == 409 and r.json()["detail"] == blocked, "approved is still open"
+    client.cookies.clear()
+    login_as(client, ADMIN)
+    assert _decide(client, org_id, credit_id, "done").status_code == 200
+    client.cookies.clear()
+    login_as(client, investor)
+    assert _transfer(client, org_id, A(1001), W("main"), "900").status_code == 201
+
+
+def test_a_credit_transfer_is_refused_while_an_outflow_out_of_the_account_is_open(
+        org_client, make_user, login_as, db):
+    """The same mutual exclusion, built the other way round: the outflow
+    is requested first, so the credit transfer is the one refused."""
+    client, org_id, investor = _funded(org_client, make_user, login_as, db, main="0",
+                                       link_to=1001, equity="1000")
+    out_id = _transfer(client, org_id, A(1001), W("main"), "900").json()["id"]
+    credit(db, org_id, investor["id"], Decimal("100"), wallet="credit")
+    blocked = "this account has a transfer out still open; wait for it to finish"
+    r = _transfer(client, org_id, W("credit"), A(1001), "100")
+    assert r.status_code == 409 and r.json()["detail"] == blocked
+    client.cookies.clear()
+    login_as(client, ADMIN)
+    assert _decide(client, org_id, out_id, "approved").status_code == 200
+    client.cookies.clear()
+    login_as(client, investor)
+    r = _transfer(client, org_id, W("credit"), A(1001), "100")
+    assert r.status_code == 409 and r.json()["detail"] == blocked, "approved is still open"
+    client.cookies.clear()
+    login_as(client, ADMIN)
+    assert _decide(client, org_id, out_id, "done").status_code == 200
+    client.cookies.clear()
+    login_as(client, investor)
+    assert _transfer(client, org_id, W("credit"), A(1001), "100").status_code == 201
+
+
+# --------------------------------------------- unknown equity (fix round 1)
+#
+# Controller ruling, Task 11 fix round 1, Finding 2: with equity unknown,
+# account_movable has no equity to subtract the funded credit from, and
+# the decide-time re-check never runs either (equity_at_request stays
+# NULL) -- so an account that already holds done bonus credit must refuse
+# an outflow outright while the copier is down, rather than let the whole
+# balance move uncapped. An account with no bonus credit keeps today's
+# behaviour (test_unknown_equity_is_accepted_but_flagged already covers
+# that in isolation; this test puts both side by side on one investor).
+
+
+def test_unknown_equity_outflow_is_refused_only_when_the_account_holds_bonus_credit(
+        org_client, make_user, login_as, db):
+    client, org_id, investor = _funded(org_client, make_user, login_as, db, main="0",
+                                       link_to=1001, equity="1000")
+    _, _, seed = org_client
+    seed(1002, role="slave")
+    link(db, org_id, investor["id"], 1002)
+    credit(db, org_id, investor["id"], Decimal("100"), wallet="credit")
+    tr_id = _transfer(client, org_id, W("credit"), A(1001), "100").json()["id"]
+    client.cookies.clear()
+    login_as(client, ADMIN)
+    assert _decide(client, org_id, tr_id, "done").status_code == 200
+    client.cookies.clear()
+    login_as(client, investor)
+    _state(client, down=True)
+    r = _transfer(client, org_id, A(1001), W("main"), "50")
+    assert r.status_code == 409
+    assert r.json()["detail"] == (
+        "this account holds bonus credit; try again when its balance is live")
+    r = _transfer(client, org_id, A(1002), W("main"), "99999")
+    assert r.status_code == 201
+    assert r.json()["equity_verified"] is False and r.json()["equity_at_request"] is None
+
+
+# --------------------------------------------- claw-back holds (extra: review)
+#
+# Controller ruling from the Task 10 review: an open (requested or
+# approved) credit->account transfer is a hold on the Credit wallet, same
+# as any other open transfer out of a wallet (wallet_holds already counts
+# every open transfer whose source_kind is 'wallet', regardless of its
+# target) -- so a manual claw-back that would take the wallet's available
+# figure below zero is refused while the transfer stays open.
+
+
+def test_an_open_credit_transfer_holds_the_credit_wallet_for_a_claw_back(
+        org_client, make_user, login_as, db):
+    client, org_id, investor = _funded(org_client, make_user, login_as, db, main="0",
+                                       link_to=1001, equity="1000")
+    credit(db, org_id, investor["id"], Decimal("100"), wallet="credit")
+    tr_id = _transfer(client, org_id, W("credit"), A(1001), "80").json()["id"]
+    assert _figures(db, org_id, investor["id"], "credit") == {
+        "balance": 100.0, "on_hold": 80.0, "available": 20.0}
+    client.cookies.clear()
+    login_as(client, ADMIN)
+    url = f"/api/orgs/{org_id}/investors/{investor['id']}/bonuses"
+
+    def claw_back(amount):
+        return client.post(url, json={"amount": amount, "note": "x", "mpin": "123456"},
+                           headers=csrf(client))
+
+    r = claw_back("-30")
+    assert r.status_code == 400
+    assert r.json()["detail"] == (
+        "a claw-back cannot take the Credit wallet below zero (available 20.00)")
+    r = claw_back("-20")
+    assert r.status_code == 201, r.text
+    assert _figures(db, org_id, investor["id"], "credit") == {
+        "balance": 80.0, "on_hold": 80.0, "available": 0.0}
+    # The hold survives approval: the transfer is still open, not yet done.
+    assert _decide(client, org_id, tr_id, "approved").status_code == 200
+    r = claw_back("-0.01")
+    assert r.status_code == 400
+    assert r.json()["detail"] == (
+        "a claw-back cannot take the Credit wallet below zero (available 0.00)")

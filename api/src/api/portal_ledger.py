@@ -80,6 +80,13 @@ def fee_for(amount: Decimal, fee_pct: Decimal) -> Decimal:
     return round_cents(amount * fee_pct / Decimal(100))
 
 
+def deposit_bonus(amount: Decimal, pct: Decimal, cap: Optional[Decimal]) -> Decimal:
+    """The deposit rule's bonus: pct of the confirmed amount, half-up to the
+    cent, never above cap (None = no cap). Zero means nothing is paid."""
+    bonus = round_cents(amount * pct / Decimal(100))
+    return bonus if cap is None else min(bonus, cap)
+
+
 def money(value: Optional[Decimal]) -> Optional[float]:
     """The JSON form: a float rounded to cents, or None."""
     return None if value is None else float(round_cents(value))
@@ -151,8 +158,11 @@ def can_transition(table: str, current: str, new: str) -> bool:
 
 # ------------------------------------------------------------ transfers
 
+# Bonus credit moves only to a trading account: never to My wallet, never
+# withdrawn (withdrawals only ever debit main).
 TRANSFER_PAIRS: frozenset[tuple[str, str]] = frozenset({
     ("main", "account"), ("account", "main"), ("pamm", "main"), ("social", "main"),
+    ("credit", "account"),
 })
 _NOT_ALLOWED = "that transfer is not allowed"
 
@@ -172,7 +182,7 @@ def _end(ref: dict) -> str:
 
 def transfer_pair(source: dict, target: dict) -> tuple[str, str]:
     """("main", "account") and friends; raises LedgerError for every pair
-    outside TRANSFER_PAIRS (credit never moves in phase 1)."""
+    outside TRANSFER_PAIRS (credit moves only to a trading account)."""
     pair = (_end(source), _end(target))
     if pair not in TRANSFER_PAIRS:
         raise LedgerError(_NOT_ALLOWED)

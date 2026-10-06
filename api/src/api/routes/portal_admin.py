@@ -24,6 +24,7 @@ from ..db import get_conn
 from ..mpin_core import require_mpin
 from ..rbac import OrgContext, require_org_role
 from .portal_investor import WALLET_LABELS, entries_page, money_ref_label, pending_counts
+from .portal_support import WAITING_ON_DESK
 from .. import portal_common as pc
 # Controller ruling (Task 10): org_state/equity_from already live in
 # portal_common (Task 5); imported under these underscore names rather than
@@ -138,6 +139,23 @@ def parse_pct(raw: object, field: str) -> Decimal:
     if value != value.quantize(Decimal("0.001")):
         raise pc.LedgerError(message)
     return value
+
+
+def parse_signed_amount(raw: object) -> Decimal:
+    """A hand-posted amount (adjustments, manual bonuses): one optional sign,
+    at most two decimals, never zero. A run of signs ('+-5', '--5') is never
+    read as either sign. Raises HTTPException 400."""
+    text = "" if raw is None or isinstance(raw, bool) else str(raw).strip()
+    if text and not SIGNED_AMOUNT.fullmatch(text):
+        raise HTTPException(status_code=400, detail=(
+            "amount must be a signed number with at most two decimals, e.g. -25.00"))
+    if text and Decimal(text) == 0:
+        raise HTTPException(status_code=400, detail="amount must not be zero")
+    try:
+        magnitude = pc.parse_amount(text.lstrip("+-") if text else raw)
+    except pc.LedgerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return -magnitude if text.startswith("-") else magnitude
 
 
 def _require_investor(conn: psycopg.Connection, org_id: int, user_id: int) -> str:
@@ -382,6 +400,8 @@ def create_portal_admin_router() -> APIRouter:
                                     f"the notice amount ({Decimal(amount):.2f})")
         linked: Optional[int] = None
         transfer_id: Optional[int] = None
+        bonus = Decimal("0")
+        bonus_id: Optional[int] = None
         with conn.transaction():
             # First statement in the transaction, uniformly, whether this
             # decision settles money or not: keeps every ledger-writing
@@ -420,6 +440,13 @@ def create_portal_admin_router() -> APIRouter:
                         "now(), %s) RETURNING id",
                         (ctx.org_id, investor_id, linked, credited, ctx.user_id,
                          f"funded from deposit #{deposit_id}")).fetchone()
+                # The deposit rule, on the confirmed (credited) amount: inside
+                # this transaction, so the deposit and its bonus land together;
+                # bonuses_once_per_deposit makes a replay pay nothing.
+                bonus = pc.rule_bonus(conn, ctx.org_id, "deposit", credited)
+                bonus_id = pc.pay_bonus(conn, ctx.org_id, investor_id, "deposit", bonus,
+                                        source_id=deposit_id, note=f"deposit #{deposit_id}",
+                                        created_by=ctx.user_id)
         out = pc.deposit_json(row)
         await pc.audit_control(
             conn, org_id=ctx.org_id, action="investor_deposit_decided",
@@ -429,11 +456,16 @@ def create_portal_admin_router() -> APIRouter:
             summary=f"Deposit #{deposit_id} {new_status} by {ctx.user_email}")
         credited_line = (f"Credited: {out['credited_amount']:.2f} USD\n"
                          if out["credited_amount"] is not None else "")
-        await pc.notify_investor(
-            conn, http_request, investor_id,
+        await pc.notify(
+            conn, http_request, ctx.org_id, investor_id, "money",
             f"Your deposit of {out['amount']:.2f} USD was {new_status}",
             f"Status: {new_status}\nAmount: {out['amount']:.2f} USD via {out['method_label']}\n"
-            f"{credited_line}Note: {note or '—'}\n\nOpen the portal for details.")
+            f"{credited_line}Note: {note or '—'}\n\nOpen the portal for details.",
+            pc.investor_link(ctx.org_id, "deposit"))
+        if bonus_id is not None:
+            await pc.announce_bonus(conn, http_request, org_id=ctx.org_id, user_id=investor_id,
+                                    bonus_id=bonus_id, source="deposit", amount=bonus,
+                                    actor_email=ctx.user_email, note=f"deposit #{deposit_id}")
         return out
 
     # ------------------------------------------------------------ withdrawals
@@ -487,11 +519,12 @@ def create_portal_admin_router() -> APIRouter:
             conn, org_id=ctx.org_id, action="investor_withdrawal_decided",
             actor_email=ctx.user_email, user_id=user_id,
             withdrawal_id=wd_id, status=new_status, note=note, amount=out["amount"])
-        await pc.notify_investor(
-            conn, http_request, user_id,
+        await pc.notify(
+            conn, http_request, ctx.org_id, user_id, "money",
             f"Your withdrawal of {amount:.2f} USD was {new_status}",
             f"Status: {new_status}\nAmount: {amount:.2f} USD\nTo: {summary}\n"
-            f"Note: {note or '—'}\n\nOpen the portal for details.")
+            f"Note: {note or '—'}\n\nOpen the portal for details.",
+            pc.investor_link(ctx.org_id, "withdraw"))
         return out
 
     @router.post("/withdrawals/{wd_id}/paid", response_model=Dict[str, Any])
@@ -535,11 +568,12 @@ def create_portal_admin_router() -> APIRouter:
             conn, org_id=ctx.org_id, action="investor_withdrawal_paid",
             actor_email=ctx.user_email, user_id=user_id,
             withdrawal_id=wd_id, txid=txid, amount=out["amount"])
-        await pc.notify_investor(
-            conn, http_request, user_id,
+        await pc.notify(
+            conn, http_request, ctx.org_id, user_id, "money",
             f"Your withdrawal of {amount:.2f} USD was paid",
             f"Amount: {amount:.2f} USD\nTo: {summary}\nTransaction: {txid}\n\n"
-            "Open the portal for details.")
+            "Open the portal for details.",
+            pc.investor_link(ctx.org_id, "withdraw"))
         return out
 
     # ---------------------------------------------------- payout destinations
@@ -592,11 +626,12 @@ def create_portal_admin_router() -> APIRouter:
             conn, org_id=ctx.org_id, action="investor_destination_decided",
             actor_email=ctx.user_email, user_id=user_id,
             destination_id=dest_id, status=new_status, note=note, destination=summary)
-        await pc.notify_investor(
-            conn, http_request, user_id,
+        await pc.notify(
+            conn, http_request, ctx.org_id, user_id, "money",
             f"Your payout account {summary} was {new_status}",
             f"Status: {new_status}\nPayout account: {summary}\nNote: {note or '—'}\n\n"
-            "Open the portal for details.")
+            "Open the portal for details.",
+            pc.investor_link(ctx.org_id, "payout-accounts"))
         return out
 
     # -------------------------------------------------------------- transfers
@@ -631,12 +666,12 @@ def create_portal_admin_router() -> APIRouter:
             raise HTTPException(status_code=400, detail=str(exc))
         current = conn.execute(
             "SELECT status, user_id, source_kind, source_wallet, source_account_id, "
-            "target_kind, target_wallet, target_account_id, amount FROM transfers "
-            "WHERE id = %s AND org_id = %s", (tr_id, ctx.org_id)).fetchone()
+            "target_kind, target_wallet, target_account_id, amount, equity_at_request "
+            "FROM transfers WHERE id = %s AND org_id = %s", (tr_id, ctx.org_id)).fetchone()
         if not current:
             raise HTTPException(status_code=404, detail="Transfer not found")
         (status_now, user_id, source_kind, source_wallet, source_account, target_kind,
-         target_wallet, target_account, amount) = current
+         target_wallet, target_account, amount, equity_at_request) = current
         if not pc.can_transition("transfers", status_now, new_status):
             raise HTTPException(status_code=409, detail=f"transfer is already {status_now}")
         amount = Decimal(amount)
@@ -648,6 +683,20 @@ def create_portal_admin_router() -> APIRouter:
         # (user_id), never the admin deciding it.
         with conn.transaction():
             pc.lock_investor_ledger(conn, ctx.org_id, user_id)
+            # Bonus credit may have been funded into the account after this
+            # request was checked (the desk funds the broker credit, then
+            # marks the credit transfer done). Re-check against the equity
+            # seen at request time, never the live equity: by `done` the
+            # desk has already taken the money out at the broker.
+            if (new_status in ("approved", "done") and source_kind == "account"
+                    and source_account is not None and equity_at_request is not None):
+                cap = max(pc.floor_cents(Decimal(equity_at_request) - pc.credit_funded(
+                    conn, ctx.org_id, user_id, source_account)), Decimal("0.00"))
+                if amount > cap:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"bonus credit cannot leave the account (at most {cap:.2f} "
+                               "may move out); reject this transfer instead")
             if new_status == "done":
                 # Done straight from requested also records the decision;
                 # done after approved keeps the earlier decision.
@@ -699,11 +748,12 @@ def create_portal_admin_router() -> APIRouter:
             account_id=source_account if source_account is not None else target_account,
             transfer_id=tr_id, status=new_status, note=note, amount=out["amount"],
             source=from_label, target=to_label)
-        await pc.notify_investor(
-            conn, http_request, user_id,
+        await pc.notify(
+            conn, http_request, ctx.org_id, user_id, "money",
             f"Your transfer of {amount:.2f} USD was {new_status}",
             f"Status: {new_status}\nAmount: {amount:.2f} USD\nFrom: {from_label}\n"
-            f"To: {to_label}\nNote: {note or '—'}\n\nOpen the portal for details.")
+            f"To: {to_label}\nNote: {note or '—'}\n\nOpen the portal for details.",
+            pc.investor_link(ctx.org_id, "transfer"))
         return out
 
     # ---------------------------------------------------------------- investors
@@ -829,22 +879,11 @@ def create_portal_admin_router() -> APIRouter:
         if wallet not in pc.WALLETS:
             raise HTTPException(status_code=400,
                                 detail="wallet must be one of main, credit, pamm, social")
-        raw = "" if body.amount is None or isinstance(body.amount, bool) else str(body.amount).strip()
-        # One optional sign, then the number: a run of signs ('+-5', '--5')
-        # must never be read as either sign. An empty amount falls through
-        # to parse_amount's "is required".
-        if raw and not SIGNED_AMOUNT.fullmatch(raw):
-            raise HTTPException(status_code=400, detail=(
-                "amount must be a signed number with at most two decimals, e.g. -25.00"))
-        if raw and Decimal(raw) == 0:
-            raise HTTPException(status_code=400, detail="amount must not be zero")
-        negative = raw.startswith("-")
+        amount = parse_signed_amount(body.amount)
         try:
-            magnitude = pc.parse_amount(raw.lstrip("+-") if raw else body.amount)
             note = pc.clean_text(body.note, "note", max_len=500)
         except pc.LedgerError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
-        amount = -magnitude if negative else magnitude
         # An adjustment has no request row to reference, so it is a plain
         # insert rather than settle(): nothing to make idempotent against.
         # The per-investor ledger lock is the FIRST statement inside the
@@ -866,11 +905,12 @@ def create_portal_admin_router() -> APIRouter:
             actor_email=ctx.user_email, user_id=user_id, severity="warning",
             entry_id=out["id"], wallet=wallet, amount=out["amount"], note=note,
             summary=f"Ledger adjusted: {amount:+.2f} USD on {label} of {email} by {ctx.user_email}")
-        await pc.notify_investor(
-            conn, http_request, user_id,
+        await pc.notify(
+            conn, http_request, ctx.org_id, user_id, "money",
             f"Your {label} was adjusted by {amount:+.2f} USD",
             f"Wallet: {label}\nAmount: {amount:+.2f} USD\nNote: {note}\n\n"
-            "Open the portal for details.")
+            "Open the portal for details.",
+            pc.investor_link(ctx.org_id, "transactions"))
         return out
 
     # ---------------------------------------------------------------- requests
@@ -889,11 +929,14 @@ def create_portal_admin_router() -> APIRouter:
                    WHERE org_id = %(o)s AND status = 'pending'),
                  (SELECT count(*) FROM kyc_profiles WHERE org_id = %(o)s AND status = 'submitted'),
                  (SELECT count(*) FROM account_requests
-                   WHERE org_id = %(o)s AND status = 'requested')""",
+                   WHERE org_id = %(o)s AND status = 'requested'),
+                 (SELECT count(*) FROM tickets t
+                   WHERE t.org_id = %(o)s AND """ + WAITING_ON_DESK + ")",
             {"o": ctx.org_id}).fetchone()
         counts = {"deposits": int(row[0]), "withdrawals": int(row[1]),
                   "transfers": int(row[2]), "payout_destinations": int(row[3]),
-                  "kyc": int(row[4]), "account_requests": int(row[5])}
+                  "kyc": int(row[4]), "account_requests": int(row[5]),
+                  "tickets": int(row[6])}
         return {**counts, "total": sum(counts.values())}
 
     return router
