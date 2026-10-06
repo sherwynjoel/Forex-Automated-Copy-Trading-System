@@ -136,12 +136,68 @@ test('opening with the keyboard moves focus into the panel', async () => {
   expect(panel).toHaveFocus()
 })
 
-test('Tab closes the panel rather than letting focus escape into the page behind it', async () => {
+test('ArrowDown from the opened panel focuses the first row', async () => {
   mockRoutes()
   renderBell()
-  await openPanel('Notifications, 1 unread')
+  const panel = await openPanel('Notifications, 1 unread')
+  await within(panel).findByText('Your deposit of 250.00 USD was confirmed')
+  await userEvent.keyboard('{ArrowDown}')
+  expect(within(panel).getByRole('button', { name: /Your deposit of 250.00 USD was confirmed/ }))
+    .toHaveFocus()
+})
+
+test('ArrowUp from the opened panel wraps to the last item (See all)', async () => {
+  mockRoutes()
+  renderBell()
+  const panel = await openPanel('Notifications, 1 unread')
+  await within(panel).findByText('Your deposit of 250.00 USD was confirmed')
+  await userEvent.keyboard('{ArrowUp}')
+  expect(within(panel).getByRole('link', { name: 'See all notifications' })).toHaveFocus()
+})
+
+test('Tab from the last item wraps to the first, rather than escaping into the page behind the panel', async () => {
+  mockRoutes()
+  renderBell()
+  const panel = await openPanel('Notifications, 1 unread')
+  const seeAll = await within(panel).findByRole('link', { name: 'See all notifications' })
+  act(() => seeAll.focus())
   await userEvent.keyboard('{Tab}')
-  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  expect(within(panel).getByRole('button', { name: /Your deposit of 250.00 USD was confirmed/ }))
+    .toHaveFocus()
+  expect(screen.getByRole('dialog')).toBeInTheDocument()
+})
+
+test('Shift+Tab from the first item wraps to the last', async () => {
+  mockRoutes()
+  renderBell()
+  const panel = await openPanel('Notifications, 1 unread')
+  const firstRow = await within(panel).findByRole('button', { name: /Your deposit of 250.00 USD was confirmed/ })
+  act(() => firstRow.focus())
+  await userEvent.keyboard('{Shift>}{Tab}{/Shift}')
+  expect(within(panel).getByRole('link', { name: 'See all notifications' })).toHaveFocus()
+})
+
+test('Home and End jump to the first and last focusable item', async () => {
+  mockRoutes()
+  renderBell()
+  const panel = await openPanel('Notifications, 1 unread')
+  await within(panel).findByText('Your deposit of 250.00 USD was confirmed')
+  await userEvent.keyboard('{End}')
+  expect(within(panel).getByRole('link', { name: 'See all notifications' })).toHaveFocus()
+  await userEvent.keyboard('{Home}')
+  expect(within(panel).getByRole('button', { name: /Your deposit of 250.00 USD was confirmed/ }))
+    .toHaveFocus()
+})
+
+test('a disabled Mark all read is skipped by keyboard navigation', async () => {
+  mockRoutes()
+  renderBell(0)
+  const panel = await openPanel('Notifications')
+  await within(panel).findByText('Your deposit of 250.00 USD was confirmed')
+  expect(within(panel).getByRole('button', { name: 'Mark all read' })).toBeDisabled()
+  // Two rows, so Mark all read (disabled) must be skipped between them and "See all".
+  await userEvent.keyboard('{ArrowDown}{ArrowDown}{ArrowDown}')
+  expect(within(panel).getByRole('link', { name: 'See all notifications' })).toHaveFocus()
 })
 
 test('Escape closes the panel and returns focus to the bell', async () => {

@@ -17,13 +17,20 @@ const PANEL_WIDTH = 320
  * badge, and a glass popover with the latest eight (on an opaque inset),
  * "Mark all read" and a link to the full page. A row click marks it read
  * and follows its in-app link. The popover is portalled and fixed to the
- * trigger, as Menu's is, so no clipping ancestor cuts it off. Opening it
- * moves focus straight into the dialog; Tab closes it and returns focus to
- * the trigger rather than let focus wander into the page behind the portal
- * (Menu.tsx's choice, for the same reason); Escape and an outside click
- * also close it, Escape returning focus to the trigger. The trigger is
- * 44 px square at every width (a touch target in the tablet top bar as
- * much as on the phone).
+ * trigger, as Menu's is, so no clipping ancestor cuts it off.
+ *
+ * Opening it moves focus straight into the dialog (not a row -- the list
+ * may still be loading). From there it is a small focus trap, Menu-style
+ * (Menu.tsx ~95) but over a mixed list of rows, "Mark all read" and the
+ * "See all" link rather than one list of menuitems: ArrowDown/ArrowUp/
+ * Home/End move across that list (rows first, then Mark all read, then See
+ * all -- skipping Mark all read while it is disabled), wrapping at either
+ * end; Tab/Shift+Tab wrap the same way rather than let focus wander into
+ * the page behind the portal, since Tab's native traversal has no notion of
+ * this portalled dialog's edges. Escape and an outside click close it,
+ * Escape returning focus to the trigger. The trigger is 44 px square at
+ * every width (a touch target in the tablet top bar as much as on the
+ * phone).
  */
 export default function NotificationBell({ orgId, pageHref, count, onChange }: {
   orgId: number
@@ -48,6 +55,21 @@ export default function NotificationBell({ orgId, pageHref, count, onChange }: {
   // bump `seq` itself).
   useEffect(() => { seq.current += 1; setOpen(false); setItems(null) }, [orgId])
 
+  // The panel's focusable items in keyboard-navigation order: every row,
+  // then "Mark all read" (skipped while disabled -- a disabled button can
+  // never take focus anyway), then "See all". That order puts the content
+  // before the actions below it, regardless of "Mark all read" sitting
+  // above the list in the markup.
+  const navItems = (): HTMLElement[] => {
+    const panel = panelRef.current
+    if (!panel) return []
+    const rows = Array.from(panel.querySelectorAll<HTMLElement>('ul li button'))
+    const markAll = panel.querySelector<HTMLElement>('[data-nav="mark-all-read"]')
+    const seeAll = panel.querySelector<HTMLElement>('[data-nav="see-all"]')
+    return [...rows, markAll, seeAll].filter(
+      (el): el is HTMLElement => !!el && !(el instanceof HTMLButtonElement && el.disabled))
+  }
+
   useEffect(() => {
     if (!open) return
     // Focus the dialog itself (not a specific row -- the list may still be
@@ -60,14 +82,29 @@ export default function NotificationBell({ orgId, pageHref, count, onChange }: {
       }
     }
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { setOpen(false); triggerRef.current?.focus() }
-      // Tab never tabs on into the page behind the popover (it is portalled
-      // to the end of <body>, past everything else): close it and send
-      // focus back to the trigger first, the same choice Menu.tsx makes.
-      else if (e.key === 'Tab' && panelRef.current?.contains(document.activeElement)) {
-        triggerRef.current?.focus()
-        setOpen(false)
+      if (e.key === 'Escape') { setOpen(false); triggerRef.current?.focus(); return }
+      const panel = panelRef.current
+      const inPanel = !!panel && (panel === document.activeElement || panel.contains(document.activeElement))
+      if (!inPanel) return
+      const items = navItems()
+      if (items.length === 0) return
+      const current = items.indexOf(document.activeElement as HTMLElement)
+      // No item focused yet (focus is on the dialog itself): a forward move
+      // lands on the first item, a backward one on the last -- the same
+      // "clamp at the ends, Home/End for the jump" idea as Menu.tsx, except
+      // Tab/Shift+Tab wrap here rather than close the panel (Tab's native
+      // traversal has no notion of this portalled dialog's own edges).
+      const go = (delta: number) => {
+        const next = current === -1
+          ? (delta > 0 ? 0 : items.length - 1)
+          : (current + delta + items.length) % items.length
+        items[next]?.focus({ preventScroll: true })
       }
+      if (e.key === 'ArrowDown') { e.preventDefault(); go(1) }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); go(-1) }
+      else if (e.key === 'Home') { e.preventDefault(); items[0]?.focus({ preventScroll: true }) }
+      else if (e.key === 'End') { e.preventDefault(); items[items.length - 1]?.focus({ preventScroll: true }) }
+      else if (e.key === 'Tab') { e.preventDefault(); go(e.shiftKey ? -1 : 1) }
     }
     document.addEventListener('mousedown', onDoc)
     document.addEventListener('keydown', onKey)
@@ -139,7 +176,7 @@ export default function NotificationBell({ orgId, pageHref, count, onChange }: {
           <div className="flex items-center justify-between gap-2 px-1">
             <span className="desk-label">Notifications</span>
             <Button variant="ghost" size="sm" onClick={() => { void readAll() }}
-                    disabled={!count}>
+                    disabled={!count} data-nav="mark-all-read">
               Mark all read
             </Button>
           </div>
@@ -167,7 +204,7 @@ export default function NotificationBell({ orgId, pageHref, count, onChange }: {
               </ul>
             )}
           </div>
-          <Link to={pageHref} onClick={() => setOpen(false)}
+          <Link to={pageHref} onClick={() => setOpen(false)} data-nav="see-all"
                 className="block px-1 text-sm text-brand underline underline-offset-2 hover:text-brand-deep">
             See all notifications
           </Link>
