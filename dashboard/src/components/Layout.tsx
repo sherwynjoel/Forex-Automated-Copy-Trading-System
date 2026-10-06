@@ -32,8 +32,16 @@ import { platformCaption } from '../lib/platform'
 export default function Layout() {
   const { theme, toggle: toggleTheme, choose: chooseTheme } = useTheme()
   // The account's theme follows the user between browsers; localStorage
-  // stays the first-paint cache. Once per shell mount.
-  useEffect(() => { void syncThemeFromServer(chooseTheme) }, [chooseTheme])
+  // stays the first-paint cache. Once per shell mount -- but the GET can
+  // take as long as a slow network does, and if the user flips the rail's
+  // toggle before it answers, that manual choice must win: a late server
+  // answer landing after it would otherwise flip the theme back under them.
+  const themeChangedLocally = useRef(false)
+  useEffect(() => {
+    void syncThemeFromServer((pref) => {
+      if (!themeChangedLocally.current) chooseTheme(pref)
+    })
+  }, [chooseTheme])
   const location = useLocation()
   const navigate = useNavigate()
   const { orgId, role, me } = useOrg()
@@ -120,7 +128,8 @@ export default function Layout() {
       </div>
       <NavRail groups={groups} onNavigate={() => setMenuOpen(false)} />
       <div className="border-t p-3">
-        <Button variant="ghost" tone="neutral" size="sm" block onClick={() => { void saveThemePref(toggleTheme()) }}
+        <Button variant="ghost" tone="neutral" size="sm" block
+                onClick={() => { themeChangedLocally.current = true; void saveThemePref(toggleTheme()) }}
                 aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dim theme'}
                 className="justify-start">
           <span aria-hidden="true">{theme === 'dark' ? '☀' : '☾'}</span>{' '}

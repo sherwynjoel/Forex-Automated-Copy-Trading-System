@@ -59,6 +59,38 @@ test('shows the account theme and saves a new one, painting it at once', async (
   expect(await screen.findByText('Appearance saved')).toBeInTheDocument()
 })
 
+test('a saved dark theme (updated_at set) still reads as Dim, not a dead "dark" selection', async () => {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input)
+    const method = init?.method ?? 'GET'
+    if (url === '/api/me/settings' && method === 'GET') {
+      return jsonResponse({ theme: 'dark', updated_at: '2026-10-05T09:00:00Z' })
+    }
+    if (url.endsWith('/notification-prefs')) {
+      return jsonResponse({ money: true, identity: true, support: true, bonus: true })
+    }
+    return jsonResponse({})
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  render(<MemoryRouter><Settings /></MemoryRouter>)
+  expect(await screen.findByRole('radio', { name: 'Dim' })).toBeChecked()
+  expect(screen.getByRole('radio', { name: 'Light' })).not.toBeChecked()
+  expect(screen.getByRole('radio', { name: 'System' })).not.toBeChecked()
+})
+
+test('with no theme ever saved (updated_at null) this browser\'s own look is shown selected, not the server default', async () => {
+  // This browser already paints Dim (its first-paint localStorage cache);
+  // the server has never saved anything for this account (theme defaults
+  // to 'system', updated_at null). The page must show what it already
+  // looks like, not silently disagree with its own palette.
+  localStorage.setItem('mf.theme', 'dark')
+  const fetchMock = mockRoutes({ theme: 'system' })
+  render(<MemoryRouter><Settings /></MemoryRouter>)
+  expect(await screen.findByRole('radio', { name: 'Dim' })).toBeChecked()
+  expect(screen.getByRole('radio', { name: 'System' })).not.toBeChecked()
+  expect(fetchMock.mock.calls.some(([, i]) => (i as RequestInit | undefined)?.method === 'PUT')).toBe(false)
+})
+
 test('two quick theme picks leave only the latest in control: a stale success never overwrites a later error', async () => {
   let releaseFirst: ((r: Response) => void) | null = null
   let putCount = 0

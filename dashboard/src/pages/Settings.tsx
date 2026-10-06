@@ -3,7 +3,7 @@ import { api, orgApi } from '../lib/api'
 import { useOrg } from '../lib/org'
 import { errorText } from '../lib/format'
 import { TOPICS, TOPIC_EMAIL_LABELS } from '../lib/engagement'
-import { isThemePref } from '../lib/themeSync'
+import { isThemePref, localPref } from '../lib/themeSync'
 import { useTheme } from '../hooks/useTheme'
 import Banner from '../components/Banner'
 import Card from '../components/Card'
@@ -43,7 +43,16 @@ export default function Settings() {
     ]).then(
       ([s, p]) => {
         if (mine !== seq.current) return
-        setThemePref(isThemePref(s?.theme) ? s.theme : 'system')
+        // The server's own value, normalised (it may answer 'dark', which
+        // paints the same night palette as 'dim' and has no radio of its
+        // own). While the account has never saved one (updated_at null,
+        // same rule as syncThemeFromServer), this browser's own look wins
+        // over whatever default the column carries -- showing it as
+        // selected here, with no PUT, matches what the page already looks
+        // like.
+        const server = isThemePref(s?.theme) ? s.theme : 'system'
+        const normalized = server === 'dark' ? 'dim' : server
+        setThemePref(s?.updated_at == null ? (localPref() ?? normalized) : normalized)
         setPrefs(p)
       },
       (err) => {
@@ -83,7 +92,6 @@ export default function Settings() {
     }
   }
 
-  const shown = theme === 'dark' ? 'dim' : theme
   return (
     <div className="space-y-6 max-w-3xl">
       <PageHeader
@@ -103,7 +111,7 @@ export default function Settings() {
                 {THEME_OPTIONS.map(([value, label]) => (
                   <label key={value} className="flex items-center gap-2 text-ink">
                     <input type="radio" name="theme" value={value} className="accent-brand"
-                           checked={shown === value} onChange={() => { void pickTheme(value) }} />
+                           checked={theme === value} onChange={() => { void pickTheme(value) }} />
                     {label}
                   </label>
                 ))}
