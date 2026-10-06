@@ -476,6 +476,28 @@ An investor with several accounts picks one on Account, History, Transfer and
 Deposit. Deploy the api and the dashboard together: the old dashboard reads
 `account` from the investor summary, which no longer exists.
 
+Migration 025 (client portal phase 4: notifications, support tickets,
+bonuses, settings) is additive -- eight new tables, nothing else touched --
+so the same sequence applies and `migrate` prints
+`applied: ['025_portal_engagement.sql']`. After the upgrade an admin adds at
+least one subject under **Investors → Portal settings → Ticket subjects**
+(the tab formerly called Payment methods; until a subject exists investors
+cannot raise a ticket) and, if wanted, switches on **Bonus rules** in the
+same tab -- a rule pays only for events after it is switched on. Bonuses
+land in the investor's Credit wallet, which moves only to a trading account:
+fund every Credit -> trading account transfer at the broker as **credit**,
+never as balance, before marking it done. The portal keeps that principal
+inside the account (an account -> My wallet transfer may take equity less
+the credit funded into it; profit made on the credit may leave). An account
+cannot have a bonus credit transfer in and a transfer out open at the same
+time -- whichever is requested second is refused with a 409 until the first
+finishes. Deleting and re-adding an account, or relinking it to a different
+investor, resets its bonus-credit floor to zero (an admin-only action; avoid
+it while the account still holds bonus credit). Every portal email now also
+lands in the bell; each user mutes email per topic (money, identity,
+support, bonus) under **Settings**, and the theme follows the account
+across browsers. Deploy the api and the dashboard together.
+
 Then hard-reload any open dashboard tab (the old bundle is stale). Without a
 new migration the short form is `sudo docker compose build api && sudo docker
 compose up -d api`. The first deploy of the client portal also creates the

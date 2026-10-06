@@ -110,7 +110,7 @@
 - Consumes: `db/migrate.py` `apply_migrations` (conftest runs it); conftest `db`, `make_user`, `make_org`.
 - Produces: tables `notifications`, `notification_prefs`, `user_settings`, `ticket_subjects`, `tickets`, `ticket_messages`, `bonus_rules`, `bonuses` with the indexes and CHECKs listed in the interfaces doc; conftest truncates all eight.
 
-- [ ] **Step 1: Write the failing migration test**
+- [x] **Step 1: Write the failing migration test**
 
 Create `api/tests/test_migration_025.py`:
 
@@ -246,12 +246,12 @@ def test_bonus_rules_default_off_and_bonuses_pay_once(db, people):
                 conn.execute(insert, (org_id, uid, source, source_id, amount))
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `"$PY" -m pytest tests/test_migration_025.py -q -p no:cacheprovider`
 Expected: FAIL — `025_portal_engagement.sql` is not in `schema_migrations`.
 
-- [ ] **Step 3: Write the migration**
+- [x] **Step 3: Write the migration**
 
 Create `db/migrations/025_portal_engagement.sql`:
 
@@ -384,7 +384,7 @@ CREATE UNIQUE INDEX bonuses_once_per_deposit ON bonuses (org_id, source_id)
 CREATE INDEX bonuses_by_user ON bonuses (org_id, user_id, created_at DESC, id DESC);
 ```
 
-- [ ] **Step 4: Truncate the new tables between tests**
+- [x] **Step 4: Truncate the new tables between tests**
 
 In `api/tests/conftest.py`, in the `db` fixture, replace the first line of the TRUNCATE string
 
@@ -402,12 +402,12 @@ with
 
 (`RESTART IDENTITY` then resets their sequences too, which the RBAC matrix's fixed ids rely on in Task 12.)
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 Run: `"$PY" -m pytest tests/test_migration_025.py tests/test_migration_024.py tests/test_migration_022.py -q -p no:cacheprovider`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add db/migrations/025_portal_engagement.sql api/tests/test_migration_025.py api/tests/conftest.py
@@ -432,7 +432,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 - Consumes: migration 025 (`notifications`, `notification_prefs`); `ws.broadcaster.alerter` / `request.app.state.alerter` (unchanged); `portal_helpers.member`, `add_method`, `approved_destination`, `credit`, `kyc_profile`, `add_package`, `open_account_request`, `csrf`, `DEST_CRYPTO`.
 - Produces (in `api/src/api/portal_common.py`): `TOPICS`, `clip(text, limit) -> str`, `investor_link(org_id, page) -> str`, `email_wanted(conn, org_id, user_id, topic) -> bool`, `async notify(conn, request, org_id, user_id, topic, title, body, link=None)`, `async notify_admins(conn, request, org_id, topic, title, body, link=None)`. `notify_investor` is deleted. Titles of the nine notifications equal the old email subjects.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `api/tests/test_portal_common.py`, replace the whole `test_notify_investor_is_best_effort` function with:
 
@@ -576,12 +576,12 @@ def test_the_nine_decisions_each_write_one_notification(org_client, make_user, d
     ]
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `"$PY" -m pytest tests/test_portal_common.py tests/test_portal_notify_callers.py -q -p no:cacheprovider`
 Expected: FAIL — `module 'api.portal_common' has no attribute 'notify'`; the callers test finds no notification rows.
 
-- [ ] **Step 3: Replace `notify_investor` with `notify`**
+- [x] **Step 3: Replace `notify_investor` with `notify`**
 
 In `api/src/api/portal_common.py`, replace the whole `notify_investor` function with:
 
@@ -651,7 +651,7 @@ async def notify_admins(conn: psycopg.Connection, request: Request, org_id: int,
         await notify(conn, request, org_id, admin_id, topic, title, body, link)
 ```
 
-- [ ] **Step 4: Move the six admin callers**
+- [x] **Step 4: Move the six admin callers**
 
 In `api/src/api/routes/portal_admin.py`, replace each `pc.notify_investor(...)` call as follows (the texts are unchanged; only the call, the org, the topic and the link are new).
 
@@ -721,7 +721,7 @@ In `post_adjustment`:
             pc.investor_link(ctx.org_id, "transactions"))
 ```
 
-- [ ] **Step 5: Move the three identity callers**
+- [x] **Step 5: Move the three identity callers**
 
 In `api/src/api/routes/portal_identity.py`:
 
@@ -759,12 +759,12 @@ In `reject_request`:
 Run: `grep -rn "notify_investor" api/src api/tests`
 Expected: no output.
 
-- [ ] **Step 6: Run the tests to verify they pass**
+- [x] **Step 6: Run the tests to verify they pass**
 
 Run: `"$PY" -m pytest tests/test_portal_common.py tests/test_portal_notify_callers.py tests/test_portal_deposits.py tests/test_portal_withdrawals.py tests/test_portal_transfers.py tests/test_portal_summary.py tests/test_portal_kyc.py tests/test_portal_account_requests.py -q -p no:cacheprovider`
 Expected: PASS (the existing email tests still see the same subjects and texts).
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add api/src/api/portal_common.py api/src/api/routes/portal_admin.py api/src/api/routes/portal_identity.py api/tests/test_portal_common.py api/tests/test_portal_notify_callers.py
@@ -787,7 +787,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 - Consumes: `rbac.require_org_role("investor")` (every member passes), `pc._iso`.
 - Produces: `create_portal_notifications_router()` (prefix `/api`), `note_json(row) -> dict`, `NOTE_COLS`; routes `GET /api/orgs/{org_id}/notifications?before=&limit=`, `GET .../notifications/unread-count`, `POST .../notifications/{note_id}/read`, `POST .../notifications/read-all` (contracts in the interfaces doc).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `api/tests/test_portal_notifications.py`:
 
@@ -889,12 +889,12 @@ def test_a_desk_member_reads_their_own_too(org_client, db):
     assert client.get(_url(org_id, "/unread-count")).json() == {"count": 1}
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `"$PY" -m pytest tests/test_portal_notifications.py -q -p no:cacheprovider`
 Expected: FAIL — 404 on every notifications path (no router).
 
-- [ ] **Step 3: Write the router**
+- [x] **Step 3: Write the router**
 
 Create `api/src/api/routes/portal_notifications.py`:
 
@@ -981,7 +981,7 @@ def create_portal_notifications_router() -> APIRouter:
     return router
 ```
 
-- [ ] **Step 4: Wire the router**
+- [x] **Step 4: Wire the router**
 
 In `api/src/api/main.py`, directly after `app.include_router(create_portal_identity_router())`, add:
 
@@ -993,12 +993,12 @@ In `api/src/api/main.py`, directly after `app.include_router(create_portal_ident
     app.include_router(create_portal_notifications_router())
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 Run: `"$PY" -m pytest tests/test_portal_notifications.py -q -p no:cacheprovider`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add api/src/api/routes/portal_notifications.py api/src/api/main.py api/tests/test_portal_notifications.py
@@ -1020,7 +1020,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 - Consumes: `auth.require_user`; `pc.TOPICS`, `pc.email_wanted` (Task 2).
 - Produces: `THEMES = ("light", "dim", "dark", "system")`; routes `GET/PUT /api/me/settings` (`{theme, updated_at}`), `GET/PUT /api/orgs/{org_id}/notification-prefs` (`{money, identity, support, bonus}`), refusals in the interfaces doc.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `api/tests/test_portal_settings.py`:
 
@@ -1083,12 +1083,12 @@ def test_prefs_are_per_org(org_client, make_user, make_org, login_as, db):
     assert client.get(f"/api/orgs/{other_org}/notification-prefs").json() == ALL_ON
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `"$PY" -m pytest tests/test_portal_settings.py -q -p no:cacheprovider`
 Expected: FAIL — 404 on `/api/me/settings` and `notification-prefs`.
 
-- [ ] **Step 3: Add the routes**
+- [x] **Step 3: Add the routes**
 
 In `api/src/api/routes/portal_notifications.py`, change the FastAPI import to
 
@@ -1157,12 +1157,12 @@ and add before `return router`:
         return dict(zip(pc.TOPICS, values))
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `"$PY" -m pytest tests/test_portal_settings.py tests/test_portal_notifications.py tests/test_auth.py -q -p no:cacheprovider`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add api/src/api/routes/portal_notifications.py api/tests/test_portal_settings.py
@@ -1187,7 +1187,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 - Consumes: `pc.clean_text`, `pc.audit_control`, `pc._iso`; `portal_helpers.csrf`, `member`, `seed_file`.
 - Produces: `create_portal_support_router()` (prefix `/api/orgs/{org_id}`), `subject_json(row)`, `SUBJECT_COLS`; routes `GET/POST ticket-subjects`, `PATCH/DELETE ticket-subjects/{subject_id}`, `GET investor/ticket-subjects`; audit action `ticket_subject_changed` (`change` = created/updated/deleted). `uploads.ACCEPTED_PURPOSES` gains `ticket_attachment`; the upload route answers 400 `attachments must be images` for a non-image ticket attachment; `file_belongs` refuses a file already in any `ticket_messages.file_ids`. Test helpers in `test_portal_tickets.py`: `ADMIN`, `_events(db, org_id, action)`, `_user_id(db, email)`, `_subject(client, org_id, label, **extra)`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `api/tests/test_portal_tickets.py`:
 
@@ -1309,12 +1309,12 @@ def test_ticket_attachments_are_images_only(portal):
     assert r.status_code == 400 and r.json()["detail"] == "attachments must be images"
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `"$PY" -m pytest tests/test_portal_tickets.py tests/test_uploads.py -q -p no:cacheprovider`
 Expected: FAIL — 404 on `ticket-subjects`, `purpose is not accepted yet` for `ticket_attachment`, and `file_belongs` still true for an attached image.
 
-- [ ] **Step 3: Accept ticket images and keep each file to one message**
+- [x] **Step 3: Accept ticket images and keep each file to one message**
 
 In `api/src/api/uploads.py`, replace
 
@@ -1362,7 +1362,7 @@ with
 and in its docstring replace `not to any slot of a KYC profile (phase 2: one file per document slot).` with `not to any slot of a KYC profile (phase 2: one file per document slot)
 and not to any support-ticket message (phase 4).`
 
-- [ ] **Step 4: Write the subjects half of the support router**
+- [x] **Step 4: Write the subjects half of the support router**
 
 Create `api/src/api/routes/portal_support.py`:
 
@@ -1516,12 +1516,12 @@ In `api/src/api/main.py`, directly after `app.include_router(create_portal_notif
     app.include_router(create_portal_support_router())
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 Run: `"$PY" -m pytest tests/test_portal_tickets.py tests/test_uploads.py tests/test_portal_deposits.py tests/test_portal_kyc.py -q -p no:cacheprovider`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add api/src/api/routes/portal_support.py api/src/api/main.py api/src/api/uploads.py api/src/api/routes/portal_files.py api/tests/test_portal_tickets.py api/tests/test_uploads.py
@@ -1543,7 +1543,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 - Consumes: Task 5's router and helpers; `routes/portal_files.file_belongs`; `routes/portal_investor.RATE_LIMITED`; `auth.LoginRateLimiter`; `pc.notify_admins`, `pc.qualify`.
 - Produces (module level in `portal_support.py`): `TICKETS_PER_HOUR = 10`, `REPLIES_PER_HOUR = 60`, `MAX_IMAGES = 3`, `STATUSES`, `TICKET_COLS`, `MESSAGE_COLS`, `LAST_FROM_DESK`, `WAITING_ON_DESK` (the one SQL rule for "waiting on the desk", on tickets aliased `t`), `TICKET_SELECT`, `TicketBody`, `MessageBody`, `DeskReply`, `ticket_json(row)`, `message_json(row)`, `clean_attachments(conn, org_id, user_id, raw) -> list[int]`, `search_clause(q, status) -> tuple[str, list]`, `load_thread(conn, org_id, ticket_id, user_id=None) -> dict` (with `user_id` set, the investor's view: desk messages carry no `author_id`/`author_name` and a desk close no `closed_by`), `add_message(conn, org_id, ticket_id, author_id, from_desk, body, file_ids)`, `desk_link(org_id, ticket_id) -> str`; inside the router `_close(conn, ctx, ticket_id, *, owner) -> (investor_id, subject_label)`. Routes `POST investor/tickets`, `GET investor/tickets?status=&q=`, `GET investor/tickets/{ticket_id}`, `POST investor/tickets/{ticket_id}/messages` (60 replies per hour, 429), `POST investor/tickets/{ticket_id}/close`; every Ticket carries `waiting_on_desk`; audits `ticket_opened`, `ticket_replied`, `ticket_closed`. Test helpers: fixture `portal` -> `(client, org_id, investor, {"deposits": id, "old": id})`, `_open`, `_reply`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `api/tests/test_portal_tickets.py`:
 
@@ -1715,12 +1715,12 @@ def test_sixty_replies_an_hour(portal, monkeypatch):
     assert _open(client, org_id, subjects["deposits"]).status_code == 201, "tickets count apart"
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `"$PY" -m pytest tests/test_portal_tickets.py -q -p no:cacheprovider`
 Expected: FAIL — 404/405 on `investor/tickets`.
 
-- [ ] **Step 3: Add the ticket helpers**
+- [x] **Step 3: Add the ticket helpers**
 
 In `api/src/api/routes/portal_support.py`, change the FastAPI import to
 
@@ -1881,7 +1881,7 @@ def desk_link(org_id: int, ticket_id: int) -> str:
     return f"/org/{org_id}/requests?tab=support&ticket={ticket_id}"
 ```
 
-- [ ] **Step 4: Add the investor routes**
+- [x] **Step 4: Add the investor routes**
 
 In `create_portal_support_router()`, directly after `router = APIRouter(...)`, add:
 
@@ -2012,12 +2012,12 @@ and before `return router` add:
         return load_thread(conn, ctx.org_id, ticket_id, ctx.user_id)
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 Run: `"$PY" -m pytest tests/test_portal_tickets.py -q -p no:cacheprovider`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add api/src/api/routes/portal_support.py api/tests/test_portal_tickets.py
@@ -2040,7 +2040,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 - Consumes: Task 6's helpers, `DeskReply` and `_close`; `pc.notify`, `pc.investor_link`.
 - Produces: routes `GET tickets?status=&q=`, `GET tickets/{ticket_id}`, `POST tickets/{ticket_id}/messages`, `POST tickets/{ticket_id}/close`; `requests/summary` gains `tickets` (in `total`).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `api/tests/test_portal_tickets.py`:
 
@@ -2151,12 +2151,12 @@ In `api/tests/test_portal_summary.py`, in `test_requests_summary_counts_open_row
         "kyc": 0, "account_requests": 0, "tickets": 0, "total": 6}
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `"$PY" -m pytest tests/test_portal_tickets.py tests/test_portal_summary.py -q -p no:cacheprovider`
 Expected: FAIL — 404 on `tickets`, and the summary has no `tickets` key.
 
-- [ ] **Step 3: Add the desk routes**
+- [x] **Step 3: Add the desk routes**
 
 In `api/src/api/routes/portal_support.py`, before `return router` add:
 
@@ -2226,7 +2226,7 @@ In `api/src/api/routes/portal_support.py`, before `return router` add:
         return load_thread(conn, ctx.org_id, ticket_id)
 ```
 
-- [ ] **Step 4: Count tickets waiting on the desk**
+- [x] **Step 4: Count tickets waiting on the desk**
 
 In `api/src/api/routes/portal_admin.py`, below `from .portal_investor import WALLET_LABELS, entries_page, money_ref_label, pending_counts` add
 
@@ -2261,12 +2261,12 @@ and the `counts` dict with
                   "tickets": int(row[6])}
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 Run: `"$PY" -m pytest tests/test_portal_tickets.py tests/test_portal_summary.py tests/test_portal_account_requests.py -q -p no:cacheprovider`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add api/src/api/routes/portal_support.py api/src/api/routes/portal_admin.py api/tests/test_portal_tickets.py api/tests/test_portal_summary.py
@@ -2291,7 +2291,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 - Consumes: `pl.round_cents`; `pc.settle`, `pc.lock_investor_ledger`, `pc.audit_control`, `pc.notify`, `pc.investor_link`, `pc.money`, `pc.parse_amount`; `routes/portal_admin.parse_min`.
 - Produces: `portal_ledger.deposit_bonus(amount, pct, cap) -> Decimal`; in `portal_common`: `BONUS_SOURCES`, `BONUS_NAMES`, `bonus_rules(conn, org_id) -> dict`, `rule_bonus(conn, org_id, source, base=None) -> Decimal`, `pay_bonus(conn, org_id, user_id, source, amount, source_id=None, note=None, created_by=None) -> Optional[int]`, `async announce_bonus(conn, request, *, org_id, user_id, bonus_id, source, amount, actor_email, note=None)`, `async award_rule_bonus(conn, request, org_id, user_id, source, *, actor_email) -> Optional[int]`; `create_portal_bonus_router()` with `GET/PUT bonus-rules`, `RulesBody`, `rules_json(rules)`, `parse_rules(body)`, audit `bonus_rules_changed`. Test helpers in `test_portal_bonus.py`: `ADMIN`, `RULES_OFF`, `_events`, `_rules(client, org_id, **over)`, `_credit_entries(db, user_id) -> [(source, amount)]`, `_investor(make_user, db, org_id, email=…)`, `_strip(rules)`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `api/tests/test_portal_ledger.py`, add `deposit_bonus` to the `from api.portal_ledger import (…)` list and append:
 
@@ -2434,12 +2434,12 @@ def test_bad_rules_are_refused(org_client, over, detail):
     assert r.status_code == 400 and r.json()["detail"] == detail
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `"$PY" -m pytest tests/test_portal_ledger.py tests/test_portal_common.py tests/test_portal_bonus.py -q -p no:cacheprovider`
 Expected: FAIL — `cannot import name 'deposit_bonus'`, no `pay_bonus`, 404 on `bonus-rules`.
 
-- [ ] **Step 3: `deposit_bonus`**
+- [x] **Step 3: `deposit_bonus`**
 
 In `api/src/api/portal_ledger.py`, directly after `fee_for`, add:
 
@@ -2451,7 +2451,7 @@ def deposit_bonus(amount: Decimal, pct: Decimal, cap: Optional[Decimal]) -> Deci
     return bonus if cap is None else min(bonus, cap)
 ```
 
-- [ ] **Step 4: The bonus helpers**
+- [x] **Step 4: The bonus helpers**
 
 In `api/src/api/portal_common.py`, change the explicit ledger import to
 
@@ -2572,7 +2572,7 @@ async def award_rule_bonus(conn: psycopg.Connection, request: Request, org_id: i
     return bonus_id
 ```
 
-- [ ] **Step 5: The bonus rules routes**
+- [x] **Step 5: The bonus rules routes**
 
 Create `api/src/api/routes/portal_bonus.py`:
 
@@ -2699,12 +2699,12 @@ In `api/src/api/main.py`, directly after `app.include_router(create_portal_suppo
     app.include_router(create_portal_bonus_router())
 ```
 
-- [ ] **Step 6: Run the tests to verify they pass**
+- [x] **Step 6: Run the tests to verify they pass**
 
 Run: `"$PY" -m pytest tests/test_portal_ledger.py tests/test_portal_common.py tests/test_portal_bonus.py -q -p no:cacheprovider`
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add api/src/api/portal_ledger.py api/src/api/portal_common.py api/src/api/routes/portal_bonus.py api/src/api/main.py api/tests/test_portal_ledger.py api/tests/test_portal_common.py api/tests/test_portal_bonus.py
@@ -2728,7 +2728,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 - Consumes: `pc.award_rule_bonus`, `pc.rule_bonus`, `pc.pay_bonus`, `pc.announce_bonus` (Task 8); `portal_helpers.kyc_profile`.
 - Produces: signup bonus when a member becomes an investor (invite join with role investor; role changed to investor from another role); kyc bonus on KYC approval; deposit bonus on deposit confirmation (`source_id` = deposit id, note `deposit #<id>`, inside the confirmation transaction).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `api/tests/test_portal_bonus.py`:
 
@@ -2883,12 +2883,12 @@ def test_the_deposit_bonus_rounds_caps_and_pays_once(org_client, make_user, db):
                     (big, Decimal("100.00"), f"deposit #{big}")]
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `"$PY" -m pytest tests/test_portal_bonus.py -q -p no:cacheprovider`
 Expected: FAIL — no credit rows are written by any trigger.
 
-- [ ] **Step 3: Signup on join and on a role change**
+- [x] **Step 3: Signup on join and on a role change**
 
 In `api/src/api/routes/orgs.py`, change `from fastapi import APIRouter, Depends, HTTPException` to
 
@@ -2935,7 +2935,7 @@ In `patch_member`, add `http_request: Request,` after `body: PatchMemberRequest,
         return {"user_id": member_user_id, "role": body.role}
 ```
 
-- [ ] **Step 4: KYC on approval**
+- [x] **Step 4: KYC on approval**
 
 In `api/src/api/routes/portal_identity.py`, in `decide_kyc`, directly after the `await pc.notify(...)` call (Task 2) and before `return pid.profile_json(row)`, add:
 
@@ -2945,7 +2945,7 @@ In `api/src/api/routes/portal_identity.py`, in `decide_kyc`, directly after the 
                                       actor_email=ctx.user_email)
 ```
 
-- [ ] **Step 5: Deposit on confirmation**
+- [x] **Step 5: Deposit on confirmation**
 
 In `api/src/api/routes/portal_admin.py`, in `decide_deposit`, replace
 
@@ -2984,12 +2984,12 @@ and directly after the deposit's `await pc.notify(...)` call, before `return out
                                     actor_email=ctx.user_email, note=f"deposit #{deposit_id}")
 ```
 
-- [ ] **Step 6: Run the tests to verify they pass**
+- [x] **Step 6: Run the tests to verify they pass**
 
 Run: `"$PY" -m pytest tests/test_portal_bonus.py tests/test_orgs.py tests/test_portal_kyc.py tests/test_portal_deposits.py tests/test_portal_notify_callers.py -q -p no:cacheprovider`
 Expected: PASS (with every rule off, the existing flows write no bonus).
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add api/src/api/routes/orgs.py api/src/api/routes/portal_identity.py api/src/api/routes/portal_admin.py api/tests/test_portal_bonus.py
@@ -3013,7 +3013,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 - Consumes: `mpin_core.require_mpin`; `portal_admin._require_investor`, `SIGNED_AMOUNT`; `portal_investor._parse_day`; `pc.wallet_figures`, `pc.pay_bonus`, `pc.announce_bonus`, `pc.lock_investor_ledger`.
 - Produces: `portal_admin.parse_signed_amount(raw) -> Decimal` (used by `post_adjustment` and the grant); in `portal_bonus.py`: `GrantBody`, `BONUS_COLS`, `bonus_json(row)`, routes `POST investors/{user_id}/bonuses` and `GET investor/bonuses?source=&from=&to=`; `("control", "warning", "investor_bonus_paid")` in `ALERT_RULES` and `TELEGRAM_RULES`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `api/tests/test_portal_bonus.py`:
 
@@ -3111,12 +3111,12 @@ def test_a_bonus_paid_by_hand_reaches_both_alerters():
     assert ("control", "warning", "investor_bonus_paid") in TELEGRAM_RULES
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `"$PY" -m pytest tests/test_portal_bonus.py -q -p no:cacheprovider`
 Expected: FAIL — 404/405 on `investors/{id}/bonuses` and `investor/bonuses`; the alert rule is missing. (`test_the_adjustment_route_keeps_its_amount_rules` already passes: it pins today's behaviour for the refactor in Step 3.)
 
-- [ ] **Step 3: Extract `parse_signed_amount`**
+- [x] **Step 3: Extract `parse_signed_amount`**
 
 In `api/src/api/routes/portal_admin.py`, add directly after `parse_pct`:
 
@@ -3148,7 +3148,7 @@ In `post_adjustment`, replace everything from `raw = "" if body.amount is None �
             raise HTTPException(status_code=400, detail=str(exc))
 ```
 
-- [ ] **Step 4: The grant and history routes**
+- [x] **Step 4: The grant and history routes**
 
 In `api/src/api/routes/portal_bonus.py`, change the imports to:
 
@@ -3256,7 +3256,7 @@ and before `return router` add:
         return [bonus_json(r) for r in rows]
 ```
 
-- [ ] **Step 5: The alert rules**
+- [x] **Step 5: The alert rules**
 
 In `api/src/api/alerts.py`, in `ALERT_RULES`, directly after the `investor_ledger_adjusted` entry add:
 
@@ -3272,12 +3272,12 @@ In `api/src/api/telegram.py`, in `TELEGRAM_RULES`, directly after `("control", "
 
 (Only manual grants are warnings; the rules' own bonuses are info and stay out of both channels.)
 
-- [ ] **Step 6: Run the tests to verify they pass**
+- [x] **Step 6: Run the tests to verify they pass**
 
 Run: `"$PY" -m pytest tests/test_portal_bonus.py tests/test_portal_summary.py tests/test_alerts.py tests/test_telegram.py -q -p no:cacheprovider`
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add api/src/api/routes/portal_admin.py api/src/api/routes/portal_bonus.py api/src/api/alerts.py api/src/api/telegram.py api/tests/test_portal_bonus.py
@@ -3302,7 +3302,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 - Consumes: `routes/portal_investor.request_transfer` and `routes/portal_admin.decide_transfer` (they already hold and settle any source wallet); `pc.open_account_transfers_out`, `pc.floor_cents`; `portal_helpers.approved_destination`.
 - Produces: `TRANSFER_PAIRS` = main->account, account->main, pamm->main, social->main, credit->account. `pc.credit_funded(conn, org_id, user_id, account_id) -> Decimal` (sum of `done` transfers with `source_wallet = 'credit'` into that account by that investor). `pc.account_movable(conn, org_id, user_id, account_id, equity) -> Decimal` = `floor_cents(equity - open_account_transfers_out - credit_funded)`, never below 0. The account -> wallet cap in `request_transfer`, the summary's per-account `account_available`, and a new re-check in `decide_transfer` (approve or done of an account -> wallet transfer: `equity_at_request - credit_funded`, 409 when exceeded) all exclude bonus credit. Principal credit stays at the broker; profits made on it may leave.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `api/tests/test_portal_ledger.py`, rename `test_the_four_allowed_pairs` to `test_the_allowed_pairs` and add to its parametrize list:
 
@@ -3446,12 +3446,12 @@ def test_a_decision_within_the_cap_is_unaffected(org_client, make_user, login_as
                                                         out_id)
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `"$PY" -m pytest tests/test_portal_ledger.py tests/test_portal_transfers.py -q -p no:cacheprovider`
 Expected: FAIL — `that transfer is not allowed` for credit -> account, then `ImportError: cannot import name 'credit_funded'`.
 
-- [ ] **Step 3: Allow the pair**
+- [x] **Step 3: Allow the pair**
 
 In `api/src/api/portal_ledger.py`, replace
 
@@ -3474,7 +3474,7 @@ TRANSFER_PAIRS: frozenset[tuple[str, str]] = frozenset({
 
 and in `transfer_pair`'s docstring replace `(credit never moves in phase 1)` with `(credit moves only to a trading account)`.
 
-- [ ] **Step 4: Keep bonus credit inside the account**
+- [x] **Step 4: Keep bonus credit inside the account**
 
 In `api/src/api/portal_common.py`, directly after the `net_funded` function (before `# ------------------------------------------------------------ locking`), add:
 
@@ -3609,12 +3609,12 @@ with
                 # Done straight from requested also records the decision;
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 Run: `"$PY" -m pytest tests/test_portal_ledger.py tests/test_portal_transfers.py tests/test_portal_withdrawals.py tests/test_portal_multi_account.py tests/test_portal_summary.py -q -p no:cacheprovider`
 Expected: PASS (the summary and multi-account `account_available` figures are unchanged: they move no credit).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add api/src/api/portal_ledger.py api/src/api/portal_common.py api/src/api/routes/portal_investor.py api/src/api/routes/portal_admin.py api/tests/test_portal_ledger.py api/tests/test_portal_transfers.py
@@ -3635,7 +3635,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 - Consumes: every route of Tasks 3-10.
 - Produces: one matrix row per new org route; the fixture seeds ticket subjects 1 (`Deposits`) and 2 (`Spare`), the investor's ticket 1 with one message, and one notification per role (`users[role]["note"]`), substituted for `{note}` per caller.
 
-- [ ] **Step 1: Add the rows**
+- [x] **Step 1: Add the rows**
 
 In `api/tests/test_rbac_matrix.py`, append to `MATRIX` (before its closing `]`):
 
@@ -3674,7 +3674,7 @@ In `api/tests/test_rbac_matrix.py`, append to `MATRIX` (before its closing `]`):
                                                   "mpin": MPIN},                "admin"),
 ```
 
-- [ ] **Step 2: Seed the rows the new routes aim at**
+- [x] **Step 2: Seed the rows the new routes aim at**
 
 In `matrix_org`, at the end of the `with psycopg.connect(db, autocommit=True) as conn:` block (after the transfer insert), add:
 
@@ -3696,7 +3696,7 @@ In `matrix_org`, at the end of the `with psycopg.connect(db, autocommit=True) as
 
 and extend the module docstring's list of seeded rows: after `…and the investor's open account request 1.` add ` Phase 4 adds ticket subjects 1 and 2, the investor's ticket 1, and one notification per role (`{note}` in a path is the CALLER's own notification).`
 
-- [ ] **Step 3: Substitute `{note}` per caller**
+- [x] **Step 3: Substitute `{note}` per caller**
 
 Replace the whole body of `test_role_thresholds` with:
 
@@ -3759,17 +3759,17 @@ In `test_destructive_rows_allowed`, directly before `r = _call(client, "DELETE",
     assert r.status_code == 204
 ```
 
-- [ ] **Step 4: Run the matrix**
+- [x] **Step 4: Run the matrix**
 
 Run: `"$PY" -m pytest tests/test_rbac_matrix.py -q -p no:cacheprovider`
 Expected: PASS.
 
-- [ ] **Step 5: Full API suite**
+- [x] **Step 5: Full API suite**
 
 Run: `"$PY" -m pytest tests -q -p no:cacheprovider`
 Expected: everything passes except the 7 known `test_events_ws.py` errors and the 1 EA-download CRLF failure.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add api/tests/test_rbac_matrix.py
@@ -3792,7 +3792,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 - Consumes: the API shapes of Tasks 3-10 (interfaces doc, "Shapes").
 - Produces: the phase 4 types, `RequestsSummary.tickets`; `lib/engagement.ts` (`TOPICS`, `TOPIC_LABELS`, `TOPIC_EMAIL_LABELS`, `TICKET_STATUS_LABELS`, `TICKET_STATUS_TONES`, `BONUS_SOURCES`, `BONUS_SOURCE_LABELS`, `IMAGE_ACCEPT`, `MAX_IMAGES`, `TEXTAREA` (the one textarea class the phase 4 forms share), `safeLink`, `ticketsQuery`); fixtures `notificationFixture`, `ticketFixture`, `ticketMessageFixture`, `threadFixture`, `subjectFixture`, `bonusFixture`, `bonusRulesFixture`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `dashboard/src/lib/engagement.test.ts`:
 
@@ -3842,12 +3842,12 @@ test('the phase 4 builders give complete rows and take overrides', () => {
 })
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run (from `dashboard/`): `npx vitest run src/lib/engagement.test.ts src/test/portalFixtures.test.ts`
 Expected: FAIL — `./engagement` does not exist; the fixtures are not exported.
 
-- [ ] **Step 3: Types**
+- [x] **Step 3: Types**
 
 In `dashboard/src/lib/types.ts`, change the `RequestsSummary` interface to
 
@@ -3904,7 +3904,7 @@ export interface BonusRules {
 }
 ```
 
-- [ ] **Step 4: `lib/engagement.ts`**
+- [x] **Step 4: `lib/engagement.ts`**
 
 Create `dashboard/src/lib/engagement.ts`:
 
@@ -3966,7 +3966,7 @@ export function ticketsQuery(base: string, status: TicketStatus | 'all', q: stri
 }
 ```
 
-- [ ] **Step 5: Fixtures**
+- [x] **Step 5: Fixtures**
 
 In `dashboard/src/test/portalFixtures.ts`, add `Bonus, BonusRules, PortalNotification, Ticket, TicketMessage, TicketSubject, TicketThread,` to the type import and append:
 
@@ -4026,12 +4026,12 @@ export function bonusRulesFixture(overrides: Partial<BonusRules> = {}): BonusRul
 }
 ```
 
-- [ ] **Step 6: Run the tests and the type check**
+- [x] **Step 6: Run the tests and the type check**
 
 Run: `npx vitest run src/lib/engagement.test.ts src/test/portalFixtures.test.ts && npx tsc --noEmit -p tsconfig.app.json`
 Expected: PASS, no type errors (a test or page that builds a `RequestsSummary` literal now needs `tickets`; `tsc` names it -- add `tickets: 0`).
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add dashboard/src/lib/types.ts dashboard/src/lib/engagement.ts dashboard/src/lib/engagement.test.ts dashboard/src/test/portalFixtures.ts dashboard/src/test/portalFixtures.test.ts
@@ -4058,7 +4058,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 - Consumes: `orgApi`; `safeLink`, `TOPIC_LABELS` (Task 13); `notificationFixture`; `Loading`, `Button`, `Badge`, `Card`, `Banner`, `PageHeader`.
 - Produces: `UNREAD_POLL_MS`, `useUnreadCount(orgId)` (a `seq` ref: only the newest poll or refresh lands); `lib/notificationActions.ts` `markRead(orgId, n) -> Promise<PortalNotification>`, `markAllRead(orgId) -> Promise<void>`, `withAllRead(list, now?)` (the bell and the page share them); `NotificationBell` (default) props `{ orgId; pageHref; count; onChange }`; `Notifications` page (default export, both groups export it as `Notifications`); routes `notifications` and `invest/notifications`; investor nav Account gains `Notifications`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `dashboard/src/hooks/useUnreadCount.test.tsx`:
 
@@ -4401,12 +4401,12 @@ test('the bell carries the unread count and links to the desk or portal page', a
 
 In `dashboard/src/components/layout/nav.test.ts`, in the first test, add `['Notifications', '/org/7/invest/notifications'],` as the last row of the Account expectation and change `toHaveLength(12)` to `toHaveLength(13)`.
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `npx vitest run src/hooks/useUnreadCount.test.tsx src/lib/notificationActions.test.ts src/components/layout/NotificationBell.test.tsx src/pages/Notifications.test.tsx src/components/Layout.test.tsx src/components/layout/nav.test.ts`
 Expected: FAIL — the modules do not exist; no bell in the shell; nav has 12 links.
 
-- [ ] **Step 3: `useUnreadCount`**
+- [x] **Step 3: `useUnreadCount`**
 
 Create `dashboard/src/hooks/useUnreadCount.ts`:
 
@@ -4479,7 +4479,7 @@ export function withAllRead(list: PortalNotification[],
 }
 ```
 
-- [ ] **Step 4: `NotificationBell`**
+- [x] **Step 4: `NotificationBell`**
 
 Create `dashboard/src/components/layout/NotificationBell.tsx`:
 
@@ -4647,7 +4647,7 @@ export default function NotificationBell({ orgId, pageHref, count, onChange }: {
 }
 ```
 
-- [ ] **Step 5: The Notifications page**
+- [x] **Step 5: The Notifications page**
 
 Create `dashboard/src/pages/Notifications.tsx`:
 
@@ -4782,7 +4782,7 @@ export default function Notifications() {
 }
 ```
 
-- [ ] **Step 6: Bell in the shell, routes, nav**
+- [x] **Step 6: Bell in the shell, routes, nav**
 
 In `dashboard/src/components/Layout.tsx`:
 - add the imports `import NotificationBell from './layout/NotificationBell'` and `import { useUnreadCount } from '../hooks/useUnreadCount'`;
@@ -4830,12 +4830,12 @@ In `dashboard/src/components/layout/nav.ts`, `investorNav`, append to the Accoun
         { path: `${p}/notifications`, label: 'Notifications' },
 ```
 
-- [ ] **Step 7: Run the tests and the type check**
+- [x] **Step 7: Run the tests and the type check**
 
 Run: `npx vitest run src/hooks/useUnreadCount.test.tsx src/lib/notificationActions.test.ts src/components/layout src/pages/Notifications.test.tsx src/components/Layout.test.tsx src/App.test.tsx && npx tsc --noEmit -p tsconfig.app.json`
 Expected: PASS, no type errors, no `act(...)` warning.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add dashboard/src/hooks/useUnreadCount.ts dashboard/src/hooks/useUnreadCount.test.tsx dashboard/src/lib/notificationActions.ts dashboard/src/lib/notificationActions.test.ts dashboard/src/components/layout/NotificationBell.tsx dashboard/src/components/layout/NotificationBell.test.tsx dashboard/src/pages/Notifications.tsx dashboard/src/pages/Notifications.test.tsx dashboard/src/components/Layout.tsx dashboard/src/components/Layout.test.tsx dashboard/src/App.tsx dashboard/src/pages/groups/admin.ts dashboard/src/pages/groups/investor.ts dashboard/src/components/layout/nav.ts dashboard/src/components/layout/nav.test.ts
@@ -4860,7 +4860,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 - Consumes: `GET/PUT /api/me/settings`, `GET/PUT notification-prefs` (Task 4); `ThemePref`, `UserSettings`, `NotificationPrefs`; `TOPICS`, `TOPIC_EMAIL_LABELS`.
 - Produces: `useTheme(): { theme, toggle: () => ThemePref, choose: (pref) => void }`, `paletteFor`; `lib/themeSync.ts` (`THEME_PREFS`, `isThemePref`, `localPref`, `saveThemePref`, `syncThemeFromServer`); `Settings` page (both groups); routes `settings`, `invest/settings`; investor nav `Settings`; desk rail button `Settings`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `dashboard/src/hooks/useTheme.test.ts` (change its import to `import { paletteFor, useTheme } from './useTheme'`):
 
@@ -5047,12 +5047,12 @@ test('the theme toggle saves the choice to the account; the desk rail links to S
 
 In `dashboard/src/components/layout/nav.test.ts`, add `['Settings', '/org/7/invest/settings'],` after the Notifications row and change `toHaveLength(13)` to `toHaveLength(14)`.
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `npx vitest run src/hooks/useTheme.test.ts src/lib/themeSync.test.ts src/pages/Settings.test.tsx src/components/Layout.test.tsx src/components/layout/nav.test.ts`
 Expected: FAIL — `choose`/`paletteFor` missing, the modules do not exist, no PUT on toggle.
 
-- [ ] **Step 3: `useTheme` learns preferences**
+- [x] **Step 3: `useTheme` learns preferences**
 
 In `dashboard/src/hooks/useTheme.ts`, add `import type { ThemePref } from '../lib/types'` below the React import, and below `const STORAGE_KEY = 'mf.theme'` add:
 
@@ -5149,7 +5149,7 @@ export function useTheme(): { theme: Theme; toggle: () => ThemePref; choose: (pr
 }
 ```
 
-- [ ] **Step 4: `lib/themeSync.ts`**
+- [x] **Step 4: `lib/themeSync.ts`**
 
 Create `dashboard/src/lib/themeSync.ts`:
 
@@ -5202,7 +5202,7 @@ export async function syncThemeFromServer(choose: (pref: ThemePref) => void): Pr
 }
 ```
 
-- [ ] **Step 5: The Settings page**
+- [x] **Step 5: The Settings page**
 
 Create `dashboard/src/pages/Settings.tsx`:
 
@@ -5342,7 +5342,7 @@ export default function Settings() {
 }
 ```
 
-- [ ] **Step 6: Wire the shell, routes and nav**
+- [x] **Step 6: Wire the shell, routes and nav**
 
 In `dashboard/src/components/Layout.tsx`:
 - add `import { saveThemePref, syncThemeFromServer } from '../lib/themeSync'`;
@@ -5376,12 +5376,12 @@ In `nav.ts`, append to the investor Account items after Notifications:
         { path: `${p}/settings`, label: 'Settings' },
 ```
 
-- [ ] **Step 7: Run the tests and the type check**
+- [x] **Step 7: Run the tests and the type check**
 
 Run: `npx vitest run src/hooks/useTheme.test.ts src/lib/themeSync.test.ts src/pages/Settings.test.tsx src/components/Layout.test.tsx src/components/layout/nav.test.ts src/App.test.tsx && npx tsc --noEmit -p tsconfig.app.json`
 Expected: PASS, no type errors.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add dashboard/src/hooks/useTheme.ts dashboard/src/hooks/useTheme.test.ts dashboard/src/lib/themeSync.ts dashboard/src/lib/themeSync.test.ts dashboard/src/pages/Settings.tsx dashboard/src/pages/Settings.test.tsx dashboard/src/components/Layout.tsx dashboard/src/components/Layout.test.tsx dashboard/src/App.tsx dashboard/src/pages/groups/admin.ts dashboard/src/pages/groups/investor.ts dashboard/src/components/layout/nav.ts dashboard/src/components/layout/nav.test.ts
@@ -5404,7 +5404,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 - Consumes: Task 6 routes; `orgApi`, `orgUpload`; `FileInput`, `MAX_UPLOAD_BYTES`; `IMAGE_ACCEPT`, `MAX_IMAGES`, `TEXTAREA`, `TICKET_STATUS_LABELS`, `TICKET_STATUS_TONES`, `ticketsQuery`; fixtures `subjectFixture`, `ticketFixture`, `ticketMessageFixture`, `threadFixture`.
 - Produces: `TicketMessages` (default; props `{ messages; fileUrl; viewer }`); `InvestorSupport` (default; its image slots are private: `useImageSlots` keeps each uploaded id once the upload lands, so a send that fails afterwards neither re-uploads nor drops the image on retry, as `InvestorProfile` does); route `invest/support` (`?ticket=<id>` opens a thread); investor nav `Support`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `dashboard/src/pages/investor/InvestorSupport.test.tsx`:
 
@@ -5577,12 +5577,12 @@ test('a slow list for an older filter never lands over the newer one', async () 
 
 In `nav.test.ts`, insert `['Support', '/org/7/invest/support'],` directly after the History row (before Notifications) and change `toHaveLength(14)` to `toHaveLength(15)`.
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `npx vitest run src/pages/investor/InvestorSupport.test.tsx src/components/layout/nav.test.ts`
 Expected: FAIL — `./InvestorSupport` does not exist; nav has no Support.
 
-- [ ] **Step 3: The thread view shared by both sides**
+- [x] **Step 3: The thread view shared by both sides**
 
 Create `dashboard/src/pages/support/TicketMessages.tsx`:
 
@@ -5628,7 +5628,7 @@ export default function TicketMessages({ messages, fileUrl, viewer }: {
 }
 ```
 
-- [ ] **Step 4: The investor page**
+- [x] **Step 4: The investor page**
 
 Create `dashboard/src/pages/investor/InvestorSupport.tsx`:
 
@@ -5993,7 +5993,7 @@ export default function InvestorSupport() {
 }
 ```
 
-- [ ] **Step 5: Route and nav**
+- [x] **Step 5: Route and nav**
 
 In `pages/groups/investor.ts` append `export { default as InvestorSupport } from '../investor/InvestorSupport'`. In `App.tsx` add `const InvestorSupport = pick(investor, 'InvestorSupport')` and `<Route path="invest/support" element={<InvestorSupport />} />` after `invest/open-account`. In `nav.ts`, insert in the investor Account items directly after History:
 
@@ -6001,12 +6001,12 @@ In `pages/groups/investor.ts` append `export { default as InvestorSupport } from
         { path: `${p}/support`, label: 'Support' },
 ```
 
-- [ ] **Step 6: Run the tests and the type check**
+- [x] **Step 6: Run the tests and the type check**
 
 Run: `npx vitest run src/pages/investor/InvestorSupport.test.tsx src/components/layout/nav.test.ts && npx tsc --noEmit -p tsconfig.app.json`
 Expected: PASS, no type errors, no `act(...)` warning.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add dashboard/src/pages/support/TicketMessages.tsx dashboard/src/pages/investor/InvestorSupport.tsx dashboard/src/pages/investor/InvestorSupport.test.tsx dashboard/src/App.tsx dashboard/src/pages/groups/investor.ts dashboard/src/components/layout/nav.ts dashboard/src/components/layout/nav.test.ts
@@ -6030,7 +6030,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 - Consumes: Tasks 5 and 7 routes; `TicketMessages` (Task 16); `TEXTAREA` (Task 13); `Ticket.waiting_on_desk` (Tasks 6/13); `Row`, `Section` from `RequestDetailsDrawer`; `DeskTabProps` from `VerificationTab`; `RequestsSummary.tickets`.
 - Produces: `SupportTab` (default; props `DeskTabProps & { initialTicket: number | null; onDrawerClosed: () => void }`; follows `initialTicket` whenever it changes), `DeskTab` += `'support'`, tab `Support (<n>)`; `Requests` keeps `?tab` in step with the selected tab, follows `?tab`/`?ticket` changes while mounted, and drops `?ticket` when the ticket drawer closes; `TicketSubjectsCard` (default; props `{ orgId; control }`); the Investors tab `Portal settings`; the settings card renamed `Withdrawal and account rules`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `dashboard/src/pages/requests/SupportTab.test.tsx`:
 
@@ -6306,12 +6306,12 @@ In `dashboard/src/pages/Investors.test.tsx`: replace every `getByRole('tab', { n
     if (path.endsWith('/ticket-subjects')) return jsonResponse([])
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `npx vitest run src/pages/requests/SupportTab.test.tsx src/pages/investors/TicketSubjectsCard.test.tsx src/pages/Requests.test.tsx src/pages/Investors.test.tsx`
 Expected: FAIL — the modules do not exist, there is no Support tab, and the Investors tab is still "Payment methods".
 
-- [ ] **Step 3: The desk Support tab**
+- [x] **Step 3: The desk Support tab**
 
 Create `dashboard/src/pages/requests/SupportTab.tsx`:
 
@@ -6570,7 +6570,7 @@ In `dashboard/src/pages/Requests.tsx`:
 
 - in the PageHeader subtitle replace `identities to verify and trading accounts to open.` with `identities to verify, trading accounts to open and support tickets to answer.`
 
-- [ ] **Step 4: The Ticket subjects card**
+- [x] **Step 4: The Ticket subjects card**
 
 Create `dashboard/src/pages/investors/TicketSubjectsCard.tsx`:
 
@@ -6731,7 +6731,7 @@ export default function TicketSubjectsCard({ orgId, control }: { orgId: number; 
 }
 ```
 
-- [ ] **Step 5: The Portal settings tab**
+- [x] **Step 5: The Portal settings tab**
 
 In `dashboard/src/pages/Investors.tsx`, change the tab item `{ key: 'methods', label: 'Payment methods' }` to `{ key: 'methods', label: 'Portal settings' }`.
 
@@ -6740,12 +6740,12 @@ In `dashboard/src/pages/investors/PaymentMethodsTab.tsx`:
 - change `<Card title="Portal settings">` to `<Card title="Withdrawal and account rules">` (the tab now carries the name "Portal settings"; two of the same words on one screen would make the heading ambiguous) and the comment `// Portal settings: the same dirty guard …` to `// Withdrawal and account rules: the same dirty guard …`;
 - directly after that Card's closing `</Card>` add `<TicketSubjectsCard orgId={orgId} control={control} />`.
 
-- [ ] **Step 6: Run the tests and the type check**
+- [x] **Step 6: Run the tests and the type check**
 
 Run: `npx vitest run src/pages/requests src/pages/investors src/pages/Requests.test.tsx src/pages/Investors.test.tsx && npx tsc --noEmit -p tsconfig.app.json`
 Expected: PASS, no type errors.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add dashboard/src/pages/requests/SupportTab.tsx dashboard/src/pages/requests/SupportTab.test.tsx dashboard/src/pages/requests/RequestTabs.tsx dashboard/src/pages/Requests.tsx dashboard/src/pages/Requests.test.tsx dashboard/src/pages/investors/TicketSubjectsCard.tsx dashboard/src/pages/investors/TicketSubjectsCard.test.tsx dashboard/src/pages/investors/PaymentMethodsTab.tsx dashboard/src/pages/Investors.tsx dashboard/src/pages/Investors.test.tsx
@@ -6768,7 +6768,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 - Consumes: `GET investor/bonuses` (Task 10), `investor/summary` (`wallets.credit`), credit -> account transfers (Task 11); `BONUS_SOURCES`, `BONUS_SOURCE_LABELS`; `Money`; `bonusFixture`, `summaryFixture`.
 - Produces: `InvestorBonus` (default); route `invest/bonus`; investor nav Money `Bonus`; `InvestorTransfer` offers `wallet:credit`, `pairAllowed('wallet:credit', 'account:<id>')`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `dashboard/src/pages/investor/InvestorBonus.test.tsx`:
 
@@ -6890,12 +6890,12 @@ test('bonus credit can only go to a trading account', async () => {
 
 In `nav.test.ts`, add `['Bonus', '/org/7/invest/bonus'],` as the last row of the Money expectation and change `toHaveLength(15)` to `toHaveLength(16)`.
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `npx vitest run src/pages/investor/InvestorBonus.test.tsx src/pages/investor/InvestorTransfer.test.tsx src/components/layout/nav.test.ts`
 Expected: FAIL — no `InvestorBonus`; the transfer options have no credit wallet; no Bonus link.
 
-- [ ] **Step 3: The Bonus page**
+- [x] **Step 3: The Bonus page**
 
 Create `dashboard/src/pages/investor/InvestorBonus.tsx`:
 
@@ -7048,7 +7048,7 @@ export default function InvestorBonus() {
 }
 ```
 
-- [ ] **Step 4: Transfer offers Credit**
+- [x] **Step 4: Transfer offers Credit**
 
 In `dashboard/src/pages/investor/InvestorTransfer.tsx`:
 - replace the `PAIRS` comment and constant with
@@ -7066,7 +7066,7 @@ const PAIRS: ReadonlyArray<readonly [string, string]> = [
 - replace the `targets.length === 0` hint's text with
   `{fromOpt.ref.wallet === 'credit' ? 'Bonus credit moves only to a trading account; you have none linked yet.' : 'Link a trading account to move wallet money into it; PAMM and Social wallets can still move to My wallet.'}`.
 
-- [ ] **Step 5: Route and nav**
+- [x] **Step 5: Route and nav**
 
 In `pages/groups/investor.ts` append `export { default as InvestorBonus } from '../investor/InvestorBonus'`. In `App.tsx` add `const InvestorBonus = pick(investor, 'InvestorBonus')` and `<Route path="invest/bonus" element={<InvestorBonus />} />` after `invest/support`. In `nav.ts`, append to the investor Money items after Payout accounts:
 
@@ -7074,12 +7074,12 @@ In `pages/groups/investor.ts` append `export { default as InvestorBonus } from '
         { path: `${p}/bonus`, label: 'Bonus' },
 ```
 
-- [ ] **Step 6: Run the tests and the type check**
+- [x] **Step 6: Run the tests and the type check**
 
 Run: `npx vitest run src/pages/investor src/components/layout/nav.test.ts src/components/Layout.test.tsx && npx tsc --noEmit -p tsconfig.app.json`
 Expected: PASS, no type errors.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add dashboard/src/pages/investor/InvestorBonus.tsx dashboard/src/pages/investor/InvestorBonus.test.tsx dashboard/src/pages/investor/InvestorTransfer.tsx dashboard/src/pages/investor/InvestorTransfer.test.tsx dashboard/src/App.tsx dashboard/src/pages/groups/investor.ts dashboard/src/components/layout/nav.ts dashboard/src/components/layout/nav.test.ts
@@ -7103,7 +7103,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 - Consumes: `GET/PUT bonus-rules` (Task 8), `POST investors/{id}/bonuses` (Task 10); `PinConfirmDialog`; `bonusRulesFixture`, `bonusFixture`, `investorRowFixture`.
 - Produces: `BonusRulesCard` (default; `{ orgId; control }`), `GrantBonusDialog` (default; `{ orgId; investor; onCancel; onGranted }`); the Investors row menu item `Grant bonus`; `AdjustDialog.tsx` named exports `SIGNED_AMOUNT` and `checkSignedAmount(amount, note) -> string` (the one client-side signed-amount check both MPIN dialogs run; the adjustment's messages unchanged).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `dashboard/src/pages/investors/BonusRulesCard.test.tsx`:
 
@@ -7282,12 +7282,12 @@ test('the Portal settings tab carries the bonus rules and the ticket subjects', 
 })
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `npx vitest run src/pages/investors src/pages/Investors.test.tsx`
 Expected: FAIL — the two components do not exist; no "Grant bonus" menu item.
 
-- [ ] **Step 3: The Bonus rules card**
+- [x] **Step 3: The Bonus rules card**
 
 Create `dashboard/src/pages/investors/BonusRulesCard.tsx`:
 
@@ -7418,7 +7418,7 @@ export default function BonusRulesCard({ orgId, control }: { orgId: number; cont
 }
 ```
 
-- [ ] **Step 4: The Grant bonus dialog**
+- [x] **Step 4: The Grant bonus dialog**
 
 In `dashboard/src/pages/investors/AdjustDialog.tsx`, replace
 
@@ -7545,7 +7545,7 @@ export default function GrantBonusDialog({ orgId, investor, onCancel, onGranted 
 }
 ```
 
-- [ ] **Step 5: Wire both into Investors**
+- [x] **Step 5: Wire both into Investors**
 
 In `dashboard/src/pages/investors/PaymentMethodsTab.tsx`, add `import BonusRulesCard from './BonusRulesCard'` and render `<BonusRulesCard orgId={orgId} control={control} />` directly after the `Withdrawal and account rules` Card (before `<TicketSubjectsCard … />`).
 
@@ -7568,12 +7568,12 @@ In `dashboard/src/pages/Investors.tsx`:
                         }} />
 ```
 
-- [ ] **Step 6: Run the tests and the type check**
+- [x] **Step 6: Run the tests and the type check**
 
 Run: `npx vitest run src/pages/investors src/pages/Investors.test.tsx && npx tsc --noEmit -p tsconfig.app.json`
 Expected: PASS, no type errors, no `act(...)` warning.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add dashboard/src/pages/investors/BonusRulesCard.tsx dashboard/src/pages/investors/BonusRulesCard.test.tsx dashboard/src/pages/investors/GrantBonusDialog.tsx dashboard/src/pages/investors/GrantBonusDialog.test.tsx dashboard/src/pages/investors/AdjustDialog.tsx dashboard/src/pages/investors/PaymentMethodsTab.tsx dashboard/src/pages/Investors.tsx dashboard/src/pages/Investors.test.tsx
@@ -7596,7 +7596,7 @@ Claude-Session: https://claude.ai/code/session_0172Z1YU9U49b8Hx22j96ooN"
 - Consumes: everything above.
 - Produces: a green branch and the deploy notes.
 
-- [ ] **Step 1: Full dashboard gate**
+- [x] **Step 1: Full dashboard gate**
 
 From `dashboard/`:
 
@@ -7606,14 +7606,14 @@ Expected: palette prover passes, no type errors, every test passes, and `npx vit
 Run: `npm run build`
 Expected: build succeeds.
 
-- [ ] **Step 2: Full API suite**
+- [x] **Step 2: Full API suite**
 
 From `api/` with the env of the Global Constraints:
 
 Run: `"$PY" -m pytest tests -q -p no:cacheprovider`
 Expected: everything passes except the 7 known `test_events_ws.py` errors and the 1 EA-download CRLF failure.
 
-- [ ] **Step 3: `copier/` untouched; no stray caller left**
+- [x] **Step 3: `copier/` untouched; no stray caller left**
 
 Run: `git diff --stat main..HEAD -- copier/`
 Expected: prints nothing.
@@ -7621,7 +7621,7 @@ Expected: prints nothing.
 Run: `grep -rn "notify_investor" api/src api/tests`
 Expected: prints nothing.
 
-- [ ] **Step 4: README runbook**
+- [x] **Step 4: README runbook**
 
 In `README.md`, directly after the paragraph that starts "Migration 024 (client portal phase 3", add:
 
@@ -7644,12 +7644,12 @@ portal email now also lands in the bell; each user mutes email per topic
 the account across browsers. Deploy the api and the dashboard together.
 ```
 
-- [ ] **Step 5: Spec status**
+- [x] **Step 5: Spec status**
 
 In the spec, replace `**Status:** approved design; plan to follow` with
 `**Status:** implemented on branch client-portal-phase-4 (plan docs/superpowers/plans/2026-10-05-client-portal-phase-4.md); awaiting deploy`.
 
-- [ ] **Step 6: Tick this plan's checkboxes, then commit**
+- [x] **Step 6: Tick this plan's checkboxes, then commit**
 
 ```bash
 git add README.md docs/superpowers/specs/2026-10-05-client-portal-phase-4-design.md docs/superpowers/plans/2026-10-05-client-portal-phase-4.md

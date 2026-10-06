@@ -1,7 +1,7 @@
 # Client portal, phase 4: notifications, support tickets, bonus and settings
 
 **Date:** 2026-10-05
-**Status:** approved design; plan to follow
+**Status:** implemented on branch client-portal-phase-4 (plan docs/superpowers/plans/2026-10-05-client-portal-phase-4.md); awaiting deploy
 **Builds on:** phases 1-3 (`2026-09-29-client-portal-phase-1-money-design.md`,
 `2026-10-01-client-portal-phase-2-identity-design.md`,
 `2026-10-05-client-portal-phase-3-multi-account-design.md`), all on main.
