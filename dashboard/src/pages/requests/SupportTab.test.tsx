@@ -81,6 +81,37 @@ test('the drawer shows the thread, sends a reply and closes the ticket', async (
   expect(within(drawer).getByText('Closed. The investor can open it again by replying.')).toBeInTheDocument()
 })
 
+test('a close 409 (decided elsewhere) also refetches the open thread, so the drawer shows the real status', async () => {
+  let closedElsewhere = false
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input)
+    const method = init?.method ?? 'GET'
+    if (url.endsWith('/tickets/7/close') && method === 'POST') {
+      closedElsewhere = true
+      return jsonResponse({ detail: 'Ticket already closed' }, 409)
+    }
+    if (url.endsWith('/tickets/7')) {
+      return jsonResponse(closedElsewhere
+        ? { ...thread7, status: 'closed', closed_at: WHEN } : thread7)
+    }
+    if (url.endsWith('/tickets')) return jsonResponse(queue)
+    return jsonResponse({})
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  render(<SupportTab orgId={1} control show="all" onDone={vi.fn()} initialTicket={null}
+                     onDrawerClosed={vi.fn()} />)
+  await userEvent.click(await screen.findByRole('button', { name: 'Open ticket 7' }))
+  const drawer = await screen.findByRole('dialog', { name: 'Ticket #7: Deposits' })
+  await userEvent.click(within(drawer).getByRole('button', { name: 'Close ticket' }))
+  expect(await within(drawer).findByText('Ticket already closed')).toBeInTheDocument()
+  // The refetched thread, not the stale open one, decides what the drawer shows.
+  expect(await within(drawer).findByText(
+    'Closed. The investor can open it again by replying.')).toBeInTheDocument()
+  const threadGets = fetchMock.mock.calls.filter(([u, i]) =>
+    String(u).endsWith('/tickets/7') && ((i as RequestInit | undefined)?.method ?? 'GET') === 'GET')
+  expect(threadGets.length).toBeGreaterThanOrEqual(2)
+})
+
 test('a notification link opens its ticket straight away', async () => {
   mockRoutes()
   render(<SupportTab orgId={1} control show="open" onDone={vi.fn()} initialTicket={7}

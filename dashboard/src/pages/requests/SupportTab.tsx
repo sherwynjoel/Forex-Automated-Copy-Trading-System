@@ -80,8 +80,19 @@ export default function SupportTab({ orgId, control, show, onDone, initialTicket
       onDone(done)
     } catch (err) {
       setDrawerError(errorText(err, 'The action failed'))
-      // 409: closed by someone else meanwhile -- show the queue as it is now.
-      if ((err as ApiError).response?.status === 409) void load()
+      // 409: decided elsewhere meanwhile (closed, or reopened by a reply) --
+      // show the queue AND the open thread as they are now, seq-guarded the
+      // same way the openId effect already is.
+      if ((err as ApiError).response?.status === 409) {
+        void load()
+        if (openId != null) {
+          const mine = threadSeq.current
+          orgApi<TicketThread>(orgId, `tickets/${openId}`).then(
+            (t) => { if (mine === threadSeq.current) setThread(t) },
+            () => { /* the drawer keeps showing the stale thread and the error above */ },
+          )
+        }
+      }
     } finally {
       setBusy(false)
     }

@@ -775,7 +775,7 @@ export interface Ticket {
   /** The server's one "waiting on the desk" rule (not closed, investor spoke last). */
   waiting_on_desk: boolean
   /** On the desk queue and on every thread. */
-  email?: string; display_name?: string | null
+  email?: string; display_name?: string
 }
 export interface TicketMessage {
   id: number; author_id: number | null; author_name: string | null; from_desk: boolean
@@ -789,5 +789,5 @@ export interface Bonus {
 }
 export interface BonusRules {
   signup_enabled: boolean; signup_amount: number; kyc_enabled: boolean; kyc_amount: number
-  deposit_enabled: boolean; deposit_pct: number; deposit_cap: number | null; updated_at: string | null
+  deposit_enabled: boolean; deposit_pct: number; deposit_cap: number | null; updated_at: string
 }
