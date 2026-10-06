@@ -169,6 +169,10 @@ def create_portal_bonus_router() -> APIRouter:
                          date_to: Optional[str] = Query(None, alias="to"),
                          ctx: OrgContext = Depends(require_investor),
                          conn: psycopg.Connection = Depends(get_conn)) -> List[Dict[str, Any]]:
+        # A cleared filter sends `?source=`, not a missing param: blank reads
+        # as no filter rather than a 400 for an empty "source".
+        if source == "":
+            source = None
         if source is not None and source not in pc.BONUS_SOURCES:
             raise HTTPException(status_code=400,
                                 detail="source must be one of signup, kyc, deposit, manual")

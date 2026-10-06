@@ -6,7 +6,6 @@ routes resolve the caller's OWN tickets through ctx.user_id; message text
 never goes into the audit trail."""
 from __future__ import annotations
 
-import logging
 from typing import Any, Dict, List, Optional
 
 import psycopg
@@ -19,8 +18,6 @@ from .. import portal_common as pc
 from ..auth import LoginRateLimiter
 from .portal_files import file_belongs
 from .portal_investor import RATE_LIMITED
-
-logger = logging.getLogger(__name__)
 
 SUBJECT_COLS = "id, label, enabled, sort, created_at"
 

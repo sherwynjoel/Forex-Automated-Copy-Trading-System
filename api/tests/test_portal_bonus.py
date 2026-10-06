@@ -264,6 +264,15 @@ def test_manual_grant_and_the_claw_back_floor(org_client, make_user, db):
     r = client.post(f"/api/orgs/{org_id}/investors/999/bonuses",
                     json={"amount": "5", "note": "x", "mpin": "123456"}, headers=csrf(client))
     assert r.status_code == 404 and r.json()["detail"] == "Investor not found"
+    with psycopg.connect(db, autocommit=True) as conn:
+        (admin_id,) = conn.execute("SELECT id FROM users WHERE email = %s",
+                                   (ADMIN["email"],)).fetchone()
+    # Granting to the org's own admin (a member, but not an investor) is the
+    # same 404 as an unknown id -- _require_investor's role check, not just
+    # existence.
+    r = client.post(f"/api/orgs/{org_id}/investors/{admin_id}/bonuses",
+                    json={"amount": "5", "note": "x", "mpin": "123456"}, headers=csrf(client))
+    assert r.status_code == 404 and r.json()["detail"] == "Investor not found"
     assert [e[0] for e in _events(db, org_id, "investor_bonus_paid")] == ["warning", "warning"]
     with psycopg.connect(db, autocommit=True) as conn:
         titles = [r[0] for r in conn.execute(
@@ -312,11 +321,38 @@ def test_the_investor_reads_their_own_bonus_history(org_client, make_user, login
     assert [b["source"] for b in client.get(url + "?source=signup").json()] == ["signup"]
     assert [b["source"] for b in client.get(url + "?from=2026-09-10&to=2026-09-15").json()] == [
         "deposit"]
+    # A cleared filter sends `?source=`, not a missing param: blank reads as
+    # no filter, same as omitting source entirely.
+    assert [b["source"] for b in client.get(url + "?source=").json()] == [
+        "manual", "deposit", "signup"]
     r = client.get(url + "?source=bogus")
     assert r.status_code == 400
     assert r.json()["detail"] == "source must be one of signup, kyc, deposit, manual"
     r = client.get(url + "?from=yesterday")
     assert r.status_code == 400 and r.json()["detail"] == "from must be a date (YYYY-MM-DD)"
+
+
+def test_a_failing_notify_after_a_manual_grant_still_succeeds_once(org_client, make_user, db,
+                                                                   monkeypatch):
+    """Fix-wave item 2: notify() raising deep inside announce_bonus (the
+    grant route's one call after the money commits) must not turn an
+    already-committed grant into a 500, and must not pay twice."""
+    from api import portal_common
+
+    async def boom(*_args, **_kwargs):
+        raise RuntimeError("email down")
+
+    client, org_id, _seed = org_client
+    uid = _investor(make_user, db, org_id)["id"]
+    monkeypatch.setattr(portal_common, "notify", boom)
+    r = client.post(f"/api/orgs/{org_id}/investors/{uid}/bonuses",
+                    json={"amount": "20", "note": "Promo", "mpin": "123456"}, headers=csrf(client))
+    assert r.status_code == 201, r.text
+    assert _credit_entries(db, uid) == [("manual", 20.0)]
+    with psycopg.connect(db, autocommit=True) as conn:
+        rows = conn.execute("SELECT amount FROM bonuses WHERE org_id = %s AND user_id = %s",
+                            (org_id, uid)).fetchall()
+    assert rows == [(Decimal("20.00"),)]
 
 
 def test_a_bonus_paid_by_hand_reaches_both_alerters():
